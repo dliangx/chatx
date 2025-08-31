@@ -12,7 +12,7 @@ function ChannelsList({ onJoinChannel, onBack }) {
   const fetchChannels = async () => {
     try {
       setLoading(true);
-      const response = await fetch("http://127.0.0.1:3000/api/channels");
+      const response = await fetch("api/channels");
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
@@ -20,7 +20,9 @@ function ChannelsList({ onJoinChannel, onBack }) {
       setChannels(data);
       setError(null);
     } catch (err) {
-      setError("Failed to fetch channels. Please ensure the backend server is running.");
+      setError(
+        "Failed to fetch channels. Please ensure the backend server is running.",
+      );
       console.error("Error fetching channels:", err);
     } finally {
       setLoading(false);
