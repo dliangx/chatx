@@ -100,6 +100,24 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Check if frontend/dist exists, if not build frontend
+if [ ! -d "frontend/dist" ]; then
+    print_status "frontend/dist directory not found, building frontend..."
+    cd frontend
+    npm run build
+
+    if [ $? -eq 0 ]; then
+        print_success "Frontend build completed"
+    else
+        print_error "Frontend build failed"
+        exit 1
+    fi
+
+    cd ..
+else
+    print_status "frontend/dist directory found, skipping build"
+fi
+
 # Start backend if not frontend-only
 if [ "$FRONTEND_ONLY" != true ]; then
     print_status "Starting backend server on port $BACKEND_PORT..."
