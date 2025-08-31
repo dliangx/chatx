@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import JoinForm from "./components/JoinForm";
 import ChatRoom from "./components/ChatRoom";
+import ChannelsList from "./components/ChannelsList";
 import "./App.css";
 
 function App() {
@@ -170,6 +171,19 @@ function App() {
     setCurrentView("join");
   };
 
+  const handleShowChannels = () => {
+    setCurrentView("channels");
+  };
+
+  const handleJoinFromChannels = (selectedChannel) => {
+    setChannel(selectedChannel);
+    setCurrentView("join");
+  };
+
+  const handleBackFromChannels = () => {
+    setCurrentView("join");
+  };
+
   const sendMessage = (message) => {
     // Add message immediately to local state for instant feedback
     const tempMessage = {
@@ -205,7 +219,12 @@ function App() {
   return (
     <div className="app-container">
       {currentView === "join" ? (
-        <JoinForm onJoin={handleJoin} />
+        <JoinForm onJoin={handleJoin} onShowChannels={handleShowChannels} />
+      ) : currentView === "channels" ? (
+        <ChannelsList
+          onJoinChannel={handleJoinFromChannels}
+          onBack={handleBackFromChannels}
+        />
       ) : (
         <ChatRoom
           username={username}

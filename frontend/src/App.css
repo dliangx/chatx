@@ -582,6 +582,153 @@ body {
     justify-content: center;
 }
 
+/* Channels List Styles */
+.channels-container {
+    background: var(--bg-card);
+    backdrop-filter: blur(20px);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-xl);
+    padding: var(--space-xl);
+    box-shadow: var(--shadow-xl);
+    animation: slideInUp 0.6s ease-out;
+}
+
+.channels-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-lg);
+    padding-bottom: var(--space-md);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.channels-header h2 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.header-buttons {
+    display: flex;
+    gap: var(--space-sm);
+}
+
+.refresh-button,
+.back-button {
+    padding: var(--space-sm) var(--space-md);
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.refresh-button:hover {
+    background: rgba(59, 130, 246, 0.2);
+    border-color: var(--info-color);
+    color: var(--info-color);
+}
+
+.back-button:hover {
+    background: rgba(239, 68, 68, 0.2);
+    border-color: var(--danger-color);
+    color: var(--danger-color);
+}
+
+.channels-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.channel-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-md);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    transition: all 0.3s ease;
+}
+
+.channel-item:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: var(--primary-color);
+}
+
+.channel-name {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.join-channel-button {
+    padding: var(--space-sm) var(--space-md);
+    background: linear-gradient(135deg, var(--success-color), #059669);
+    border: none;
+    border-radius: var(--radius-md);
+    color: white;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.join-channel-button:hover {
+    background: linear-gradient(135deg, var(--success-hover), #047857);
+    transform: translateY(-1px);
+}
+
+.no-channels {
+    text-align: center;
+    padding: var(--space-xl);
+    color: var(--text-muted);
+}
+
+.loading {
+    text-align: center;
+    padding: var(--space-xl);
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.error-message {
+    text-align: center;
+    padding: var(--space-xl);
+    color: var(--danger-color);
+}
+
+.error-message p {
+    margin-bottom: var(--space-md);
+}
+
+.secondary-button {
+    width: 100%;
+    padding: var(--space-md);
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-sm);
+    cursor: pointer;
+    transition: all 0.3s ease;
+    margin-top: var(--space-md);
+}
+
+.secondary-button:hover {
+    background: rgba(255, 255, 255, 0.15);
+    border-color: var(--primary-color);
+    transform: translateY(-1px);
+}
+
 /* Responsive adjustments for React layout */
 @media (max-width: 640px) {
     .app-container {

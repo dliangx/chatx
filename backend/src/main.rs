@@ -3,6 +3,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
     },
+    http::{HeaderValue, Method},
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -14,6 +15,7 @@ use mime_guess::from_path;
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::broadcast;
+use tower_http::cors::CorsLayer;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChatMessage {
@@ -51,12 +53,19 @@ async fn main() {
         channels: DashMap::new(),
     });
 
+    let cors = CorsLayer::new()
+        .allow_origin("http://localhost:3000".parse::<HeaderValue>().unwrap())
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([axum::http::header::CONTENT_TYPE]);
+
     let app = Router::new()
         .route("/ws", get(websocket_handler))
+        .route("/api/channels", get(get_channels_handler))
         // 静态文件服务，根路径单独处理
         .route("/", get(static_index_handler))
         .route("/*path", get(static_handler))
-        .with_state(app_state);
+        .with_state(app_state)
+        .layer(cors);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     println!("listening on {}", addr);
@@ -80,14 +89,20 @@ async fn static_index_handler() -> Response {
     }
 }
 
+// 获取所有频道的 handler
+async fn get_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let channels: Vec<String> = state
+        .channels
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
+    axum::Json(channels)
+}
+
 // 静态文件 handler
 async fn static_handler(Path(path): Path<String>) -> Response {
-    println!("Request path: {}", path);
     let rel_path = path.trim_start_matches("/");
-    println!("Looking for file: {}", rel_path);
-
     if let Some(file) = STATIC_DIR.get_file(rel_path) {
-        println!("Found file: {}", rel_path);
         let mime = from_path(rel_path).first_or_octet_stream();
         (
             axum::http::StatusCode::OK,
@@ -96,7 +111,6 @@ async fn static_handler(Path(path): Path<String>) -> Response {
         )
             .into_response()
     } else {
-        println!("File not found: {}", rel_path);
         (axum::http::StatusCode::NOT_FOUND, "404 Not Found").into_response()
     }
 }
