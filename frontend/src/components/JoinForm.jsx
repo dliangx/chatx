@@ -1,66 +1,73 @@
 import React, { useState } from "react";
+import { useAuth } from "../context/AuthContext";
 
-const JoinForm = ({ onJoin, onShowChannels }) => {
-  const [username, setUsername] = useState("");
+const JoinForm = ({ onJoin, onShowChannels, onSwitchToLogin }) => {
   const [channel, setChannel] = useState("");
+  const [error, setError] = useState("");
+  const { user, isAuthenticated } = useAuth();
+
+  const handleChange = (e) => {
+    setChannel(e.target.value);
+    // Clear error when user starts typing
+    if (error) {
+      setError("");
+    }
+  };
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    const trimmedUsername = username.trim();
     const trimmedChannel = channel.trim();
 
-    if (trimmedUsername && trimmedChannel) {
-      onJoin(trimmedUsername, trimmedChannel);
+    if (isAuthenticated && user && trimmedChannel) {
+      // 如果用户已认证，直接使用认证用户的用户名
+      onJoin(user.username, trimmedChannel);
+    } else if (trimmedChannel) {
+      // 如果用户未认证但输入了频道名，则需要先认证
+      onSwitchToLogin();
     } else {
-      alert("Please enter both username and channel name.");
+      setError("Please enter a channel name.");
     }
   };
 
   return (
     <div className="join-container">
       <div className="join-card">
-        <h2 className="join-title">Join Chat Room</h2>
-        <p className="join-description">
-          Enter your username and channel to start chatting
-        </p>
+        <div className="join-header">
+          <h2 className="join-title">Join Chat Room</h2>
+          {isAuthenticated && user ? (
+            <p className="join-description">
+              Welcome back, <strong>{user.username}</strong>! Choose a channel
+              to start chatting
+            </p>
+          ) : (
+            <p className="join-description">
+              Enter a channel name to start chatting
+            </p>
+          )}
+        </div>
+
+        {error && (
+          <div className="error-message">
+            <p>{error}</p>
+          </div>
+        )}
+
+        {isAuthenticated && user && (
+          <div className="user-info">
+            <div className="user-avatar">
+              <span className="avatar-text">
+                {user.username.charAt(0).toUpperCase()}
+              </span>
+            </div>
+            <div className="user-details">
+              <span className="user-name">{user.username}</span>
+              <span className="user-email">{user.email}</span>
+            </div>
+          </div>
+        )}
 
         <form onSubmit={handleSubmit}>
           <div className="input-group">
-            <div className="input-wrapper">
-              <svg
-                className="input-icon"
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                xmlns="http://www.w3.org/2000/svg"
-              >
-                <path
-                  d="M20 21V19C20 17.9391 19.5786 16.9217 18.8284 16.1716C18.0783 15.4214 17.0609 15 16 15H8C6.93913 15 5.92172 15.4214 5.17157 16.1716C4.42143 16.9217 4 17.9391 4 19V21"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d="M12 11C14.2091 11 16 9.20914 16 7C16 4.79086 14.2091 3 12 3C9.79086 3 8 4.79086 8 7C8 9.20914 9.79086 11 12 11Z"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="Your username"
-                className="styled-input"
-                autoComplete="off"
-                autoFocus
-              />
-            </div>
-
             <div className="input-wrapper">
               <svg
                 className="input-icon"
@@ -81,10 +88,11 @@ const JoinForm = ({ onJoin, onShowChannels }) => {
               <input
                 type="text"
                 value={channel}
-                onChange={(e) => setChannel(e.target.value)}
+                onChange={handleChange}
                 placeholder="Channel name"
                 className="styled-input"
                 autoComplete="off"
+                autoFocus
               />
             </div>
           </div>

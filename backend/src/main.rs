@@ -3,19 +3,23 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
     },
-    http::{HeaderValue, Method},
+    http::{HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
-    Router,
+    routing::{get, post},
+    Json, Router,
 };
+use bcrypt::{hash, verify, DEFAULT_COST};
+use chrono::{Duration, Utc};
 use dashmap::DashMap;
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use include_dir::{include_dir, Dir};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use mime_guess::from_path;
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChatMessage {
@@ -23,6 +27,53 @@ struct ChatMessage {
     message: String,
     channel: String,
     message_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct User {
+    id: Uuid,
+    username: String,
+    email: String,
+    password_hash: String,
+    created_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String, // user id
+    username: String,
+    exp: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterRequest {
+    username: String,
+    email: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthResponse {
+    token: String,
+    user: UserResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct UserResponse {
+    id: Uuid,
+    username: String,
+    email: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorResponse {
+    error: String,
 }
 
 struct Channel {
@@ -42,6 +93,9 @@ impl Default for Channel {
 
 struct AppState {
     channels: DashMap<String, Arc<Channel>>,
+    users: DashMap<String, User>,     // username -> User
+    users_by_id: DashMap<Uuid, User>, // id -> User
+    jwt_secret: String,
 }
 
 // 静态文件目录（前端打包产物）
@@ -49,18 +103,30 @@ static STATIC_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../frontend/dist");
 
 #[tokio::main]
 async fn main() {
+    let jwt_secret = std::env::var("JWT_SECRET")
+        .unwrap_or_else(|_| "your-secret-key-change-this-in-production".to_string());
+
     let app_state = Arc::new(AppState {
         channels: DashMap::new(),
+        users: DashMap::new(),
+        users_by_id: DashMap::new(),
+        jwt_secret,
     });
 
     let cors = CorsLayer::new()
         .allow_origin("http://localhost:3000".parse::<HeaderValue>().unwrap())
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers([axum::http::header::CONTENT_TYPE]);
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+        ]);
 
     let app = Router::new()
         .route("/ws", get(websocket_handler))
         .route("/api/channels", get(get_channels_handler))
+        .route("/api/auth/register", post(register_handler))
+        .route("/api/auth/login", post(login_handler))
+        .route("/api/auth/verify", post(verify_token_handler))
         // 静态文件服务，根路径单独处理
         .route("/", get(static_index_handler))
         .route("/*path", get(static_handler))
@@ -72,6 +138,217 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+// 用户注册
+async fn register_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RegisterRequest>,
+) -> Result<Json<AuthResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // 验证输入
+    if req.username.trim().is_empty() || req.email.trim().is_empty() || req.password.len() < 6 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Username and email are required, password must be at least 6 characters"
+                    .to_string(),
+            }),
+        ));
+    }
+
+    // 检查用户名是否已存在
+    if state.users.contains_key(&req.username) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Username already exists".to_string(),
+            }),
+        ));
+    }
+
+    // 哈希密码
+    let password_hash = match hash(&req.password, DEFAULT_COST) {
+        Ok(hash) => hash,
+        Err(_) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to hash password".to_string(),
+                }),
+            ));
+        }
+    };
+
+    // 创建用户
+    let user_id = Uuid::new_v4();
+    let user = User {
+        id: user_id,
+        username: req.username.clone(),
+        email: req.email.clone(),
+        password_hash,
+        created_at: Utc::now(),
+    };
+
+    // 保存用户
+    state.users.insert(req.username.clone(), user.clone());
+    state.users_by_id.insert(user_id, user.clone());
+
+    // 生成JWT token
+    let claims = Claims {
+        sub: user_id.to_string(),
+        username: user.username.clone(),
+        exp: (Utc::now() + Duration::hours(24)).timestamp() as usize,
+    };
+
+    let token = match encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(state.jwt_secret.as_ref()),
+    ) {
+        Ok(token) => token,
+        Err(_) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to generate token".to_string(),
+                }),
+            ));
+        }
+    };
+
+    Ok(Json(AuthResponse {
+        token,
+        user: UserResponse {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+        },
+    }))
+}
+
+// 用户登录
+async fn login_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoginRequest>,
+) -> Result<Json<AuthResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // 查找用户
+    let user = match state.users.get(&req.username) {
+        Some(user) => user.clone(),
+        None => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Invalid username or password".to_string(),
+                }),
+            ));
+        }
+    };
+
+    // 验证密码
+    if !verify(&req.password, &user.password_hash).unwrap_or(false) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Invalid username or password".to_string(),
+            }),
+        ));
+    }
+
+    // 生成JWT token
+    let claims = Claims {
+        sub: user.id.to_string(),
+        username: user.username.clone(),
+        exp: (Utc::now() + Duration::hours(24)).timestamp() as usize,
+    };
+
+    let token = match encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(state.jwt_secret.as_ref()),
+    ) {
+        Ok(token) => token,
+        Err(_) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to generate token".to_string(),
+                }),
+            ));
+        }
+    };
+
+    Ok(Json(AuthResponse {
+        token,
+        user: UserResponse {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+        },
+    }))
+}
+
+// 验证token
+async fn verify_token_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<UserResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let token = match params.get("token") {
+        Some(token) => token,
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Token is required".to_string(),
+                }),
+            ));
+        }
+    };
+
+    let claims = match decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(state.jwt_secret.as_ref()),
+        &Validation::default(),
+    ) {
+        Ok(claims) => claims.claims,
+        Err(_) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Invalid token".to_string(),
+                }),
+            ));
+        }
+    };
+
+    let user_id = match Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(_) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Invalid token".to_string(),
+                }),
+            ));
+        }
+    };
+
+    let user = match state.users_by_id.get(&user_id) {
+        Some(user) => user.clone(),
+        None => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "User not found".to_string(),
+                }),
+            ));
+        }
+    };
+
+    Ok(Json(UserResponse {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+    }))
 }
 
 // 新增：根路径 handler

@@ -1,21 +1,27 @@
 import React, { useState, useEffect, useRef } from "react";
+import { AuthProvider, useAuth } from "./context/AuthContext";
+import LoginPage from "./components/LoginPage";
+import RegisterPage from "./components/RegisterPage";
 import JoinForm from "./components/JoinForm";
 import ChatRoom from "./components/ChatRoom";
 import ChannelsList from "./components/ChannelsList";
+import UserProfile from "./components/UserProfile";
 import "./App.css";
 
-function App() {
+function AppContent() {
   const [currentView, setCurrentView] = useState("join");
-  const [username, setUsername] = useState("");
   const [channel, setChannel] = useState("");
   const [onlineUsers, setOnlineUsers] = useState(new Set());
   const [messages, setMessages] = useState([]);
   const [hasWelcomeMessage, setHasWelcomeMessage] = useState(true);
+  const [showProfile, setShowProfile] = useState(false);
   const wsRef = useRef(null);
+
+  const { user, isAuthenticated, loading } = useAuth();
 
   const handleWebSocketMessage = (
     event,
-    currentUsername = username,
+    currentUsername,
     currentChannel = channel,
   ) => {
     try {
@@ -115,8 +121,7 @@ function App() {
     }
   };
 
-  const handleJoin = (user, chan) => {
-    setUsername(user);
+  const handleJoin = (username, chan) => {
     setChannel(chan);
     setCurrentView("chat");
     setMessages([]);
@@ -127,7 +132,7 @@ function App() {
 
     wsRef.current.onopen = () => {
       const joinMessage = {
-        username: user,
+        username: username,
         channel: chan,
         message: "",
       };
@@ -136,7 +141,7 @@ function App() {
 
     wsRef.current.onmessage = (event) => {
       // Use the current user and channel values from the closure
-      handleWebSocketMessage(event, user, chan);
+      handleWebSocketMessage(event, username, chan);
     };
 
     wsRef.current.onerror = (error) => {
@@ -153,6 +158,7 @@ function App() {
 
   const handleLeave = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const username = isAuthenticated && user ? user.username : "Guest";
       const leaveMessage = {
         username: username,
         channel: channel,
@@ -163,7 +169,6 @@ function App() {
     }
 
     // Reset state
-    setUsername("");
     setChannel("");
     setOnlineUsers(new Set());
     setMessages([]);
@@ -176,8 +181,11 @@ function App() {
   };
 
   const handleJoinFromChannels = (selectedChannel) => {
-    setChannel(selectedChannel);
-    setCurrentView("join");
+    // Get username from authenticated user or prompt for guest username
+    const username = isAuthenticated && user ? user.username : "Guest";
+
+    // Directly join the selected channel and start chat
+    handleJoin(username, selectedChannel);
   };
 
   const handleBackFromChannels = () => {
@@ -185,6 +193,8 @@ function App() {
   };
 
   const sendMessage = (message) => {
+    const username = isAuthenticated && user ? user.username : "Guest";
+
     // Add message immediately to local state for instant feedback
     const tempMessage = {
       id: Date.now() + Math.random(),
@@ -208,6 +218,29 @@ function App() {
     }
   };
 
+  // Handle authentication state changes
+  useEffect(() => {
+    console.log("Auth state change detected:", {
+      isAuthenticated,
+      currentView,
+    });
+
+    // If user logs out while in chat, leave the chat
+    if (!isAuthenticated && currentView === "chat") {
+      console.log("User logged out while in chat, leaving...");
+      handleLeave();
+    }
+
+    // If user successfully authenticates, redirect to join page
+    if (
+      isAuthenticated &&
+      (currentView === "login" || currentView === "register")
+    ) {
+      console.log("User authenticated, redirecting to join page...");
+      setCurrentView("join");
+    }
+  }, [isAuthenticated, currentView]);
+
   useEffect(() => {
     return () => {
       if (wsRef.current) {
@@ -216,27 +249,113 @@ function App() {
     };
   }, []);
 
+  // Show loading screen while checking authentication
+  if (loading) {
+    return (
+      <div className="loading-container">
+        <div className="loading-spinner"></div>
+        <p>Loading...</p>
+      </div>
+    );
+  }
+
+  // Authentication views
+  if (currentView === "login") {
+    return (
+      <LoginPage
+        onSwitchToRegister={() => setCurrentView("register")}
+        onSwitchToGuest={() => setCurrentView("join")}
+      />
+    );
+  }
+
+  if (currentView === "register") {
+    return (
+      <RegisterPage
+        onSwitchToLogin={() => setCurrentView("login")}
+        onSwitchToGuest={() => setCurrentView("join")}
+      />
+    );
+  }
+
   return (
     <div className="app-container">
-      {currentView === "join" ? (
-        <JoinForm onJoin={handleJoin} onShowChannels={handleShowChannels} />
-      ) : currentView === "channels" ? (
-        <ChannelsList
-          onJoinChannel={handleJoinFromChannels}
-          onBack={handleBackFromChannels}
-        />
-      ) : (
-        <ChatRoom
-          username={username}
-          channel={channel}
-          onlineUsers={onlineUsers}
-          messages={messages}
-          hasWelcomeMessage={hasWelcomeMessage}
-          onLeave={handleLeave}
-          onSendMessage={sendMessage}
-        />
-      )}
+      {/* Header with user info and auth buttons */}
+      <header className="app-header">
+        <div className="app-title">
+          <h1>Chat App</h1>
+        </div>
+        <div className="app-actions">
+          {isAuthenticated && user ? (
+            <div className="user-section">
+              <button
+                onClick={() => setShowProfile(true)}
+                className="user-button"
+              >
+                <div className="user-avatar-small">
+                  <span className="avatar-text">
+                    {user.username.charAt(0).toUpperCase()}
+                  </span>
+                </div>
+                <span className="user-name">{user.username}</span>
+              </button>
+            </div>
+          ) : (
+            <div className="auth-buttons">
+              <button
+                onClick={() => setCurrentView("login")}
+                className="auth-button login"
+              >
+                Sign In
+              </button>
+              <button
+                onClick={() => setCurrentView("register")}
+                className="auth-button register"
+              >
+                Sign Up
+              </button>
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* Main content */}
+      <main className="app-main">
+        {currentView === "join" ? (
+          <JoinForm
+            onJoin={handleJoin}
+            onShowChannels={handleShowChannels}
+            onSwitchToLogin={() => setCurrentView("login")}
+          />
+        ) : currentView === "channels" ? (
+          <ChannelsList
+            onJoinChannel={handleJoinFromChannels}
+            onBack={handleBackFromChannels}
+          />
+        ) : (
+          <ChatRoom
+            username={isAuthenticated && user ? user.username : "Guest"}
+            channel={channel}
+            onlineUsers={onlineUsers}
+            messages={messages}
+            hasWelcomeMessage={hasWelcomeMessage}
+            onLeave={handleLeave}
+            onSendMessage={sendMessage}
+          />
+        )}
+      </main>
+
+      {/* User profile modal */}
+      {showProfile && <UserProfile onClose={() => setShowProfile(false)} />}
     </div>
+  );
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 }
 
