@@ -92,7 +92,7 @@ const RegisterPage = ({ onSwitchToLogin, onSwitchToGuest }) => {
         <div className="auth-header">
           <h2 className="auth-title">Create Account</h2>
           <p className="auth-description">
-            Sign up to join the Social Network Services
+            Sign up to join the Distributed Social Network
           </p>
         </div>
 
