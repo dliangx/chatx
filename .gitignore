@@ -100,3 +100,5 @@ pids/
 # Backup files
 *.backup
 *.bak
+
+chatx.db

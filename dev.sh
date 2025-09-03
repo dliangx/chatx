@@ -1,7 +1,12 @@
 #!/bin/bash
 
 # Rust Chat App - Development Script
-# This script runs both frontend and backend in development mode
+# This script runs both frontend and backend in development mode with database support
+
+set -e  # Exit on any error
+
+# Rust Chat App - Development Script
+# This script runs both frontend and backend in development mode with database support
 
 set -e  # Exit on any error
 
@@ -63,6 +68,8 @@ BACKEND_ONLY=false
 FRONTEND_ONLY=false
 BACKEND_PORT=3000
 FRONTEND_PORT=5173
+INIT_DB=false
+NO_DB=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -82,6 +89,14 @@ while [[ $# -gt 0 ]]; do
             FRONTEND_PORT="$2"
             shift 2
             ;;
+        --init-db)
+            INIT_DB=true
+            shift
+            ;;
+        --no-db)
+            NO_DB=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -89,6 +104,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --frontend-only     Run only the frontend dev server"
             echo "  --backend-port PORT Set backend port (default: 8080)"
             echo "  --frontend-port PORT Set frontend port (default: 5173)"
+            echo "  --init-db          Initialize database before starting"
+            echo "  --no-db            Run without database (memory only)"
             echo "  --help              Show this help message"
             exit 0
             ;;
@@ -99,6 +116,25 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Database initialization
+if [ "$INIT_DB" = true ] && [ "$NO_DB" != true ]; then
+    print_status "Initializing database..."
+    if [ -f "init_db.sh" ]; then
+        chmod +x init_db.sh
+        ./init_db.sh
+    else
+        print_warning "init_db.sh not found, skipping database initialization"
+    fi
+fi
+
+# Set database environment variable
+if [ "$NO_DB" != true ]; then
+    export DATABASE_URL="sqlite:chatx.db"
+else
+    print_warning "Running in memory-only mode (no database)"
+    export DATABASE_URL="sqlite::memory:"
+fi
 
 # Check if frontend/dist exists, if not build frontend
 if [ ! -d "frontend/dist" ]; then
@@ -133,6 +169,13 @@ if [ "$FRONTEND_ONLY" != true ]; then
     # Set the port environment variable if specified
     if [ "$BACKEND_PORT" != "3000" ]; then
         export PORT=$BACKEND_PORT
+    fi
+
+    # Set database environment variable for backend
+    if [ "$NO_DB" != true ]; then
+        export DATABASE_URL="sqlite:../chatx.db"
+    else
+        export DATABASE_URL="sqlite::memory:"
     fi
 
     # Start backend in background
