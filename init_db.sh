@@ -45,6 +45,7 @@ if ! command -v sqlx &> /dev/null; then
     cargo install sqlx-cli --no-default-features --features sqlite
 fi
 
+cd "$BACKEND_DIR"
 # Set database URL
 export DATABASE_URL="sqlite:$DATABASE_PATH"
 
@@ -58,7 +59,7 @@ fi
 
 # Run database migrations
 print_status "Running database migrations..."
-cd "$BACKEND_DIR"
+
 
 if sqlx database create; then
     print_success "Database created successfully"
@@ -77,7 +78,7 @@ fi
 cd ..
 
 print_status "Verifying database structure..."
-if sqlx query "SELECT name FROM sqlite_master WHERE type='table';" --database-url "$DATABASE_URL" > /dev/null 2>&1; then
+if sqlite3 "backend/$DATABASE_PATH" "SELECT name FROM sqlite_master WHERE type='table';" > /dev/null 2>&1; then
     print_success "Database structure verified"
 else
     print_error "Database verification failed"
@@ -87,7 +88,7 @@ fi
 # Display database info
 print_status "Database information:"
 echo "-----------------------"
-sqlite3 "$DATABASE_PATH" ".tables"
+sqlite3 "backend/$DATABASE_PATH" ".tables"
 echo "-----------------------"
 
 print_success "Database initialization completed successfully!"
@@ -95,6 +96,6 @@ print_status "Database file: $DATABASE_PATH"
 print_status "You can now start the application with: ./dev.sh"
 
 # Set proper permissions
-chmod 644 "$DATABASE_PATH"
+chmod 644 "backend/$DATABASE_PATH"
 
 exit 0

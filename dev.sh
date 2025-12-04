@@ -120,12 +120,9 @@ done
 # Database initialization
 if [ "$INIT_DB" = true ] && [ "$NO_DB" != true ]; then
     print_status "Initializing database..."
-    if [ -f "init_db.sh" ]; then
-        chmod +x init_db.sh
-        ./init_db.sh
-    else
-        print_warning "init_db.sh not found, skipping database initialization"
-    fi
+    touch backend/chatx.db
+    cd backend
+    sqlx migrate run
 fi
 
 # Set database environment variable
