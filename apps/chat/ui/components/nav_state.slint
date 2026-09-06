@@ -31,8 +31,10 @@ export struct TabState {
 
 // 全局状态
 export struct NavigationState {
+    active-tab:int,
     // 4 个 Tab 各自维护自己的栈
     tabs: [TabState],
+
     // 全局浮层（独立）
     global-overlay: GlobalOverlayType,
 }

@@ -12,34 +12,36 @@ import { MeView } from "me/me.slint";
 import { ImageViewer } from "components/image_view.slint";
 import { BottomNavBar } from "components/bottom_nav.slint";
 import { SubPageView } from "./subpage.slint";
+import { QrcodeView } from "components/qrcode.slint";
+import { VideoCallView } from "components/video_call.slint";
 
 
 export component MainWindow inherits Window {
     // 1. 全局数据模型（只存历史，不存当前选中的索引）
-    in-out property <NavigationState> state: { tabs: [], global-overlay: GlobalOverlayType.None };
-
-    // 2. UI 本地状态：当前激活的 Tab 索引（0-3）
-    in-out property <int> active-tab: 0;
+    in-out property <NavigationState> state: {active-tab:0, tabs: [], global-overlay: GlobalOverlayType.None };
 
     callback pop-sub-page(int);   // 弹出当前 Tab 的栈顶
     callback push-sub-page(int, SubPageType, int);
 
     // ----- 布局渲染 -----
+    if root.state.active-tab > 0:
     Rectangle {
         // 内容区：根据 active-tab 切换根列表
-        if root.active-tab == 0: ChatListView { /* ... */
+        if root.state.active-tab == 0: ChatListView { /* ... */
         }
-        if root.active-tab == 1: ContactListView { /* ... */
+        if root.state.active-tab == 1: ContactListView { /* ... */
         }
-        if root.active-tab == 2: DiscoverView { /* ... */
+        if root.state.active-tab == 2: DiscoverView { /* ... */
         }
-        if root.active-tab == 3: MeView { /* ... */
+        if root.state.active-tab == 3: MeView { /* ... */
         }
         BottomNavBar {
-            active-tab: root.active-tab;
+            active-tab: root.state.active-tab;
         }
-    }
+    } SubPageView { }
 
     // 全局覆盖层（依然从 state 读取）
     if root.state.global-overlay == GlobalOverlayType.ImageViewer : ImageViewer { /* ... */ }
+    if root.state.global-overlay == GlobalOverlayType.QrScanner : QrcodeView {}
+    if root.state.global-overlay == GlobalOverlayType.VideoCall : VideoCallView {}
 }
