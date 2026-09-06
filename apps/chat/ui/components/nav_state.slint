@@ -1,0 +1,38 @@
+export enum PageType {
+    Chat, Contact, Discover, Me,
+}
+
+// 子页面类型枚举（所有全屏/子页面）
+export enum SubPageType {
+    ChatRoom, ChatSetting,
+    ContactProfile, GroupProfile,
+    SettingsMain, SettingsGeneral, SettingsPrivacy, LanguagePicker,
+    // ... 其余 90+ 个
+}
+
+export enum GlobalOverlayType {
+    None,      // 无覆盖层
+    ImageViewer,   // 图片/视频预览
+    QrScanner,     // 二维码扫描
+    VideoCall,     // 视频通话
+    // ... 根据需要增加
+}
+
+export struct SubPageEntry {
+    page: SubPageType,
+    payload: int, // 业务 ID
+}
+
+// 每个 Tab 的独立导航状态（只存子页面，根页面由 main-tab 隐式确定）
+export struct TabState {
+    // 核心：子页面历史栈，最后一项为当前页
+    sub-history: [SubPageEntry],
+}
+
+// 全局状态
+export struct NavigationState {
+    // 4 个 Tab 各自维护自己的栈
+    tabs: [TabState],
+    // 全局浮层（独立）
+    global-overlay: GlobalOverlayType,
+}

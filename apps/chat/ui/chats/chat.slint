@@ -1,0 +1,102 @@
+import {
+    ScrollView,
+    VerticalBox,
+    HorizontalBox,
+    Button,
+} from "std-widgets.slint";
+
+struct MessageData {
+    bubble: image,
+    width: length,
+    height: length,
+    is_self: bool,
+    text: string,
+    selected: bool,
+}
+
+export component ChatWindow inherits Rectangle {
+    in property <int> chat-id;
+    in property <[MessageData]> messages;
+    callback press(int);
+    callback release(int);
+    callback copy-text(string);
+    callback on-back();
+    // 聊天室内部可能跳转到聊天设置
+    callback open-setting(int);
+
+    width: 480px;
+    height: 680px;
+    background: #e5e5e5;
+
+    VerticalBox {
+        Rectangle {
+            height: 48px;
+            background: #2d2d2d;
+            HorizontalBox {
+                padding-left: 16px;
+                padding-right: 16px;
+                Text {
+                    text: "P2P Chat";
+                    color: white;
+                    font-size: 16px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        ScrollView {
+            VerticalBox {
+                width: 460px;
+                alignment: start;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                for msg[i] in messages: Rectangle {
+                    width: parent.width;
+                    height: msg.height + 24px;
+
+                    TouchArea {
+                        x: msg.is_self ? parent.width - msg.width - 12px : 12px;
+                        y: 4px;
+                        width: msg.width;
+                        height: msg.height;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down) {
+                                root.press(i);
+                            } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                                root.release(i);
+                            }
+                        }
+                        Image {
+                            source: msg.bubble;
+                            width: msg.width;
+                            height: msg.height;
+                        }
+                    }
+
+                    if msg.selected: Button {
+                        text: "复制";
+                        x: msg.is_self ? parent.width - msg.width - 12px - 64px : 12px + msg.width + 8px;
+                        y: 4px;
+                        width: 56px;
+                        height: 28px;
+                        clicked => { root.copy-text(msg.text); }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 56px;
+            background: white;
+            HorizontalBox {
+                padding: 8px;
+                Text {
+                    text: "长按消息可选中并复制";
+                    color: #999999;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

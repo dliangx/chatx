@@ -1,0 +1,37 @@
+import { SubPageType } from "components/nav_state.slint";
+import { ChatWindow } from "chats/chat.slint";
+import { ChatSettingView } from "chats/chat_setting.slint";
+import { ContactProfileView } from "contacts/profile.slint";
+import { SettingView } from "me/setting.slint";
+
+// 如果放在单独文件，记得在 MainWindow.slint 中导入
+export component SubPageView inherits Rectangle {
+    in property <SubPageType> page;
+    in property <int> payload;
+
+    // 向外抛出返回和导航事件
+    callback go-back();
+    callback navigate-to(SubPageType, int);
+
+    // 根据 page 类型渲染不同的全屏页面
+    if root.page == SubPageType.ChatRoom: ChatWindow {
+        chat-id: root.payload;
+        // 聊天室内部的返回按钮触发 go-back
+        on-back => { root.go-back(); }
+        // 聊天室内部可能跳转到聊天设置
+        open-setting => { root.navigate-to(SubPageType.ChatSetting, root.payload); }
+    }
+    if root.page == SubPageType.ChatSetting: ChatSettingView {
+        chat-id: root.payload;
+        on-back => { root.go-back(); }
+    }
+    if root.page == SubPageType.ContactProfile: ContactProfileView {
+        user-id: root.payload;
+        on-back => { root.go-back(); }
+    }
+    if root.page == SubPageType.SettingsMain: SettingView {
+        on-back => { root.go-back(); }
+        open-sub(page) => { root.navigate-to(page, 0); }
+    }
+    // ... 继续添加其余 90+ 个页面类型
+}

@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/cli",
+    "apps/chat",
+    "crates/*",
+    "signaling",
+    "crates/api",
+    "crates/camera", "apps/bot"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+slint = "^1.17"
+slint-build = "^1.17"
+fontdue = "^0.9"
+rustybuzz = "^0.20"
+unicode-linebreak = "0.1"
+unicode-bidi = "0.3"
+emojis = "0.6"
+libp2p = { version = "0.56", features = [
+    "tcp",
+    "quic",
+    "mdns",
+    "yamux",
+    "identify",
+    "request-response",
+    "json",
+    "floodsub",
+    "noise",
+    "tokio",
+] }
+libp2p-identity = "0.2"
+libp2p-core = "0.43"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+axum = { version = "0.8", features = ["macros", "http1"] }
+ureq = { version = "2", features = ["json"] }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+sha2 = "0.10"
+hmac = "0.12"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+base64 = "0.22"
+aes-gcm = "0.10"
+hkdf = "0.12"
+rand = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"

@@ -1,0 +1,45 @@
+import {
+    NavigationState,
+    TabState,
+    SubPageEntry,
+    SubPageType,
+    GlobalOverlayType,
+} from "components/nav_state.slint";
+import { ChatListView } from "chats/chat_list.slint";
+import { ContactListView } from "contacts/contacts.slint";
+import { DiscoverView } from "discovery/discover.slint";
+import { MeView } from "me/me.slint";
+import { ImageViewer } from "components/image_view.slint";
+import { BottomNavBar } from "components/bottom_nav.slint";
+import { SubPageView } from "./subpage.slint";
+
+
+export component MainWindow inherits Window {
+    // 1. 全局数据模型（只存历史，不存当前选中的索引）
+    in-out property <NavigationState> state: { tabs: [], global-overlay: GlobalOverlayType.None };
+
+    // 2. UI 本地状态：当前激活的 Tab 索引（0-3）
+    in-out property <int> active-tab: 0;
+
+    callback pop-sub-page(int);   // 弹出当前 Tab 的栈顶
+    callback push-sub-page(int, SubPageType, int);
+
+    // ----- 布局渲染 -----
+    Rectangle {
+        // 内容区：根据 active-tab 切换根列表
+        if root.active-tab == 0: ChatListView { /* ... */
+        }
+        if root.active-tab == 1: ContactListView { /* ... */
+        }
+        if root.active-tab == 2: DiscoverView { /* ... */
+        }
+        if root.active-tab == 3: MeView { /* ... */
+        }
+        BottomNavBar {
+            active-tab: root.active-tab;
+        }
+    }
+
+    // 全局覆盖层（依然从 state 读取）
+    if root.state.global-overlay == GlobalOverlayType.ImageViewer : ImageViewer { /* ... */ }
+}

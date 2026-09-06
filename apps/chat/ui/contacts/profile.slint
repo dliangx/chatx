@@ -1,0 +1,19 @@
+export component ContactProfileView inherits Rectangle {
+    in property <int> user-id;
+    callback on-back();
+
+    VerticalLayout {
+        // 顶部返回栏
+        Rectangle {
+            height: 50px;
+            TouchArea {
+                clicked => { root.on-back(); }
+            }
+
+            Text {
+                text: "back";
+            }
+        }
+        // 个人资料内容...
+    }
+}

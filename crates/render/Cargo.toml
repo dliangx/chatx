@@ -1,0 +1,17 @@
+[package]
+name = "render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Custom software bubble renderer: fontdue + rustybuzz + unicode-bidi + compositor"
+
+[dependencies]
+fontdue.workspace = true
+rustybuzz.workspace = true
+unicode-linebreak.workspace = true
+unicode-bidi.workspace = true
+emojis.workspace = true
+ttf-parser = "0.25"
+png = "0.17"
+
+[dev-dependencies]

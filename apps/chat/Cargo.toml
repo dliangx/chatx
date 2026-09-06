@@ -1,0 +1,17 @@
+[package]
+name = "chatx"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+render = {path = "../../crates/render"}
+slint = {workspace = true}
+arboard = "3"
+
+[build-dependencies]
+slint-build = {workspace = true}
+
+[lib]
+name = "chatx"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib"]
