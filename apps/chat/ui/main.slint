@@ -24,7 +24,7 @@ export component MainWindow inherits Window {
     callback push-sub-page(int, SubPageType, int);
 
     // ----- 布局渲染 -----
-    if root.state.active-tab > 0:
+    if root.state.active-tab >= 0:
     Rectangle {
         // 内容区：根据 active-tab 切换根列表
         if root.state.active-tab == 0: ChatListView { /* ... */
@@ -38,7 +38,8 @@ export component MainWindow inherits Window {
         BottomNavBar {
             active-tab: root.state.active-tab;
         }
-    } SubPageView { }
+    }
+    if root.state.active-tab < 0 : SubPageView { }
 
     // 全局覆盖层（依然从 state 读取）
     if root.state.global-overlay == GlobalOverlayType.ImageViewer : ImageViewer { /* ... */ }
