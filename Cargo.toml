@@ -6,7 +6,10 @@ members = [
     "crates/*",
     "signaling",
     "crates/api",
-    "crates/camera", "apps/bot"]
+    "crates/camera",
+    "crates/core",
+    "crates/render",
+    "apps/bot"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +17,9 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+chatx-core = { path = "crates/core" }
+chatx-render = { path = "crates/render" }
+
 slint = "^1.17"
 slint-build = "^1.17"
 fontdue = "^0.9"

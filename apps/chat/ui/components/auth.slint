@@ -1,0 +1,134 @@
+// 登录/注册表单：登录态由 MainWindow 持有（Rust 读写），此处只负责采集输入 + 展示状态。
+import { FilledButton, TextButton } from "@material";
+
+// 居中的输入框：无 label、无动画。
+// 原生 TextInput 在 1.17 没有 placeholder，也没有从外部关闭 label/动画的开关，
+// 故不复用 @material 的 TextField，改成"填充框 + 居中文本 + 占位符叠加"。
+component AuthInput inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder: "";
+    in property <bool> enabled: true;
+    callback accepted();
+
+    background: #1f2433;
+    border-radius: 8px;
+    min-height: 56px;
+
+    input := TextInput {
+        x: 16px;
+        y: 14px;
+        width: parent.width - 32px;
+        height: parent.height - 28px;
+        color: #ffffff;
+        font-size: 20px;
+        horizontal-alignment: center;
+        single-line: true;
+        text <=> root.text;
+        selection-foreground-color: #14161f;
+        enabled: root.enabled;
+        opacity: root.enabled ? 1 : 0.5;
+        accepted => { root.accepted(); }
+    }
+
+    placeholder-label := Text {
+        x: 16px;
+        y: 14px;
+        width: parent.width - 32px;
+        height: parent.height - 28px;
+        visible: root.text == "";
+        color: #6b7280;
+        font-size: 20px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        text: root.placeholder;
+    }
+}
+
+export component AuthView inherits Rectangle {
+    in property <string> message;       // Rust 状态（成功/失败）
+    in property <bool> busy;
+    in-out property <string> auth-error: "";  // 本地校验错误
+
+    in-out property <bool> is-register: false;
+    in-out property <string> uid: "";
+    in-out property <string> pass: "";
+
+    callback login(string, string);
+    callback register(string, string);
+
+    width: 100%;
+    height: 100%;
+    background: #14161f;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 14px;
+        padding-left: 28px;
+        padding-right: 28px;
+
+        Text {
+            text: "ChatX";
+            font-size: 30px;
+            font-weight: 600;
+            color: #ffffff;
+            width: 100%;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: root.is-register ? "注册新账户" : "登录";
+            font-size: 16px;
+            color: #9aa0b4;
+            width: 100%;
+            horizontal-alignment: center;
+        }
+
+        AuthInput {
+            text <=> root.uid;
+            accepted => { root.submit(); }
+        }
+
+        AuthInput {
+
+            text <=> root.pass;
+            accepted => { root.submit(); }
+        }
+
+        Text {
+            text: root.auth-error != "" ? root.auth-error : root.message;
+            color: #ff6b6b;
+            font-size: 14px;
+            width: 100%;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+
+        FilledButton {
+            text: root.busy ? "处理中…" : (root.is-register ? "注册" : "登录");
+            enabled: !root.busy;
+            clicked => { root.submit(); }
+        }
+
+        TextButton {
+            text: root.is-register ? "已有账户？去登录" : "没有账户？去注册";
+            clicked => { root.is-register = !root.is-register; }
+        }
+    }
+
+    function submit() {
+        if (root.pass == "") {
+            root.auth-error = "请输入口令";
+            return;
+        }
+        if (root.uid == "") {
+            root.auth-error = "请输入用户名";
+            return;
+        }
+        root.auth-error = "";
+        if (root.is-register) {
+            root.register(root.uid, root.pass);
+        } else {
+            root.login(root.uid, root.pass);
+        }
+    }
+}

@@ -49,6 +49,10 @@ pub trait DirectoryClient: Sync + Send {
     fn list_users(&self, exclude: &str) -> Vec<UserResolve>;
     /// 列 PENDING 设备（用于 UI 审批）。
     fn list_pending(&self, user_id: &str) -> Vec<DeviceRecord>;
+    /// 后端可达性探测（登录/注册硬闸门）。默认放行，仅 `HttpDirectory` 真正探活。
+    fn check(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// 轻量 presence 心跳：只刷新 `seen` + `endpoints`（保留 status/attestation）。
     /// 返回 `true` 表示设备已存在并被刷新，`false` 表示目录里没有该设备
     /// （调用方应随后做一次完整重登记）。默认实现走 `upsert_device` 等价路径。
@@ -267,6 +271,10 @@ impl Default for HttpDirectory {
 }
 
 impl DirectoryClient for HttpDirectory {
+    fn check(&self) -> anyhow::Result<()> {
+        self.ping()
+    }
+
     fn upsert_user(&self, user: &UserRecord) {
         let url = format!("{}/v1/users/{}", self.base, user.user_id);
         let body = serde_json::to_string(user).expect("serialize UserRecord");

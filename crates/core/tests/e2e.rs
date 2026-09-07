@@ -10,20 +10,17 @@
 //!
 //! 说明：仅验证 "身份/账户/审批/E2E" 的密码学与状态机逻辑，不依赖真实网络端点。
 
-use p2pchat_core::account::{Account, Attestation, AttestationAction, DeviceStatus, KDF_ITERATIONS};
-use p2pchat_core::identity::DeviceIdentity;
-use p2pchat_core::signal::{DirectoryClient, InMemoryDirectory};
-use p2pchat_core::Client;
+use chatx_core::Client;
+use chatx_core::account::{Account, Attestation, AttestationAction, DeviceStatus, KDF_ITERATIONS};
+use chatx_core::identity::DeviceIdentity;
+use chatx_core::signal::{DirectoryClient, InMemoryDirectory};
 
 /// 隔离的临时 base 目录（避免污染 `~/.config/p2pchat`，也不依赖环境变量）。
 struct TmpBase(std::path::PathBuf);
 
 impl TmpBase {
     fn new(tag: &str) -> Self {
-        let p = std::env::temp_dir().join(format!(
-            "p2pchat-test-{}-{tag}",
-            std::process::id()
-        ));
+        let p = std::env::temp_dir().join(format!("p2pchat-test-{}-{tag}", std::process::id()));
         let _ = std::fs::create_dir_all(&p);
         Self(p)
     }
@@ -86,7 +83,10 @@ async fn full_scheme4_flow() {
     // 目录里 deviceB 应变为 APPROVED（c1 与 c2 共享同一张表）
     let rec_b = c1.dir().resolve_device(&peer_b).expect("deviceB in dir");
     assert_eq!(rec_b.status, DeviceStatus::Approved, "批准后应 APPROVED");
-    assert!(rec_b.attestation.as_ref().unwrap().is_valid(), "目录中的证明应有效");
+    assert!(
+        rec_b.attestation.as_ref().unwrap().is_valid(),
+        "目录中的证明应有效"
+    );
 
     // ── ④ 跨账户 E2E 会话密钥派生一致 ──
     let bob = Account::generate("bob");
@@ -95,7 +95,10 @@ async fn full_scheme4_flow() {
     assert_eq!(key_a, key_b, "两方应派生同一把 AES-256 密钥");
 
     // ── ⑤ pending 列表：批准后 deviceB 不应再出现 ──
-    assert!(c1.pending_devices().is_empty(), "批准后的账户不应有 pending 设备");
+    assert!(
+        c1.pending_devices().is_empty(),
+        "批准后的账户不应有 pending 设备"
+    );
 }
 
 /// 篡改/伪造审批证明应无法通过校验。
@@ -138,7 +141,9 @@ async fn attestation_tamper_detection() {
 #[tokio::test]
 async fn keystore_password_roundtrip() {
     let acct = Account::generate("kara");
-    let ks = acct.to_keystore("s3cret!", KDF_ITERATIONS).expect("to_keystore");
+    let ks = acct
+        .to_keystore("s3cret!", KDF_ITERATIONS)
+        .expect("to_keystore");
     let opened = ks.open("s3cret!").expect("open with correct pass");
     assert_eq!(opened.e2e_public(), acct.e2e_public());
     assert_eq!(opened.sign_pk(), acct.sign_pk());
@@ -153,7 +158,9 @@ async fn only_approved_can_attest() {
     let (dir1, dir2) = InMemoryDirectory::pair();
 
     // 首台设备 bootstrap（APPROVED）
-    let (c1, _) = Client::bootstrap_in(&base_p, "deviceA", "alice", "p", dir1.clone()).await.unwrap();
+    let (c1, _) = Client::bootstrap_in(&base_p, "deviceA", "alice", "p", dir1.clone())
+        .await
+        .unwrap();
 
     let copy_to = |profile: &str| {
         let from = DeviceIdentity::base_keystore_path(&base_p, "deviceA");
@@ -164,10 +171,14 @@ async fn only_approved_can_attest() {
     };
 
     copy_to("deviceB");
-    let (c2, _) = Client::login_in(&base_p, "deviceB", "p", "b", dir2.clone()).await.unwrap();
+    let (c2, _) = Client::login_in(&base_p, "deviceB", "p", "b", dir2.clone())
+        .await
+        .unwrap();
 
     copy_to("deviceC");
-    let (c3, _) = Client::login_in(&base_p, "deviceC", "p", "c", dir2.clone()).await.unwrap();
+    let (c3, _) = Client::login_in(&base_p, "deviceC", "p", "c", dir2.clone())
+        .await
+        .unwrap();
 
     assert_eq!(c2.status().unwrap(), DeviceStatus::Pending);
     assert_eq!(c3.status().unwrap(), DeviceStatus::Pending);

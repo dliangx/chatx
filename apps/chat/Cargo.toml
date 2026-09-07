@@ -7,6 +7,9 @@ edition = "2024"
 render = {path = "../../crates/render"}
 slint = {workspace = true}
 arboard = "3"
+chatx-core = { path = "../../crates/core" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
 
 [build-dependencies]
 slint-build = {workspace = true}

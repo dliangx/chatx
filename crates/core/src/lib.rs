@@ -30,8 +30,8 @@ use account::{Account, Attestation, AttestationAction, DeviceRecord, DeviceStatu
 use identity::DeviceIdentity;
 use libp2p::{Multiaddr, PeerId};
 use signal::{DirectoryClient, UserResolve};
-use store::Store;
 use std::sync::Arc;
+use store::Store;
 use swarm::{self as sw, Cmd, Running};
 
 /// 高层客户端：账户 + 设备 + 目录 + 存储 + swarm。
@@ -51,7 +51,11 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
 
     /// 从已解密的账户 + 已有设备启动（不生成身份，不注册）。
     /// 调用方负责调用 `heartbeat` / `register_device_*` 进行目录注册。
-    pub async fn from_parts(account: Account, device: DeviceIdentity, dir: Arc<D>) -> anyhow::Result<Self> {
+    pub async fn from_parts(
+        account: Account,
+        device: DeviceIdentity,
+        dir: Arc<D>,
+    ) -> anyhow::Result<Self> {
         let (running, events) = sw::boot(&device).await?;
         let store = Arc::new(Store::new());
         Ok(Self {
@@ -129,7 +133,9 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
                 )
             }
         };
-        let acct = ks.open(passphrase).map_err(|e| anyhow::anyhow!("keystore open: {e}"))?;
+        let acct = ks
+            .open(passphrase)
+            .map_err(|e| anyhow::anyhow!("keystore open: {e}"))?;
         let device = DeviceIdentity::load_or_create(profile)?;
         let c = Self::from_parts(acct.clone(), device, dir).await?;
         c.refresh_directory_auto(label).await?;
@@ -149,9 +155,14 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         let device_path = DeviceIdentity::base_device_path(base, profile);
 
         if let Ok(ks) = account::Keystore::load(&keystore_path) {
-            let acct = ks.open(passphrase).map_err(|e| anyhow::anyhow!("keystore open: {e}"))?;
+            let acct = ks
+                .open(passphrase)
+                .map_err(|e| anyhow::anyhow!("keystore open: {e}"))?;
             if acct.user_id() != uid {
-                anyhow::bail!("profile {profile} 属于 {existing}，新账户请另选 (uid={uid})", existing = acct.user_id());
+                anyhow::bail!(
+                    "profile {profile} 属于 {existing}，新账户请另选 (uid={uid})",
+                    existing = acct.user_id()
+                );
             }
             let device = DeviceIdentity::load(&device_path)
                 .map_err(|e| anyhow::anyhow!("load device: {e}"))?;
@@ -188,10 +199,15 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         let ks = match account::Keystore::load(&keystore_path) {
             Ok(ks) => ks,
             Err(e) => {
-                anyhow::bail!("本地找不到 {path}\n  原因：{e}", path = keystore_path.display())
+                anyhow::bail!(
+                    "本地找不到 {path}\n  原因：{e}",
+                    path = keystore_path.display()
+                )
             }
         };
-        let acct = ks.open(passphrase).map_err(|e| anyhow::anyhow!("keystore open: {e}"))?;
+        let acct = ks
+            .open(passphrase)
+            .map_err(|e| anyhow::anyhow!("keystore open: {e}"))?;
         let device = match DeviceIdentity::load(&device_path) {
             Ok(d) => d,
             Err(_) => {
@@ -246,16 +262,10 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         // 1) 确认本设备在目录里是 APPROVED
         let me = self.dir.resolve_device(self.device.peer_base58())?;
         if me.user_id != self.account.user_id() {
-            anyhow::bail!(
-                "本设备未登记在 user {}",
-                self.account.user_id()
-            );
+            anyhow::bail!("本设备未登记在 user {}", self.account.user_id());
         }
         if me.status != DeviceStatus::Approved {
-            anyhow::bail!(
-                "本设备当前 {:?} —— 只有 APPROVED 能签发审批证明",
-                me.status
-            );
+            anyhow::bail!("本设备当前 {:?} —— 只有 APPROVED 能签发审批证明", me.status);
         }
 
         // 2) 目标状态校验
@@ -263,7 +273,9 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         if target.user_id != self.account.user_id() {
             anyhow::bail!(
                 "target {} 属 user {}，本账户 {} 无权签发",
-                target_peer, target.user_id, self.account.user_id()
+                target_peer,
+                target.user_id,
+                self.account.user_id()
             );
         }
         match (action, target.status) {
@@ -312,7 +324,9 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         self.dir.upsert_user(&user_rec);
 
         // 设备：走轻量通道（只刷 seen + endpoints，不视为完整 upsert）
-        let touched = self.dir.touch_presence(self.device.peer_base58(), &self.endpoints());
+        let touched = self
+            .dir
+            .touch_presence(self.device.peer_base58(), &self.endpoints());
         // 若目录里没有本设备（如服务器重启清空）→ 兜底完整重登记一次
         if !touched {
             self.fallback_register();
@@ -321,7 +335,10 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
 
     /// 极端场景（目录清空）兜底：按登录时确定的状态完整上报一次。
     fn fallback_register(&self) {
-        let is_approved = self.status().map(|s| s == DeviceStatus::Approved).unwrap_or(false);
+        let is_approved = self
+            .status()
+            .map(|s| s == DeviceStatus::Approved)
+            .unwrap_or(false);
         let status = if is_approved {
             DeviceStatus::Approved
         } else {
@@ -417,7 +434,11 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
 
         let my = self.device.peer_base58();
         // 状态继承
-        let existing = self.dir.resolve_device(my).ok().filter(|d| d.user_id == self.account.user_id());
+        let existing = self
+            .dir
+            .resolve_device(my)
+            .ok()
+            .filter(|d| d.user_id == self.account.user_id());
         let (status, approved_by, attestation, approved_at) = match existing {
             Some(d) if d.status == DeviceStatus::Approved => (
                 DeviceStatus::Approved,
@@ -466,6 +487,8 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
     /// 取代原先"本 profile 是否首次 bootstrap"的本地启发式，改为完全看**目录里
     /// 该 user_id 名下有几台设备**，避免跨 profile / 跨机的误判。
     async fn refresh_directory_auto(&self, label: impl Into<String>) -> anyhow::Result<()> {
+        // 后端可达性硬闸门：登录/注册前必须能连上目录，否则直接失败、不跳主界面。
+        self.dir.check()?;
         let my = self.device.peer_base58();
         // 1) 本设备已有记录 → 心跳（保留原状态）
         if let Ok(existing) = self.dir.resolve_device(&my) {
@@ -583,9 +606,13 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             .endpoints
             .first()
             .ok_or_else(|| anyhow::anyhow!("device 未上报 endpoints"))?;
-        let addr: Multiaddr =
-            first_addr.parse().map_err(|e| anyhow::anyhow!("bad endpoint: {e}"))?;
-        self.running.cmd_tx.send(Cmd::Connect { peer, addr: addr.clone() })?;
+        let addr: Multiaddr = first_addr
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad endpoint: {e}"))?;
+        self.running.cmd_tx.send(Cmd::Connect {
+            peer,
+            addr: addr.clone(),
+        })?;
         Ok((peer, addr))
     }
 
@@ -593,14 +620,12 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
     pub fn send_text(&self, peer: PeerId, text: &str) -> anyhow::Result<()> {
         let from = self.peer_base58();
         let e2e = self.e2e_public().to_string();
-        self.running
-            .cmd_tx
-            .send(Cmd::SendText {
-                peer,
-                from,
-                e2e,
-                text: text.to_string(),
-            })?;
+        self.running.cmd_tx.send(Cmd::SendText {
+            peer,
+            from,
+            e2e,
+            text: text.to_string(),
+        })?;
         Ok(())
     }
 

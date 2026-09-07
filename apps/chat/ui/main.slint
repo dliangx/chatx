@@ -14,35 +14,60 @@ import { BottomNavBar } from "components/bottom_nav.slint";
 import { SubPageView } from "./subpage.slint";
 import { QrcodeView } from "components/qrcode.slint";
 import { VideoCallView } from "components/video_call.slint";
-
+import { AuthView } from "components/auth.slint";
 
 export component MainWindow inherits Window {
-    // 1. 全局数据模型（只存历史，不存当前选中的索引）
+    // 1. 全局导航数据模型（只存历史，不存当前选中的索引）
     in-out property <NavigationState> state: {active-tab:0, tabs: [], global-overlay: GlobalOverlayType.None };
+
+    // 2. 登录态（由 Rust 读写；false 时只显示登录页）
+    in property <bool> logged-in: false;
+    in property <bool> auth-busy: false;
+    in property <string> auth-message: "";
+    in property <string> user-id: "";
+
+    // 登录/注册/退出：Slint 端只负责触发，真正校验走 p2pchat-core（Rust 侧实现）。
+    callback login(string, string);
+    callback register(string, string);
+    callback logout();
 
     callback pop-sub-page(int);   // 弹出当前 Tab 的栈顶
     callback push-sub-page(int, SubPageType, int);
 
-    // ----- 布局渲染 -----
-    if root.state.active-tab >= 0:
-    Rectangle {
-        // 内容区：根据 active-tab 切换根列表
-        if root.state.active-tab == 0: ChatListView { /* ... */
-        }
-        if root.state.active-tab == 1: ContactListView { /* ... */
-        }
-        if root.state.active-tab == 2: DiscoverView { /* ... */
-        }
-        if root.state.active-tab == 3: MeView { /* ... */
-        }
-        BottomNavBar {
-            active-tab: root.state.active-tab;
-        }
+    preferred-height: 932px;
+    preferred-width: 430px;
+    // ----- 登录门控：未登录仅显示登录页 -----
+    if !root.logged-in:
+    AuthView {
+        message: root.auth-message;
+        busy: root.auth-busy;
+        login(uid, pass) => { root.login(uid, pass); }
+        register(uid, pass) => { root.register(uid, pass); }
     }
-    if root.state.active-tab < 0 : SubPageView { }
 
-    // 全局覆盖层（依然从 state 读取）
-    if root.state.global-overlay == GlobalOverlayType.ImageViewer : ImageViewer { /* ... */ }
-    if root.state.global-overlay == GlobalOverlayType.QrScanner : QrcodeView {}
-    if root.state.global-overlay == GlobalOverlayType.VideoCall : VideoCallView {}
+    // 登录成功才渲染主内容
+    if root.logged-in:
+    Rectangle {
+        if root.state.active-tab >= 0:
+        Rectangle {
+            // 内容区：根据 active-tab 切换根列表
+            if root.state.active-tab == 0: ChatListView { /* ... */
+            }
+            if root.state.active-tab == 1: ContactListView { /* ... */
+            }
+            if root.state.active-tab == 2: DiscoverView { /* ... */
+            }
+            if root.state.active-tab == 3: MeView { /* ... */
+            }
+            BottomNavBar {
+                active-tab: root.state.active-tab;
+            }
+        }
+        if root.state.active-tab < 0: SubPageView { }
+
+        // 全局覆盖层（依然从 state 读取）
+        if root.state.global-overlay == GlobalOverlayType.ImageViewer : ImageViewer { /* ... */ }
+        if root.state.global-overlay == GlobalOverlayType.QrScanner : QrcodeView {}
+        if root.state.global-overlay == GlobalOverlayType.VideoCall : VideoCallView {}
+    }
 }

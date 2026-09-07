@@ -1,5 +1,5 @@
 [package]
-name = "p2pchat-core"
+name = "chatx-core"
 version.workspace = true
 edition.workspace = true
 description = "P2P messaging core: libp2p transport, E2E encryption, sessions, storage, client API"
