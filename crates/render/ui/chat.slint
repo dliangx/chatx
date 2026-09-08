@@ -1,7 +1,6 @@
 import {
     ScrollView,
     VerticalBox,
-    HorizontalBox,
     Button,
 } from "std-widgets.slint";
 
@@ -21,11 +20,10 @@ export component ChatWindow inherits Window {
     callback copy-text(string);
     preferred-height: 932px;
     preferred-width: 440px;
-    title: "P2P Chat";
+    title: "Render Example";
     background: #e5e5e5;
 
     VerticalBox {
-
         ScrollView {
             VerticalBox {
                 width: parent.width;

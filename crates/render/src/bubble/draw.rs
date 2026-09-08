@@ -9,8 +9,9 @@ use crate::font::FontManager;
 use crate::text::{layout_text, TextLine, TextStyle};
 use crate::theme::Theme;
 
-const GAP: f32 = 8.0;
-const TAIL_W: f32 = 6.0;
+const GAP: f32 = 14.0;
+const TAIL_W: f32 = 10.0;
+const TAIL_H: f32 = 18.0;
 
 /// Geometry computed for a bubble, shared between rendering and hit-testing.
 pub struct Frame {
@@ -21,6 +22,7 @@ pub struct Frame {
     pub show_name: bool,
     pub show_tail: bool,
     pub avatar_size: f32,
+    pub avatar_x: f32,
     pub body: (f32, f32, f32, f32), // (x, y, w, h)
     pub content_origin: (f32, f32),
     pub name_lines: Vec<TextLine>,
@@ -45,10 +47,10 @@ pub fn compute_frame(
     let available_w = available_w * scale;
 
     let is_self = bubble.side == Side::SelfSide;
-    let show_avatar = !is_self
+    let show_avatar = bubble.avatar.is_some()
         && (bubble.group == GroupPos::First || bubble.group == GroupPos::Single);
     let show_name = show_avatar;
-    let show_tail = bubble.group == GroupPos::Last || bubble.group == GroupPos::Single;
+    let show_tail = show_avatar;
 
     let avatar_size = theme.avatar_size;
 
@@ -83,10 +85,22 @@ pub fn compute_frame(
     let body_h = content.content_h + time_gap + time_h + theme.padding_y * 2.0;
 
     let avatar_col = if show_avatar { avatar_size + GAP } else { 0.0 };
-    let body_x = avatar_col;
     let body_y = name_h + if show_name { 4.0 } else { 0.0 };
 
-    let total_w = (avatar_col + body_w + if is_self { TAIL_W } else { 0.0 }).ceil() as u32;
+    // Avatar sits on the left for "other" messages and on the right for "self"
+    // messages (mirroring the bubble side).
+    let (body_x, avatar_x, total_w) = if is_self {
+        let body_x = 0.0;
+        let avatar_x = body_w + TAIL_W + if show_avatar { GAP } else { 0.0 };
+        let total_w = body_w + TAIL_W + avatar_col;
+        (body_x, avatar_x, total_w)
+    } else {
+        let body_x = avatar_col;
+        let avatar_x = 0.0;
+        let total_w = avatar_col + body_w;
+        (body_x, avatar_x, total_w)
+    };
+
     let total_h = (body_y + body_h).ceil() as u32;
 
     let content_x = body_x + theme.padding_x;
@@ -103,6 +117,7 @@ pub fn compute_frame(
         show_name,
         show_tail,
         avatar_size,
+        avatar_x,
         body: (body_x, body_y, body_w, body_h),
         content_origin: (content_x, content_y),
         name_lines,
@@ -111,7 +126,7 @@ pub fn compute_frame(
         time_style,
         time_x,
         time_y,
-        size: (total_w, total_h),
+        size: (total_w.ceil() as u32, total_h),
     }
 }
 
@@ -147,13 +162,12 @@ pub fn render_bubble_with_selection(
 
     let mut canvas = Canvas::new(total_w, total_h);
 
-    // Avatar (left, bottom-aligned with body).
+    // Avatar (left for "other", right for "self"), bottom-aligned with body.
     if frame.show_avatar {
-        let ax = 0.0;
-        let ay = body_y + body_h - frame.avatar_size;
-        match bubble.avatar {
-            Some(img) => canvas.blit_scaled(ax as i32, ay as i32, frame.avatar_size as u32, frame.avatar_size as u32, img),
-            None => canvas.fill_circle(ax + frame.avatar_size / 2.0, ay + frame.avatar_size / 2.0, frame.avatar_size / 2.0, Rgba::rgb(0xBB, 0xBB, 0xBB)),
+        if let Some(img) = bubble.avatar {
+            let ax = frame.avatar_x;
+            let ay = body_y + body_h - frame.avatar_size;
+            canvas.blit_scaled(ax as i32, ay as i32, frame.avatar_size as u32, frame.avatar_size as u32, img);
         }
     }
 
@@ -237,8 +251,10 @@ fn draw_tail(
     is_self: bool,
     color: Rgba,
 ) {
-    let y0 = body_y + body_h - 18.0;
-    let y1 = body_y + body_h - 6.0;
+    // Tail base sits on the straight part of the body edge (above the rounded
+    // bottom corner) so it reads as attached rather than detached.
+    let y1 = body_y + body_h - 16.0;
+    let y0 = y1 - TAIL_H;
     if is_self {
         let x = body_x + body_w;
         fill_triangle(canvas, (x, y0), (x, y1), (x + tail_w, (y0 + y1) / 2.0), color);
