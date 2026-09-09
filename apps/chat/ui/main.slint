@@ -11,6 +11,7 @@ import { DiscoverView } from "discovery/discover.slint";
 import { MeView } from "me/me.slint";
 import { ImageViewer } from "components/image_view.slint";
 import { BottomNavBar } from "components/bottom_nav.slint";
+import { LeftNavBar } from "components/left_nav.slint";
 import { SubPageView } from "./subpage.slint";
 import { QrcodeView } from "components/qrcode.slint";
 import { VideoCallView } from "components/video_call.slint";
@@ -100,15 +101,11 @@ export component MainWindow inherits Window {
         width: 100%;
         height: 100%;
         spacing: 0px;
-        Rectangle {
+        LeftNavBar {
             width: 58px;
-            border-width: 1px;
-            background: #c8c5c5;
-            Text {
-                text: "Nav";
-                font-size: 24px;
-                color: #333333;
-            }
+            height: 100%;
+            active-tab: root.state.active-tab;
+            tab-clicked(i) => { root.select_tab(i); }
         }
 
         Rectangle {
