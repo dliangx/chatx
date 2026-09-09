@@ -83,15 +83,24 @@ export component AuthView inherits Rectangle {
             horizontal-alignment: center;
         }
 
-        AuthInput {
-            text <=> root.uid;
-            accepted => { root.submit(); }
+        HorizontalLayout {
+            alignment: center;
+            AuthInput {
+                width: min(parent.width, 500px);
+                placeholder: "用户";
+                text <=> root.uid;
+                accepted => { root.submit(); }
+            }
         }
 
-        AuthInput {
-
-            text <=> root.pass;
-            accepted => { root.submit(); }
+        HorizontalLayout {
+            alignment: center;
+            AuthInput {
+                width: min(parent.width, 500px);
+                placeholder: "密码";
+                text <=> root.pass;
+                accepted => { root.submit(); }
+            }
         }
 
         Text {
@@ -103,15 +112,23 @@ export component AuthView inherits Rectangle {
             wrap: word-wrap;
         }
 
-        FilledButton {
-            text: root.busy ? "处理中…" : (root.is-register ? "注册" : "登录");
-            enabled: !root.busy;
-            clicked => { root.submit(); }
+        HorizontalLayout {
+            alignment: center;
+            FilledButton {
+                width: min(parent.width, 500px);
+                text: root.busy ? "处理中…" : (root.is-register ? "注册" : "登录");
+                enabled: !root.busy;
+                clicked => { root.submit(); }
+            }
         }
 
-        TextButton {
-            text: root.is-register ? "已有账户？去登录" : "没有账户？去注册";
-            clicked => { root.is-register = !root.is-register; }
+        HorizontalLayout {
+            alignment: center;
+            TextButton {
+                width: min(parent.width, 500px);
+                text: root.is-register ? "已有账户？去登录" : "没有账户？去注册";
+                clicked => { root.is-register = !root.is-register; }
+            }
         }
     }
 

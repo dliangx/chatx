@@ -55,6 +55,8 @@ fn default_server() -> Arc<Directory> {
 
 pub fn main() {
     let ui = MainWindow::new().expect("构建主窗口失败");
+    ui.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
+    // ui.set_is_mobile(true); 
     let weak = ui.as_weak();
 
     // 启动时给出初始提示（本地是否已有账户），但不自动登录——真正的校验走登录按钮。
