@@ -14,14 +14,16 @@ struct MessageData {
     selected: bool,
 }
 
-export component ChatWindow inherits Window {
+export component ChatView inherits Rectangle {
+    in property <int> chat-id;
     in property <[MessageData]> messages;
+    callback on-back();
+    callback open-setting();
     callback press(int);
     callback release(int);
     callback copy-text(string);
     preferred-height: 932px;
     preferred-width: 440px;
-    title: "P2P Chat";
     background: #e5e5e5;
 
     VerticalBox {

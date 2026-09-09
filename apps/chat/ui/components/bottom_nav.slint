@@ -1,4 +1,108 @@
-export component BottomNavBar {
-    in property <int> active-tab;
+// 底部导航栏：4 个 Tab（聊天 / 联系人 / 发现 / 我的），图标取自 icon/*.svg。
+// 选中项高亮，点击通过 tab-clicked(int) 向外抛出目标索引。
 
+component NavTab inherits Rectangle {
+    in property <int> index;
+    in property <int> active-tab;
+    in property <image> icon-source;     // 未选中：原色
+    in property <image> active-icon;    // 选中：主色
+    in property <string> label;
+    callback clicked(int);
+
+    background: transparent;
+
+    // 图标：绝对定位，水平居中于格子；选中时切换为主色版本
+    Image {
+        x: (parent.width - 24px) / 2;
+        y: 6px;
+        width: 24px;
+        height: 24px;
+        source: root.index == root.active-tab ? root.active-icon : root.icon-source;
+        image-fit: contain;
+    }
+
+    // 文字：占满格子宽度，horizontal-alignment 居中，与图标同轴
+    Text {
+        x: 0;
+        y: 34px;
+        width: 100%;
+        height: 14px;
+        text: root.label;
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        color: root.index == root.active-tab ? #2f6bff : #9aa0b4;
+    }
+
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.clicked(root.index); }
+    }
+}
+
+export component BottomNavBar inherits Rectangle {
+    in property <int> active-tab;
+    callback tab-clicked(int);
+
+    width: 100%;
+    height: 58px;
+    background: #ffffff;
+
+    // 顶部分隔线
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 1px;
+        background: #ececec;
+    }
+
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 0px;
+        alignment: center;
+
+        NavTab {
+            width: 25%;
+            height: 100%;
+            index: 0;
+            icon-source: @image-url("../../icon/chat.svg");
+            active-icon: @image-url("../../icon/active/chat.svg");
+            label: "聊天";
+            active-tab: root.active-tab;
+            clicked(idx) => { root.tab-clicked(idx); }
+        }
+        NavTab {
+            width: 25%;
+            height: 100%;
+            index: 1;
+            icon-source: @image-url("../../icon/contact.svg");
+            active-icon: @image-url("../../icon/active/contact.svg");
+            label: "联系人";
+            active-tab: root.active-tab;
+            clicked(idx) => { root.tab-clicked(idx); }
+        }
+        NavTab {
+            width: 25%;
+            height: 100%;
+            index: 2;
+            icon-source: @image-url("../../icon/app.svg");
+            active-icon: @image-url("../../icon/active/app.svg");
+            label: "发现";
+            active-tab: root.active-tab;
+            clicked(idx) => { root.tab-clicked(idx); }
+        }
+        NavTab {
+            width: 25%;
+            height: 100%;
+            index: 3;
+            icon-source: @image-url("../../icon/me.svg");
+            active-icon: @image-url("../../icon/active/me.svg");
+            label: "我的";
+            active-tab: root.active-tab;
+            clicked(idx) => { root.tab-clicked(idx); }
+        }
+    }
 }

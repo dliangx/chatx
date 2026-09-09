@@ -34,6 +34,11 @@ export component MainWindow inherits Window {
     callback pop-sub-page(int);   // 弹出当前 Tab 的栈顶
     callback push-sub-page(int, SubPageType, int);
 
+    // 切换底部导航选中的 Tab
+    function select_tab(i: int) {
+        root.state.active-tab = i;
+    }
+
     preferred-height: 932px;
     preferred-width: 430px;
     // ----- 登录门控：未登录仅显示登录页 -----
@@ -48,19 +53,31 @@ export component MainWindow inherits Window {
     // 登录成功才渲染主内容
     if root.logged-in:
     Rectangle {
+        width: 100%;
+        height: 100%;
+
         if root.state.active-tab >= 0:
-        Rectangle {
-            // 内容区：根据 active-tab 切换根列表
-            if root.state.active-tab == 0: ChatListView { /* ... */
+        VerticalLayout {
+            width: 100%;
+            height: 100%;
+            spacing: 0px;
+
+            // 内容区：根据 active-tab 切换根列表；不设高度，自动占满导航栏之外的剩余空间
+            Rectangle {
+                width: 100%;
+                background: #ffffff;
+                clip: true;
+
+                if root.state.active-tab == 0: ChatListView { width: 100%; height: 100%; }
+                if root.state.active-tab == 1: ContactListView { width: 100%; height: 100%; }
+                if root.state.active-tab == 2: DiscoverView { width: 100%; height: 100%; }
+                if root.state.active-tab == 3: MeView { width: 100%; height: 100%; }
             }
-            if root.state.active-tab == 1: ContactListView { /* ... */
-            }
-            if root.state.active-tab == 2: DiscoverView { /* ... */
-            }
-            if root.state.active-tab == 3: MeView { /* ... */
-            }
+
+            // 底部导航栏：固定 58px，始终可见
             BottomNavBar {
                 active-tab: root.state.active-tab;
+                tab-clicked(i) => { root.select_tab(i); }
             }
         }
         if root.state.active-tab < 0: SubPageView { }

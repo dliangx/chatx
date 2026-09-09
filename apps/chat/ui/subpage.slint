@@ -1,5 +1,5 @@
 import { SubPageType } from "components/nav_state.slint";
-import { ChatWindow } from "chats/chat.slint";
+import { ChatView } from "chats/chat.slint";
 import { ChatSettingView } from "chats/chat_setting.slint";
 import { ContactProfileView } from "contacts/profile.slint";
 import { SettingView } from "me/setting.slint";
@@ -14,7 +14,7 @@ export component SubPageView inherits Rectangle {
     callback navigate-to(SubPageType, int);
 
     // 根据 page 类型渲染不同的全屏页面
-    if root.page == SubPageType.ChatRoom: ChatWindow {
+    if root.page == SubPageType.ChatRoom: ChatView {
         chat-id: root.payload;
         // 聊天室内部的返回按钮触发 go-back
         on-back => { root.go-back(); }
