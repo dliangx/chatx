@@ -78,14 +78,16 @@ impl DeviceIdentity {
     }
 
     // ── profile 目录约定 ──
-    /// 基础目录：`$P2PCHAT_HOME` 或 `~/.config/p2pchat`。
+    /// 基础目录：`$P2PCHAT_HOME` 或 `~/.config/p2pchat`（Windows 下为 `%USERPROFILE%\.config\p2pchat`）。
     pub fn home_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(
-            std::env::var("P2PCHAT_HOME").unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                format!("{home}/.config/p2pchat")
-            }),
-        )
+        if let Ok(p) = std::env::var("P2PCHAT_HOME") {
+            return std::path::PathBuf::from(p);
+        }
+        #[cfg(windows)]
+        let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
+        #[cfg(not(windows))]
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        std::path::PathBuf::from(format!("{home}/.config/p2pchat"))
     }
 
     /// 某 profile 的目录：`<home>/<profile>`。
