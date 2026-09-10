@@ -47,6 +47,7 @@ pub struct Client<D: DirectoryClient + ?Sized> {
     dir: Arc<D>,
     running: Arc<Running>,
     store: Arc<Store>,
+    /// 入站事件接收端。UI 线程用 `poll_inbound()` 非阻塞轮询消费（无需跨线程移动）。
     events: sw::EventRx,
     /// 本 profile 的群定义（内存；从 `groups/{id}.json` 载入，改动时回写）。
     groups: RwLock<BTreeMap<String, Group>>,
@@ -675,6 +676,41 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         Ok(())
     }
 
+    /// 发送一条 1:1 文本（UI 便捷入口）：目录解析对方地址 → 拨号 → 发送 → 记 `outgoing`。
+    /// `peer_base58` 为对方设备 peer_id（字符串）；返回归一化 `chat_id`（供 UI 定位会话）。
+    pub fn send_dm(&self, peer_base58: &str, text: &str) -> anyhow::Result<String> {
+        let rec = self
+            .dir
+            .resolve_device(peer_base58)
+            .map_err(|e| anyhow::anyhow!("目录中无该设备 {peer_base58}: {e}"))?;
+        let endpoint = rec
+            .endpoints
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("设备 {peer_base58} 不在线（无端点）"))?
+            .clone();
+        let peer: PeerId = peer_base58
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
+        let addr: Multiaddr = endpoint
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad endpoint: {e}"))?;
+        self.running.cmd_tx.send(Cmd::Connect { peer: peer.clone(), addr })?;
+        self.send_text(peer, text)?;
+        let chat = store::dm_chat_id(&self.peer_base58(), peer_base58);
+        self.store.push(&chat, peer_base58, text, true, false);
+        Ok(chat)
+    }
+
+    /// 当前缓冲全部消息（旧→新，含 1:1 与群）。用于 UI 聚合"会话列表"。
+    pub fn all_messages(&self) -> Vec<store::StoredMsg> {
+        self.store.all()
+    }
+
+    /// 分页拉某会话历史（新→旧）。
+    pub fn history(&self, chat_id: &str, limit: usize, offset: usize) -> anyhow::Result<Vec<store::StoredMsg>> {
+        self.store.load(chat_id, limit, offset)
+    }
+
     /// 用本账户 E2E 私钥与对方 E2E 公钥派生共享 AES-256 密钥。
     pub fn shared_key(&self, their_e2e_public: &str) -> anyhow::Result<[u8; 32]> {
         let k = self
@@ -808,6 +844,15 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
     /// 列出本 profile 的全部群。
     pub fn list_groups(&self) -> Vec<group::Group> {
         self.groups.read().values().cloned().collect()
+    }
+
+    /// 1:1 会话的对端 peer_id：`chat_id = "A|B"`，去掉本端。群会话（不以 `|` 分隔）返回 `None`。
+    pub fn other_peer_of(&self, chat_id: &str) -> Option<String> {
+        chat_id
+            .split('|')
+            .filter(|p| !p.is_empty())
+            .find(|p| *p != self.peer_base58())
+            .map(|s| s.to_string())
     }
 
     /// 用群密钥封印一条群消息（含发送方签名）；返回密文供网络层扇出 / 落盘。
@@ -953,5 +998,36 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         g.save(&self.account, &self.groups_dir.join(format!("{}.json", g.group_id)))?;
         self.groups.write().insert(g.group_id.clone(), g.clone());
         Ok(())
+    }
+
+    /// 非阻塞消费所有已到达的入站事件（`try_recv`），逐条落盘，返回受影响的 `chat_id` 列表
+    /// （1:1 用规范化会话 id，群用群 id）。供 UI 线程在 `Timer` 回调里调用后按 id 刷新对应视图。
+    /// `Client` 的接收端是 `!Send`，但 `try_recv` 非阻塞、不跨线程，故可安全在 UI 线程轮询。
+    pub fn drain_inbound(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(evt) = self.events.try_recv() {
+            if let sw::ChatEvent::Text { peer, req } = evt {
+                let peer_b58 = peer.to_base58();
+                match req.kind {
+                    message::MsgKind::Dm => {
+                        let text = req.text.clone().unwrap_or_default();
+                        let chat = store::dm_chat_id(&self.peer_base58(), &peer_b58);
+                        self.store.push(&chat, &peer_b58, &text, false, req.sealed.is_some());
+                        out.push(chat);
+                    }
+                    _ => {
+                        // 群密钥 / 群消息：apply_inbound 负责解密 + 成员表 + 落盘 + 校验。
+                        if let Ok(Some(r)) = self.apply_inbound(&req) {
+                            let gid = match r {
+                                InboundGroup::Key { group_id } => group_id,
+                                InboundGroup::Message { group_id, .. } => group_id,
+                            };
+                            out.push(gid);
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 }
