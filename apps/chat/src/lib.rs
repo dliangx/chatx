@@ -59,12 +59,16 @@ pub fn main() {
     // ui.set_is_mobile(true); 
     let weak = ui.as_weak();
 
-    // 启动时给出初始提示（本地是否已有账户），但不自动登录——真正的校验走登录按钮。
-    ui.set_auth_message(if keystore_path(&profile()).exists() {
-        SharedString::from("检测到本地已有账户，请输入口令登录")
+    // 启动检测本地账户：keystore 里的 user_id 是明文字段，不解密即可读出 → 预填登录页"用户"输入框。
+    let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
+        .map(|ks| ks.user_id)
+        .ok();
+    if let Some(uid) = existing_uid {
+        ui.set_auth_message(SharedString::from("检测到本地已有账户，请输入口令登录"));
+        ui.set_user_id(SharedString::from(uid));
     } else {
-        SharedString::from("首次使用，请注册新账户")
-    });
+        ui.set_auth_message(SharedString::from("首次使用，请注册新账户"));
+    }
 
     // 登录：用口令解密已有 keystore 并启动设备（PENDING/APPROVED 由 core 判定）。
     {

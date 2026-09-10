@@ -26,7 +26,7 @@ export component MainWindow inherits Window {
     in property <bool> logged-in: false;
     in property <bool> auth-busy: false;
     in property <string> auth-message: "";
-    in property <string> user-id: "";
+    in-out property <string> user-id: "";
 
     // 端平台标识：Rust 侧用 cfg!(target_os = "android"/"ios") 注入
     in property <bool> is-mobile: true;
@@ -50,6 +50,7 @@ export component MainWindow inherits Window {
     AuthView {
         message: root.auth-message;
         busy: root.auth-busy;
+        uid <=> root.user-id;
         login(uid, pass) => { root.login(uid, pass); }
         register(uid, pass) => { root.register(uid, pass); }
     }

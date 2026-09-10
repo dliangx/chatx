@@ -133,19 +133,27 @@ export component AuthView inherits Rectangle {
     }
 
     function submit() {
-        if (root.pass == "") {
-            root.auth-error = "请输入口令";
+        root.auth-error = "";
+        if (root.is-register) {
+            if (root.uid == "") {
+                root.auth-error = "请输入用户名";
+                return;
+            }
+            if (root.pass == "") {
+                root.auth-error = "请输入口令";
+                return;
+            }
+            root.register(root.uid, root.pass);
             return;
         }
         if (root.uid == "") {
             root.auth-error = "请输入用户名";
             return;
         }
-        root.auth-error = "";
-        if (root.is-register) {
-            root.register(root.uid, root.pass);
-        } else {
-            root.login(root.uid, root.pass);
+        if (root.pass == "") {
+            root.auth-error = "请输入口令";
+            return;
         }
+        root.login(root.uid, root.pass);
     }
 }
