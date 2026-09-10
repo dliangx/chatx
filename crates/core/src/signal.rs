@@ -49,6 +49,16 @@ pub trait DirectoryClient: Sync + Send {
     fn list_users(&self, exclude: &str) -> Vec<UserResolve>;
     /// 列 PENDING 设备（用于 UI 审批）。
     fn list_pending(&self, user_id: &str) -> Vec<DeviceRecord>;
+
+    /// 登记/刷新一个群的公开信息（`group_id → GroupPublic`）。**绝不包含群密钥。**
+    /// 默认 no-op（内存/空后端按需覆写；HTTP 后端落服务器）。
+    fn upsert_group(&self, _g: &crate::group::GroupPublic) {}
+    /// 解析一个群的公开信息。
+    fn resolve_group(&self, group_id: &str) -> anyhow::Result<crate::group::GroupPublic>;
+    /// 列出目录里的全部群。
+    fn list_groups(&self) -> Vec<crate::group::GroupPublic> {
+        Vec::new()
+    }
     /// 后端可达性探测（登录/注册硬闸门）。默认放行，仅 `HttpDirectory` 真正探活。
     fn check(&self) -> anyhow::Result<()> {
         Ok(())
@@ -75,6 +85,7 @@ pub trait DirectoryClient: Sync + Send {
 pub struct InMemoryDirectory {
     users: Arc<Mutex<HashMap<String, UserRecord>>>,
     devices: Arc<Mutex<HashMap<String, DeviceRecord>>>,
+    groups: Arc<Mutex<HashMap<String, crate::group::GroupPublic>>>,
 }
 
 impl InMemoryDirectory {
@@ -88,6 +99,7 @@ impl InMemoryDirectory {
         let b = Arc::new(InMemoryDirectory {
             users: Arc::clone(&a.users),
             devices: Arc::clone(&a.devices),
+            groups: Arc::clone(&a.groups),
         });
         (a, b)
     }
@@ -224,6 +236,26 @@ impl DirectoryClient for InMemoryDirectory {
             .cloned()
             .collect()
     }
+
+    fn upsert_group(&self, g: &crate::group::GroupPublic) {
+        self.groups
+            .lock()
+            .unwrap()
+            .insert(g.group_id.clone(), g.clone());
+    }
+
+    fn resolve_group(&self, group_id: &str) -> anyhow::Result<crate::group::GroupPublic> {
+        self.groups
+            .lock()
+            .unwrap()
+            .get(group_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("group {group_id} not found in directory"))
+    }
+
+    fn list_groups(&self) -> Vec<crate::group::GroupPublic> {
+        self.groups.lock().unwrap().values().cloned().collect()
+    }
 }
 
 // ────────────────────────── HTTP 实现（生产 / 跨机） ──────────────────────────
@@ -240,7 +272,7 @@ impl HttpDirectory {
     pub fn default_server() -> Self {
         Self::new(
             std::env::var("P2PCHAT_SIGNAL")
-                .unwrap_or_else(|_| "http://127.0.0.1:8787".into()),
+                .unwrap_or_else(|_| "http://192.168.1.2:8787".into()),
         )
     }
 
@@ -354,6 +386,33 @@ impl DirectoryClient for HttpDirectory {
         }
     }
 
+    fn upsert_group(&self, g: &crate::group::GroupPublic) {
+        let url = format!("{}/v1/groups/{}", self.base, g.group_id);
+        let body = serde_json::to_string(g).expect("serialize GroupPublic");
+        let res = ureq::request("PUT", &url)
+            .set("content-type", "application/json")
+            .send_string(&body);
+        if let Err(e) = res {
+            tracing::warn!("directory upsert_group 失败: {e}");
+        }
+    }
+
+    fn resolve_group(&self, group_id: &str) -> anyhow::Result<crate::group::GroupPublic> {
+        let url = format!("{}/v1/groups/{group_id}", self.base);
+        let resp = ureq::request("GET", &url)
+            .call()
+            .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
+        resp.into_json().map_err(|e| anyhow::anyhow!("解析群失败: {e}"))
+    }
+
+    fn list_groups(&self) -> Vec<crate::group::GroupPublic> {
+        let url = format!("{}/v1/groups", self.base);
+        match ureq::request("GET", &url).call() {
+            Ok(resp) => resp.into_json::<Vec<crate::group::GroupPublic>>().unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// 走轻量 presence 通道。返回 `true` = 200（设备存在已刷新）；
     /// `false` = 404 / 其它错误（目录里没有该设备，调用方应重登记）。
     fn touch_presence(&self, peer_id: &str, endpoints: &[String]) -> bool {
@@ -409,5 +468,9 @@ impl DirectoryClient for NullDirectory {
     }
     fn list_pending(&self, _user_id: &str) -> Vec<DeviceRecord> {
         Vec::new()
+    }
+
+    fn resolve_group(&self, group_id: &str) -> anyhow::Result<crate::group::GroupPublic> {
+        anyhow::bail!("null directory: group {group_id} not found")
     }
 }

@@ -126,6 +126,16 @@ impl DeviceIdentity {
         Self::base_profile_dir(base, profile).join("keystore.json")
     }
 
+    /// 指定 base 目录下的群定义目录 `<base>/<profile>/groups/`（每个群一个 `.json`）。
+    pub fn base_groups_dir(base: &std::path::Path, profile: &str) -> std::path::PathBuf {
+        Self::base_profile_dir(base, profile).join("groups")
+    }
+
+    /// 某 profile 下的群定义目录。
+    pub fn groups_dir(profile: &str) -> std::path::PathBuf {
+        Self::base_groups_dir(&Self::home_dir(), profile)
+    }
+
     /// 当前 profile 的设备文件路径 `<profile>/device.json`。
     pub fn device_path(profile: &str) -> std::path::PathBuf {
         Self::base_device_path(&Self::home_dir(), profile)

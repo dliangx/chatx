@@ -141,6 +141,65 @@ impl Account {
         Ok(vk.verify(&a.canonical(), &sig).is_ok())
     }
 
+    /// 用账户签名密钥对任意字节能签名（base64 输出）。群消息签名、审批等通用。
+    pub fn sign_raw(&self, message: &[u8]) -> Result<String, AcctError> {
+        let sk = SigningKey::from_bytes(&self.secret().sign_sk);
+        let sig = sk.sign(message);
+        Ok(b64(&sig.to_bytes()))
+    }
+
+    /// 用给定账户签名公钥（base64）验证任意字节的签名。
+    pub fn verify_raw(
+        sign_pk_b64: &str,
+        message: &[u8],
+        signature_b64: &str,
+    ) -> Result<bool, AcctError> {
+        let vk = verifying_key_from_b64(sign_pk_b64)?;
+        let sig = signature_from_b64(signature_b64)?;
+        Ok(vk.verify(message, &sig).is_ok())
+    }
+
+    /// 由账户签名私钥派生一把**只在本账户设备上有效**的 AES-256 数据保护密钥。
+    ///
+    /// 用途：保护"不属于 keystore、但需要跨设备跟随账户"的落盘秘密
+    /// （如群共享密钥 `g_secret`——任何持有账户口令的设备都能解出，但不必重述口令）。
+    pub fn data_protect_key(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        hkdf::Hkdf::<Sha256>::new(Some(b"p2pchat/data-protect/v1"), &self.secret().sign_sk)
+            .expand(b"32b-aes", &mut out)
+            .expect("hkdf 32B");
+        out
+    }
+
+    /// 用数据保护密钥加密一段秘密，返回 `nonce(12) ‖ ciphertext+tag`。
+    pub fn encrypt_data(&self, plaintext: &[u8]) -> Result<Vec<u8>, AcctError> {
+        let key = self.data_protect_key();
+        let mut nonce = [0u8; 12];
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).expect("32B key");
+        let ct = cipher
+            .encrypt(aes_gcm::Nonce::from_slice(&nonce), plaintext)
+            .map_err(|e| AcctError::Crypto(e.to_string()))?;
+        let mut out = Vec::with_capacity(12 + ct.len());
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ct);
+        Ok(out)
+    }
+
+    /// 解密 `encrypt_data` 的产物。
+    pub fn decrypt_data(&self, bundle: &[u8]) -> Result<Vec<u8>, AcctError> {
+        if bundle.len() < 13 {
+            return Err(AcctError::Crypto("data bundle too short".into()));
+        }
+        let (nonce_b, ct) = bundle.split_at(12);
+        let nonce = aes_gcm::Nonce::from_slice(nonce_b);
+        let key = self.data_protect_key();
+        let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).expect("32B key");
+        cipher
+            .decrypt(nonce, ct)
+            .map_err(|_| AcctError::Crypto("data decrypt failed".into()))
+    }
+
     /// 用账户 E2E 私钥与对方 E2E 公钥派生共享 AES-256 会话密钥。
     ///
     /// 因为 E2E 密钥是 **账户级**，同一账户的任一对 APPROVED 设备都能派生出
@@ -473,12 +532,12 @@ impl Keystore {
 
 // ────────────────────────── base64 helpers ──────────────────────────
 
-pub(crate) fn b64(bytes: &[u8]) -> String {
+pub fn b64(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-pub(crate) fn from_b64(s: &str) -> Option<Vec<u8>> {
+pub fn from_b64(s: &str) -> Option<Vec<u8>> {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.decode(s).ok()
 }

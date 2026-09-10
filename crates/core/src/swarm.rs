@@ -58,6 +58,16 @@ pub enum Cmd {
         e2e: String,
         text: String,
     },
+    /// 发送群密钥（`kind=GroupKey`）或群消息（`kind=GroupMsg`）：`sealed` 放 base64 密文，
+    /// `group_id` 路由到对应群；接收方 `RrEvent::Message` 里按 `kind` 分发处理。
+    SendGroup {
+        peer: PeerId,
+        from: String,
+        e2e: String,
+        kind: crate::message::MsgKind,
+        group_id: String,
+        sealed: String,
+    },
 }
 
 /// 可跨线程共享的运行态句柄（只含 Send+Sync 组件）。
@@ -139,6 +149,28 @@ async fn swarm_loop(
                         e2e,
                         text: Some(text),
                         sealed: None,
+                        kind: crate::message::MsgKind::Dm,
+                        group_id: None,
+                    };
+                    let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
+                }
+                Some(Cmd::SendGroup {
+                    peer,
+                    from,
+                    e2e,
+                    kind,
+                    group_id,
+                    sealed,
+                }) => {
+                    let id: u64 = rand::random();
+                    let req = ChatRequest {
+                        id,
+                        from,
+                        e2e,
+                        text: None,
+                        sealed: Some(sealed),
+                        kind,
+                        group_id: Some(group_id),
                     };
                     let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
                 }

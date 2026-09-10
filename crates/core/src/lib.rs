@@ -17,6 +17,7 @@
 //! - **心跳**：`heartbeat` — 极简在线心跳，只刷新 seen/endpoints（重注册仍在登录时）
 
 pub mod account;
+pub mod group;
 pub mod identity;
 pub mod message;
 pub mod signal;
@@ -27,12 +28,15 @@ pub mod swarm;
 pub use libp2p;
 
 use account::{Account, Attestation, AttestationAction, DeviceRecord, DeviceStatus, UserRecord};
+use group::{Group, MemberInfo};
 use identity::DeviceIdentity;
 use libp2p::{Multiaddr, PeerId};
 use signal::{DirectoryClient, UserResolve};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use store::Store;
 use swarm::{self as sw, Cmd, Running};
+use parking_lot::RwLock;
 
 /// 高层客户端：账户 + 设备 + 目录 + 存储 + swarm。
 ///
@@ -44,20 +48,60 @@ pub struct Client<D: DirectoryClient + ?Sized> {
     running: Arc<Running>,
     store: Arc<Store>,
     events: sw::EventRx,
+    /// 本 profile 的群定义（内存；从 `groups/{id}.json` 载入，改动时回写）。
+    groups: RwLock<BTreeMap<String, Group>>,
+    /// 群定义落盘目录 `<base>/<profile>/groups/`。
+    groups_dir: std::path::PathBuf,
+}
+
+/// 入站群消息的处理结果（`apply_inbound` / `process_inbound` 返回）。
+/// `Dm`（1:1）不在这里——宿主应走既有 1:1 解密路径。
+#[derive(Debug)]
+pub enum InboundGroup {
+    /// 收到了一个（新的或轮换后的）群密钥，本地已落地该群。
+    Key { group_id: String },
+    /// 群消息已解封 + 落盘；`from`=发送方 peer_id，`text`=明文。
+    Message {
+        group_id: String,
+        from: String,
+        text: String,
+    },
 }
 
 impl<D: DirectoryClient + ?Sized> Client<D> {
     // ── 构造 ──
 
     /// 从已解密的账户 + 已有设备启动（不生成身份，不注册）。
+    /// `base`+`profile` 定位该 profile 的消息落盘库（`sqlite`），启动后 UI 可经 `store()` 读取历史。
     /// 调用方负责调用 `heartbeat` / `register_device_*` 进行目录注册。
     pub async fn from_parts(
         account: Account,
         device: DeviceIdentity,
         dir: Arc<D>,
+        base: &std::path::Path,
+        profile: &str,
     ) -> anyhow::Result<Self> {
         let (running, events) = sw::boot(&device).await?;
-        let store = Arc::new(Store::new());
+        let db_path = base.join(profile).join("messages.db");
+        let db = sqlite::open(&db_path)?;
+        let store = Arc::new(Store::with_sql(std::sync::Arc::new(
+            parking_lot::Mutex::new(db),
+        ))?);
+
+        // 载入本 profile 已有群定义（`groups/{id}.json`，g_secret 已加密）。
+        let groups_dir = DeviceIdentity::base_groups_dir(base, profile);
+        let mut groups = BTreeMap::new();
+        if groups_dir.is_dir() {
+            for entry in std::fs::read_dir(&groups_dir)? {
+                let path = entry?.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Ok(g) = Group::load(&account, &path) {
+                        groups.insert(g.group_id.clone(), g);
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             account,
             device,
@@ -65,6 +109,8 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             running,
             store,
             events,
+            groups: RwLock::new(groups),
+            groups_dir,
         })
     }
 
@@ -92,7 +138,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
                 );
             }
             let device = DeviceIdentity::load_or_create(profile)?;
-            let c = Self::from_parts(acct.clone(), device, dir).await?;
+            let c = Self::from_parts(acct.clone(), device, dir, &DeviceIdentity::home_dir(), profile).await?;
             // 目录驱动判定：首台（账户下尚无其它设备）→ 自动 APPROVED；
             //              已有其它设备 → 本台为新设备 → 登记 PENDING 等批准；
             //              本设备早已登记 → 保持其原状态。
@@ -110,7 +156,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         let device = DeviceIdentity::generate();
         device.save(&DeviceIdentity::device_path(profile))?;
 
-        let c = Self::from_parts(acct.clone(), device, dir).await?;
+        let c = Self::from_parts(acct.clone(), device, dir, &DeviceIdentity::home_dir(), profile).await?;
         c.refresh_directory_auto(uid.clone()).await?;
         Ok((c, acct))
     }
@@ -137,7 +183,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             .open(passphrase)
             .map_err(|e| anyhow::anyhow!("keystore open: {e}"))?;
         let device = DeviceIdentity::load_or_create(profile)?;
-        let c = Self::from_parts(acct.clone(), device, dir).await?;
+        let c = Self::from_parts(acct.clone(), device, dir, &DeviceIdentity::home_dir(), profile).await?;
         c.refresh_directory_auto(label).await?;
         Ok((c, acct))
     }
@@ -166,7 +212,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             }
             let device = DeviceIdentity::load(&device_path)
                 .map_err(|e| anyhow::anyhow!("load device: {e}"))?;
-            let c = Self::from_parts(acct.clone(), device, dir).await?;
+            let c = Self::from_parts(acct.clone(), device, dir, base, profile).await?;
             c.refresh_directory_auto(uid.clone()).await?;
             return Ok((c, acct));
         }
@@ -178,9 +224,9 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         ks.save(&keystore_path)?;
 
         let device = DeviceIdentity::generate();
-        device.save(&DeviceIdentity::device_path(profile))?;
+        device.save(&device_path)?;
 
-        let c = Self::from_parts(acct.clone(), device, dir).await?;
+        let c = Self::from_parts(acct.clone(), device, dir, base, profile).await?;
         // 新规则：若该 user_id 名下已有其它设备 → PENDING；否则首台 → APPROVED
         c.refresh_directory_auto(uid.clone()).await?;
         Ok((c, acct))
@@ -216,7 +262,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
                 d
             }
         };
-        let c = Self::from_parts(acct.clone(), device, dir).await?;
+        let c = Self::from_parts(acct.clone(), device, dir, base, profile).await?;
         c.refresh_directory_auto(label).await?;
         Ok((c, acct))
     }
@@ -641,5 +687,271 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
     /// 取下一条客户端事件（阻塞）。需在异步上下文（tokio）中调用。
     pub async fn next_event(&mut self) -> Option<sw::ChatEvent> {
         self.events.recv().await
+    }
+
+    /// 处理一条 `Text` 事件：非群消息返回 `None`；群密钥/群消息返回对应 `InboundGroup`。
+    /// 与 `apply_inbound` 等价，只是把 `ChatEvent::Text` 解包好。
+    pub fn process_inbound(&self, evt: &sw::ChatEvent) -> anyhow::Result<Option<InboundGroup>> {
+        match evt {
+            sw::ChatEvent::Text { req, .. } => self.apply_inbound(req),
+            _ => Ok(None),
+        }
+    }
+
+    /// 处理一条入站消息：群密钥（`GroupKey`）落地本群 + 群消息（`GroupMsg`）解封并落盘。
+    /// `Dm`（1:1）返回 `None`，由宿主按 1:1 流程处理。
+    pub fn apply_inbound(&self, req: &message::ChatRequest) -> anyhow::Result<Option<InboundGroup>> {
+        match req.kind {
+            message::MsgKind::Dm => Ok(None),
+            message::MsgKind::GroupKey => {
+                let group_id = req
+                    .group_id
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("GroupKey missing group_id"))?;
+                let bundle = req
+                    .sealed
+                    .as_deref()
+                    .and_then(crate::account::from_b64)
+                    .ok_or_else(|| anyhow::anyhow!("bad group key bundle"))?;
+                let secret = group::open_secret(self.account(), &req.e2e, &bundle)
+                    .map_err(|e| anyhow::anyhow!("open group key: {e}"))?;
+                // 成员表从目录拿（群主 announce 过）；再把自己补进成员表。
+                let pubinfo = self
+                    .dir
+                    .resolve_group(&group_id)
+                    .map_err(|e| anyhow::anyhow!("resolve group dir: {e}"))?;
+                let mut g = group::Group::with_secret(pubinfo.group_id, pubinfo.owner, secret);
+                for (pid, mi) in pubinfo.members {
+                    g.set_member(mi);
+                    let _ = pid;
+                }
+                let me = self.peer_base58();
+                if !g.has(&me) {
+                    g.set_member(group::MemberInfo {
+                        peer_id: me.clone(),
+                        sign_pk: self.account.sign_pk().to_string(),
+                        e2e_public: self.account.e2e_public().to_string(),
+                    });
+                }
+                self.save_group(&g)?;
+                Ok(Some(InboundGroup::Key { group_id }))
+            }
+            message::MsgKind::GroupMsg => {
+                let group_id = req
+                    .group_id
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("GroupMsg missing group_id"))?;
+                let wire = req
+                    .sealed
+                    .as_deref()
+                    .and_then(crate::account::from_b64)
+                    .ok_or_else(|| anyhow::anyhow!("bad group msg blob"))?;
+                let env: group::SealedGroupMsg =
+                    serde_json::from_slice(&wire).map_err(|e| anyhow::anyhow!("group msg: {e}"))?;
+                let from = env.from.clone();
+                let text = self.open_group_message(&group_id, &env)?;
+                self.store_group_inbound(&env)?;
+                Ok(Some(InboundGroup::Message { group_id, from, text }))
+            }
+        }
+    }
+
+    // ── 群聊（Phase 2b：建群 / 落盘 / 加密收发封装） ──
+
+    /// 新建一个群（本设备自动加入为成员 + 群主），群密钥随机生成并加密落盘。
+    /// `members` 为其它成员的公开信息；本设备信息自动用本账户填充。
+    pub fn create_group(
+        &self,
+        group_id: impl Into<String>,
+        members: Vec<MemberInfo>,
+    ) -> anyhow::Result<group::Group> {
+        let group_id = group_id.into();
+        let me_peer = self.peer_base58();
+        let owner = me_peer.clone();
+        let mut g = group::Group::create(&group_id, owner);
+        g.set_member(MemberInfo {
+            peer_id: me_peer.clone(),
+            sign_pk: self.account.sign_pk().to_string(),
+            e2e_public: self.account.e2e_public().to_string(),
+        });
+        for m in members {
+            g.set_member(m);
+        }
+        g.save(&self.account, &self.groups_dir.join(format!("{group_id}.json")))?;
+        self.groups.write().insert(group_id, g.clone());
+        Ok(g)
+    }
+
+    /// 把一名成员加入既有群（成员端用 `join_group` 拿密钥后调用）。
+    pub fn add_member(&self, group_id: &str, info: MemberInfo) -> anyhow::Result<()> {
+        let mut g = self.groups.write().get_mut(group_id).cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        g.set_member(info);
+        self.save_group(&g)?;
+        Ok(())
+    }
+
+    /// 群主轮换群密钥（踢人后调用使旧密钥作废）。
+    pub fn rotate_group(&self, group_id: &str) -> anyhow::Result<group::Group> {
+        let mut g = self.groups.write().get_mut(group_id).cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        g.rotate();
+        self.save_group(&g)?;
+        Ok(g)
+    }
+
+    /// 读取一个群定义（含解出的群密钥）。
+    pub fn get_group(&self, group_id: &str) -> Option<group::Group> {
+        self.groups.read().get(group_id).cloned()
+    }
+
+    /// 列出本 profile 的全部群。
+    pub fn list_groups(&self) -> Vec<group::Group> {
+        self.groups.read().values().cloned().collect()
+    }
+
+    /// 用群密钥封印一条群消息（含发送方签名）；返回密文供网络层扇出 / 落盘。
+    pub fn seal_group_message(
+        &self,
+        group_id: &str,
+        text: &str,
+    ) -> anyhow::Result<group::SealedGroupMsg> {
+        let g = self.get_group(group_id).ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        let me = self.peer_base58();
+        group::seal_message(&g, &self.account, &me, text)
+            .map_err(|e| anyhow::anyhow!("seal group msg: {e}"))
+    }
+
+    /// 解封一条群消息（用本群密钥 + 签名校验）。
+    pub fn open_group_message(
+        &self,
+        group_id: &str,
+        env: &group::SealedGroupMsg,
+    ) -> anyhow::Result<String> {
+        if env.group_id != group_id {
+            anyhow::bail!("group id mismatch");
+        }
+        let g = self.get_group(group_id).ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        group::open_message(&g.secret(), env).map_err(|e| anyhow::anyhow!("open group msg: {e}"))
+    }
+
+    /// 群消息落盘：`chat_id = group_id`，`text = base64(SealedGroupMsg)`（密文不落地明文）。
+    pub fn store_group_outbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
+        let wire = serde_json::to_string(env)?;
+        let b64 = crate::account::b64(wire.as_bytes());
+        self.store.push(&env.group_id, &env.from, &b64, true, true);
+        Ok(())
+    }
+
+    /// 群消息入站落盘（`outgoing=false`）。
+    pub fn store_group_inbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
+        let wire = serde_json::to_string(env)?;
+        let b64 = crate::account::b64(wire.as_bytes());
+        self.store.push(&env.group_id, &env.from, &b64, false, true);
+        Ok(())
+    }
+
+    /// 解析一个设备 peer_id 的首选在线端点（base58 → PeerId + Multiaddr）。
+    /// 目录没有该设备 / 无端点时返回 `None`（离线，M2 不补发）。
+    fn resolve_peer_addr(&self, peer_id: &str) -> Option<(PeerId, Multiaddr)> {
+        let rec = self.dir.resolve_device(peer_id).ok()?;
+        let endpoint = rec.endpoints.first()?.clone();
+        let pid = peer_id.parse::<PeerId>().ok()?;
+        let addr = endpoint.parse::<Multiaddr>().ok()?;
+        Some((pid, addr))
+    }
+
+    /// 把群公开信息发布到目录（供其他成员/设备发现群与成员）。**绝不含群密钥。**
+    pub fn announce_group(&self, group_id: &str) -> anyhow::Result<group::GroupPublic> {
+        let g = self
+            .get_group(group_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        let pubinfo = g.to_public();
+        self.dir.upsert_group(&pubinfo);
+        Ok(pubinfo)
+    }
+
+    /// 群主把群密钥经 E2E 信道私发给每名在线成员（`kind=GroupKey`）。
+    /// 返回成功分发的成员数。成员侧收到后应 `open_secret` 并自建/更新本地 `Group`。
+    pub fn publish_group_key(&self, group_id: &str) -> anyhow::Result<usize> {
+        let g = self
+            .get_group(group_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        let me = self.peer_base58();
+        let my_e2e = self.e2e_public().to_string();
+        let secret = g.secret();
+        let mut sent = 0;
+        for peer in g.member_ids() {
+            if peer == me {
+                continue;
+            }
+            // 接收方用"群主 E2E 公钥"解（my_e2e）；这里用成员各自的 E2E 公钥去封
+            // （seal_secret 里 DH 是 commutative，用谁的公钥封，接收方都得能解）。
+            let their = match g.member(&peer) {
+                Some(mi) => mi.e2e_public.clone(),
+                None => continue,
+            };
+            let bundle = group::seal_secret(self.account(), &their, &secret)
+                .map_err(|e| anyhow::anyhow!("seal secret: {e}"))?;
+            let wire = crate::account::b64(&bundle);
+            if let Some((pid, addr)) = self.resolve_peer_addr(&peer) {
+                let _ = self.running.cmd_tx.send(Cmd::Connect { peer: pid.clone(), addr });
+                let ok = self.running.cmd_tx.send(Cmd::SendGroup {
+                    peer: pid,
+                    from: me.clone(),
+                    e2e: my_e2e.clone(),
+                    kind: crate::message::MsgKind::GroupKey,
+                    group_id: group_id.into(),
+                    sealed: wire,
+                })
+                .is_ok();
+                if ok {
+                    sent += 1;
+                }
+            }
+        }
+        Ok(sent)
+    }
+
+    /// 封一条群消息并扇出给所有在线成员（`kind=GroupMsg`）；返回送达成员数。
+    /// 本地同时落盘（`outgoing=true`，密文）。
+    pub fn send_group_message(&self, group_id: &str, text: &str) -> anyhow::Result<usize> {
+        let env = self.seal_group_message(group_id, text)?;
+        let me = self.peer_base58();
+        let my_e2e = self.e2e_public().to_string();
+        let wire = crate::account::b64(&serde_json::to_vec(&env)?);
+        let g = self
+            .get_group(group_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        let mut sent = 0;
+        for peer in g.member_ids() {
+            if peer == me {
+                continue;
+            }
+            if let Some((pid, addr)) = self.resolve_peer_addr(&peer) {
+                let _ = self.running.cmd_tx.send(Cmd::Connect { peer: pid.clone(), addr });
+                let ok = self.running.cmd_tx
+                    .send(Cmd::SendGroup {
+                        peer: pid,
+                        from: me.clone(),
+                        e2e: my_e2e.clone(),
+                        kind: crate::message::MsgKind::GroupMsg,
+                        group_id: group_id.into(),
+                        sealed: wire.clone(),
+                    })
+                    .is_ok();
+                if ok {
+                    sent += 1;
+                }
+            }
+        }
+        self.store_group_outbound(&env)?;
+        Ok(sent)
+    }
+
+    fn save_group(&self, g: &group::Group) -> anyhow::Result<()> {
+        g.save(&self.account, &self.groups_dir.join(format!("{}.json", g.group_id)))?;
+        self.groups.write().insert(g.group_id.clone(), g.clone());
+        Ok(())
     }
 }
