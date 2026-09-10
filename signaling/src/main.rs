@@ -15,6 +15,10 @@
 //!   GET    /v1/devices/{peer_id}               解析设备
 //!   DELETE /v1/devices/{peer_id}               撤销登记
 //!
+//!   GET    /v1/groups                          列出全部群公开信息
+//!   PUT    /v1/groups/{group_id}               登记/刷新群（owner + 成员公钥，绝不存群密钥）
+//!   GET    /v1/groups/{group_id}               解析群
+//!
 //! 跑：`cargo run -p p2pchat-signal`（默认 0.0.0.0:8787）
 
 use std::collections::HashMap;
@@ -27,6 +31,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use chatx_core::account::{DeviceRecord, DeviceStatus, UserRecord};
+use chatx_core::group::GroupPublic;
 use chatx_core::message::now_ms;
 use chatx_core::signal::{ONLINE_TTL_MS, UserResolve};
 use serde::{Deserialize, Serialize};
@@ -35,6 +40,8 @@ use serde::{Deserialize, Serialize};
 struct App {
     users: Arc<Mutex<HashMap<String, UserRecord>>>,
     devices: Arc<Mutex<HashMap<String, DeviceRecord>>>,
+    /// 群公开信息（`group_id → GroupPublic`）。只存 owner + 成员公钥，绝不存群密钥。
+    groups: Arc<Mutex<HashMap<String, GroupPublic>>>,
 }
 
 #[derive(Deserialize)]
@@ -129,7 +136,7 @@ async fn resolve_user(
 }
 
 async fn resolve_and_device(
-    State(App { users, devices }): State<App>,
+    State(App { users, devices, .. }): State<App>,
     Path(user_id): Path<String>,
 ) -> ApiResult {
     let user = {
@@ -180,7 +187,7 @@ async fn list_user_devices(
 }
 
 async fn list_users(
-    State(App { users, devices }): State<App>,
+    State(App { users, devices, .. }): State<App>,
     Query(q): Query<IdQuery>,
 ) -> ApiResult {
     let users = users.lock().unwrap();
@@ -292,6 +299,43 @@ async fn health() -> ApiResult {
     Ok(ok_json(&"ok"))
 }
 
+// ── 群公开信息（绝不存群密钥） ──
+
+async fn upsert_group(
+    State(App { groups, .. }): State<App>,
+    Path(group_id): Path<String>,
+    body: String,
+) -> ApiResult {
+    let mut g: GroupPublic = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return Err(bad(StatusCode::BAD_REQUEST, format!("bad GroupPublic: {e}"))),
+    };
+    g.group_id = group_id.clone();
+    groups.lock().unwrap().insert(group_id.clone(), g);
+    Ok(ok_json(&"ok"))
+}
+
+async fn resolve_group(
+    State(App { groups, .. }): State<App>,
+    Path(group_id): Path<String>,
+) -> ApiResult {
+    let g = groups
+        .lock()
+        .unwrap()
+        .get(&group_id)
+        .cloned()
+        .ok_or_else(|| bad(StatusCode::NOT_FOUND, format!("group {group_id} not found")))?;
+    Ok(ok_json(&g))
+}
+
+async fn list_groups(
+    State(App { groups, .. }): State<App>,
+) -> ApiResult {
+    let mut out: Vec<GroupPublic> = groups.lock().unwrap().values().cloned().collect();
+    out.sort_by_key(|g| g.group_id.clone());
+    Ok(ok_json(&out))
+}
+
 #[tokio::main]
 async fn main() {
     let _ = tracing_subscriber::fmt()
@@ -306,6 +350,7 @@ async fn main() {
     let app = App {
         users: Arc::new(Mutex::new(HashMap::new())),
         devices: Arc::new(Mutex::new(HashMap::new())),
+        groups: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let router = Router::new()
@@ -319,6 +364,8 @@ async fn main() {
             put(upsert_device).get(resolve_device).delete(delete_device),
         )
         .route("/v1/devices/{peer_id}/presence", put(device_presence))
+        .route("/v1/groups", get(list_groups))
+        .route("/v1/groups/{group_id}", put(upsert_group).get(resolve_group))
         .with_state(app.clone());
 
     let listener = tokio::net::TcpListener::bind(addr)
