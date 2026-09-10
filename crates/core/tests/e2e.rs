@@ -12,6 +12,7 @@
 
 use chatx_core::Client;
 use chatx_core::account::{Account, Attestation, AttestationAction, DeviceStatus, KDF_ITERATIONS};
+use chatx_core::group::MemberInfo;
 use chatx_core::identity::DeviceIdentity;
 use chatx_core::signal::{DirectoryClient, InMemoryDirectory};
 
@@ -193,4 +194,250 @@ async fn only_approved_can_attest() {
         "错误信息应说明原因: {msg}"
     );
     let _ = c1;
+}
+
+/// 成员端入站处理：群主 announce+seal 密钥 → 成员 apply_inbound 落地本群 →
+/// 成员解密群消息；轮换后重新分发密钥，成员更新本地密钥。
+#[tokio::test]
+async fn member_receives_group_key_and_msg() {
+    let base = TmpBase::new("member-in");
+    let (dir_a, dir_b) = InMemoryDirectory::pair();
+
+    // alice = 群主；bob = 成员（独立 profile，避免同 peer）
+    let (alice_c, _) = Client::bootstrap_in(base.path(), "mow", "alice", "p", dir_a.clone())
+        .await
+        .unwrap();
+    let (bob_c, _) = Client::bootstrap_in(base.path(), "memb", "bob", "p", dir_b.clone())
+        .await
+        .unwrap();
+    let (alice, bob) = (alice_c.account().clone(), bob_c.account().clone());
+
+    const GID: &str = "team-in";
+    // alice 建群（把 bob 作为成员）
+    alice_c
+        .create_group(
+            GID,
+            vec![MemberInfo {
+                peer_id: bob_c.peer_base58().into(),
+                sign_pk: bob_c.my_sign_pk().into(),
+                e2e_public: bob_c.e2e_public().into(),
+            }],
+        )
+        .unwrap();
+    let secret0 = alice_c.get_group(GID).unwrap().secret();
+    // 公布到目录（成员端建群要从这里拿成员表）
+    alice_c.announce_group(GID).unwrap();
+
+    // 群主把密钥 seal 给 bob（用 bob 的 E2E 公钥封装；DH 交换对称）
+    let bundle = chatx_core::group::seal_secret(&alice, &bob.e2e_public(), &secret0).unwrap();
+    let key_req = chatx_core::message::ChatRequest {
+        id: 1,
+        from: alice_c.peer_base58(),
+        e2e: alice.e2e_public().to_string(),
+        text: None,
+        sealed: Some(chatx_core::account::b64(&bundle)),
+        kind: chatx_core::message::MsgKind::GroupKey,
+        group_id: Some(GID.into()),
+    };
+
+    // bob 处理入站群密钥 → 本地落地该群
+    let handled = bob_c.apply_inbound(&key_req).unwrap().expect("GroupKey 应被处理");
+    let bob_group = bob_c.get_group(GID).expect("bob 应已建出本地群");
+    assert_eq!(bob_group.secret(), secret0, "bob 本地群密钥应与群主一致");
+    assert!(matches!(handled, chatx_core::InboundGroup::Key { .. }));
+    // bob 成员应已把群主/自己都补进成员表
+    assert!(bob_group.has(&alice_c.peer_base58()), "群主应在 bob 的成员表");
+    assert!(bob_group.has(&bob_c.peer_base58()), "bob 应在自己的成员表");
+
+    // 群消息：alice 发言 → bob 接收解密
+    let env = alice_c.seal_group_message(GID, "hi bob").unwrap();
+    let req = chatx_core::message::ChatRequest {
+        id: 2,
+        from: alice_c.peer_base58(),
+        e2e: alice.e2e_public().to_string(),
+        text: None,
+        sealed: Some(chatx_core::account::b64(
+            &serde_json::to_vec(&env).unwrap(),
+        )),
+        kind: chatx_core::message::MsgKind::GroupMsg,
+        group_id: Some(GID.into()),
+    };
+    let m = bob_c.apply_inbound(&req).unwrap().expect("GroupMsg 应被处理");
+    match m {
+        chatx_core::InboundGroup::Message { text, from, .. } => {
+            assert_eq!(text, "hi bob");
+            assert_eq!(from, alice_c.peer_base58());
+        }
+        _ => panic!("应返回 Message"),
+    }
+    // bob 入站已落盘
+    let buf = bob_c.store().all();
+    assert!(buf.iter().any(|s| s.chat_id == GID && !s.outgoing), "bob 入站群消息应落盘");
+
+    // 轮换：群主换新密钥 → 旧密钥下 bob 打不开新消息（模拟被踢），
+    // 重新分发密钥后 bob 更新本地密钥 → 能读
+    alice_c.rotate_group(GID).unwrap();
+    let post = alice_c.get_group(GID).unwrap();
+    assert_ne!(post.secret(), secret0);
+    let secret_new = post.secret();
+    let sealed_post = alice_c.seal_group_message(GID, "after rotate").unwrap();
+    assert!(
+        chatx_core::group::open_message(&secret0, &sealed_post).is_err(),
+        "旧密钥打不开新消息"
+    );
+    // 重新分发（用 bob 新密钥封）
+    let bundle2 = chatx_core::group::seal_secret(&alice, &bob.e2e_public(), &secret_new).unwrap();
+    let key_req2 = chatx_core::message::ChatRequest {
+        id: 3,
+        from: alice_c.peer_base58(),
+        e2e: alice.e2e_public().to_string(),
+        text: None,
+        sealed: Some(chatx_core::account::b64(&bundle2)),
+        kind: chatx_core::message::MsgKind::GroupKey,
+        group_id: Some(GID.into()),
+    };
+    bob_c.apply_inbound(&key_req2).unwrap();
+    let now_group = bob_c.get_group(GID).unwrap();
+    assert_eq!(now_group.secret(), secret_new, "bob 应更新为新密钥");
+    assert_eq!(
+        chatx_core::group::open_message(&now_group.secret(), &sealed_post).unwrap(),
+        "after rotate"
+    );
+}
+
+/// 群目录 API：发布群公开信息 → 其他成员解析 → 列表（InMemory 后端往返）。
+#[test]
+fn group_directory_roundtrip() {
+    let dir = InMemoryDirectory::new();
+    let acct = Account::generate("carol");
+    let gid = "team-dir";
+    let mut g = chatx_core::group::Group::create(gid, "QmCarol");
+    g.set_member(MemberInfo {
+        peer_id: "QmCarol".into(),
+        sign_pk: acct.sign_pk().into(),
+        e2e_public: acct.e2e_public().into(),
+    });
+    // 发布（绝不含群密钥）
+    let pubinfo = g.to_public();
+    assert_eq!(pubinfo.group_id, gid);
+    dir.upsert_group(&pubinfo);
+    // 解析
+    let got = dir.resolve_group(gid).expect("resolve group");
+    assert_eq!(got.group_id, gid);
+    assert!(got.members.contains_key("QmCarol"), "群应含成员");
+    // 列表
+    assert_eq!(dir.list_groups().len(), 1);
+    // 不存在的群 → Err
+    assert!(dir.resolve_group("nope").is_err());
+}
+
+/// 客户端群聊完整流程：建群→加密落盘→重启载入→密钥 E2E 分发→群消息收发→轮换踢人后旧密钥失效。
+#[tokio::test]
+async fn client_group_flow() {
+    let base = TmpBase::new("group");
+    let (dir1, _dir2) = InMemoryDirectory::pair();
+
+    // c1 = alice（群主，全新 bootstrap）
+    let (c1, _) = Client::bootstrap_in(base.path(), "gowner", "alice", "pass", dir1.clone())
+        .await
+        .expect("bootstrap owner");
+    assert_eq!(c1.user_id(), "alice");
+
+    // c2 = bob：拷 keystore 到新 profile 后登录（同账户设备或另一账户均可，此处用另一账户以测跨账户分发）
+    let (dirb, _) = InMemoryDirectory::pair();
+    let (c2, acct_b) = Client::bootstrap_in(base.path(), "gmemb", "bob", "pass", dirb.clone())
+        .await
+        .expect("bootstrap bob");
+    assert_eq!(c2.user_id(), "bob");
+    assert!(acct_b.has_secret());
+
+    // 建群：alice 为群主，把 bob 作为成员加入
+    let gid = "team-alpha";
+    let g = c1
+        .create_group(
+            gid,
+            vec![MemberInfo {
+                peer_id: c2.peer_base58().into(),
+                sign_pk: c2.my_sign_pk().into(),
+                e2e_public: c2.e2e_public().into(),
+            }],
+        )
+        .expect("create group");
+    assert!(g.has(&c1.peer_base58()), "群主应在群内");
+    assert!(g.has(&c2.peer_base58()), "bob 应在群内");
+    // 群定义已加密落盘
+    let gf = base.path().join("gowner").join("groups").join(format!("{gid}.json"));
+    assert!(gf.exists(), "群定义应落盘");
+
+    // 重启载入：同 profile 重新 bootstrap 应读回已有群（g_secret 解密成功）
+    let (c1b, _) = Client::bootstrap_in(base.path(), "gowner", "alice", "pass", dir1.clone())
+        .await
+        .expect("bootstrap owner again");
+    let g2 = c1b.get_group(gid).expect("重启后应载入同一群");
+    assert_eq!(g2.secret(), g.secret(), "重启后群密钥应一致");
+
+    // 密钥分发：alice →（E2E 信道）→ bob
+    let s0 = g2.secret();
+    let alice_acct = c1b.account().clone();
+    let bob_acct = c2.account().clone();
+    let bundle = chatx_core::group::seal_secret(&alice_acct, &bob_acct.e2e_public(), &s0)
+        .expect("seal secret");
+    let bob_secret = chatx_core::group::open_secret(&bob_acct, &alice_acct.e2e_public(), &bundle)
+        .expect("open secret");
+    assert_eq!(bob_secret, s0, "bob 应解出同一群密钥");
+
+    // 群消息：alice 封印 → bob 解封（验签通过）
+    let env = c1b.seal_group_message(gid, "hello team").expect("seal msg");
+    let text = chatx_core::group::open_message(&bob_secret, &env).expect("bob open msg");
+    assert_eq!(text, "hello team");
+    // 入站落盘（bob 侧）
+    c2.store_group_inbound(&env).expect("store inbound");
+    // 出站落盘（alice 侧）
+    c1b.store_group_outbound(&env).expect("store outbound");
+
+    // bob 回发一条（bob 侧用群密钥重建 Group 对象以 seal）
+    let mut bobg = chatx_core::group::Group::with_secret(gid, c2.peer_base58(), bob_secret);
+    bobg.set_member(MemberInfo {
+        peer_id: c2.peer_base58().into(),
+        sign_pk: c2.my_sign_pk().into(),
+        e2e_public: c2.e2e_public().into(),
+    });
+    let reply = chatx_core::group::seal_message(&bobg, &bob_acct, &c2.peer_base58(), "got it").expect("bob seal");
+    let rt = chatx_core::group::open_message(&s0, &reply).expect("alice open reply");
+    assert_eq!(rt, "got it");
+
+    // 轮换（踢 bob）：旧密钥打不开新消息
+    let g3 = c1b.rotate_group(gid).expect("rotate");
+    assert_ne!(g3.secret(), s0, "轮换后密钥应变");
+    let secret_env = c1b
+        .seal_group_message(gid, "post-rot")
+        .expect("seal post-rot");
+    assert!(
+        chatx_core::group::open_message(&s0, &secret_env).is_err(),
+        "轮换后旧密钥应打不开新消息（kick）"
+    );
+    assert_eq!(
+        chatx_core::group::open_message(&g3.secret(), &secret_env).unwrap(),
+        "post-rot"
+    );
+
+    // 跨群重放隔离：grp-two 与 team-alpha **用同一把群密钥**，但因 group_id 不同，
+    // message_key = HKDF(secret, group_id) 不同 → team-alpha 侧打不开 grp-two 的消息
+    let same_secret = g3.secret();
+    let mut other = chatx_core::group::Group::with_secret("grp-two", c1.peer_base58(), same_secret);
+    other.set_member(MemberInfo {
+        peer_id: c1.peer_base58().into(),
+        sign_pk: c1.my_sign_pk().into(),
+        e2e_public: c1.e2e_public().into(),
+    });
+    let cross = chatx_core::group::seal_message(&other, c1b.account(), &c1.peer_base58(), "x").expect("cross seal");
+    // 用 grp-two 自己的同密钥可读
+    assert_eq!(chatx_core::group::open_message(&same_secret, &cross).unwrap(), "x");
+    // team-alpha(gid) 的 message_key（同密钥不同的 group_id）打不开
+    let team_msg_key = chatx_core::group::message_key(&same_secret, gid);
+    let cross_msg_key = chatx_core::group::message_key(&same_secret, "grp-two");
+    assert_ne!(team_msg_key, cross_msg_key, "不同 group_id 派生出不同消息密钥");
+
+    let _ = c1;
+    let _ = c2;
 }
