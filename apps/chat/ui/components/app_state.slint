@@ -1,0 +1,7 @@
+import { NavigationState, GlobalOverlayType } from "nav_state.slint";
+
+export global AppState {
+    in-out property <NavigationState> nav-state: { active-tab:0, tabs: [], global-overlay: GlobalOverlayType.None };
+    in-out property <bool> logged-in: false;
+    in-out property <string> user-id: "";
+}
