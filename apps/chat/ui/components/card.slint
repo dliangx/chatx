@@ -1,1 +1,8 @@
-export component CardView inherits Rectangle { }
+export component CardView inherits Rectangle {
+    in property <int> id;
+    in property <string> image;
+    in property <string> title;
+    in property <string> user;
+    in property <bool> is-liked;
+    in property <int> likes;
+}

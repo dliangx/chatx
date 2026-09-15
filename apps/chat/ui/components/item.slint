@@ -1,2 +1,25 @@
 import { Horizontal } from "@material";
-export component ItemView inherits Horizontal { }
+
+export component TwoRowItemView inherits Horizontal {
+    in property <int> id;
+    in property <string> image;
+    in property <string> title;
+    in property <string> time;
+    in property <string> content;
+}
+
+export component OneRowItemView inherits Horizontal {
+    in property <int> id;
+    in property <string> image;
+    in property <string> title;
+}
+
+export component SettingItemView inherits Horizontal {
+    in property <string> icon;
+    in property <string> title;
+}
+
+export component PlantItemView inherits Horizontal {
+    in property <string> key;
+    in property <string> value;
+}
