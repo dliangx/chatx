@@ -3,22 +3,22 @@ import { ChatView } from "chats/chat.slint";
 import { ChatSettingView } from "chats/chat_setting.slint";
 import { ContactProfileView } from "contacts/profile.slint";
 import { SettingView } from "me/setting.slint";
+import { GroupProfileView } from "contacts/group_profile.slint";
+import { AddContactView } from "contacts/add_contact.slint";
+import { AddGroupView } from "contacts/add_group.slint";
+import { DiscoverDetailView } from "discovery/discover_detail.slint";
+import { DiscoverMiniProgramView } from "discovery/discover_mini_program.slint";
 
-// 如果放在单独文件，记得在 MainWindow.slint 中导入
 export component SubPageView inherits Rectangle {
     in property <SubPageType> page;
     in property <int> payload;
 
-    // 向外抛出返回和导航事件
     callback go-back();
     callback navigate-to(SubPageType, int);
 
-    // 根据 page 类型渲染不同的全屏页面
     if root.page == SubPageType.ChatRoom: ChatView {
         chat-id: root.payload;
-        // 聊天室内部的返回按钮触发 go-back
         on-back => { root.go-back(); }
-        // 聊天室内部可能跳转到聊天设置
         open-setting => { root.navigate-to(SubPageType.ChatSetting, root.payload); }
     }
     if root.page == SubPageType.ChatSetting: ChatSettingView {
@@ -29,9 +29,27 @@ export component SubPageView inherits Rectangle {
         user-id: root.payload;
         on-back => { root.go-back(); }
     }
+    if root.page == SubPageType.GroupProfile: GroupProfileView {
+        group-id: root.payload;
+        on-back => { root.go-back(); }
+    }
     if root.page == SubPageType.SettingsMain: SettingView {
         on-back => { root.go-back(); }
         open-sub(page) => { root.navigate-to(page, 0); }
     }
-    // ... 
+    if root.page == SubPageType.SettingsGeneral: SettingView {
+        on-back => { root.go-back(); }
+    }
+    if root.page == SubPageType.AddContact: AddContactView {
+        on-back => { root.go-back(); }
+    }
+    if root.page == SubPageType.AddGroup: AddGroupView {
+        on-back => { root.go-back(); }
+    }
+    if root.page == SubPageType.DiscoverDetail: DiscoverDetailView {
+        on-back => { root.go-back(); }
+    }
+    if root.page == SubPageType.DiscoverMiniProgram: DiscoverMiniProgramView {
+        on-back => { root.go-back(); }
+    }
 }

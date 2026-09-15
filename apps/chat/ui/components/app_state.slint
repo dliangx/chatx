@@ -2,6 +2,10 @@ import { NavigationState, GlobalOverlayType } from "nav_state.slint";
 
 export global AppState {
     in-out property <NavigationState> nav-state: { active-tab:0, tabs: [], global-overlay: GlobalOverlayType.None };
-    in-out property <bool> logged-in: false;
     in-out property <string> user-id: "";
+    in-out property <string> peer-id: "";
+    in property <string> lang: "cn";
+    in property <string> font;
+    in property <int> font-size: 16;
+    in property <string> theme: "light";
 }

@@ -1,13 +1,3 @@
-//! ChatX 桌面端入口。
-//!
-//! 启动流程：
-//! 1. 主窗口（`MainWindow`）持有登录态属性（`logged-in` 等），驱动"登录页 / 主界面"。
-//! 2. 登录/注册走 `p2pchat-core` 的 `Client::login` / `Client::bootstrap`（目录后端默认
-//!    `HttpDirectory`，即中心化信号服务器）。
-//! 3. `Client` 内持有 `!Send` 的事件接收端，必须与 UI 线程绑定（`thread_local!`），因此
-//!    登录在 UI 线程用 `block_on` 执行（一次性网络/口令 KDF），`Client` 全程留在 UI 线程，
-//!    不被跨线程移动。
-
 use slint::SharedString;
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -15,32 +5,28 @@ use std::sync::Arc;
 use chatx_core::Client;
 use chatx_core::signal::HttpDirectory;
 
-// 生成 Slint 组件 / 回调绑定（MainWindow、AuthView 等）。
 slint::include_modules!();
 
 type Directory = HttpDirectory;
 
-// UI 线程专属的登录态容器（Client 为 !Send，不能进 static / 跨线程共享）。
 thread_local! {
     static RUNTIME: RefCell<Option<Arc<tokio::runtime::Runtime>>> = RefCell::new(None);
     static CLIENT: RefCell<Option<Arc<Client<Directory>>>> = RefCell::new(None);
 }
 
-/// 惰性取出/创建一个多线程 tokio runtime，绑定到当前（UI）线程。
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     RUNTIME.with(|slot| {
         if slot.borrow().is_none() {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
-                .expect("创建 tokio runtime 失败");
+                .expect("tokio runtime init failed");
             *slot.borrow_mut() = Some(Arc::new(rt));
         }
-        slot.borrow().as_ref().expect("runtime 已初始化").clone()
+        slot.borrow().as_ref().expect("runtime init").clone()
     })
 }
 
-/// 当前生效的 profile（`$P2PCHAT_PROFILE` 或 `default`）。
 fn profile() -> String {
     chatx_core::identity::DeviceIdentity::default_profile()
 }
@@ -54,23 +40,20 @@ fn default_server() -> Arc<Directory> {
 }
 
 pub fn main() {
-    let ui = MainWindow::new().expect("构建主窗口失败");
+    let ui = MainWindow::new().expect("window init failed");
     ui.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
     // ui.set_is_mobile(true); 
+    let state = ui.global::<AppState>();
     let weak = ui.as_weak();
-
-    // 启动检测本地账户：keystore 里的 user_id 是明文字段，不解密即可读出 → 预填登录页"用户"输入框。
+    state.set_user_id(SharedString::from(""));
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
     if let Some(uid) = existing_uid {
-        ui.set_auth_message(SharedString::from("检测到本地已有账户，请输入口令登录"));
-        ui.set_user_id(SharedString::from(uid));
-    } else {
-        ui.set_auth_message(SharedString::from("首次使用，请注册新账户"));
+        ui.set_auth_message(SharedString::from("please logging in "));
+        state.set_user_id(SharedString::from(uid));
     }
 
-    // 登录：用口令解密已有 keystore 并启动设备（PENDING/APPROVED 由 core 判定）。
     {
         let weak = weak.clone();
         ui.on_login(move |user_id, pass| {
@@ -79,15 +62,13 @@ pub fn main() {
             let profile = profile();
             let dir = default_server();
             let weak = weak.clone();
-            // 立刻置忙，UI 立即反馈（按钮变"处理中…"）；KDF/HTTP 重活丢到后台线程，不冻结 UI。
             if let Some(ui) = weak.upgrade() {
                 ui.set_auth_busy(true);
-                ui.set_auth_message(SharedString::from("登录中…"));
+                ui.set_auth_message(SharedString::from("logging in …"));
             }
             let rt = runtime();
             rt.spawn(async move {
                 let res = Client::login(&profile, &pass, uid.clone(), dir).await;
-                // 事件循环已关闭（应用退出）时无从处理，忽略即可。
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.set_auth_busy(false);
@@ -98,7 +79,6 @@ pub fn main() {
         });
     }
 
-    // 注册：无账户则创建并自批 APPROVED；有账户则校验 user_id/口令。
     {
         let weak = weak.clone();
         ui.on_register(move |user_id, pass| {
@@ -109,7 +89,7 @@ pub fn main() {
             let weak = weak.clone();
             if let Some(ui) = weak.upgrade() {
                 ui.set_auth_busy(true);
-                ui.set_auth_message(SharedString::from("注册中…"));
+                ui.set_auth_message(SharedString::from("register …"));
             }
             let rt = runtime();
             rt.spawn(async move {
@@ -124,19 +104,17 @@ pub fn main() {
         });
     }
 
-    // 退出登录（清空内存中的 Client；keystore 仍留在磁盘）。
+    let w = weak.clone();
     ui.on_logout(move || {
         CLIENT.with(|s| *s.borrow_mut() = None);
-        if let Some(ui) = weak.upgrade() {
+        if let Some(ui) = w.upgrade() {
             ui.set_logged_in(false);
-            ui.set_auth_message(SharedString::from("已退出登录"));
         }
     });
 
-    ui.run().expect("运行事件循环失败");
+    ui.run().expect("window run failed");
 }
 
-/// 把 bootstrap/login 的结果落到 UI：成功 → 保存 Client 并置 `logged-in`；失败 → 显示错误。
 fn apply_result(
     weak: slint::Weak<MainWindow>,
     user_id: String,
@@ -145,7 +123,6 @@ fn apply_result(
     match res {
         Ok((client, _acct)) => {
             let client = Arc::new(client);
-            // 登录成功后做一次轻量心跳，让目录里本设备为"在线"。
             client.heartbeat();
             CLIENT.with(|s| *s.borrow_mut() = Some(client));
         }
@@ -158,8 +135,8 @@ fn apply_result(
     }
 
     if let Some(ui) = weak.upgrade() {
-        ui.set_auth_message(SharedString::from(format!("已登录：{user_id}")));
-        ui.set_user_id(SharedString::from(user_id));
+        ui.set_auth_message(SharedString::from(format!("logged in:{user_id}")));
+        ui.global::<AppState>().set_user_id(SharedString::from(user_id));
         ui.set_logged_in(true);
     }
 }
