@@ -1,17 +1,13 @@
-// 底部导航栏：4 个 Tab（聊天 / 联系人 / 发现 / 我的），图标取自 icon/*.svg。
-// 选中项高亮，点击通过 tab-clicked(int) 向外抛出目标索引。
-
 component NavTab inherits Rectangle {
     in property <int> index;
     in property <int> active-tab;
-    in property <image> icon-source;     // 未选中：原色
-    in property <image> active-icon;    // 选中：主色
+    in property <image> icon-source;
+    in property <image> active-icon;
     in property <string> label;
     callback clicked(int);
 
     background: transparent;
 
-    // 图标：绝对定位，水平居中于格子；选中时切换为主色版本
     Image {
         x: (parent.width - 24px) / 2;
         y: 6px;
@@ -21,7 +17,6 @@ component NavTab inherits Rectangle {
         image-fit: contain;
     }
 
-    // 文字：占满格子宽度，horizontal-alignment 居中，与图标同轴
     Text {
         x: 0;
         y: 34px;
@@ -49,7 +44,6 @@ export component BottomNavBar inherits Rectangle {
     height: 58px;
     background: #ffffff;
 
-    // 顶部分隔线
     Rectangle {
         x: 0px;
         y: 0px;
@@ -74,6 +68,7 @@ export component BottomNavBar inherits Rectangle {
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
         }
+
         NavTab {
             width: 25%;
             height: 100%;
@@ -84,6 +79,7 @@ export component BottomNavBar inherits Rectangle {
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
         }
+
         NavTab {
             width: 25%;
             height: 100%;
@@ -94,6 +90,7 @@ export component BottomNavBar inherits Rectangle {
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
         }
+
         NavTab {
             width: 25%;
             height: 100%;

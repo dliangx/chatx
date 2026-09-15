@@ -1,9 +1,5 @@
-// 登录/注册表单：登录态由 MainWindow 持有（Rust 读写），此处只负责采集输入 + 展示状态。
 import { FilledButton, TextButton } from "@material";
 
-// 居中的输入框：无 label、无动画。
-// 原生 TextInput 在 1.17 没有 placeholder，也没有从外部关闭 label/动画的开关，
-// 故不复用 @material 的 TextField，改成"填充框 + 居中文本 + 占位符叠加"。
 component AuthInput inherits Rectangle {
     in-out property <string> text;
     in property <string> placeholder: "";
@@ -45,9 +41,9 @@ component AuthInput inherits Rectangle {
 }
 
 export component AuthView inherits Rectangle {
-    in property <string> message;       // Rust 状态（成功/失败）
+    in property <string> message;
     in property <bool> busy;
-    in-out property <string> auth-error: "";  // 本地校验错误
+    in-out property <string> auth-error: "";
 
     in-out property <bool> is-register: false;
     in-out property <string> uid: "";
