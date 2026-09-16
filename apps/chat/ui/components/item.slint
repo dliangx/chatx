@@ -1,25 +1,159 @@
 import { Horizontal } from "@material";
+import { Icon, Glyph, Variant } from "./icon.slint";
+import { Theme } from "../theme.slint";
 
 export component TwoRowItemView inherits Horizontal {
     in property <int> id;
-    in property <string> image;
+    in property <image> image;
     in property <string> title;
     in property <string> time;
     in property <string> content;
+    callback clicked(int);
+    Image {
+        x: 0px;
+        y: 0px;
+        width: 48px;
+        height: 48px;
+        source: root.image;
+    }
+
+    VerticalLayout {
+        x: 56px;
+        y: 0px;
+        width: parent.width - 56px;
+        height: parent.height;
+        spacing: 4px;
+
+        HorizontalLayout {
+            width: parent.width;
+            height: 20px;
+
+            Text {
+                x: 0px;
+                y: 0px;
+                width: parent.width - 80px;
+                height: 20px;
+                text: root.title;
+                font-size: 14px;
+                font-weight: 800;
+                color: Theme.fg;
+            }
+
+            Text {
+                x: parent.width - 80px;
+                y: 0px;
+                width: 80px;
+                height: 20px;
+                text: root.time;
+                font-size: 12px;
+                horizontal-alignment: right;
+                color: Theme.fg-muted;
+            }
+        }
+
+        Text {
+            x: 0px;
+            y: 24px;
+            width: parent.width;
+            height: 20px;
+            text: root.content;
+            font-size: 12px;
+            color: Theme.fg-muted;
+        }
+    }
+
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.clicked(root.id); }
+    }
 }
 
 export component OneRowItemView inherits Horizontal {
     in property <int> id;
-    in property <string> image;
+    in property <image> image;
     in property <string> title;
+    callback clicked(int);
+
+    Image {
+        x: 0px;
+        y: 0px;
+        width: 48px;
+        height: 48px;
+        source: root.image;
+    }
+
+    Text {
+        x: 56px;
+        y: 0px;
+        width: parent.width - 56px;
+        height: parent.height;
+        text: root.title;
+        font-size: 14px;
+        font-weight: 800;
+        color: Theme.fg;
+    }
+
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.clicked(root.id); }
+    }
 }
 
 export component SettingItemView inherits Horizontal {
-    in property <string> icon;
+    in property <int> id;
+    in property <Glyph> icon;
     in property <string> title;
+    callback clicked(int);
+
+    Icon {
+        x: 0px;
+        y: 0px;
+        size: 24px;
+        glyph: root.icon;
+        variant: Variant.raw;
+        tint: Theme.fg-muted;
+    }
+
+    Text {
+        x: 32px;
+        y: 0px;
+        width: parent.width - 32px;
+        height: parent.height;
+        text: root.title;
+        font-size: 14px;
+        color: Theme.fg;
+    }
+
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.clicked(root.id); }
+    }
 }
 
 export component PlantItemView inherits Horizontal {
     in property <string> key;
     in property <string> value;
+
+    Text {
+        x: 0px;
+        y: 0px;
+        width: parent.width / 4;
+        height: parent.height;
+        text: root.key;
+        font-size: 14px;
+        color: Theme.fg;
+    }
+
+    Text {
+        x: parent.width / 4;
+        y: 0px;
+        width: parent.width * 3 / 4;
+        height: parent.height;
+        text: root.value;
+        font-size: 14px;
+        color: Theme.fg;
+    }
 }

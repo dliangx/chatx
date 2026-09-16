@@ -7,7 +7,7 @@ import { GroupProfileView } from "contacts/group_profile.slint";
 import { AddContactView } from "contacts/add_contact.slint";
 import { AddGroupView } from "contacts/add_group.slint";
 import { DiscoverDetailView } from "discovery/discover_detail.slint";
-import { DiscoverMiniProgramView } from "discovery/discover_mini_program.slint";
+import { PomegranateSeedView } from "discovery/pomegranate_seed.slint";
 
 export component SubPageView inherits Rectangle {
     in property <SubPageType> page;
@@ -49,7 +49,7 @@ export component SubPageView inherits Rectangle {
     if root.page == SubPageType.DiscoverDetail: DiscoverDetailView {
         on-back => { root.go-back(); }
     }
-    if root.page == SubPageType.DiscoverMiniProgram: DiscoverMiniProgramView {
+    if root.page == SubPageType.PomegranateSeed: PomegranateSeedView {
         on-back => { root.go-back(); }
     }
 }

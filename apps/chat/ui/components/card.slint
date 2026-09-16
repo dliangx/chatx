@@ -1,8 +1,103 @@
+import { Theme } from "../theme.slint";
+import { Icon, Glyph } from "./icon.slint";
+
+// 小红书风格卡片：封面图在上（3:4），下方依次是标题、作者、点赞。
+// 宽度由父级通过 width 指定；高度随内容自适应。
 export component CardView inherits Rectangle {
     in property <int> id;
-    in property <string> image;
+    in property <image> image;
     in property <string> title;
     in property <string> user;
     in property <bool> is-liked;
     in property <int> likes;
+    callback clicked(int);
+
+    out property <length> cover-h: root.width * 4 / 3;
+    // 内容总高 = 封面 + 标题 + 作者/点赞行 + 底部留白
+    out property <length> content-h: root.cover-h + 90px;
+
+    height: root.content-h;
+    border-radius: 16px;
+    clip: true;
+
+    // 封面占位底色（无图时可见）
+    Rectangle {
+        x: 0px;  y: 0px;
+        width: root.width;
+        height: root.cover-h;
+        background: #f2f2f5;
+    }
+    // 封面
+    Image {
+        x: 0px;  y: 0px;
+        width: root.width;
+        height: root.cover-h;
+        source: root.image;
+        image-fit: cover;
+    }
+
+    // 标题（最多两行，超出省略）
+    Text {
+        x: 12px;
+        y: root.cover-h + 14px;
+        width: root.width - 24px;
+        height: 40px;
+        text: root.title;
+        font-size: 15px;
+        font-weight: 700;
+        color: Theme.fg;
+        wrap: word-wrap;
+        overflow: elide;
+    }
+
+    // 作者：圆形头像占位
+    Rectangle {
+        x: 12px;
+        y: root.cover-h + 58px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: #a0aec0;
+    }
+
+    // 作者：昵称
+    Text {
+        x: 34px;
+        y: root.cover-h + 58px;
+        width: 160px;
+        height: 16px;
+        text: root.user;
+        font-size: 12px;
+        vertical-alignment: center;
+        overflow: elide;
+        color: Theme.fg-muted;
+    }
+
+    // 点赞心形：实心；已赞=品牌红，未赞=灰
+    Icon {
+        x: root.width - 32px;
+        y: root.cover-h + 56px;
+        size: 18px;
+        glyph: Glyph.heart;
+        tint: root.is-liked ? #ff2442 : #d9d9de;
+    }
+
+    // 点赞数
+    Text {
+        x: root.width - 110px;
+        y: root.cover-h + 58px;
+        width: 70px;
+        height: 16px;
+        text: root.likes;
+        font-size: 12px;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        color: root.is-liked ? #ff2442 : Theme.fg-muted;
+    }
+
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.clicked(root.id); }
+    }
 }
