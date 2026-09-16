@@ -1,38 +1,23 @@
+import { Icon, Glyph, Variant } from "./icon.slint";
+import { Theme } from "../theme.slint";
+
 component NavTab inherits Rectangle {
     in property <int> index;
     in property <int> active-tab;
-    in property <image> icon-source;     // 未选中：原色
-    in property <image> active-icon;    // 选中：主色
+    in property <Glyph> glyph;
     callback clicked(int);
 
     height: 52px;
     background: transparent;
 
-    Rectangle {
-        x: 0px;
-        y: 0px;
-        width: 100%;
-        height: 100%;
-        background: root.index == root.active-tab ? #eef3ff : #00000000;
-        visible: root.index == root.active-tab;
-    }
-
-    Rectangle {
-        x: 0px;
-        y: 0px;
-        width: 3px;
-        height: 100%;
-        background: #2f6bff;
-        visible: root.index == root.active-tab;
-    }
-
-    Image {
+    // 未选中：Raw 原始；选中：Filled 实心
+    Icon {
         x: (parent.width - 24px) / 2;
         y: (parent.height - 24px) / 2;
-        width: 24px;
-        height: 24px;
-        source: root.index == root.active-tab ? root.active-icon : root.icon-source;
-        image-fit: contain;
+        size: 24px;
+        glyph: root.glyph;
+        variant: root.index == root.active-tab ? Variant.filled : Variant.raw;
+        tint: root.index == root.active-tab ? Theme.brand : Theme.fg-muted;
     }
 
     TouchArea {
@@ -72,8 +57,7 @@ export component LeftNavBar inherits Rectangle {
             width: 100%;
             height: 52px;
             index: 0;
-            icon-source: @image-url("../../icon/chat.svg");
-            active-icon: @image-url("../../icon/active/chat.svg");
+            glyph: Glyph.chat;
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
         }
@@ -82,8 +66,7 @@ export component LeftNavBar inherits Rectangle {
             width: 100%;
             height: 52px;
             index: 1;
-            icon-source: @image-url("../../icon/contact.svg");
-            active-icon: @image-url("../../icon/active/contact.svg");
+            glyph: Glyph.contact;
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
         }
@@ -92,8 +75,7 @@ export component LeftNavBar inherits Rectangle {
             width: 100%;
             height: 52px;
             index: 2;
-            icon-source: @image-url("../../icon/app.svg");
-            active-icon: @image-url("../../icon/active/app.svg");
+            glyph: Glyph.app;
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
         }
@@ -102,8 +84,7 @@ export component LeftNavBar inherits Rectangle {
             width: 100%;
             height: 52px;
             index: 3;
-            icon-source: @image-url("../../icon/me.svg");
-            active-icon: @image-url("../../icon/active/me.svg");
+            glyph: Glyph.me;
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
         }

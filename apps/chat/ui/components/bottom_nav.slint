@@ -1,20 +1,23 @@
+import { Icon, Glyph, Variant } from "./icon.slint";
+import { Theme } from "../theme.slint";
+
 component NavTab inherits Rectangle {
     in property <int> index;
     in property <int> active-tab;
-    in property <image> icon-source;
-    in property <image> active-icon;
+    in property <Glyph> glyph;
     in property <string> label;
     callback clicked(int);
 
     background: transparent;
 
-    Image {
+    // 未选中：Raw 原始；选中：Filled 实心
+    Icon {
         x: (parent.width - 24px) / 2;
         y: 6px;
-        width: 24px;
-        height: 24px;
-        source: root.index == root.active-tab ? root.active-icon : root.icon-source;
-        image-fit: contain;
+        size: 24px;
+        glyph: root.glyph;
+        variant: root.index == root.active-tab ? Variant.filled : Variant.raw;
+        tint: root.index == root.active-tab ? Theme.brand : Theme.fg-muted;
     }
 
     Text {
@@ -26,7 +29,7 @@ component NavTab inherits Rectangle {
         font-size: 11px;
         horizontal-alignment: center;
         vertical-alignment: center;
-        color: root.index == root.active-tab ? #2f6bff : #9aa0b4;
+        color: root.index == root.active-tab ? Theme.brand : Theme.fg-muted;
     }
 
     TouchArea {
@@ -62,8 +65,7 @@ export component BottomNavBar inherits Rectangle {
             width: 25%;
             height: 100%;
             index: 0;
-            icon-source: @image-url("../../icon/chat.svg");
-            active-icon: @image-url("../../icon/active/chat.svg");
+            glyph: Glyph.chat;
             label: "聊天";
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
@@ -73,8 +75,7 @@ export component BottomNavBar inherits Rectangle {
             width: 25%;
             height: 100%;
             index: 1;
-            icon-source: @image-url("../../icon/contact.svg");
-            active-icon: @image-url("../../icon/active/contact.svg");
+            glyph: Glyph.contact;
             label: "联系人";
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
@@ -84,8 +85,7 @@ export component BottomNavBar inherits Rectangle {
             width: 25%;
             height: 100%;
             index: 2;
-            icon-source: @image-url("../../icon/app.svg");
-            active-icon: @image-url("../../icon/active/app.svg");
+            glyph: Glyph.app;
             label: "发现";
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
@@ -95,8 +95,7 @@ export component BottomNavBar inherits Rectangle {
             width: 25%;
             height: 100%;
             index: 3;
-            icon-source: @image-url("../../icon/me.svg");
-            active-icon: @image-url("../../icon/active/me.svg");
+            glyph: Glyph.me;
             label: "我的";
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
