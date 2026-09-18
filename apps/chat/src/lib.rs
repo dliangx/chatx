@@ -55,7 +55,10 @@ pub fn main() {
     }
 
     {
-        let tabs: Vec<TabState> = (0..4).map(|_| TabState { sub_history: slint::ModelRc::new(slint::VecModel::from(Vec::<SubPageEntry>::new())) }).collect();
+        let tabs: Vec<TabState> = (0..4).map(|_| TabState {
+            sub_history: slint::ModelRc::new(slint::VecModel::from(Vec::<SubPageEntry>::new())),
+            sub_top: -1,
+        }).collect();
         let mut nav = state.get_nav_state();
         nav.tabs = slint::ModelRc::new(slint::VecModel::from(tabs));
         state.set_nav_state(nav);
@@ -151,6 +154,7 @@ fn push_sub_history(app: &AppState, entry: SubPageEntry) {
     let mut v2: Vec<SubPageEntry> = (0..h.row_count()).filter_map(|i| h.row_data(i)).collect();
     v2.push(entry);
     tab.sub_history = slint::ModelRc::new(slint::VecModel::from(v2));
+    tab.sub_top = tab.sub_history.row_count() as i32 - 1;
     nav.tabs = slint::ModelRc::new(slint::VecModel::from(v));
     app.set_nav_state(nav);
 }
@@ -163,10 +167,13 @@ fn pop_sub_history(app: &AppState) {
     let mut v: Vec<TabState> = (0..tabs_model.row_count()).filter_map(|i| tabs_model.row_data(i)).collect();
     if active >= v.len() { return; }
     let tab = v.get_mut(active).unwrap();
-    let h = tab.sub_history.clone();
-    let mut v2: Vec<SubPageEntry> = (0..h.row_count()).filter_map(|i| h.row_data(i)).collect();
-    v2.pop();
-    tab.sub_history = slint::ModelRc::new(slint::VecModel::from(v2));
+    let next_top = tab.sub_top - 1;
+    if next_top < 0 {
+        tab.sub_history = slint::ModelRc::new(slint::VecModel::from(Vec::<SubPageEntry>::new()));
+        tab.sub_top = -1;
+    } else {
+        tab.sub_top = next_top;
+    }
     nav.tabs = slint::ModelRc::new(slint::VecModel::from(v));
     app.set_nav_state(nav);
 }

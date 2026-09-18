@@ -96,13 +96,13 @@ export component MainWindow inherits Window {
                 tab-clicked(i) => { root.select_tab(i); }
             }
         }
-        if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history.length > 0: SubPageView {
+        for entry[i] in AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history:
+        SubPageView {
             width: 100%;
             height: 100%;
-            page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
-                AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history.length - 1].page;
-            payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
-                AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history.length - 1].payload;
+            visible: i == AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top;
+            page: entry.page;
+            payload: entry.payload;
             go-back() => { AppState.pop-sub(); }
             navigate-to(t, p) => { AppState.push-sub(t, p); }
         }
@@ -147,13 +147,13 @@ export component MainWindow inherits Window {
             }
         }
 
-        if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history.length > 0: SubPageView {
+        for entry[i] in AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history:
+        SubPageView {
             width: 100%;
             height: 100%;
-            page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
-                AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history.length - 1].page;
-            payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
-                AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history.length - 1].payload;
+            visible: i == AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top;
+            page: entry.page;
+            payload: entry.payload;
             go-back() => { AppState.pop-sub(); }
             navigate-to(t, p) => { AppState.push-sub(t, p); }
         }
