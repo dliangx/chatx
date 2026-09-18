@@ -1,6 +1,3 @@
-// 发现页：小红书风格双栏瀑布流。
-// 卡片等高（封面 3:4 + 固定文字区），两列按索引平衡排布。
-// 数据源当前为参数内示例数据（无图→显示占位色块），后续替换为 Rust 侧 model。
 import { CardView } from "../components/card.slint";
 import { Theme } from "../theme.slint";
 import { SubPageType } from "../components/nav_state.slint";
@@ -14,60 +11,17 @@ export struct DiscoverCard {
 }
 
 export component DiscoverView inherits Rectangle {
-    in property <[DiscoverCard]> cards: [
-        {
-            id: 1,
-            title: "周末去哪玩？这几个小众地推给你",
-            user: "旅行日记",
-            likes: 128,
-            liked: true
-        },
-        {
-            id: 2,
-            title: "打工人 10 分钟快手早餐合集",
-            user: "厨房小当家",
-            likes: 96,
-            liked: false
-        },
-        {
-            id: 3,
-            title: "我的极简工作桌面（附清单）",
-            user: "桌搭研究所",
-            likes: 342,
-            liked: true
-        },
-        {
-            id: 4,
-            title: "新手健身 8 周变化，真的有用",
-            user: "健身打卡",
-            likes: 57,
-            liked: false
-        },
-        {
-            id: 5,
-            title: "三件基础款穿出高级感",
-            user: "穿搭笔记",
-            likes: 210,
-            liked: true
-        },
-        {
-            id: 6,
-            title: "雨天咖啡角，治愈一下午",
-            user: "慢生活",
-            likes: 73,
-            liked: false
-        },
-    ];
+    in property <[DiscoverCard]> cards: [];
     callback navigate-to(SubPageType, int);
 
     width: 100%;
     height: 100%;
     background: #fafafa;
 
-    out property <length> gap: 16px;
+    out property <length> gap: 8px;
     out property <length> col-w: (root.width - 3 * root.gap) / 2;   // 单列卡片宽
     out property <length> card-h: root.col-w * 4 / 3 + 90px;        // 卡片高（与 CardView.content-h 一致）
-    out property <length> viewport-h: root.gap + root.cards.length * (root.card-h + root.gap);
+    out property <length> viewport-h: root.gap + root.cards.length * (root.card-h + root.gap) / 2;
 
     if root.cards.length == 0:
     Text {
