@@ -95,14 +95,15 @@ export component SettingItem inherits Rectangle {
     in property <Glyph> icon;
     in property <string> title;
     callback clicked(int);
+    height: 48px;
 
     Icon {
         x: 0px;
-        y: 0px;
+        y: 12px;
         size: 24px;
         glyph: root.icon;
         variant: Variant.raw;
-        tint: Theme.fg-muted;
+        tint: Theme.fg;
     }
 
     Text {
@@ -110,9 +111,27 @@ export component SettingItem inherits Rectangle {
         y: 0px;
         width: parent.width - 32px;
         height: parent.height;
+        vertical-alignment: center;
         text: root.title;
         font-size: 14px;
         color: Theme.fg;
+    }
+
+    Icon {
+        x: parent.width - 24px;
+        y: 14px;
+        size: 20px;
+        glyph: Glyph.right;
+        variant: Variant.raw;
+        tint: Theme.fg;
+    }
+
+    Rectangle {
+        x: 32px;
+        y: 48px;
+        width: 100%;
+        height: 1px;
+        background: #ececec;
     }
 
     TouchArea {

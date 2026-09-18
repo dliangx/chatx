@@ -1,11 +1,38 @@
+import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { SubPageType } from "../components/nav_state.slint";
+import { Icon, Glyph } from "../components/icon.slint";
+import { SettingItem } from "../components/item.slint";
+import { Theme } from "../theme.slint";
+
 
 export component MeView inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: #f5f5f5;
+
     callback navigate-to(SubPageType, int);
 
-    Text {
-        text: "Me";
-        font-size: 24px;
-        color: #333333;
+    ScrollView {
+        width: 100%;
+        height: 100%;
+
+        VerticalBox {
+            width: 100%;
+            spacing: 0px;
+
+            SettingItem {
+                id: 1;
+                icon: Glyph.collection;
+                title: "收藏";
+                clicked => { root.navigate-to(SubPageType.SettingsGeneral, 0); }
+            }
+
+            SettingItem {
+                id: 2;
+                icon: Glyph.setting;
+                title: "设置";
+                clicked => { root.navigate-to(SubPageType.SettingsMain, 0); }
+            }
+        }
     }
 }
