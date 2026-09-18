@@ -2,68 +2,14 @@
 import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { Vertical } from "../../material-1.0/material.slint";
 import { SubPageType } from "../components/nav_state.slint";
+import { ChatListItem } from "../components/item.slint";
 
 export struct ConversationRow {
-    chat-id: string,
+    chat-id: int,
     title: string,
     preview: string,
     is-group: bool,
     time-label: string,
-}
-
-component MsgRow inherits Rectangle {
-    in property <ConversationRow> data;
-    callback clicked();
-
-    width: 100%;
-    height: 64px;
-    background: #ffffff;
-
-    Text {
-        text: root.data.is-group ? "群 · " + root.data.title : root.data.title;
-        x: 16px;
-        y: 12px;
-        width: parent.width - 100px;
-        font-size: 16px;
-        font-weight: 500;
-        color: #1f2433;
-        wrap: no-wrap;
-    }
-
-    Text {
-        text: root.data.preview;
-        x: 16px;
-        y: 38px;
-        width: parent.width - 110px;
-        font-size: 13px;
-        color: #6b7280;
-        wrap: no-wrap;
-    }
-
-    Text {
-        text: root.data.time-label;
-        x: parent.width - 84px;
-        y: 14px;
-        width: 68px;
-        font-size: 11px;
-        color: #9aa0b4;
-        horizontal-alignment: right;
-    }
-
-    // 分隔线
-    Rectangle {
-        x: 0;
-        y: 63px;
-        width: 100%;
-        height: 1px;
-        background: #f0f0f0;
-    }
-
-    TouchArea {
-        width: 100%;
-        height: 100%;
-        clicked => { root.clicked(); }
-    }
 }
 
 export component ChatListView inherits Rectangle {
@@ -75,7 +21,6 @@ export component ChatListView inherits Rectangle {
 
     callback navigate-to(SubPageType, int);
 
-    // 状态条
     if root.status != "":
     Text {
 
@@ -87,7 +32,6 @@ export component ChatListView inherits Rectangle {
         vertical-alignment: center;
     }
 
-    // 空提示
     if root.rows.length == 0:
     Text {
         y: 180px;
@@ -98,13 +42,21 @@ export component ChatListView inherits Rectangle {
         wrap: word-wrap;
     }
 
-    // 列表
     ScrollView {
-        width: 100%;
 
-        for row[i] in root.rows: MsgRow {
-            data: row;
-            clicked => { root.navigate-to(SubPageType.ChatRoom, 0); }
+        VerticalBox {
+            width: 100%;
+            spacing: 0px;
+
+            for row[i] in root.rows: ChatListItem {
+                width: parent.width;
+                height: 56px;
+                id: row.chat-id;
+                title: row.title;
+                content: row.preview;
+                time: row.time-label;
+                clicked(id) => { root.navigate-to(SubPageType.ChatRoom, id); }
+            }
         }
     }
 }
