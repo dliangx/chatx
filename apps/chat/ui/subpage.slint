@@ -16,6 +16,12 @@ export component SubPageView inherits Rectangle {
     callback go-back();
     callback navigate-to(SubPageType, int);
 
+    // 指针挡板：铺满全屏吸收所有点击，阻断穿透到下层 tab 页（置于最底层）
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+    }
+
     if root.page == SubPageType.ChatRoom: ChatView {
         chat-id: root.payload;
         on-back => { root.go-back(); }

@@ -99,7 +99,7 @@ export component SettingItem inherits Rectangle {
 
     Icon {
         x: 0px;
-        y: 12px;
+        y: (parent.height - self.size) / 2;
         size: 24px;
         glyph: root.icon;
         variant: Variant.raw;
@@ -119,7 +119,7 @@ export component SettingItem inherits Rectangle {
 
     Icon {
         x: parent.width - 24px;
-        y: 14px;
+        y: (parent.height - self.size) / 2;
         size: 20px;
         glyph: Glyph.right;
         variant: Variant.raw;
