@@ -3,6 +3,7 @@
 // 数据源当前为参数内示例数据（无图→显示占位色块），后续替换为 Rust 侧 model。
 import { CardView } from "../components/card.slint";
 import { Theme } from "../theme.slint";
+import { SubPageType } from "../components/nav_state.slint";
 
 export struct DiscoverCard {
     id: int,
@@ -57,7 +58,7 @@ export component DiscoverView inherits Rectangle {
             liked: false
         },
     ];
-    callback open-card(int);
+    callback navigate-to(SubPageType, int);
 
     width: 100%;
     height: 100%;
@@ -94,7 +95,7 @@ export component DiscoverView inherits Rectangle {
             is-liked: card.liked;
             likes: card.likes;
             id: card.id;
-            clicked(id) => { root.open-card(id); }
+            clicked(id) => { root.navigate-to(SubPageType.DiscoverDetail, id); }
         }
     }
 }

@@ -1,4 +1,8 @@
+import { SubPageType } from "../components/nav_state.slint";
+
 export component ContactListView inherits Rectangle {
+    callback navigate-to(SubPageType, int);
+
     Text {
         text: "Contact List";
         font-size: 24px;

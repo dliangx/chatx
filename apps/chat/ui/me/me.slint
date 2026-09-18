@@ -1,4 +1,8 @@
+import { SubPageType } from "../components/nav_state.slint";
+
 export component MeView inherits Rectangle {
+    callback navigate-to(SubPageType, int);
+
     Text {
         text: "Me";
         font-size: 24px;
