@@ -96,13 +96,15 @@ export component MainWindow inherits Window {
                 tab-clicked(i) => { root.select_tab(i); }
             }
         }
-        if AppState.nav-state.tabs.length > 0: SubPageView {
-            page: SubPageType.ChatRoom;
-            payload: 0;
-            go-back() => {}
-            navigate-to(t, p) => {
-                root.push-sub-page(AppState.nav-state.active-tab, t, p);
-            }
+        if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history.length > 0: SubPageView {
+            width: 100%;
+            height: 100%;
+            page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history.length - 1].page;
+            payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history.length - 1].payload;
+            go-back() => { AppState.pop-sub(); }
+            navigate-to(t, p) => { AppState.push-sub(t, p); }
         }
     }
 
@@ -145,13 +147,15 @@ export component MainWindow inherits Window {
             }
         }
 
-        SubPageView {
-            page: SubPageType.ChatRoom;
-            payload: 0;
-            go-back() => {}
-            navigate-to(t, p) => {
-                root.push-sub-page(AppState.nav-state.active-tab, t, p);
-            }
+        if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history.length > 0: SubPageView {
+            width: 100%;
+            height: 100%;
+            page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history.length - 1].page;
+            payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history.length - 1].payload;
+            go-back() => { AppState.pop-sub(); }
+            navigate-to(t, p) => { AppState.push-sub(t, p); }
         }
     }
 

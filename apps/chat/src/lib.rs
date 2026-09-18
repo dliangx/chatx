@@ -55,6 +55,30 @@ pub fn main() {
     }
 
     {
+        let tabs: Vec<TabState> = (0..4).map(|_| TabState { sub_history: slint::ModelRc::new(slint::VecModel::from(Vec::<SubPageEntry>::new())) }).collect();
+        let mut nav = state.get_nav_state();
+        nav.tabs = slint::ModelRc::new(slint::VecModel::from(tabs));
+        state.set_nav_state(nav);
+    }
+    {
+        let w = weak.clone();
+        state.on_push_sub(move |page, payload| {
+            if let Some(ui) = w.upgrade() {
+                let s = ui.global::<AppState>();
+                push_sub_history(&s, SubPageEntry { page, payload });
+            }
+        });
+    }
+    {
+        let w = weak.clone();
+        state.on_pop_sub(move || {
+            if let Some(ui) = w.upgrade() {
+                pop_sub_history(&ui.global::<AppState>());
+            }
+        });
+    }
+
+    {
         let weak = weak.clone();
         ui.on_login(move |user_id, pass| {
             let uid = user_id.to_string();
@@ -113,6 +137,38 @@ pub fn main() {
     });
 
     ui.run().expect("window run failed");
+}
+
+fn push_sub_history(app: &AppState, entry: SubPageEntry) {
+    let mut nav = app.get_nav_state();
+    let active = nav.active_tab as usize;
+    use slint::Model;
+    let tabs_model = nav.tabs.clone();
+    let mut v: Vec<TabState> = (0..tabs_model.row_count()).filter_map(|i| tabs_model.row_data(i)).collect();
+    if active >= v.len() { return; }
+    let tab = v.get_mut(active).unwrap();
+    let h = tab.sub_history.clone();
+    let mut v2: Vec<SubPageEntry> = (0..h.row_count()).filter_map(|i| h.row_data(i)).collect();
+    v2.push(entry);
+    tab.sub_history = slint::ModelRc::new(slint::VecModel::from(v2));
+    nav.tabs = slint::ModelRc::new(slint::VecModel::from(v));
+    app.set_nav_state(nav);
+}
+
+fn pop_sub_history(app: &AppState) {
+    let mut nav = app.get_nav_state();
+    let active = nav.active_tab as usize;
+    use slint::Model;
+    let tabs_model = nav.tabs.clone();
+    let mut v: Vec<TabState> = (0..tabs_model.row_count()).filter_map(|i| tabs_model.row_data(i)).collect();
+    if active >= v.len() { return; }
+    let tab = v.get_mut(active).unwrap();
+    let h = tab.sub_history.clone();
+    let mut v2: Vec<SubPageEntry> = (0..h.row_count()).filter_map(|i| h.row_data(i)).collect();
+    v2.pop();
+    tab.sub_history = slint::ModelRc::new(slint::VecModel::from(v2));
+    nav.tabs = slint::ModelRc::new(slint::VecModel::from(v));
+    app.set_nav_state(nav);
 }
 
 fn apply_result(
