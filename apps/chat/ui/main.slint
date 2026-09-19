@@ -28,8 +28,6 @@ export component MainWindow inherits Window {
     in property <bool> auth-busy: false;
     in property <string> auth-message: "";
 
-    in property <bool> is-mobile: true;
-
     callback login(string, string);
     callback register(string, string);
     callback logout();
@@ -41,8 +39,8 @@ export component MainWindow inherits Window {
         AppState.nav-state.active-tab = i;
     }
 
-    preferred-height: root.is-mobile ? 844px : 768px;
-    preferred-width: root.is-mobile ? 390px : 1024px;
+    preferred-height: AppState.is-mobile ? 844px : 768px;
+    preferred-width: AppState.is-mobile ? 390px : 1024px;
 
     if !root.logged-in:
     AuthView {
@@ -53,7 +51,7 @@ export component MainWindow inherits Window {
         register(uid, pass) => { root.register(uid, pass); }
     }
 
-    if root.logged-in && root.is-mobile:
+    if root.logged-in && AppState.is-mobile:
     Rectangle {
         width: 100%;
         height: 100%;
@@ -114,7 +112,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.logged-in && !root.is-mobile:
+    if root.logged-in && !AppState.is-mobile:
     HorizontalLayout {
         width: 100%;
         height: 100%;

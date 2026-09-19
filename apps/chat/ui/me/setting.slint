@@ -3,6 +3,7 @@ import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
 import { HorizontalBox, VerticalBox } from "std-widgets.slint";
 import { Horizontal } from "../../material-1.0/material.slint";
+import { AppState } from "../components/app_state.slint";
 
 export component SettingView inherits Rectangle {
     width: 100%;
@@ -18,11 +19,10 @@ export component SettingView inherits Rectangle {
         Rectangle {
             width: 100%;
             height: 48px;
-            background: Theme.bg;
-
+            if AppState.is-mobile:
             Icon {
                 x: 12px;
-                y: 12px;
+                y: (parent.height - self.size) / 2;
                 size: 24px;
                 glyph: Glyph.left;
                 tint: Theme.fg;

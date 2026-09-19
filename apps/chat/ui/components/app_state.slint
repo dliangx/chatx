@@ -1,10 +1,16 @@
-import { NavigationState, SubPageType, SubPageEntry, GlobalOverlayType } from "nav_state.slint";
+import {
+    NavigationState,
+    SubPageType,
+    SubPageEntry,
+    GlobalOverlayType,
+} from "nav_state.slint";
 
 export global AppState {
     in-out property <NavigationState> nav-state: { active-tab:0, tabs: [], global-overlay: GlobalOverlayType.None };
     callback push-sub(SubPageType, int);
     callback pop-sub();
     callback clear();
+    in-out property <bool> is-mobile: true;
     in-out property <string> user-id: "";
     in-out property <string> peer-id: "";
     in property <string> lang: "cn";

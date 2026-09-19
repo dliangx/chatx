@@ -8,6 +8,7 @@ import { AddContactView } from "contacts/add_contact.slint";
 import { AddGroupView } from "contacts/add_group.slint";
 import { DiscoverDetailView } from "discovery/discover_detail.slint";
 import { PomegranateSeedView } from "discovery/pomegranate_seed.slint";
+import { MyCollectView } from "me/my_collect.slint";
 
 export component SubPageView inherits Rectangle {
     in property <SubPageType> page;
@@ -43,7 +44,7 @@ export component SubPageView inherits Rectangle {
         on-back => { root.go-back(); }
         open-sub(page) => { root.navigate-to(page, 0); }
     }
-    if root.page == SubPageType.SettingsGeneral: SettingView {
+    if root.page == SubPageType.SettingsGeneral: MyCollectView {
         on-back => { root.go-back(); }
     }
     if root.page == SubPageType.AddContact: AddContactView {
