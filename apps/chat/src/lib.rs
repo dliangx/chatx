@@ -80,6 +80,14 @@ pub fn main() {
             }
         });
     }
+    {
+        let w = weak.clone();
+        state.on_clear(move || {
+            if let Some(ui) = w.upgrade() {
+                clear_sub_history(&ui.global::<AppState>());
+            }
+        });
+    }
 
     {
         let weak = weak.clone();
@@ -175,6 +183,18 @@ fn pop_sub_history(app: &AppState) {
         tab.sub_top = next_top;
     }
     nav.tabs = slint::ModelRc::new(slint::VecModel::from(v));
+    app.set_nav_state(nav);
+}
+
+fn clear_sub_history(app: &AppState) {
+    let tabs: Vec<TabState> = (0..4)
+        .map(|_| TabState {
+            sub_history: slint::ModelRc::new(slint::VecModel::from(Vec::<SubPageEntry>::new())),
+            sub_top: -1,
+        })
+        .collect();
+    let mut nav = app.get_nav_state();
+    nav.tabs = slint::ModelRc::new(slint::VecModel::from(tabs));
     app.set_nav_state(nav);
 }
 
