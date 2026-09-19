@@ -41,11 +41,11 @@ fn default_server() -> Arc<Directory> {
 
 pub fn main() {
     let ui = MainWindow::new().expect("window init failed");
-    ui.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
-    // ui.set_is_mobile(true); 
     let state = ui.global::<AppState>();
     let weak = ui.as_weak();
     state.set_user_id(SharedString::from(""));
+    state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
+    // state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();

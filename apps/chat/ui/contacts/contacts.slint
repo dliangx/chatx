@@ -1,6 +1,7 @@
 import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { SubPageType } from "../components/nav_state.slint";
 import { ContactListItem } from "../components/item.slint";
+import { Theme } from "../theme.slint";
 
 export struct ContactRow {
     id: int,
@@ -13,7 +14,7 @@ export component ContactListView inherits Rectangle {
 
     width: 100%;
     height: 100%;
-
+    background: Theme.bg;
     callback navigate-to(SubPageType, int);
 
     if root.rows.length == 0:
