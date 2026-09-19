@@ -15,7 +15,7 @@ import { SubPageView } from "./subpage.slint";
 import { AuthView } from "components/auth.slint";
 import { Horizontal } from "../material-1.0/ui/components/horizontal.slint";
 import { AppState } from "components/app_state.slint";
-export { AppState }from "components/app_state.slint";
+export { AppState } from "components/app_state.slint";
 import { ScanView } from "global/scan.slint";
 import { ImageViewer } from "global/image.slint";
 import { AudioView } from "global/audio.slint";
@@ -75,18 +75,21 @@ export component MainWindow inherits Window {
                     height: 100%;
                     navigate-to(t, p) => { AppState.push-sub(t, p); }
                 }
+
                 ContactListView {
                     visible: AppState.nav-state.active-tab == 1;
                     width: 100%;
                     height: 100%;
                     navigate-to(t, p) => { AppState.push-sub(t, p); }
                 }
+
                 DiscoverView {
                     visible: AppState.nav-state.active-tab == 2;
                     width: 100%;
                     height: 100%;
                     navigate-to(t, p) => { AppState.push-sub(t, p); }
                 }
+
                 MeView {
                     visible: AppState.nav-state.active-tab == 3;
                     width: 100%;
@@ -100,8 +103,7 @@ export component MainWindow inherits Window {
                 tab-clicked(i) => { root.select_tab(i); }
             }
         }
-        for entry[i] in AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history:
-        SubPageView {
+        for entry[i] in AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history: SubPageView {
             width: 100%;
             height: 100%;
             visible: i == AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top;
@@ -126,6 +128,7 @@ export component MainWindow inherits Window {
 
         Rectangle {
             width: 280px;
+            height: 100%;
             background: #e4e1e1;
             clip: true;
 
@@ -133,33 +136,46 @@ export component MainWindow inherits Window {
                 visible: AppState.nav-state.active-tab == 0;
                 width: 100%;
                 height: 100%;
+                navigate-to(t, p) => { AppState.push-sub(t, p); }
             }
+
             ContactListView {
                 visible: AppState.nav-state.active-tab == 1;
                 width: 100%;
                 height: 100%;
+                navigate-to(t, p) => { AppState.push-sub(t, p); }
             }
+
             DiscoverView {
                 visible: AppState.nav-state.active-tab == 2;
                 width: 100%;
                 height: 100%;
+                navigate-to(t, p) => { AppState.push-sub(t, p); }
             }
+
             MeView {
                 visible: AppState.nav-state.active-tab == 3;
                 width: 100%;
                 height: 100%;
+                navigate-to(t, p) => { AppState.push-sub(t, p); }
             }
         }
 
-        for entry[i] in AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history:
-        SubPageView {
-            width: 100%;
+        Rectangle {
+            background: #e4e1e1;
+            clip: true;
+            width: root.width - 280px - 58px;
             height: 100%;
-            visible: i == AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top;
-            page: entry.page;
-            payload: entry.payload;
-            go-back() => { AppState.pop-sub(); }
-            navigate-to(t, p) => { AppState.push-sub(t, p); }
+
+            for entry[i] in AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history: SubPageView {
+                width: 100%;
+                height: 100%;
+                visible: i == AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top;
+                page: entry.page;
+                payload: entry.payload;
+                go-back() => { AppState.pop-sub(); }
+                navigate-to(t, p) => { AppState.push-sub(t, p); }
+            }
         }
     }
 

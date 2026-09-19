@@ -12,7 +12,7 @@ import { PomegranateSeedView } from "discovery/pomegranate_seed.slint";
 export component SubPageView inherits Rectangle {
     in property <SubPageType> page;
     in property <int> payload;
-
+    background: #f5f5f5;
     callback go-back();
     callback navigate-to(SubPageType, int);
 
