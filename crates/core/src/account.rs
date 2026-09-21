@@ -424,7 +424,7 @@ fn encrypt_secret(key: &[u8; 32], secret: &AccountSecret, nonce: &[u8; 12]) -> V
         .expect("aes-gcm encrypt")
 }
 
-fn decrypt_secret(key: &[u8; 32], ciphertext: &[u8], nonce: &[u8; 12]) -> Result<AccountSecret, KsError> {
+fn decrypt_secret(key: &[u8; 32], ciphertext: &[u8], nonce: &[u8; 12]) -> KsResult<AccountSecret> {
     let cipher = aes_gcm::Aes256Gcm::new_from_slice(key).expect("32B key");
     let plain = cipher
         .decrypt(aes_gcm::Nonce::from_slice(nonce), ciphertext)
@@ -470,7 +470,7 @@ impl Keystore {
     }
 
 
-    pub fn open(&self, password: &str) -> Result<Account, KsError> {
+    pub fn open(&self, password: &str) -> KsResult<Account> {
         let salt = from_b64(&self.salt).ok_or_else(|| KsError::Malformed("salt".into()))?;
         let nonce_b = from_b64(&self.nonce).ok_or_else(|| KsError::Malformed("nonce".into()))?;
         let ct = from_b64(&self.ciphertext)

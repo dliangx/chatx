@@ -36,7 +36,7 @@ async fn full_scheme4_flow() {
     assert_eq!(
         c1.status().expect("status"),
         DeviceStatus::Approved,
-        "root device 应自批为 APPROVED"
+        "root device should self-approve as APPROVED"
     );
     let alice_e2e = c1.e2e_public().to_string();
     let alice_sign_pk = c1.my_sign_pk().to_string();
@@ -53,35 +53,35 @@ async fn full_scheme4_flow() {
     let (c2, acct2) = Client::login_in(base.path(), "deviceB", "pass-A", "deviceB", dir2.clone())
         .await
         .expect("login deviceB");
-    assert_eq!(c2.user_id(), "alice", "两设备同账户");
-    assert_eq!(c2.e2e_public(), alice_e2e, "账户级 E2E 公钥应一致");
+    assert_eq!(c2.user_id(), "alice", "both devices share one account");
+    assert_eq!(c2.e2e_public(), alice_e2e, "account-level E2E key must match");
     assert_eq!(
         c2.status().expect("status"),
         DeviceStatus::Pending,
-        "新登录设备应为 PENDING"
+        "newly logged-in device should be PENDING"
     );
     assert!(acct2.has_secret());
 
     let peer_b = c2.peer_base58();
     let att = c1.approve_device(&peer_b).expect("approve deviceB");
     assert_eq!(att.device, peer_b);
-    assert!(att.is_valid(), "批准证明应通过签名校验");
+    assert!(att.is_valid(), "attestation must pass signature check");
 
     let rec_b = c1.dir().resolve_device(&peer_b).expect("deviceB in dir");
-    assert_eq!(rec_b.status, DeviceStatus::Approved, "批准后应 APPROVED");
+    assert_eq!(rec_b.status, DeviceStatus::Approved, "deviceB should be APPROVED after approval");
     assert!(
         rec_b.attestation.as_ref().unwrap().is_valid(),
-        "目录中的证明应有效"
+        "attestation in directory should be valid"
     );
 
     let bob = Account::generate("bob");
     let key_a = c1.shared_key(bob.e2e_public()).unwrap();
     let key_b = bob.derive_session_key(&alice_e2e).unwrap();
-    assert_eq!(key_a, key_b, "两方应派生同一把 AES-256 密钥");
+    assert_eq!(key_a, key_b, "both sides must derive the same AES-256 key");
 
     assert!(
         c1.pending_devices().is_empty(),
-        "批准后的账户不应有 pending 设备"
+        "account should have no pending devices after approval"
     );
 }
 
@@ -103,20 +103,20 @@ async fn attestation_tamper_detection() {
         signature: sig,
         ..base
     };
-    assert!(good.is_valid(), "未篡改证明应通过");
+    assert!(good.is_valid(), "unmodified attestation should pass");
 
     let mut bad_action = good.clone();
     bad_action.action = AttestationAction::Revoke;
-    assert!(!bad_action.is_valid(), "篡改 action 应失败");
+    assert!(!bad_action.is_valid(), "tampered action should fail");
 
     let mut bad_device = good.clone();
     bad_device.device = "QmOther".into();
-    assert!(!bad_device.is_valid(), "篡改 device 应失败");
+    assert!(!bad_device.is_valid(), "tampered device should fail");
 
     let evil = Account::generate("eve");
     let mut forged = good.clone();
     forged.approver_sign_pk = evil.sign_pk().to_string();
-    assert!(!forged.is_valid(), "用别的账户公钥应失败");
+    assert!(!forged.is_valid(), "forged with another account's key should fail");
 }
 
 #[tokio::test]
@@ -128,7 +128,7 @@ async fn keystore_password_roundtrip() {
     let opened = ks.open("s3cret!").expect("open with correct pass");
     assert_eq!(opened.e2e_public(), acct.e2e_public());
     assert_eq!(opened.sign_pk(), acct.sign_pk());
-    assert!(ks.open("wrong").is_err(), "错误口令应失败");
+    assert!(ks.open("wrong").is_err(), "wrong passphrase should fail");
 }
 
 #[tokio::test]
@@ -164,11 +164,11 @@ async fn only_approved_can_attest() {
 
     let peer_c = c3.peer_base58();
     let err = c2.approve_device(&peer_c);
-    assert!(err.is_err(), "PENDING 设备不能签发审批证明");
+    assert!(err.is_err(), "PENDING device cannot issue attestations");
     let msg = format!("{:?}", err.unwrap_err());
     assert!(
-        msg.contains("APPROVED") || msg.contains("无权"),
-        "错误信息应说明原因: {msg}"
+        msg.contains("APPROVED") || msg.contains("no permission"),
+        "error message should explain the reason: {msg}"
     );
     let _ = c1;
 }
@@ -211,12 +211,12 @@ async fn member_receives_group_key_and_msg() {
         group_id: Some(GID.into()),
     };
 
-    let handled = bob_c.apply_inbound(&key_req).unwrap().expect("GroupKey 应被处理");
-    let bob_group = bob_c.get_group(GID).expect("bob 应已建出本地群");
-    assert_eq!(bob_group.secret(), secret0, "bob 本地群密钥应与群主一致");
+    let handled = bob_c.apply_inbound(&key_req).unwrap().expect("GroupKey should be handled");
+    let bob_group = bob_c.get_group(GID).expect("bob should have a local group");
+    assert_eq!(bob_group.secret(), secret0, "bob's local group secret must match the owner's");
     assert!(matches!(handled, chatx_core::InboundGroup::Key { .. }));
-    assert!(bob_group.has(&alice_c.peer_base58()), "群主应在 bob 的成员表");
-    assert!(bob_group.has(&bob_c.peer_base58()), "bob 应在自己的成员表");
+    assert!(bob_group.has(&alice_c.peer_base58()), "owner should be in bob's member list");
+    assert!(bob_group.has(&bob_c.peer_base58()), "bob should be in his own member list");
 
     let env = alice_c.seal_group_message(GID, "hi bob").unwrap();
     let req = chatx_core::message::ChatRequest {
@@ -230,17 +230,17 @@ async fn member_receives_group_key_and_msg() {
         kind: chatx_core::message::MsgKind::GroupMsg,
         group_id: Some(GID.into()),
     };
-    let m = bob_c.apply_inbound(&req).unwrap().expect("GroupMsg 应被处理");
+    let m = bob_c.apply_inbound(&req).unwrap().expect("GroupMsg should be handled");
     match m {
         chatx_core::InboundGroup::Message { text, from, .. } => {
             assert_eq!(text, "hi bob");
             assert_eq!(from, alice_c.peer_base58());
         }
-        _ => panic!("应返回 Message"),
+        _ => panic!("should return Message"),
     }
     let buf = bob_c.store().all();
     let me = bob_c.peer_base58();
-    assert!(buf.iter().any(|s| s.chat_id == GID && !s.is_outgoing(&me)), "bob 入站群消息应落盘");
+    assert!(buf.iter().any(|s| s.chat_id == GID && !s.is_outgoing(&me)), "bob's inbound group message should be stored");
 
     alice_c.rotate_group(GID).unwrap();
     let post = alice_c.get_group(GID).unwrap();
@@ -249,7 +249,7 @@ async fn member_receives_group_key_and_msg() {
     let sealed_post = alice_c.seal_group_message(GID, "after rotate").unwrap();
     assert!(
         chatx_core::group::open_message(&secret0, &sealed_post).is_err(),
-        "旧密钥打不开新消息"
+        "old secret must not open new message"
     );
     let bundle2 = chatx_core::group::seal_secret(&alice, &bob.e2e_public(), &secret_new).unwrap();
     let key_req2 = chatx_core::message::ChatRequest {
@@ -263,7 +263,7 @@ async fn member_receives_group_key_and_msg() {
     };
     bob_c.apply_inbound(&key_req2).unwrap();
     let now_group = bob_c.get_group(GID).unwrap();
-    assert_eq!(now_group.secret(), secret_new, "bob 应更新为新密钥");
+    assert_eq!(now_group.secret(), secret_new, "bob should have the new secret");
     assert_eq!(
         chatx_core::group::open_message(&now_group.secret(), &sealed_post).unwrap(),
         "after rotate"
@@ -286,7 +286,7 @@ fn group_directory_roundtrip() {
     dir.upsert_group(&pubinfo);
     let got = dir.resolve_group(gid).expect("resolve group");
     assert_eq!(got.group_id, gid);
-    assert!(got.members.contains_key("QmCarol"), "群应含成员");
+    assert!(got.members.contains_key("QmCarol"), "group should contain members");
     assert_eq!(dir.list_groups().len(), 1);
     assert!(dir.resolve_group("nope").is_err());
 }
@@ -319,16 +319,16 @@ async fn client_group_flow() {
             }],
         )
         .expect("create group");
-    assert!(g.has(&c1.peer_base58()), "群主应在群内");
-    assert!(g.has(&c2.peer_base58()), "bob 应在群内");
+    assert!(g.has(&c1.peer_base58()), "owner should be in the group");
+    assert!(g.has(&c2.peer_base58()), "bob should be in the group");
     let gf = base.path().join("gowner").join("groups").join(format!("{gid}.json"));
-    assert!(gf.exists(), "群定义应落盘");
+    assert!(gf.exists(), "group definition must be persisted");
 
     let (c1b, _) = Client::bootstrap_in(base.path(), "gowner", "alice", "pass", dir1.clone())
         .await
         .expect("bootstrap owner again");
-    let g2 = c1b.get_group(gid).expect("重启后应载入同一群");
-    assert_eq!(g2.secret(), g.secret(), "重启后群密钥应一致");
+    let g2 = c1b.get_group(gid).expect("same group should be loaded after restart");
+    assert_eq!(g2.secret(), g.secret(), "group secret must survive restart");
 
     let s0 = g2.secret();
     let alice_acct = c1b.account().clone();
@@ -337,7 +337,7 @@ async fn client_group_flow() {
         .expect("seal secret");
     let bob_secret = chatx_core::group::open_secret(&bob_acct, &alice_acct.e2e_public(), &bundle)
         .expect("open secret");
-    assert_eq!(bob_secret, s0, "bob 应解出同一群密钥");
+    assert_eq!(bob_secret, s0, "bob should open the same group secret");
 
     let env = c1b.seal_group_message(gid, "hello team").expect("seal msg");
     let text = chatx_core::group::open_message(&bob_secret, &env).expect("bob open msg");
@@ -356,13 +356,13 @@ async fn client_group_flow() {
     assert_eq!(rt, "got it");
 
     let g3 = c1b.rotate_group(gid).expect("rotate");
-    assert_ne!(g3.secret(), s0, "轮换后密钥应变");
+    assert_ne!(g3.secret(), s0, "secret must change after rotation");
     let secret_env = c1b
         .seal_group_message(gid, "post-rot")
         .expect("seal post-rot");
     assert!(
         chatx_core::group::open_message(&s0, &secret_env).is_err(),
-        "轮换后旧密钥应打不开新消息（kick）"
+        "old secret must not open new message after rotation (kick)"
     );
     assert_eq!(
         chatx_core::group::open_message(&g3.secret(), &secret_env).unwrap(),
@@ -380,7 +380,7 @@ async fn client_group_flow() {
     assert_eq!(chatx_core::group::open_message(&same_secret, &cross).unwrap(), "x");
     let team_msg_key = chatx_core::group::message_key(&same_secret, gid);
     let cross_msg_key = chatx_core::group::message_key(&same_secret, "grp-two");
-    assert_ne!(team_msg_key, cross_msg_key, "不同 group_id 派生出不同消息密钥");
+    assert_ne!(team_msg_key, cross_msg_key, "different group_id must derive different message keys");
 
     let _ = c1;
     let _ = c2;

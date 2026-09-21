@@ -97,7 +97,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
                 .map_err(|e| anyhow::anyhow!("keystore open: {e}"))?;
             if acct.user_id() != uid {
                 anyhow::bail!(
-                    "profile {profile} 属于 {existing}，新账户请另选 profile (uid={uid})",
+                    "profile {profile} belongs to {existing}, pick a different profile for a new account (uid={uid})",
                     existing = acct.user_id()
                 );
             }
@@ -132,8 +132,8 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             Ok(ks) => ks,
             Err(e) => {
                 anyhow::bail!(
-                    "本地找不到 {path}\n  原因：{e}\n  解决：在已批准设备上生成后，\
-                     把 keystore.json 拷到此 profile 目录下（U 盘/网盘/邮件均可）",
+                    "not found locally: {path}\n  cause: {e}\n  fix: generate it on an approved\
+                     device, then copy keystore.json into this profile dir (USB drive/cloud drive/email all work)",
                     path = keystore_path.display()
                 )
             }
@@ -164,7 +164,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
                 .map_err(|e| anyhow::anyhow!("keystore open: {e}"))?;
             if acct.user_id() != uid {
                 anyhow::bail!(
-                    "profile {profile} 属于 {existing}，新账户请另选 (uid={uid})",
+                    "profile {profile} belongs to {existing}, pick a different one (uid={uid})",
                     existing = acct.user_id()
                 );
             }
@@ -202,7 +202,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             Ok(ks) => ks,
             Err(e) => {
                 anyhow::bail!(
-                    "本地找不到 {path}\n  原因：{e}",
+                    "not found locally: {path}\n  cause: {e}",
                     path = keystore_path.display()
                 )
             }
@@ -254,16 +254,16 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
     ) -> anyhow::Result<Attestation> {
         let me = self.dir.resolve_device(self.device.peer_base58())?;
         if me.user_id != self.account.user_id() {
-            anyhow::bail!("本设备未登记在 user {}", self.account.user_id());
+            anyhow::bail!("this device is not registered under user {}", self.account.user_id());
         }
         if me.status != DeviceStatus::Approved {
-            anyhow::bail!("本设备当前 {:?} —— 只有 APPROVED 能签发审批证明", me.status);
+            anyhow::bail!("this device is {:?} — only APPROVED can issue attestations", me.status);
         }
 
         let target = self.dir.resolve_device(target_peer)?;
         if target.user_id != self.account.user_id() {
             anyhow::bail!(
-                "target {} 属 user {}，本账户 {} 无权签发",
+                "target {} belongs to user {}, account {} has no permission to attest",
                 target_peer,
                 target.user_id,
                 self.account.user_id()
@@ -273,7 +273,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             (AttestationAction::Approve, DeviceStatus::Pending) => {}
             (AttestationAction::Revoke, DeviceStatus::Approved)
             | (AttestationAction::Revoke, DeviceStatus::Revoked) => {}
-            (a, s) => anyhow::bail!("action={:?} 与目标状态 {:?} 不一致", a, s),
+            (a, s) => anyhow::bail!("action={:?} inconsistent with target status {:?}", a, s),
         }
 
         let base = Attestation {
@@ -560,7 +560,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             .device
             .endpoints
             .first()
-            .ok_or_else(|| anyhow::anyhow!("device 未上报 endpoints"))?;
+            .ok_or_else(|| anyhow::anyhow!("device reported no endpoints"))?;
         let addr: Multiaddr = first_addr
             .parse()
             .map_err(|e| anyhow::anyhow!("bad endpoint: {e}"))?;
@@ -587,11 +587,11 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         let rec = self
             .dir
             .resolve_device(peer_base58)
-            .map_err(|e| anyhow::anyhow!("目录中无该设备 {peer_base58}: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("device {peer_base58} not found in directory: {e}"))?;
         let endpoint = rec
             .endpoints
             .first()
-            .ok_or_else(|| anyhow::anyhow!("设备 {peer_base58} 不在线（无端点）"))?
+            .ok_or_else(|| anyhow::anyhow!("device {peer_base58} is offline (no endpoints)"))?
             .clone();
         let peer: PeerId = peer_base58
             .parse()

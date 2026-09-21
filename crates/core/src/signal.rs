@@ -245,7 +245,7 @@ impl HttpDirectory {
         ureq::request("GET", &url)
             .call()
             .map(|_| ())
-            .map_err(|e| anyhow::anyhow!("signal 服务器不可达: {e}"))
+            .map_err(|e| anyhow::anyhow!("signal server unreachable: {e}"))
     }
 }
 
@@ -267,7 +267,7 @@ impl DirectoryClient for HttpDirectory {
             .set("content-type", "application/json")
             .send_string(&body);
         if let Err(e) = res {
-            tracing::warn!("directory upsert_user 失败: {e}");
+            tracing::warn!("directory upsert_user failed: {e}");
         }
     }
 
@@ -278,7 +278,7 @@ impl DirectoryClient for HttpDirectory {
             .set("content-type", "application/json")
             .send_string(&body);
         if let Err(e) = res {
-            tracing::warn!("directory upsert_device 失败: {e}");
+            tracing::warn!("directory upsert_device failed: {e}");
         }
     }
 
@@ -289,7 +289,7 @@ impl DirectoryClient for HttpDirectory {
             .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
         resp
             .into_json()
-            .map_err(|e| anyhow::anyhow!("解析设备失败: {e}"))
+            .map_err(|e| anyhow::anyhow!("resolve device failed: {e}"))
     }
 
     fn resolve_user(&self, user_id: &str) -> anyhow::Result<UserRecord> {
@@ -299,7 +299,7 @@ impl DirectoryClient for HttpDirectory {
             .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
         resp
             .into_json()
-            .map_err(|e| anyhow::anyhow!("解析用户失败: {e}"))
+            .map_err(|e| anyhow::anyhow!("resolve user failed: {e}"))
     }
 
     fn resolve_user_and_device(&self, user_id: &str) -> anyhow::Result<UserResolve> {
@@ -309,7 +309,7 @@ impl DirectoryClient for HttpDirectory {
             .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
         resp
             .into_json()
-            .map_err(|e| anyhow::anyhow!("解析用户失败: {e}"))
+            .map_err(|e| anyhow::anyhow!("resolve user failed: {e}"))
     }
 
     fn list_devices(&self, user_id: &str) -> Vec<DeviceRecord> {
@@ -346,7 +346,7 @@ impl DirectoryClient for HttpDirectory {
             .set("content-type", "application/json")
             .send_string(&body);
         if let Err(e) = res {
-            tracing::warn!("directory upsert_group 失败: {e}");
+            tracing::warn!("directory upsert_group failed: {e}");
         }
     }
 
@@ -355,7 +355,7 @@ impl DirectoryClient for HttpDirectory {
         let resp = ureq::request("GET", &url)
             .call()
             .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
-        resp.into_json().map_err(|e| anyhow::anyhow!("解析群失败: {e}"))
+        resp.into_json().map_err(|e| anyhow::anyhow!("resolve group failed: {e}"))
     }
 
     fn list_groups(&self) -> Vec<crate::group::GroupPublic> {
@@ -384,7 +384,7 @@ impl DirectoryClient for HttpDirectory {
         {
             Ok(_) => true,
             Err(e) => {
-                tracing::debug!("presence touch 失败: {e}");
+                tracing::debug!("presence touch failed: {e}");
                 false
             }
         }

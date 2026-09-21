@@ -198,9 +198,9 @@ mod tests {
         }
 
         let store = Store::with_sql(db).unwrap();
-        assert_eq!(store.len(), 0, "预填前缓冲为空");
+        assert_eq!(store.len(), 0, "buffer empty before load");
         let n = store.hydrate(&chat).unwrap();
-        assert_eq!(n, 3, "灌入全部 3 条");
+        assert_eq!(n, 3, "all 3 rows loaded");
         assert_eq!(store.all()[0].text, "old");
         assert_eq!(store.all()[2].text, "new");
 

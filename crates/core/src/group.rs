@@ -1,5 +1,6 @@
 
-use crate::account::{Account, AcctError};
+use crate::account::Account;
+use crate::account::AcctError;
 use aes_gcm::aead::{Aead, KeyInit};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -323,9 +324,9 @@ mod tests {
 
         group.rotate();
         let s1 = group.secret();
-        assert_ne!(s0, s1, "轮换后密钥应变化");
+        assert_ne!(s0, s1, "secret must change after rotation");
         let sealed_after = seal_message(&group, &bob, bob_p, "secret msg").unwrap();
-        assert!(open_message(&s0, &sealed_after).is_err(), "旧密钥应打不开新消息");
+        assert!(open_message(&s0, &sealed_after).is_err(), "old secret must not open new message");
         assert_eq!(open_message(&s1, &sealed_after).unwrap(), "secret msg");
 
         let mut other = Group::with_secret("grp-2", alice_p, s1);
@@ -336,7 +337,7 @@ mod tests {
 
         let mut tampered = sealed_bob.clone();
         tampered.from = carol_p.into();
-        assert!(open_message(&s0, &tampered).is_err(), "篡改 from 应失败");
+        assert!(open_message(&s0, &tampered).is_err(), "tampered from must fail");
     }
 
     #[test]
@@ -348,8 +349,8 @@ mod tests {
         group.set_member(mem(alice_p, &alice));
 
         let forged = seal_message(&group, &mallory, alice_p, "I am alice").unwrap();
-        assert!(!group.has("QmMallory"), "mallory 不在群内");
+        assert!(!group.has("QmMallory"), "mallory not a member");
         let _ = forged;
-        assert!(group.has(alice_p), "alice 在群");
+        assert!(group.has(alice_p), "alice is a member");
     }
 }
