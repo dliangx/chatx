@@ -1,8 +1,6 @@
-//! Hit-testing and selection geometry over laid-out text lines.
 
 use crate::text::TextLine;
 
-/// An axis-aligned rectangle in content coordinates.
 #[derive(Clone, Copy, Debug)]
 pub struct Rect {
     pub x: f32,
@@ -11,16 +9,13 @@ pub struct Rect {
     pub h: f32,
 }
 
-/// Result of hit-testing a point against laid-out lines.
 #[derive(Clone, Copy, Debug)]
 pub struct HitResult {
     pub line: usize,
     pub char_index: u32,
-    /// `true` when the point is closer to the end of the hit glyph.
     pub after: bool,
 }
 
-/// Horizontal segment (start/end x) for a selectable unit on a line.
 #[derive(Clone, Copy, Debug)]
 struct Segment {
     start: f32,
@@ -40,10 +35,6 @@ fn segments(line: &TextLine) -> Vec<Segment> {
     segs
 }
 
-/// Finds the character index nearest to a point in content coordinates.
-///
-/// `x` is relative to the line's left edge; `y` is relative to the top of the
-/// first line.
 pub fn hit_test(lines: &[TextLine], x: f32, y: f32) -> Option<HitResult> {
     let mut top = 0.0f32;
     let mut line_idx = lines.len().checked_sub(1)?;
@@ -57,7 +48,6 @@ pub fn hit_test(lines: &[TextLine], x: f32, y: f32) -> Option<HitResult> {
         top += line.height;
     }
     if !found {
-        // y is below the last line; use the last line.
         line_idx = lines.len() - 1;
     }
 
@@ -78,7 +68,6 @@ pub fn hit_test(lines: &[TextLine], x: f32, y: f32) -> Option<HitResult> {
             return Some(HitResult { line: line_idx, char_index: s.char_index, after });
         }
     }
-    // In a gap between segments, snap to the previous.
     let mut prev = first;
     for s in &segs {
         if s.start > x {
@@ -89,8 +78,6 @@ pub fn hit_test(lines: &[TextLine], x: f32, y: f32) -> Option<HitResult> {
     Some(HitResult { line: line_idx, char_index: prev.char_index, after: true })
 }
 
-/// Returns highlight rectangles covering the character range `[start, end)`,
-/// in content coordinates (y relative to the top of the first line).
 pub fn selection_rects(lines: &[TextLine], start: u32, end: u32) -> Vec<Rect> {
     let mut rects = Vec::new();
     let mut top = 0.0f32;

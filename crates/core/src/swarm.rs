@@ -1,4 +1,3 @@
-//! libp2p 网络层（M2 v4）：TCP + Noise + Yamux + mDNS + request-response 文本聊天。
 use crate::identity::DeviceIdentity;
 use crate::message::{ChatRequest, ChatResponse};
 use anyhow::Result;
@@ -58,8 +57,6 @@ pub enum Cmd {
         e2e: String,
         text: String,
     },
-    /// 发送群密钥（`kind=GroupKey`）或群消息（`kind=GroupMsg`）：`sealed` 放 base64 密文，
-    /// `group_id` 路由到对应群；接收方 `RrEvent::Message` 里按 `kind` 分发处理。
     SendGroup {
         peer: PeerId,
         from: String,
@@ -70,7 +67,6 @@ pub enum Cmd {
     },
 }
 
-/// 可跨线程共享的运行态句柄（只含 Send+Sync 组件）。
 #[derive(Clone)]
 pub struct Running {
     pub cmd_tx: mpsc::UnboundedSender<Cmd>,
@@ -78,10 +74,8 @@ pub struct Running {
     pub my_peer_id: PeerId,
 }
 
-/// 事件接收端（独占，交事件泵）。
 pub type EventRx = mpsc::UnboundedReceiver<ChatEvent>;
 
-/// 启动 swarm；返回共享句柄 + 事件接收端。
 pub async fn boot(
     device: &DeviceIdentity,
 ) -> Result<(Arc<Running>, mpsc::UnboundedReceiver<ChatEvent>)> {

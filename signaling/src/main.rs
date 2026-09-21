@@ -1,25 +1,3 @@
-//! p2pchat-signal — 中心化目录服务器（axum）。
-//!
-//! 职责边界（方案4）：只存**账户公钥 + 设备公钥 + 端点 + 审批证明**；
-//! 不存口令/私钥，不做消息存储 / 群组扇出。
-//!
-//!   GET    /v1/health                          探活
-//!
-//!   PUT    /v1/users/{user_id}                 刷新账户目录
-//!   GET    /v1/users/{user_id}                  解析账户
-//!   GET    /v1/users/{user_id}/resolve         账户 + 首选在线 APPROVED 设备
-//!   GET    /v1/users/{user_id}/devices         账户所有设备（可选 ?status=）
-//!   GET    /v1/users?exclude={peer_id}        在线用户列表
-//!
-//!   PUT    /v1/devices/{peer_id}               登记/刷新设备
-//!   GET    /v1/devices/{peer_id}               解析设备
-//!   DELETE /v1/devices/{peer_id}               撤销登记
-//!
-//!   GET    /v1/groups                          列出全部群公开信息
-//!   PUT    /v1/groups/{group_id}               登记/刷新群（owner + 成员公钥，绝不存群密钥）
-//!   GET    /v1/groups/{group_id}               解析群
-//!
-//! 跑：`cargo run -p p2pchat-signal`（默认 0.0.0.0:8787）
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -40,7 +18,6 @@ use serde::{Deserialize, Serialize};
 struct App {
     users: Arc<Mutex<HashMap<String, UserRecord>>>,
     devices: Arc<Mutex<HashMap<String, DeviceRecord>>>,
-    /// 群公开信息（`group_id → GroupPublic`）。只存 owner + 成员公钥，绝不存群密钥。
     groups: Arc<Mutex<HashMap<String, GroupPublic>>>,
 }
 
@@ -67,7 +44,6 @@ fn ok_json<T: serde::Serialize + ?Sized>(v: &T) -> Response {
         .into_response()
 }
 
-/// 找某用户首选在线 APPROVED 设备。
 fn best_device(
     devices: &HashMap<String, DeviceRecord>,
     user_id: &str,
@@ -97,7 +73,6 @@ fn best_device(
     best.cloned()
 }
 
-// ── 账户 ──
 
 async fn upsert_user(
     State(App { users, .. }): State<App>,
@@ -205,7 +180,6 @@ async fn list_users(
     Ok(ok_json(&out))
 }
 
-// ── 设备 ──
 
 async fn upsert_device(
     State(App { devices, .. }): State<App>,
@@ -266,7 +240,6 @@ struct Presence {
     endpoints: Option<Vec<String>>,
 }
 
-/// 轻量 presence：只刷 `seen` + `endpoints`（不视为完整 upsert，不打 upsert 日志）。
 async fn device_presence(
     State(App { devices, .. }): State<App>,
     Path(peer_id): Path<String>,
@@ -299,7 +272,6 @@ async fn health() -> ApiResult {
     Ok(ok_json(&"ok"))
 }
 
-// ── 群公开信息（绝不存群密钥） ──
 
 async fn upsert_group(
     State(App { groups, .. }): State<App>,

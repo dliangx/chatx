@@ -1,4 +1,3 @@
-//! Bubble content layout: inline text/emoji + block images.
 
 use crate::bubble::{Bubble, Segment};
 use crate::canvas::Image;
@@ -7,7 +6,6 @@ use crate::font::FontManager;
 use crate::text::{layout_rich, RichItem, Span, TextLine, TextStyle};
 use crate::theme::Theme;
 
-/// Laid-out bubble content (relative geometry; positions are content-local).
 pub struct ContentLayout {
     pub lines: Vec<TextLine>,
     pub images: Vec<BlockImage>,

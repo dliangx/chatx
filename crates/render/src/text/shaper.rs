@@ -1,26 +1,15 @@
-//! Shaping of a single direction+font run via rustybuzz.
 
 use crate::font::{FontId, FontManager, GlyphId};
 
-/// A glyph produced by shaping, before rasterization.
 #[derive(Clone, Copy, Debug)]
 pub struct ShapedGlyph {
     pub glyph: GlyphId,
-    /// Horizontal advance in pixels.
     pub x_advance: f32,
-    /// Horizontal offset in pixels (mark positioning).
     pub x_offset: f32,
-    /// Vertical offset in pixels (mark positioning).
     pub y_offset: f32,
-    /// Byte offset of the originating character within the shaped run.
     pub cluster: u32,
 }
 
-/// Shapes a run of text with a single font and direction.
-///
-/// Advances and offsets are returned in pixels at the given font size.
-/// For RTL runs, glyphs are returned in visual order (right-to-left input,
-/// left-to-right output), which is what the compositor needs.
 pub fn shape_run(
     manager: &FontManager,
     font: FontId,

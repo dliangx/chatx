@@ -1,12 +1,6 @@
-//! Minimal software compositor operating on a premultiplied RGBA8 buffer.
-//!
-//! Provides the primitives needed to draw chat bubbles:
-//! filled rects, rounded rects (per-corner radius), image blits and
-//! coverage-mask blits (used to draw fontdue glyphs and triangles).
 
 use crate::color::Rgba;
 
-/// Converts a premultiplied RGBA buffer to straight (non-premultiplied) alpha.
 pub fn unpremultiply(buf: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; buf.len()];
     for (dst, px) in out.chunks_exact_mut(4).zip(buf.chunks_exact(4)) {
@@ -24,7 +18,7 @@ pub fn unpremultiply(buf: &[u8]) -> Vec<u8> {
 }
 
 pub struct Canvas {
-    buf: Vec<u8>, // RGBA8, premultiplied alpha
+    buf: Vec<u8>,
     pub w: u32,
     pub h: u32,
 }
@@ -45,7 +39,7 @@ impl Corners {
 
 #[derive(Clone, Debug)]
 pub struct Image {
-    pub rgba: Vec<u8>, // RGBA8, straight alpha (non-premultiplied)
+    pub rgba: Vec<u8>,
     pub w: u32,
     pub h: u32,
 }
@@ -85,7 +79,7 @@ impl Canvas {
         }
     }
 
-    /// Rounded rectangle with independent corner radii.
+
     pub fn round_rect(
         &mut self,
         x: f32,
@@ -105,7 +99,7 @@ impl Canvas {
             for px in x0..x1 {
                 let fx = px as f32 + 0.5;
                 let fy = py as f32 + 0.5;
-                // Nearest corner center + radius, or `None` for the interior.
+
                 let corner = if fx < x + corners.tl && fy < y + corners.tl {
                     Some((x + corners.tl, y + corners.tl, corners.tl))
                 } else if fx > right - corners.tr && fy < y + corners.tr {
@@ -131,7 +125,7 @@ impl Canvas {
         }
     }
 
-    /// Blit a straight-alpha image with alpha blending.
+
     pub fn blit(&mut self, dst_x: i32, dst_y: i32, img: &Image) {
         for sy in 0..img.h as i32 {
             for sx in 0..img.w as i32 {
@@ -145,7 +139,7 @@ impl Canvas {
                 if a == 0 {
                     continue;
                 }
-                // straight -> premultiplied source
+
                 let src = if a == 255 {
                     Rgba {
                         r: img.rgba[si],
@@ -166,8 +160,8 @@ impl Canvas {
         }
     }
 
-    /// Blit a single-channel coverage bitmap tinted with `color`.
-    /// Used for fontdue glyphs (coverage = alpha).
+
+
     pub fn blit_mask(
         &mut self,
         dst_x: i32,
@@ -203,7 +197,7 @@ impl Canvas {
         }
     }
 
-    /// Blit an image scaled (nearest-neighbor) to `w` x `h`.
+
     pub fn blit_scaled(&mut self, dst_x: i32, dst_y: i32, w: u32, h: u32, img: &Image) {
         if w == 0 || h == 0 {
             return;
@@ -237,7 +231,7 @@ impl Canvas {
         }
     }
 
-    /// Fills a circle centered at (cx, cy) with radius `r`.
+
     pub fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, color: Rgba) {
         let x0 = (cx - r).ceil() as i32;
         let y0 = (cy - r).ceil() as i32;
@@ -257,13 +251,13 @@ impl Canvas {
         }
     }
 
-    /// Source-over blend of a premultiplied `src` onto a pixel.
+
     #[inline]
     fn blend_px(&mut self, x: u32, y: u32, src: Rgba) {
         let i = self.idx(x, y);
         let sa = src.a as u32;
         let da = self.buf[i + 3] as u32;
-        // out = src + dst * (1 - src_alpha), premultiplied
+
         let out_a = sa + da * (255 - sa) / 255;
         if out_a == 0 {
             self.buf[i..i + 4].fill(0);

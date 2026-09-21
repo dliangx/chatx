@@ -1,9 +1,3 @@
-//! Interactive chat-bubble rendering demo.
-//!
-//! Renders a handful of demo messages (CJK + Latin + RTL + emoji) into a
-//! slint window. Long-press a bubble to select it and reveal a copy button.
-//!
-//! Run with: `cargo run -p render --example chat`
 
 slint::include_modules!();
 
@@ -39,7 +33,6 @@ fn load(path: &str) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
-/// Builds a simple vertical-gradient avatar image for testing.
 fn make_avatar(size: u32, top: (u8, u8, u8), bottom: (u8, u8, u8)) -> Image {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     for y in 0..size {
@@ -77,7 +70,6 @@ fn to_slint_image(r: &RenderedBubble) -> slint::Image {
     slint::Image::from_rgba8(buf)
 }
 
-/// Renders one message into a `MessageData`, optionally with a selection.
 fn render_msg(
     renderer: &mut Renderer,
     id: u64,
@@ -136,8 +128,6 @@ fn main() -> Result<(), slint::PlatformError> {
     let selected = Rc::new(Cell::new(None::<usize>));
     let ui_weak = ui.as_weak();
 
-    // Initial render, deferred until the window is mapped so the correct
-    // device scale factor (retina) is known.
     {
         let ui_weak = ui_weak.clone();
         let renderer = renderer.clone();
@@ -168,7 +158,6 @@ fn main() -> Result<(), slint::PlatformError> {
         let scale = scale.clone();
         move |idx: usize| {
             let s = scale.get();
-            // Deselect previous.
             if let Some(prev) = selected.get().filter(|&p| p != idx)
                 && let Some(md) = model.row_data(prev)
             {

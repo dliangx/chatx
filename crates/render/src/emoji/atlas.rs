@@ -1,8 +1,3 @@
-//! Emoji atlas.
-//!
-//! Maps emoji characters to pre-rasterized `Image`s. Color emoji require a
-//! CBDT/sbix bitmap source (e.g. Noto Color Emoji); P0 falls back to a
-//! monochrome glyph rasterized with fontdue or a placeholder box.
 
 use crate::canvas::Image;
 use crate::color::Rgba;
@@ -30,8 +25,6 @@ impl EmojiAtlas {
         self.images.contains_key(&ch)
     }
 
-    /// Rasterizes emoji codepoints as monochrome glyphs using a font that
-    /// contains them (e.g. a monochrome symbol font). Color is tinted.
     pub fn add_monochrome(
         &mut self,
         manager: &FontManager,
@@ -65,8 +58,6 @@ impl EmojiAtlas {
         }
     }
 
-    /// Loads color emoji from a bitmap-emoji font (e.g. Apple Color Emoji's
-    /// sbix table) at the given pixel size.
     pub fn add_color_font(&mut self, face: &ttf_parser::Face, chars: &[char], px: f32) {
         for &ch in chars {
             let Some(gid) = face.glyph_index(ch) else { continue };
@@ -83,7 +74,6 @@ impl EmojiAtlas {
         }
     }
 
-    /// Convenience wrapper over [`add_color_font`] taking raw font bytes.
     pub fn add_color_font_bytes(
         &mut self,
         bytes: &[u8],
@@ -103,7 +93,6 @@ impl Default for EmojiAtlas {
     }
 }
 
-/// Decodes a PNG into straight-alpha RGBA8.
 fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let mut dec = png::Decoder::new(data);
     dec.set_transformations(png::Transformations::normalize_to_color8());
@@ -128,7 +117,6 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     Some((rgba, w, h))
 }
 
-/// A fallback placeholder image (rounded square) for emoji with no bitmap.
 pub fn placeholder(px: f32) -> Image {
     let size = px.ceil().max(1.0) as u32;
     let mut image = Image {

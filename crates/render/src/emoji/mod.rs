@@ -1,4 +1,3 @@
-//! Emoji atlas.
 
 pub mod atlas;
 

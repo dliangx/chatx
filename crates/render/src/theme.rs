@@ -1,4 +1,3 @@
-//! Visual theme for bubbles and text.
 
 use crate::color::Rgba;
 
@@ -20,7 +19,6 @@ pub struct Theme {
     pub line_height: f32,
     pub time_font_size: f32,
     pub avatar_size: f32,
-    /// Max bubble width as a ratio of the available width.
     pub max_bubble_width_ratio: f32,
 }
 
@@ -49,8 +47,6 @@ impl Default for Theme {
 }
 
 impl Theme {
-    /// Returns a copy with all pixel dimensions scaled by `f` (e.g. a device
-    /// pixel ratio). Used to render crisp textures on high-DPI displays.
     pub fn scaled(&self, f: f32) -> Theme {
         Theme {
             radius: self.radius * f,

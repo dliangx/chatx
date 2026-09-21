@@ -1,18 +1,13 @@
-//! Glyph coverage bitmap cache keyed by (font, glyph, pixel size).
 
 use crate::font::{FontId, GlyphId};
 
-/// A rasterized glyph's coverage bitmap and positioning metadata.
 #[derive(Clone, Debug)]
 pub struct GlyphBitmap {
     pub coverage: Vec<u8>,
     pub width: usize,
     pub height: usize,
-    /// Left edge of the bitmap relative to the pen origin.
     pub xmin: i32,
-    /// Bottom edge of the bitmap relative to the baseline.
     pub ymin: i32,
-    /// Advance width in pixels.
     pub advance: f32,
 }
 
@@ -20,7 +15,6 @@ pub struct GlyphBitmap {
 struct CacheKey {
     font: FontId,
     glyph: GlyphId,
-    /// Quantized pixel size (px * 2, to allow half-pixel steps).
     px2: u32,
 }
 
@@ -37,7 +31,6 @@ impl GlyphCache {
         CacheKey { font, glyph, px2: (px * 2.0).round().max(1.0) as u32 }
     }
 
-    /// Rasterizes (or returns a cached copy of) a glyph at the given size.
     pub fn rasterize(
         &mut self,
         font: &fontdue::Font,

@@ -1,7 +1,3 @@
-//! Custom software bubble renderer.
-//!
-//! Pipeline: message segments -> bidi + line break + shape -> text layout ->
-//! compositor (fontdue glyphs + emoji atlas + bubble chrome) -> RGBA texture.
 
 pub mod bubble;
 pub mod cache;
@@ -18,8 +14,6 @@ use emoji::EmojiAtlas;
 use font::FontManager;
 use theme::Theme;
 
-/// Renders plain text (white background, black glyphs) to a straight-alpha RGBA
-/// buffer. Primarily for visual comparison / testing.
 pub fn render_text_rgba(
     manager: &mut FontManager,
     text: &str,
@@ -66,7 +60,6 @@ pub fn render_text_rgba(
     (rgba, w, h)
 }
 
-/// Convenience renderer bundling fonts, emoji and a texture cache.
 pub struct Renderer {
     pub fonts: FontManager,
     pub emoji: EmojiAtlas,
@@ -86,17 +79,11 @@ impl Renderer {
         }
     }
 
-    /// Bump when the theme changes so cached textures are invalidated.
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
         self.theme_version = self.theme_version.wrapping_add(1);
     }
 
-    /// Renders a bubble, returning a cached texture if available.
-    ///
-    /// `available_w` is the logical width; `scale` is the device pixel ratio
-    /// (1.0 = normal, 2.0 = retina). The returned texture is `scale`x the
-    /// logical size.
     pub fn render(
         &mut self,
         id: u64,
@@ -120,8 +107,6 @@ impl Renderer {
         self.cache.get(id, key_w, scale, self.theme_version).unwrap()
     }
 
-    /// Renders a bubble with a text-selection highlight. Not cached (selection
-    /// changes every frame while dragging).
     pub fn render_selection(
         &mut self,
         bubble: &Bubble,
@@ -140,11 +125,6 @@ impl Renderer {
         )
     }
 
-    /// Maps a point (in bubble-texture pixel coordinates, i.e. already scaled)
-    /// to the character index at that point.
-    ///
-    /// Returns the character index in the combined text space, and whether the
-    /// point is closer to the character's trailing edge.
     pub fn hit_test(
         &self,
         bubble: &Bubble,

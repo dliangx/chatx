@@ -1,5 +1,3 @@
-//! High-level rich text layout: spans + inline emoji -> wrapped lines ->
-//! positioned glyphs and images (in visual order, bidi-aware).
 
 use crate::emoji::atlas::placeholder;
 use crate::emoji::EmojiAtlas;
@@ -10,10 +8,8 @@ use crate::text::{Direction, PositionedGlyph, PositionedImage, RichItem, TextLin
 use crate::color::Rgba;
 use unicode_bidi::Level;
 
-/// Placeholder used to mark an inline emoji inside the combined bidi string.
 const EMOJI_PLACEHOLDER: char = '\u{E000}';
 
-/// Metadata for one character (in logical order) of the combined string.
 enum CharMeta {
     Text { color: Rgba },
     Emoji { ch: char },
@@ -29,7 +25,6 @@ struct CharInfo {
     emoji: Option<char>,
 }
 
-/// Lays out plain text (no emoji, single color) into visual lines.
 pub fn layout_text(
     manager: &FontManager,
     text: &str,
@@ -40,7 +35,6 @@ pub fn layout_text(
     layout_rich(manager, &EmojiAtlas::new(), &items, style, max_width)
 }
 
-/// Lays out rich inline content (styled spans + emoji) into visual lines.
 pub fn layout_rich(
     manager: &FontManager,
     emoji: &EmojiAtlas,
@@ -81,7 +75,6 @@ pub fn layout_rich(
         .collect()
 }
 
-/// Builds a combined string (emoji -> placeholder) plus per-char metadata.
 fn build_combined(items: &[RichItem]) -> (String, Vec<CharMeta>) {
     let mut combined = String::new();
     let mut meta = Vec::new();
@@ -102,7 +95,6 @@ fn build_combined(items: &[RichItem]) -> (String, Vec<CharMeta>) {
     (combined, meta)
 }
 
-/// Computes the line height and baseline offset (from line top) for a line.
 fn line_metrics(manager: &FontManager, style: &TextStyle, rtl: bool) -> (f32, f32) {
     let size = style.font_size;
     let mut baseline = size;
@@ -117,7 +109,6 @@ fn line_metrics(manager: &FontManager, style: &TextStyle, rtl: bool) -> (f32, f3
     (height, baseline)
 }
 
-/// Greedy line breaking into byte ranges (logical order).
 fn line_ranges(
     manager: &FontManager,
     para: &str,
@@ -156,7 +147,6 @@ fn line_ranges(
     lines
 }
 
-/// Measures the advance width of the logical byte range `[a, b)`.
 fn measure(
     manager: &FontManager,
     chars: &[CharInfo],
@@ -196,7 +186,6 @@ fn measure(
     total
 }
 
-/// Lays out one line (byte range `[a, b)`) into visual-order glyphs/images.
 fn layout_line(
     manager: &FontManager,
     emoji: &EmojiAtlas,
@@ -261,8 +250,6 @@ fn layout_line(
             }
         }
         for g in shape_run(manager, font, &run, rtl, style.font_size) {
-            // Map the glyph's cluster (byte offset within `run`) to the source
-            // char index of that cluster's first character.
             let char_pos = run[..g.cluster as usize].chars().count();
             let char_index = run_indices[char_pos.min(run_indices.len() - 1)];
             glyphs.push(PositionedGlyph {

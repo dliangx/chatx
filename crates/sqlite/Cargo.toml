@@ -7,3 +7,4 @@ edition = "2024"
 rusqlite = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
+rand = { workspace = true }

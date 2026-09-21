@@ -1,4 +1,3 @@
-//! Integration tests using system fonts (macOS).
 
 use render::bubble::parse::parse_text;
 use render::bubble::{Bubble, GroupPos, Segment, Side};
@@ -64,7 +63,6 @@ fn layout_pure_arabic_is_rtl() {
 fn layout_rtl_with_embedded_ltr_numbers() {
     let Some(mut m) = make_manager() else { return };
     let style = text_style(Rgba::rgb(0, 0, 0));
-    // RTL text containing LTR digits.
     let lines = layout_text(&mut m, "السعر 1234 ريال", &style, 200.0);
     assert!(!lines.is_empty());
     assert!(lines[0].glyphs.len() >= 2);
@@ -84,10 +82,8 @@ fn canvas_round_rect_covers_center() {
     let mut c = Canvas::new(20, 20);
     c.round_rect(2.0, 2.0, 16.0, 16.0, Corners::all(4.0), Rgba::rgb(255, 0, 0));
     let rgba = c.into_rgba();
-    // Center pixel should be filled.
     let idx = (10 * 20 + 10) * 4;
     assert_eq!(rgba[idx + 3], 255);
-    // Corner pixel should be transparent.
     let corner = (2 * 20 + 2) * 4;
     assert_eq!(rgba[corner + 3], 0);
 }
@@ -114,7 +110,6 @@ fn bubble_render_produces_texture() {
     let out = render::bubble::draw::render_bubble(&mut m, &emoji, &bubble, &theme, 300.0, 1.0);
     assert!(out.width > 0 && out.height > 0);
     assert_eq!(out.rgba.len() as u32, out.width * out.height * 4);
-    // Some pixel is non-transparent (bubble body drawn).
     let any_opaque = out.rgba.chunks_exact(4).any(|p| p[3] != 0);
     assert!(any_opaque, "bubble should have opaque pixels");
 }
@@ -148,12 +143,10 @@ fn hit_test_maps_point_to_char() {
     let lines = layout_text(&mut m, text, &style, 400.0);
     assert_eq!(lines.len(), 1);
 
-    // Start of the line maps to the first char.
     let hit = hit_test(&lines, 0.0, 0.0).unwrap();
     assert_eq!(hit.char_index, 0);
     assert!(!hit.after);
 
-    // End of the line maps to the last char.
     let width = lines[0].width;
     let hit = hit_test(&lines, width, 0.0).unwrap();
     assert_eq!(hit.char_index, (text.chars().count() - 1) as u32);
@@ -166,13 +159,11 @@ fn selection_rects_cover_range() {
     let style = text_style(Rgba::rgb(0, 0, 0));
     let lines = layout_text(&mut m, "Hello world", &style, 400.0);
 
-    // Selecting "Hello" (indices 0..5) should produce a single leading rect.
     let rects = selection_rects(&lines, 0, 5);
     assert!(!rects.is_empty());
     assert!(rects[0].x >= 0.0);
     assert!(rects[0].w > 0.0);
 
-    // Empty selection produces no rects.
     assert!(selection_rects(&lines, 3, 3).is_empty());
 }
 
@@ -198,7 +189,6 @@ fn selection_highlight_renders() {
     assert_eq!(plain.width, selected.width);
     assert_eq!(plain.height, selected.height);
 
-    // The selection highlight (blue) introduces new colored pixels.
     let has_blue = selected
         .rgba
         .chunks_exact(4)

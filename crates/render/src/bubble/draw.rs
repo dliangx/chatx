@@ -1,4 +1,3 @@
-//! Bubble rendering: chrome (avatar/name/body/tail) + content, into RGBA.
 
 use crate::bubble::layout::{layout_content, ContentLayout};
 use crate::bubble::{Bubble, GroupPos, RenderedBubble, Side};
@@ -13,9 +12,8 @@ const GAP: f32 = 14.0;
 const TAIL_W: f32 = 10.0;
 const TAIL_H: f32 = 18.0;
 
-/// Geometry computed for a bubble, shared between rendering and hit-testing.
 pub struct Frame {
-    pub theme: Theme, // scaled
+    pub theme: Theme,
     pub content: ContentLayout,
     pub is_self: bool,
     pub show_avatar: bool,
@@ -23,7 +21,7 @@ pub struct Frame {
     pub show_tail: bool,
     pub avatar_size: f32,
     pub avatar_x: f32,
-    pub body: (f32, f32, f32, f32), // (x, y, w, h)
+    pub body: (f32, f32, f32, f32),
     pub content_origin: (f32, f32),
     pub name_lines: Vec<TextLine>,
     pub name_style: TextStyle,
@@ -34,7 +32,6 @@ pub struct Frame {
     pub size: (u32, u32),
 }
 
-/// Computes the geometry and content layout for a bubble.
 pub fn compute_frame(
     manager: &FontManager,
     emoji: &EmojiAtlas,
@@ -87,8 +84,8 @@ pub fn compute_frame(
     let avatar_col = if show_avatar { avatar_size + GAP } else { 0.0 };
     let body_y = name_h + if show_name { 4.0 } else { 0.0 };
 
-    // Avatar sits on the left for "other" messages and on the right for "self"
-    // messages (mirroring the bubble side).
+
+
     let (body_x, avatar_x, total_w) = if is_self {
         let body_x = 0.0;
         let avatar_x = body_w + TAIL_W + if show_avatar { GAP } else { 0.0 };
@@ -141,10 +138,6 @@ pub fn render_bubble(
     render_bubble_with_selection(manager, emoji, bubble, theme, available_w, scale, None)
 }
 
-/// Renders a bubble with an optional text-selection highlight.
-///
-/// `selection` is a half-open character range `[start, end)` in the combined
-/// text index space (see `text::layout`). `None` renders without a highlight.
 pub fn render_bubble_with_selection(
     manager: &mut FontManager,
     emoji: &EmojiAtlas,
@@ -162,7 +155,7 @@ pub fn render_bubble_with_selection(
 
     let mut canvas = Canvas::new(total_w, total_h);
 
-    // Avatar (left for "other", right for "self"), bottom-aligned with body.
+
     if frame.show_avatar {
         if let Some(img) = bubble.avatar {
             let ax = frame.avatar_x;
@@ -171,19 +164,19 @@ pub fn render_bubble_with_selection(
         }
     }
 
-    // Sender name.
+
     if frame.show_name {
         draw_lines(&mut canvas, manager, &frame.name_lines, body_x, 0.0, frame.name_style.font_size);
     }
 
-    // Body.
+
     let body_color = if frame.is_self { frame.theme.bubble_self } else { frame.theme.bubble_other };
     canvas.round_rect(body_x, body_y, body_w, body_h, Corners::all(frame.theme.radius), body_color);
     if frame.show_tail {
         draw_tail(&mut canvas, body_x, body_y, body_w, body_h, TAIL_W, frame.is_self, body_color);
     }
 
-    // Selection highlight (under glyphs).
+
     if let Some((start, end)) = selection {
         let rects = crate::text::selection::selection_rects(&frame.content.lines, start, end);
         for r in rects {
@@ -197,7 +190,7 @@ pub fn render_bubble_with_selection(
         }
     }
 
-    // Content.
+
     let mut content_y = content_y;
     draw_lines(&mut canvas, manager, &frame.content.lines, content_x, content_y, frame.theme.font_size);
     content_y += frame.content.content_h;
@@ -206,7 +199,7 @@ pub fn render_bubble_with_selection(
         content_y += img.h + 6.0;
     }
 
-    // Time (right-aligned within body).
+
     draw_lines(&mut canvas, manager, &frame.time_lines, frame.time_x, frame.time_y, frame.time_style.font_size);
 
     RenderedBubble { rgba: canvas.into_rgba(), width: total_w, height: total_h }
@@ -251,8 +244,8 @@ fn draw_tail(
     is_self: bool,
     color: Rgba,
 ) {
-    // Tail base sits on the straight part of the body edge (above the rounded
-    // bottom corner) so it reads as attached rather than detached.
+
+
     let y1 = body_y + body_h - 16.0;
     let y0 = y1 - TAIL_H;
     if is_self {
@@ -264,7 +257,6 @@ fn draw_tail(
     }
 }
 
-/// Fills a triangle using an edge-function (barycentric sign) test.
 fn fill_triangle(canvas: &mut Canvas, a: (f32, f32), b: (f32, f32), c: (f32, f32), color: Rgba) {
     let min_x = a.0.min(b.0).min(c.0).floor() as i32;
     let max_x = a.0.max(b.0).max(c.0).ceil() as i32;

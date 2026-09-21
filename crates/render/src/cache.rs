@@ -1,4 +1,3 @@
-//! Bubble texture cache keyed by (message id, width bucket, scale, theme version).
 
 use crate::bubble::RenderedBubble;
 use std::collections::HashMap;
@@ -28,7 +27,6 @@ impl TextureCache {
         self.map.insert(Self::key(id, width, scale, theme_version), bubble);
     }
 
-    /// Drops entries whose width bucket no longer matches `width`.
     pub fn evict_width(&mut self, width: u32) {
         let bucket = width_bucket(width);
         self.map.retain(|k, _| k.width_bucket == bucket);
@@ -48,12 +46,10 @@ impl TextureCache {
     }
 }
 
-/// Quantizes width to buckets (rounded to 8px) so minor resizes reuse textures.
 fn width_bucket(width: u32) -> u32 {
     (width + 4) / 8
 }
 
-/// Quantizes scale to 1/4 increments so similar ratios share textures.
 fn scale_bucket(scale: f32) -> u32 {
     (scale * 4.0).round() as u32
 }

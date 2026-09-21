@@ -1,48 +1,62 @@
-//! 消息持久化（rusqlite）。
-//!
-//! Phase 1：把聊天消息从内存 `Vec` 落到每个 profile 一个的 `messages.db`，
-//! 重启后可恢复；按 `chat_id` 维度存储（1:1 与未来群聊共用一套结构）。
-//!
-//! 表结构（见 `SCHEMA`）：`msgs(id, chat_id, sender, text, outgoing, sealed, t)`，
-//! 复合索引 `(chat_id, t DESC)` 支撑"按会话拉最近 N 条历史"的高频查询。
-//!
-//! 线程模型：`rusqlite::Connection` 非 `Sync`，但 `sqlite` crate 的 `Connection` 是
-//! `Send` + `Sync`（`single-thread` 模式不支持 sync，`bundled` 默认多线程）。这里用
-//! `Mutex<Connection>` 串行化写，读也走同一把锁（SQLite 单连接最稳，WAL 下读不阻塞）。
 
 use rusqlite::{params, Connection};
 
-/// 一条消息的持久化行（与 `chatx_core::store::StoredMsg` 一一对应，避免跨 crate 循环依赖）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MsgRow {
-    /// 会话 id：1:1 用 `min(peer_a,peer_b)|max(peer_a,peer_b)` 规范化；群聊用群 id。
     pub chat_id: String,
-    /// 本条消息发送方的 peer_id（base58，包含自己）。
     pub sender: String,
-    /// 消息内容（`sealed=true` 时为 E2E 密文 payload）。
     pub text: String,
-    /// 是否我发出去的（true=本端）。
-    pub outgoing: bool,
-    /// 内容是否为密文。
     pub sealed: bool,
-    /// 时间戳（毫秒，UTC）。
     pub t: u64,
 }
 
-const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS msgs (
-    id       INTEGER PRIMARY KEY,
-    chat_id  TEXT    NOT NULL,
-    sender   TEXT    NOT NULL,
-    text     TEXT    NOT NULL,
-    outgoing INTEGER NOT NULL,
-    sealed   INTEGER NOT NULL,
-    t        INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_msgs_chat_t ON msgs(chat_id, t DESC);
-"#;
 
-/// 打开（不存在则创建）一个持久化存储。启用 WAL：写不阻塞读、崩溃恢复更稳。
+pub struct Migration {
+    pub version: u32,
+    pub sql: &'static str,
+}
+
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: include_str!("../migrations/0001_baseline.sql"),
+    },
+];
+
+fn ensure_migrations_table(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            version    INTEGER PRIMARY KEY,
+            applied_at TEXT    NOT NULL
+        );",
+        [],
+    )?;
+    Ok(())
+}
+
+pub fn apply_migrations(conn: &Connection) -> anyhow::Result<Vec<u32>> {
+    ensure_migrations_table(conn)?;
+    let applied: std::collections::HashSet<u32> = {
+        let mut stmt = conn.prepare("SELECT version FROM schema_migrations")?;
+        let rows = stmt.query_map([], |r| r.get::<_, u32>(0))?;
+        rows.collect::<std::result::Result<std::collections::HashSet<_>, _>>()
+            .unwrap_or_default()
+    };
+    let mut ran = Vec::new();
+    for m in MIGRATIONS {
+        if applied.contains(&m.version) {
+            continue;
+        }
+        conn.execute_batch(m.sql)?;
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, strftime('%s','now'))",
+            params![m.version],
+        )?;
+        ran.push(m.version);
+    }
+    Ok(ran)
+}
+
 pub fn open(path: &std::path::Path) -> anyhow::Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -50,36 +64,40 @@ pub fn open(path: &std::path::Path) -> anyhow::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    conn.execute_batch(SCHEMA)?;
+    apply_migrations(&conn)?;
     Ok(conn)
 }
 
-/// 在给定连接上建表（连接可能已由 `open` 建好，供测试注入内存库）。
 pub fn init(conn: &Connection) -> anyhow::Result<()> {
-    conn.execute_batch(SCHEMA)?;
-    Ok(())
+    apply_migrations(conn).map(|_| ())
 }
 
-/// 写入一条消息（`Mutex<Connection>` 串行化）。
 pub fn insert(conn: &Connection, m: &MsgRow) -> anyhow::Result<()> {
+    let id = new_msg_id();
     conn.execute(
-        "INSERT INTO msgs (chat_id, sender, text, outgoing, sealed, t) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![m.chat_id, m.sender, m.text, m.outgoing as i64, m.sealed as i64, m.t as i64],
+        "INSERT INTO conversations (id, type) VALUES (?1, 0)
+         ON CONFLICT(id) DO UPDATE SET
+            last_message_time  = COALESCE(last_message_time, ?2),
+            last_message_preview = COALESCE(last_message_preview, ?3)",
+        params![m.chat_id, m.t as i64, m.text],
+    )?;
+    conn.execute(
+        "INSERT INTO messages (id, conversation_id, sender_id, msg_type, text_content, is_encrypted, timestamp)
+         VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
+        params![id, m.chat_id, m.sender, m.text, m.sealed as i64, m.t as i64],
     )?;
     Ok(())
 }
 
-/// 按会话时间倒序返回全部消息（新→旧）。
 pub fn load_all(conn: &Connection, chat_id: &str) -> anyhow::Result<Vec<MsgRow>> {
     let mut stmt = conn.prepare(
-        "SELECT chat_id, sender, text, outgoing, sealed, t
-         FROM msgs WHERE chat_id = ?1 ORDER BY t DESC",
+        "SELECT conversation_id, sender_id, text_content, is_encrypted, timestamp
+         FROM messages WHERE conversation_id = ?1 ORDER BY timestamp DESC",
     )?;
     let rows = stmt.query_map(params![chat_id], row_from)?;
     rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-/// 分页拉历史：按时间倒序取 `limit` 条，`offset` 为已跳过条数（新→旧）。
 pub fn load_page(
     conn: &Connection,
     chat_id: &str,
@@ -87,38 +105,44 @@ pub fn load_page(
     offset: u32,
 ) -> anyhow::Result<Vec<MsgRow>> {
     let mut stmt = conn.prepare(
-        "SELECT chat_id, sender, text, outgoing, sealed, t
-         FROM msgs WHERE chat_id = ?1 ORDER BY t DESC LIMIT ?2 OFFSET ?3",
+        "SELECT conversation_id, sender_id, text_content, is_encrypted, timestamp
+         FROM messages WHERE conversation_id = ?1 ORDER BY timestamp DESC LIMIT ?2 OFFSET ?3",
     )?;
     let rows = stmt.query_map(params![chat_id, limit, offset], row_from)?;
     rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-/// 删除 `t` 之前的消息；返回删除条数。
 pub fn delete_before(conn: &Connection, chat_id: &str, before_t: u64) -> anyhow::Result<usize> {
     let n = conn.execute(
-        "DELETE FROM msgs WHERE chat_id = ?1 AND t < ?2",
+        "DELETE FROM messages WHERE conversation_id = ?1 AND timestamp < ?2",
         params![chat_id, before_t as i64],
     )?;
     Ok(n)
 }
 
-/// 某会话消息条数。
 pub fn count(conn: &Connection, chat_id: &str) -> anyhow::Result<u32> {
     let n: i64 = conn
-        .query_row("SELECT COUNT(*) FROM msgs WHERE chat_id = ?1", params![chat_id], |r| r.get(0))?;
+        .query_row("SELECT COUNT(*) FROM messages WHERE conversation_id = ?1", params![chat_id], |r| r.get(0))?;
     Ok(n as u32)
 }
 
 fn row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<MsgRow> {
     Ok(MsgRow {
-        chat_id: row.get(0)?,
-        sender: row.get(1)?,
-        text: row.get(2)?,
-        outgoing: row.get::<_, i64>(3)? != 0,
-        sealed: row.get::<_, i64>(4)? != 0,
-        t: row.get::<_, i64>(5)? as u64,
+        chat_id: row.get::<_, String>(0)?,
+        sender: row.get::<_, String>(1)?,
+        text: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        sealed: row.get::<_, i64>(3)? != 0,
+        t: row.get::<_, i64>(4)? as u64,
     })
+}
+
+fn new_msg_id() -> String {
+    let mut buf = [0u8; 16];
+    for b in buf.iter_mut() {
+        *b = rand::random();
+    }
+    let hex: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+    format!("m_{hex}")
 }
 
 #[cfg(test)]
@@ -127,24 +151,23 @@ mod tests {
 
     #[test]
     fn insert_load_roundtrip_and_page() {
-        // 内存库，无文件
         let conn = Connection::open_in_memory().unwrap();
         init(&conn).unwrap();
 
         let a = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-        insert(&conn, &MsgRow { chat_id: "c".into(), sender: "s".into(), text: "hi".into(), outgoing: true, sealed: false, t: a }).unwrap();
-        insert(&conn, &MsgRow { chat_id: "c".into(), sender: "p".into(), text: "yo".into(), outgoing: false, sealed: false, t: a + 1 }).unwrap();
-        insert(&conn, &MsgRow { chat_id: "c".into(), sender: "s".into(), text: "hey".into(), outgoing: true, sealed: true, t: a + 2 }).unwrap();
+        insert(&conn, &MsgRow { chat_id: "c".into(), sender: "s".into(), text: "hi".into(), sealed: false, t: a }).unwrap();
+        insert(&conn, &MsgRow { chat_id: "c".into(), sender: "p".into(), text: "yo".into(), sealed: false, t: a + 1 }).unwrap();
+        insert(&conn, &MsgRow { chat_id: "c".into(), sender: "s".into(), text: "hey".into(), sealed: true, t: a + 2 }).unwrap();
 
         assert_eq!(count(&conn, "c").unwrap(), 3);
 
         let all = load_all(&conn, "c").unwrap();
         assert_eq!(all.len(), 3);
-        // 新→旧
         assert_eq!(all[0].text, "hey");
         assert_eq!(all[2].text, "hi");
         assert_eq!(all[0].sealed, true);
-        assert_eq!(all[1].outgoing, false);
+        assert_eq!(all[0].sender, "s");
+        assert_eq!(all[1].sender, "p");
 
         let page = load_page(&conn, "c", 2, 0).unwrap();
         assert_eq!(page.len(), 2);
@@ -154,5 +177,39 @@ mod tests {
         let removed = delete_before(&conn, "c", a + 2).unwrap();
         assert_eq!(removed, 2);
         assert_eq!(count(&conn, "c").unwrap(), 1);
+    }
+
+    #[test]
+    fn baseline_tables_are_created_and_rerun_is_a_noop() {
+        let conn = Connection::open_in_memory().unwrap();
+        let first = init_and_captured(&conn).unwrap();
+        assert!(!first.is_empty(), "首跑应该应用至少一条迁移");
+
+        let second = init_and_captured(&conn).unwrap();
+        assert!(second.is_empty(), "重跑不应再应用任何迁移，got: {second:?}");
+
+        let tables: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0)).unwrap()
+                .collect::<std::result::Result<_,_>>().unwrap()
+        };
+        for want in [
+            "users","devices","friendships","friend_requests","follows",
+            "conversations","messages","groups","group_members","group_message_reads",
+            "settings","plugins","social_posts","social_likes","social_comments",
+            "offline_messages","push_tokens","sync_sequences","schema_migrations",
+        ] {
+            assert!(tables.iter().any(|t| t == want), "missing table: {want} (have: {tables:?})");
+        }
+    }
+
+    fn init_and_captured(conn: &Connection) -> anyhow::Result<Vec<u32>> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version    INTEGER PRIMARY KEY,
+                applied_at TEXT    NOT NULL
+            );",
+        )?;
+        apply_migrations(conn)
     }
 }
