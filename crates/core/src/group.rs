@@ -189,6 +189,19 @@ impl GroupPayload {
 }
 
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupWire {
+    pub env: SealedGroupMsg,
+}
+
+pub fn msg_wire(env: &SealedGroupMsg) -> anyhow::Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&GroupWire { env: env.clone() })?)
+}
+
+pub fn parse_group_wire(wire: &[u8]) -> Result<GroupWire, AcctError> {
+    serde_json::from_slice(wire).map_err(|e| AcctError::Crypto(format!("group wire: {e}")))
+}
+
 pub fn seal_secret(
     sender: &Account,
     their_e2e_public: &str,

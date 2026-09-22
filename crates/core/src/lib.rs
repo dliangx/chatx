@@ -666,6 +666,10 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
                     });
                 }
                 self.save_group(&g)?;
+                let _ = self
+                    .running
+                    .cmd_tx
+                    .send(Cmd::GroupSubscribe { group_id: group_id.clone() });
                 Ok(Some(InboundGroup::Key { group_id }))
             }
             message::MsgKind::GroupMsg => {
@@ -706,16 +710,32 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         for m in members {
             g.set_member(m);
         }
-        g.save(&self.account, &self.groups_dir.join(format!("{group_id}.json")))?;
-        self.groups.write().insert(group_id, g.clone());
+        self.save_group(&g)?;
+        if let Err(e) = self
+            .running
+            .cmd_tx
+            .send(Cmd::GroupSubscribe { group_id: group_id.clone() })
+        {
+            tracing::warn!("GroupSubscribe cmd failed: {e}");
+        }
         Ok(g)
     }
 
     pub fn add_member(&self, group_id: &str, info: MemberInfo) -> anyhow::Result<()> {
         let mut g = self.groups.write().get_mut(group_id).cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
-        g.set_member(info);
+        g.set_member(info.clone());
         self.save_group(&g)?;
+        self
+            .running
+            .cmd_tx
+            .send(Cmd::GroupSubscribe { group_id: group_id.into() })
+            .map_err(|e| anyhow::anyhow!("GroupSubscribe cmd failed: {e}"))?;
+        // The new member must receive the group secret: redistribute the key
+        // (sealed per-peer) so the added member can decrypt future group messages.
+        if !info.peer_id.is_empty() && info.peer_id != self.peer_base58() {
+            self.publish_group_key(group_id)?;
+        }
         Ok(())
     }
 
@@ -724,7 +744,36 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
         g.rotate();
         self.save_group(&g)?;
+        self.publish_group_key(group_id)?;
         Ok(g)
+    }
+
+    pub fn leave_group(&self, group_id: &str) -> anyhow::Result<()> {
+        if !self.groups.read().contains_key(group_id) {
+            anyhow::bail!("unknown group {group_id}");
+        }
+        let _ = self
+            .running
+            .cmd_tx
+            .send(Cmd::GroupUnsubscribe { group_id: group_id.into() });
+        self.groups.write().remove(group_id);
+        let _ = std::fs::remove_file(self.groups_dir.join(format!("{group_id}.json")));
+        Ok(())
+    }
+
+    /// Subscribes the local swarm to the group's gossipsub topic.
+    ///
+    /// This is the first step after learning a group_id out-of-band: it opens the
+    /// pub/sub stream for that group so the owner's key publication can be
+    /// received. The caller must subsequently call `drain_inbound` until
+    /// `InboundGroup::Key` for this group arrives, at which point the local
+    /// `Group` record exists and `send_group_message` will work.
+    pub fn join_group(&self, group_id: &str) -> anyhow::Result<()> {
+        let _ = self
+            .running
+            .cmd_tx
+            .send(Cmd::GroupSubscribe { group_id: group_id.into() });
+        Ok(())
     }
 
     pub fn get_group(&self, group_id: &str) -> Option<group::Group> {
@@ -780,14 +829,6 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         Ok(())
     }
 
-    fn resolve_peer_addr(&self, peer_id: &str) -> Option<(PeerId, Multiaddr)> {
-        let rec = self.dir.resolve_device(peer_id).ok()?;
-        let endpoint = rec.endpoints.first()?.clone();
-        let pid = peer_id.parse::<PeerId>().ok()?;
-        let addr = endpoint.parse::<Multiaddr>().ok()?;
-        Some((pid, addr))
-    }
-
     pub fn announce_group(&self, group_id: &str) -> anyhow::Result<group::GroupPublic> {
         let g = self
             .get_group(group_id)
@@ -797,6 +838,9 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         Ok(pubinfo)
     }
 
+    /// Sends the group's current secret to every other member over the
+    /// request/response channel (one sealed bundle per member). The receiver
+    /// handles it in `apply_inbound` under `MsgKind::GroupKey`.
     pub fn publish_group_key(&self, group_id: &str) -> anyhow::Result<usize> {
         let g = self
             .get_group(group_id)
@@ -809,64 +853,56 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             if peer == me {
                 continue;
             }
-            let their = match g.member(&peer) {
+            let their_e2e = match g.member(&peer) {
                 Some(mi) => mi.e2e_public.clone(),
                 None => continue,
             };
-            let bundle = group::seal_secret(self.account(), &their, &secret)
-                .map_err(|e| anyhow::anyhow!("seal secret: {e}"))?;
-            let wire = crate::account::b64(&bundle);
-            if let Some((pid, addr)) = self.resolve_peer_addr(&peer) {
-                let _ = self.running.cmd_tx.send(Cmd::Connect { peer: pid.clone(), addr });
-                let ok = self.running.cmd_tx.send(Cmd::SendGroup {
+            let bundle = group::seal_secret(self.account(), &their_e2e, &secret)
+                .map_err(|e| anyhow::anyhow!("seal key: {e}"))?;
+            let sealed = crate::account::b64(&bundle);
+            let pid = match peer.parse::<PeerId>() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            // Best-effort dial: pull endpoint from directory if available,
+            // but skip the addr requirement when the peer is already a local
+            // neighbour (request/response works over any established stream).
+            if let Ok(rec) = self.dir.resolve_device(&peer) {
+                if let Some(endpoint) = rec.endpoints.first() {
+                    if let Ok(addr) = endpoint.parse::<Multiaddr>() {
+                        let _ = self.running.cmd_tx.send(Cmd::Connect { peer: pid.clone(), addr });
+                    }
+                }
+            }
+            if self
+                .running
+                .cmd_tx
+                .send(Cmd::GroupKeyDirect {
                     peer: pid,
                     from: me.clone(),
                     e2e: my_e2e.clone(),
-                    kind: crate::message::MsgKind::GroupKey,
                     group_id: group_id.into(),
-                    sealed: wire,
+                    sealed,
                 })
-                .is_ok();
-                if ok {
-                    sent += 1;
-                }
+                .is_ok()
+            {
+                sent += 1;
             }
         }
         Ok(sent)
     }
 
-    pub fn send_group_message(&self, group_id: &str, text: &str) -> anyhow::Result<usize> {
+    pub fn send_group_message(&self, group_id: &str, text: &str) -> anyhow::Result<()> {
         let env = self.seal_group_message(group_id, text)?;
-        let me = self.peer_base58();
-        let my_e2e = self.e2e_public().to_string();
-        let wire = crate::account::b64(&serde_json::to_vec(&env)?);
-        let g = self
-            .get_group(group_id)
-            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
-        let mut sent = 0;
-        for peer in g.member_ids() {
-            if peer == me {
-                continue;
-            }
-            if let Some((pid, addr)) = self.resolve_peer_addr(&peer) {
-                let _ = self.running.cmd_tx.send(Cmd::Connect { peer: pid.clone(), addr });
-                let ok = self.running.cmd_tx
-                    .send(Cmd::SendGroup {
-                        peer: pid,
-                        from: me.clone(),
-                        e2e: my_e2e.clone(),
-                        kind: crate::message::MsgKind::GroupMsg,
-                        group_id: group_id.into(),
-                        sealed: wire.clone(),
-                    })
-                    .is_ok();
-                if ok {
-                    sent += 1;
-                }
-            }
-        }
+        let wire = group::msg_wire(&env)?;
+        let topic = sw::IdentTopic::new(sw::group_topic_name(group_id));
+        self
+            .running
+            .cmd_tx
+            .send(Cmd::GroupPublish { topic, data: wire })
+            .map_err(|e| anyhow::anyhow!("publish group msg: {e}"))?;
         self.store_group_outbound(&env)?;
-        Ok(sent)
+        Ok(())
     }
 
     fn save_group(&self, g: &group::Group) -> anyhow::Result<()> {
@@ -878,27 +914,67 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
     pub fn drain_inbound(&mut self) -> Vec<String> {
         let mut out = Vec::new();
         while let Ok(evt) = self.events.try_recv() {
-            if let sw::ChatEvent::Text { peer, req } = evt {
-                let peer_b58 = peer.to_base58();
-                match req.kind {
-                    message::MsgKind::Dm => {
-                        let text = req.text.clone().unwrap_or_default();
-                        let chat = store::dm_chat_id(&self.peer_base58(), &peer_b58);
-                        self.store.push(&chat, &peer_b58, &text, req.sealed.is_some());
-                        out.push(chat);
-                    }
-                    _ => {
-                        if let Ok(Some(r)) = self.apply_inbound(&req) {
-                            let gid = match r {
-                                InboundGroup::Key { group_id } => group_id,
-                                InboundGroup::Message { group_id, .. } => group_id,
-                            };
-                            out.push(gid);
+            match evt {
+                sw::ChatEvent::Text { peer, req } => {
+                    let peer_b58 = peer.to_base58();
+                    match req.kind {
+                        message::MsgKind::Dm => {
+                            let text = req.text.clone().unwrap_or_default();
+                            let chat = store::dm_chat_id(&self.peer_base58(), &peer_b58);
+                            self.store.push(&chat, &peer_b58, &text, req.sealed.is_some());
+                            out.push(chat);
+                        }
+                        _ => {
+                            if let Ok(Some(r)) = self.apply_inbound(&req) {
+                                let gid = match r {
+                                    InboundGroup::Key { group_id } => group_id,
+                                    InboundGroup::Message { group_id, .. } => group_id,
+                                };
+                                out.push(gid);
+                            }
                         }
                     }
                 }
+                sw::ChatEvent::GroupPacket { topic, from, data } => {
+                    let Some(group_id) = sw::topic_to_group_id(&topic) else {
+                        continue;
+                    };
+                    if from.to_base58() == self.peer_base58() {
+                        continue;
+                    }
+                    if !self.group_member(&group_id) {
+                        continue;
+                    }
+                    let wire = match group::parse_group_wire(&data) {
+                        Ok(w) => w,
+                        Err(e) => {
+                            tracing::warn!("parse group wire for {group_id}: {e}");
+                            continue;
+                        }
+                    };
+                    if wire.env.group_id != group_id {
+                        continue;
+                    }
+                    match self.open_group_message(&group_id, &wire.env) {
+                        Ok(_text) => {
+                            let _ = self.store_group_inbound(&wire.env);
+                            out.push(group_id);
+                        }
+                        Err(e) => tracing::warn!("open group msg {group_id}: {e}"),
+                    }
+                }
+                _ => {}
             }
         }
         out
     }
+
+    fn group_member(&self, group_id: &str) -> bool {
+        let guard = self.groups.read();
+        guard
+            .get(group_id)
+            .map(|g| g.has(&self.peer_base58()))
+            .unwrap_or(false)
+    }
+
 }

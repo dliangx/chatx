@@ -1,6 +1,7 @@
 use crate::identity::DeviceIdentity;
 use crate::message::{ChatRequest, ChatResponse};
 use anyhow::Result;
+pub use libp2p::gossipsub::IdentTopic;
 use libp2p::futures::StreamExt as _;
 use libp2p::mdns::tokio::Behaviour as Mdns;
 use libp2p::mdns::{Config as MdnsConfig, Event as MdnsEvent};
@@ -16,11 +17,21 @@ use tokio::sync::mpsc;
 
 pub const TEXT_PROTOCOL: StreamProtocol = StreamProtocol::new("/p2pchat/text/1");
 
+pub fn group_topic_name(group_id: &str) -> String {
+    format!("/p2pchat/group/{}", group_id)
+}
+
+pub fn topic_to_group_id(topic: &str) -> Option<String> {
+    let prefix = "/p2pchat/group/";
+    topic.strip_prefix(prefix).map(|s| s.to_string()).filter(|s| !s.is_empty())
+}
+
 #[derive(NetworkBehaviour)]
 #[behaviour(prelude = "libp2p::swarm::derive_prelude")]
 pub struct Net {
     pub mdns: Mdns,
     pub chat: Chat<ChatRequest, ChatResponse>,
+    pub group: libp2p::gossipsub::Behaviour,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +55,19 @@ pub enum ChatEvent {
     Connected(PeerId),
     Disconnected(PeerId),
     Listening(Multiaddr),
+    GroupPacket {
+        topic: String,
+        from: PeerId,
+        data: Vec<u8>,
+    },
+    GroupPeerSubscribed {
+        peer: PeerId,
+        topic: String,
+    },
+    GroupPeerUnsubscribed {
+        peer: PeerId,
+        topic: String,
+    },
 }
 
 pub enum Cmd {
@@ -57,13 +81,22 @@ pub enum Cmd {
         e2e: String,
         text: String,
     },
-    SendGroup {
+    GroupKeyDirect {
         peer: PeerId,
         from: String,
         e2e: String,
-        kind: crate::message::MsgKind,
         group_id: String,
         sealed: String,
+    },
+    GroupSubscribe {
+        group_id: String,
+    },
+    GroupUnsubscribe {
+        group_id: String,
+    },
+    GroupPublish {
+        topic: IdentTopic,
+        data: Vec<u8>,
     },
 }
 
@@ -80,10 +113,22 @@ pub async fn boot(
     device: &DeviceIdentity,
 ) -> Result<(Arc<Running>, mpsc::UnboundedReceiver<ChatEvent>)> {
     let my_peer = device.peer_id();
+    let gossip_cfg = libp2p::gossipsub::ConfigBuilder::default()
+        .allow_self_origin(true)
+        .build()
+        .map_err(|e| anyhow::anyhow!("gossipsub config: {e}"))?;
     let mdns = Mdns::new(MdnsConfig::default(), my_peer)?;
     let chat: Chat<ChatRequest, ChatResponse> =
         Chat::new([(TEXT_PROTOCOL, ProtocolSupport::Full)], RrConfig::default());
-    let net = Net { mdns, chat };
+    let net = Net {
+        mdns,
+        chat,
+        group: libp2p::gossipsub::Behaviour::new(
+            libp2p::gossipsub::MessageAuthenticity::Signed(device.keypair()),
+            gossip_cfg,
+        )
+        .map_err(|e| anyhow::anyhow!("gossipsub init: {e}"))?,
+    };
 
     let mut swarm = SwarmBuilder::with_existing_identity(device.keypair())
         .with_tokio()
@@ -148,11 +193,10 @@ async fn swarm_loop(
                     };
                     let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
                 }
-                Some(Cmd::SendGroup {
+                Some(Cmd::GroupKeyDirect {
                     peer,
                     from,
                     e2e,
-                    kind,
                     group_id,
                     sealed,
                 }) => {
@@ -163,10 +207,21 @@ async fn swarm_loop(
                         e2e,
                         text: None,
                         sealed: Some(sealed),
-                        kind,
+                        kind: crate::message::MsgKind::GroupKey,
                         group_id: Some(group_id),
                     };
                     let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
+                }
+                Some(Cmd::GroupSubscribe { group_id }) => {
+                    let t = IdentTopic::new(group_topic_name(&group_id));
+                    let _ = swarm.behaviour_mut().group.subscribe(&t);
+                }
+                Some(Cmd::GroupUnsubscribe { group_id }) => {
+                    let t = IdentTopic::new(group_topic_name(&group_id));
+                    swarm.behaviour_mut().group.unsubscribe(&t);
+                }
+                Some(Cmd::GroupPublish { topic, data }) => {
+                    let _ = swarm.behaviour_mut().group.publish(topic, data);
                 }
                 None => return,
             },
@@ -181,7 +236,9 @@ async fn swarm_loop(
                 SwarmEvent::ConnectionClosed { peer_id, .. } => {
                     let _ = ev.send(ChatEvent::Disconnected(peer_id));
                 }
-                SwarmEvent::Behaviour(inner) => match inner {
+                SwarmEvent::Behaviour(inner) => {
+                    let me = *swarm.local_peer_id();
+                    match inner {
                     NetEvent::Mdns(m) => {
                         if let MdnsEvent::Discovered(ips) = m {
                             for (p, addr) in ips {
@@ -224,6 +281,33 @@ async fn swarm_loop(
                         }
                         _ => {}
                     },
+                    NetEvent::Group(g) => match g {
+                        libp2p::gossipsub::Event::Message { message, .. } => {
+                            let topic = message.topic.into_string();
+                            let from = message
+                                .source
+                                .unwrap_or(me);
+                            let _ = ev.send(ChatEvent::GroupPacket {
+                                topic,
+                                from,
+                                data: message.data,
+                            });
+                        }
+                        libp2p::gossipsub::Event::Subscribed { peer_id, topic } => {
+                            let _ = ev.send(ChatEvent::GroupPeerSubscribed {
+                                peer: peer_id,
+                                topic: topic.into_string(),
+                            });
+                        }
+                        libp2p::gossipsub::Event::Unsubscribed { peer_id, topic } => {
+                            let _ = ev.send(ChatEvent::GroupPeerUnsubscribed {
+                                peer: peer_id,
+                                topic: topic.into_string(),
+                            });
+                        }
+                        _ => {}
+                    },
+                    };
                 },
                 _ => {}
             }

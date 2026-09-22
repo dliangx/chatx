@@ -385,3 +385,198 @@ async fn client_group_flow() {
     let _ = c1;
     let _ = c2;
 }
+
+async fn peer_addr(
+    c: &Client<InMemoryDirectory>,
+) -> (libp2p::PeerId, libp2p::Multiaddr) {
+    for _ in 0..100 {
+        if let Some(addr) = c
+            .endpoints()
+            .into_iter()
+            .find(|a| a.starts_with("/ip4/"))
+        {
+            return (
+                c.peer_id(),
+                addr.parse().expect("addr should parse"),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("client should have at least one ip4 listen addr; got {:?}", c.endpoints())
+}
+
+#[tokio::test(start_paused = false)]
+async fn group_messages_flow_over_gossipsub() {
+    let base = TmpBase::new("gossipsub");
+    let (dir_a, dir_b) = InMemoryDirectory::pair();
+
+    let (alice, _) = Client::bootstrap_in(base.path(), "fa", "alice", "p", dir_a.clone())
+        .await
+        .expect("bootstrap alice");
+
+    let (mut bob, _) = Client::bootstrap_in(base.path(), "fb", "bob", "p", dir_b.clone())
+        .await
+        .expect("bootstrap bob");
+
+    let gid = "gossipsub-team";
+    alice
+        .create_group(
+            gid,
+            vec![MemberInfo {
+                peer_id: bob.peer_base58(),
+                sign_pk: bob.my_sign_pk().to_string(),
+                e2e_public: bob.e2e_public().to_string(),
+            }],
+        )
+        .expect("create group");
+    alice.announce_group(gid).expect("announce");
+
+    // Connect the two peers
+    let (bob_peer, bob_addr) = peer_addr(&bob).await;
+    alice
+        .running()
+        .cmd_tx
+        .send(chatx_core::swarm::Cmd::Connect { peer: bob_peer, addr: bob_addr })
+        .expect("connect cmd");
+
+    // Give the swarm a moment to establish the gossipsub substream.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Bob subscribes to the group topic so he can receive the key packet.
+    bob.join_group(gid).expect("bob joins topic");
+
+    // Now distribute the group key to bob (one sealed bundle per member,
+    // each individually E2E-sealed under the member's own account key).
+    alice.publish_group_key(gid).expect("publish key to bob");
+
+    // Poll drain_inbound until bob receives the key.
+    for _ in 0..200 {
+        let touched = bob.drain_inbound();
+        if touched.iter().any(|g| g == gid) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let bob_g = bob.get_group(gid).expect("bob should have the group after key pub");
+    let alice_secret = alice.get_group(gid).expect("alice should have the group").secret();
+    assert_eq!(bob_g.secret(), alice_secret, "bob must have the same secret after key delivery");
+    assert!(bob_g.has(&bob.peer_base58()), "bob is member of own group");
+    assert!(bob_g.has(&alice.peer_base58()), "owner is member of group");
+
+    // Now send a group message from alice to bob via gossipsub.
+    alice.send_group_message(gid, "hi over gossipsub").expect("send group msg");
+
+    let bob_seen = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let b = &mut bob;
+        loop {
+            let touched = b.drain_inbound();
+            if touched.iter().any(|g| g == gid) {
+                // Pull the stored message
+                let all = b.store().all();
+                if let Some(msg) = all.iter().find(|m| m.chat_id == gid && m.sender == alice.peer_base58()) {
+                    return msg.text.clone();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("bob should receive the group message over gossipsub");
+
+    // The stored text is the sealed envelope (base64) — decrypt via open_group_message
+    // and verify it round-trips back to the original plaintext.
+    let secret = alice.get_group(gid).unwrap().secret();
+    use base64::Engine;
+    let env_bytes = base64::engine::general_purpose::STANDARD.decode(&bob_seen).expect("b64");
+    let env: chatx_core::group::SealedGroupMsg = serde_json::from_slice(&env_bytes).expect("env");
+    assert_eq!(
+        chatx_core::group::open_message(&secret, &env).unwrap(),
+        "hi over gossipsub"
+    );
+}
+
+#[tokio::test(start_paused = false)]
+async fn add_member_receives_group_key() {
+    let base = TmpBase::new("addmem");
+    let (dir_a, dir_b) = InMemoryDirectory::pair();
+
+    let (mut alice, _) = Client::bootstrap_in(base.path(), "am-a", "alice", "p", dir_a.clone())
+        .await
+        .expect("bootstrap alice");
+    let (mut bob, _) = Client::bootstrap_in(base.path(), "am-b", "bob", "p", dir_b.clone())
+        .await
+        .expect("bootstrap bob");
+
+    let gid = "addmem-team";
+    // alice creates the group WITHOUT bob; bob has no key at this point.
+    alice.create_group(gid, Vec::new()).expect("create group (no members)");
+    alice.announce_group(gid).expect("announce");
+
+    let (bob_peer, bob_addr) = peer_addr(&bob).await;
+    alice
+        .running()
+        .cmd_tx
+        .send(chatx_core::swarm::Cmd::Connect { peer: bob_peer, addr: bob_addr })
+        .expect("connect cmd");
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    // Adding bob to the group must redistribute the secret to bob.
+    alice
+        .add_member(
+            gid,
+            MemberInfo {
+                peer_id: bob.peer_base58(),
+                sign_pk: bob.my_sign_pk().to_string(),
+                e2e_public: bob.e2e_public().to_string(),
+            },
+        )
+        .expect("add bob as member (triggers key redistribution)");
+
+    // Poll (draining inbound events) until bob has the group with a matching secret.
+    for _ in 0..200 {
+        let _ = bob.drain_inbound();
+        if bob
+            .get_group(gid)
+            .map(|g| g.secret() == alice.get_group(gid).unwrap().secret())
+            .unwrap_or(false)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let bob_g = bob.get_group(gid).expect("bob should have the group after add_member");
+    assert!(bob_g.has(&bob.peer_base58()), "bob is a member");
+    assert_eq!(
+        bob_g.secret(),
+        alice.get_group(gid).unwrap().secret(),
+        "bob's secret must match alice's after add_member"
+    );
+
+    // Bob can now send a group message that alice (already a member) receives.
+    bob.send_group_message(gid, "bob joined via add_member").expect("bob sends");
+    for _ in 0..200 {
+        let _ = alice.drain_inbound();
+        if alice
+            .store()
+            .all()
+            .iter()
+            .any(|m| m.chat_id == gid && m.sender == bob.peer_base58())
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let all = alice.store().all();
+    let stored = all
+        .iter()
+        .find(|m| m.chat_id == gid && m.sender == bob.peer_base58())
+        .expect("alice should have stored bob's group message");
+    let secret = alice.get_group(gid).unwrap().secret();
+    use base64::Engine;
+    let env_bytes = base64::engine::general_purpose::STANDARD.decode(&stored.text).unwrap();
+    let env: chatx_core::group::SealedGroupMsg = serde_json::from_slice(&env_bytes).unwrap();
+    assert_eq!(
+        chatx_core::group::open_message(&secret, &env).unwrap(),
+        "bob joined via add_member"
+    );
+}
