@@ -1,5 +1,5 @@
-import { Theme } from "../theme.slint";
 import { Icon, Glyph } from "./icon.slint";
+import { Theme } from "../theme.slint";
 
 // 小红书风格卡片：封面图在上（3:4），下方依次是标题、作者、点赞。
 // 宽度由父级通过 width 指定；高度随内容自适应。
@@ -11,6 +11,7 @@ export component CardView inherits Rectangle {
     in property <bool> is-liked;
     in property <int> likes;
     callback clicked(int);
+    callback like-toggled();
 
     out property <length> cover-h: root.width * 4 / 3;
     // 内容总高 = 封面 + 标题 + 作者/点赞行 + 底部留白
@@ -99,5 +100,14 @@ export component CardView inherits Rectangle {
         width: 100%;
         height: 100%;
         clicked => { root.clicked(root.id); }
+    }
+
+    // 点赞热区：覆盖心形与点赞数；声明在最后(最上层)，优先命中、只切换点赞不跳转
+    TouchArea {
+        x: root.width - 110px;
+        y: root.cover-h + 52px;
+        width: 100px;
+        height: 24px;
+        clicked => { root.like-toggled(); }
     }
 }

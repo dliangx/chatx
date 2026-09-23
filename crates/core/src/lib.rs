@@ -52,10 +52,8 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
     ) -> anyhow::Result<Self> {
         let (running, events) = sw::boot(&device).await?;
         let db_path = base.join(profile).join("messages.db");
-        let db = sqlite::open(&db_path)?;
-        let store = Arc::new(Store::with_sql(std::sync::Arc::new(
-            parking_lot::Mutex::new(db),
-        ))?);
+        let db = sqlite::open(&db_path).await?;
+        let store = Arc::new(Store::with_sql(db));
 
         let groups_dir = DeviceIdentity::base_groups_dir(base, profile);
         let mut groups = BTreeMap::new();
@@ -583,7 +581,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         Ok(())
     }
 
-    pub fn send_dm(&self, peer_base58: &str, text: &str) -> anyhow::Result<String> {
+    pub async fn send_dm(&self, peer_base58: &str, text: &str) -> anyhow::Result<String> {
         let rec = self
             .dir
             .resolve_device(peer_base58)
@@ -602,7 +600,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         self.running.cmd_tx.send(Cmd::Connect { peer: peer.clone(), addr })?;
         self.send_text(peer, text)?;
         let chat = store::dm_chat_id(&self.peer_base58(), peer_base58);
-        self.store.push(&chat, &self.peer_base58(), text, false);
+        self.store.push(&chat, &self.peer_base58(), text, false).await;
         Ok(chat)
     }
 
@@ -610,8 +608,8 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         self.store.all()
     }
 
-    pub fn history(&self, chat_id: &str, limit: usize, offset: usize) -> anyhow::Result<Vec<store::StoredMsg>> {
-        self.store.load(chat_id, limit, offset)
+    pub async fn history(&self, chat_id: &str, limit: usize, offset: usize) -> anyhow::Result<Vec<store::StoredMsg>> {
+        self.store.load(chat_id, limit, offset).await
     }
 
     pub fn shared_key(&self, their_e2e_public: &str) -> anyhow::Result<[u8; 32]> {
@@ -626,14 +624,14 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         self.events.recv().await
     }
 
-    pub fn process_inbound(&self, evt: &sw::ChatEvent) -> anyhow::Result<Option<InboundGroup>> {
+    pub async fn process_inbound(&self, evt: &sw::ChatEvent) -> anyhow::Result<Option<InboundGroup>> {
         match evt {
-            sw::ChatEvent::Text { req, .. } => self.apply_inbound(req),
+            sw::ChatEvent::Text { req, .. } => self.apply_inbound(req).await,
             _ => Ok(None),
         }
     }
 
-    pub fn apply_inbound(&self, req: &message::ChatRequest) -> anyhow::Result<Option<InboundGroup>> {
+    pub async fn apply_inbound(&self, req: &message::ChatRequest) -> anyhow::Result<Option<InboundGroup>> {
         match req.kind {
             message::MsgKind::Dm => Ok(None),
             message::MsgKind::GroupKey => {
@@ -686,7 +684,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
                     serde_json::from_slice(&wire).map_err(|e| anyhow::anyhow!("group msg: {e}"))?;
                 let from = env.from.clone();
                 let text = self.open_group_message(&group_id, &env)?;
-                self.store_group_inbound(&env)?;
+                self.store_group_inbound(&env).await?;
                 Ok(Some(InboundGroup::Message { group_id, from, text }))
             }
         }
@@ -815,17 +813,17 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         group::open_message(&g.secret(), env).map_err(|e| anyhow::anyhow!("open group msg: {e}"))
     }
 
-    pub fn store_group_outbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
+    pub async fn store_group_outbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
         let wire = serde_json::to_string(env)?;
         let b64 = crate::account::b64(wire.as_bytes());
-        self.store.push(&env.group_id, &env.from, &b64, true);
+        self.store.push(&env.group_id, &env.from, &b64, true).await;
         Ok(())
     }
 
-    pub fn store_group_inbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
+    pub async fn store_group_inbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
         let wire = serde_json::to_string(env)?;
         let b64 = crate::account::b64(wire.as_bytes());
-        self.store.push(&env.group_id, &env.from, &b64, true);
+        self.store.push(&env.group_id, &env.from, &b64, true).await;
         Ok(())
     }
 
@@ -892,7 +890,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         Ok(sent)
     }
 
-    pub fn send_group_message(&self, group_id: &str, text: &str) -> anyhow::Result<()> {
+    pub async fn send_group_message(&self, group_id: &str, text: &str) -> anyhow::Result<()> {
         let env = self.seal_group_message(group_id, text)?;
         let wire = group::msg_wire(&env)?;
         let topic = sw::IdentTopic::new(sw::group_topic_name(group_id));
@@ -901,7 +899,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             .cmd_tx
             .send(Cmd::GroupPublish { topic, data: wire })
             .map_err(|e| anyhow::anyhow!("publish group msg: {e}"))?;
-        self.store_group_outbound(&env)?;
+        self.store_group_outbound(&env).await?;
         Ok(())
     }
 
@@ -911,7 +909,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         Ok(())
     }
 
-    pub fn drain_inbound(&mut self) -> Vec<String> {
+    pub async fn drain_inbound(&mut self) -> Vec<String> {
         let mut out = Vec::new();
         while let Ok(evt) = self.events.try_recv() {
             match evt {
@@ -921,11 +919,11 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
                         message::MsgKind::Dm => {
                             let text = req.text.clone().unwrap_or_default();
                             let chat = store::dm_chat_id(&self.peer_base58(), &peer_b58);
-                            self.store.push(&chat, &peer_b58, &text, req.sealed.is_some());
+                            self.store.push(&chat, &peer_b58, &text, req.sealed.is_some()).await;
                             out.push(chat);
                         }
                         _ => {
-                            if let Ok(Some(r)) = self.apply_inbound(&req) {
+                            if let Ok(Some(r)) = self.apply_inbound(&req).await {
                                 let gid = match r {
                                     InboundGroup::Key { group_id } => group_id,
                                     InboundGroup::Message { group_id, .. } => group_id,
@@ -957,7 +955,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
                     }
                     match self.open_group_message(&group_id, &wire.env) {
                         Ok(_text) => {
-                            let _ = self.store_group_inbound(&wire.env);
+                            let _ = self.store_group_inbound(&wire.env).await;
                             out.push(group_id);
                         }
                         Err(e) => tracing::warn!("open group msg {group_id}: {e}"),

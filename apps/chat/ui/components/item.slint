@@ -8,46 +8,52 @@ export component ChatListItem inherits Rectangle {
     in property <string> time;
     in property <string> content;
     callback clicked(int);
-    Image {
-        x: 0px;
-        y: 0px;
-        width: 48px;
-        height: 48px;
-        source: root.image;
-    }
 
-    Text {
-        x: 56px;
-        y: 6px;
-        width: parent.width - 56px - 80px;
-        height: 20px;
-        text: root.title;
-        font-size: 14px;
-        font-weight: 800;
-        color: Theme.fg;
-        overflow: elide;
-    }
+    background: transparent;
 
-    Text {
-        x: parent.width - 80px;
-        y: 6px;
-        width: 80px;
-        height: 20px;
-        text: root.time;
-        font-size: 12px;
-        horizontal-alignment: right;
-        color: Theme.fg-muted;
-    }
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 10px;
 
-    Text {
-        x: 56px;
-        y: 28px;
-        width: parent.width - 56px;
-        height: 20px;
-        text: root.content;
-        font-size: 12px;
-        color: Theme.fg-muted;
-        overflow: elide;
+        Image {
+            width: 40px;
+            height: 40px;
+            source: root.image;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+
+            Text {
+                width: 100%;
+                text: root.title;
+                font-size: 14px;
+                font-weight: 800;
+                color: Theme.fg;
+                overflow: elide;
+            }
+
+            Text {
+                width: 100%;
+                text: root.content;
+                font-size: 12px;
+                color: Theme.fg-muted;
+                overflow: elide;
+            }
+        }
+
+        Text {
+            width: 80px;
+            text: root.time;
+            font-size: 12px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            color: Theme.fg-muted;
+        }
     }
 
     TouchArea {
@@ -64,23 +70,28 @@ export component ContactListItem inherits Rectangle {
     in property <string> title;
     callback clicked();
 
-    Image {
-        x: 0px;
-        y: 0px;
-        width: 48px;
-        height: 48px;
-        source: root.image;
-    }
+    background: transparent;
 
-    Text {
-        x: 56px;
-        y: 0px;
-        width: parent.width - 56px;
-        height: parent.height;
-        text: root.title;
-        font-size: 14px;
-        font-weight: 800;
-        color: Theme.fg;
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 10px;
+
+        Image {
+            width: 40px;
+            height: 40px;
+            source: root.image;
+        }
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.title;
+            font-size: 14px;
+            font-weight: 800;
+            color: Theme.fg;
+        }
     }
 
     TouchArea {
@@ -144,6 +155,7 @@ export component SettingItem inherits Rectangle {
 export component PlantItem inherits Rectangle {
     in property <string> key;
     in property <string> value;
+    height: 48px;
 
     Text {
         x: 0px;

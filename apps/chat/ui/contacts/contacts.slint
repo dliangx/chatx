@@ -1,4 +1,3 @@
-import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { SubPageType } from "../components/nav_state.slint";
 import { ContactListItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
@@ -17,9 +16,13 @@ export component ContactListView inherits Rectangle {
     background: Theme.bg;
     callback navigate-to(SubPageType, int);
 
+    out property <length> row-h: 56px;
+    out property <length> viewport-h: root.rows.length * root.row-h;
+
     if root.rows.length == 0:
     Text {
         y: 180px;
+        width: parent.width;
         text: "暂无联系人，添加后会出现在这里";
         color: #9aa0b4;
         font-size: 14px;
@@ -27,22 +30,24 @@ export component ContactListView inherits Rectangle {
         wrap: word-wrap;
     }
 
-    ScrollView {
-        width: 100%;
+    Flickable {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        viewport-height: root.viewport-h;
+        interactive: true;
 
-        VerticalBox {
-            width: 100%;
-            spacing: 0px;
+        for row[i] in root.rows: ContactListItem {
+            x: 0px;
+            y: root.row-h * i;
+            width: parent.width;
+            height: root.row-h;
+            id: row.id;
+            peer_id: row.peer_id;
+            title: row.name;
 
-            for row[i] in root.rows: ContactListItem {
-                width: parent.width;
-                height: 56px;
-                id: row.id;
-                peer_id: row.peer_id;
-                title: row.name;
-
-                clicked => { root.navigate-to(SubPageType.ContactProfile, row.id); }
-            }
+            clicked => { root.navigate-to(SubPageType.ContactProfile, row.id); }
         }
     }
 }

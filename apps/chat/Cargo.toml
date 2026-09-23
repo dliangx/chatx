@@ -8,6 +8,8 @@ render = {path = "../../crates/render"}
 slint = {workspace = true}
 arboard = "3"
 chatx-core = { path = "../../crates/core" }
+sqlite = { path = "../../crates/sqlite" }
+sqlx = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 

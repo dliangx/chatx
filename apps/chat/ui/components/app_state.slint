@@ -4,6 +4,9 @@ import {
     SubPageEntry,
     GlobalOverlayType,
 } from "nav_state.slint";
+import { ConversationRow } from "../chats/chat_list.slint";
+import { ContactRow } from "../contacts/contacts.slint";
+import { DiscoverCard } from "../discovery/discover.slint";
 
 export global AppState {
     in-out property <NavigationState> nav-state: { active-tab:0, tabs: [], global-overlay: GlobalOverlayType.None };
@@ -17,4 +20,11 @@ export global AppState {
     in property <string> font;
     in property <int> font-size: 16;
     in property <string> theme: "light";
+
+    // ---- 数据模型（内存优先，启动时从 sqlite 载入，运行期读内存）----
+    in property <[ConversationRow]> chats: [];
+    in property <[ContactRow]> contacts: [];
+    in property <[DiscoverCard]> discover: [];
+    in property <string> data-status: "";
+    callback toggle-like(int);
 }

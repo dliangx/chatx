@@ -211,7 +211,7 @@ async fn member_receives_group_key_and_msg() {
         group_id: Some(GID.into()),
     };
 
-    let handled = bob_c.apply_inbound(&key_req).unwrap().expect("GroupKey should be handled");
+    let handled = bob_c.apply_inbound(&key_req).await.unwrap().expect("GroupKey should be handled");
     let bob_group = bob_c.get_group(GID).expect("bob should have a local group");
     assert_eq!(bob_group.secret(), secret0, "bob's local group secret must match the owner's");
     assert!(matches!(handled, chatx_core::InboundGroup::Key { .. }));
@@ -230,7 +230,7 @@ async fn member_receives_group_key_and_msg() {
         kind: chatx_core::message::MsgKind::GroupMsg,
         group_id: Some(GID.into()),
     };
-    let m = bob_c.apply_inbound(&req).unwrap().expect("GroupMsg should be handled");
+    let m = bob_c.apply_inbound(&req).await.unwrap().expect("GroupMsg should be handled");
     match m {
         chatx_core::InboundGroup::Message { text, from, .. } => {
             assert_eq!(text, "hi bob");
@@ -261,7 +261,7 @@ async fn member_receives_group_key_and_msg() {
         kind: chatx_core::message::MsgKind::GroupKey,
         group_id: Some(GID.into()),
     };
-    bob_c.apply_inbound(&key_req2).unwrap();
+    bob_c.apply_inbound(&key_req2).await.unwrap();
     let now_group = bob_c.get_group(GID).unwrap();
     assert_eq!(now_group.secret(), secret_new, "bob should have the new secret");
     assert_eq!(
@@ -342,8 +342,8 @@ async fn client_group_flow() {
     let env = c1b.seal_group_message(gid, "hello team").expect("seal msg");
     let text = chatx_core::group::open_message(&bob_secret, &env).expect("bob open msg");
     assert_eq!(text, "hello team");
-    c2.store_group_inbound(&env).expect("store inbound");
-    c1b.store_group_outbound(&env).expect("store outbound");
+    c2.store_group_inbound(&env).await.expect("store inbound");
+    c1b.store_group_outbound(&env).await.expect("store outbound");
 
     let mut bobg = chatx_core::group::Group::with_secret(gid, c2.peer_base58(), bob_secret);
     bobg.set_member(MemberInfo {
@@ -451,7 +451,7 @@ async fn group_messages_flow_over_gossipsub() {
 
     // Poll drain_inbound until bob receives the key.
     for _ in 0..200 {
-        let touched = bob.drain_inbound();
+        let touched = bob.drain_inbound().await;
         if touched.iter().any(|g| g == gid) {
             break;
         }
@@ -464,12 +464,12 @@ async fn group_messages_flow_over_gossipsub() {
     assert!(bob_g.has(&alice.peer_base58()), "owner is member of group");
 
     // Now send a group message from alice to bob via gossipsub.
-    alice.send_group_message(gid, "hi over gossipsub").expect("send group msg");
+    alice.send_group_message(gid, "hi over gossipsub").await.expect("send group msg");
 
     let bob_seen = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let b = &mut bob;
         loop {
-            let touched = b.drain_inbound();
+            let touched = b.drain_inbound().await;
             if touched.iter().any(|g| g == gid) {
                 // Pull the stored message
                 let all = b.store().all();
@@ -534,7 +534,7 @@ async fn add_member_receives_group_key() {
 
     // Poll (draining inbound events) until bob has the group with a matching secret.
     for _ in 0..200 {
-        let _ = bob.drain_inbound();
+        let _ = bob.drain_inbound().await;
         if bob
             .get_group(gid)
             .map(|g| g.secret() == alice.get_group(gid).unwrap().secret())
@@ -553,9 +553,9 @@ async fn add_member_receives_group_key() {
     );
 
     // Bob can now send a group message that alice (already a member) receives.
-    bob.send_group_message(gid, "bob joined via add_member").expect("bob sends");
+    bob.send_group_message(gid, "bob joined via add_member").await.expect("bob sends");
     for _ in 0..200 {
-        let _ = alice.drain_inbound();
+        let _ = alice.drain_inbound().await;
         if alice
             .store()
             .all()

@@ -1,6 +1,4 @@
 // 会话列表：1:1 会话 + 群，聚合自 Rust 侧。
-import { ScrollView, VerticalBox } from "std-widgets.slint";
-import { Vertical } from "../../material-1.0/material.slint";
 import { SubPageType } from "../components/nav_state.slint";
 import { ChatListItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
@@ -22,9 +20,13 @@ export component ChatListView inherits Rectangle {
     background: Theme.bg;
     callback navigate-to(SubPageType, int);
 
+    out property <length> row-h: 56px;
+    out property <length> viewport-h: root.rows.length * root.row-h;
+
     if root.status != "":
     Text {
-
+        y: 0px;
+        width: parent.width;
         height: 26px;
         text: root.status;
         color: #6b7280;
@@ -36,6 +38,7 @@ export component ChatListView inherits Rectangle {
     if root.rows.length == 0:
     Text {
         y: 180px;
+        width: parent.width;
         text: "暂无会话，发消息后会出现在这里";
         color: #9aa0b4;
         font-size: 14px;
@@ -43,21 +46,24 @@ export component ChatListView inherits Rectangle {
         wrap: word-wrap;
     }
 
-    ScrollView {
+    Flickable {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        viewport-height: root.viewport-h;
+        interactive: true;
 
-        VerticalBox {
-            width: 100%;
-            spacing: 0px;
-
-            for row[i] in root.rows: ChatListItem {
-                width: parent.width;
-                height: 56px;
-                id: row.chat-id;
-                title: row.title;
-                content: row.preview;
-                time: row.time-label;
-                clicked(id) => { root.navigate-to(SubPageType.ChatRoom, id); }
-            }
+        for row[i] in root.rows: ChatListItem {
+            x: 0px;
+            y: root.row-h * i;
+            width: parent.width;
+            height: root.row-h;
+            id: row.chat-id;
+            title: row.title;
+            content: row.preview;
+            time: row.time-label;
+            clicked(id) => { root.navigate-to(SubPageType.ChatRoom, id); }
         }
     }
 }

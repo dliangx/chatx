@@ -13,6 +13,7 @@ export struct DiscoverCard {
 export component DiscoverView inherits Rectangle {
     in property <[DiscoverCard]> cards: [];
     callback navigate-to(SubPageType, int);
+    callback like-toggled(int);
 
     width: 100%;
     height: 100%;
@@ -50,6 +51,7 @@ export component DiscoverView inherits Rectangle {
             likes: card.likes;
             id: card.id;
             clicked(id) => { root.navigate-to(SubPageType.DiscoverDetail, id); }
+            like-toggled => { root.like-toggled(card.id); }
         }
     }
 }

@@ -25,7 +25,7 @@ rand = { workspace = true }
 ureq = { workspace = true }
 tracing = { workspace = true }
 sqlite = { path = "../sqlite" }
-rusqlite = { workspace = true }
+sqlx = { workspace = true }
 crossbeam = "0.8"
 parking_lot = "0.12"
 
