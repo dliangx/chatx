@@ -5,11 +5,11 @@ members = [
     "apps/chat",
     "crates/*",
     "signaling",
-    "crates/api",
     "crates/camera",
     "crates/core",
     "crates/render",
-    "apps/bot"]
+    "apps/bot",
+]
 
 [workspace.package]
 version = "0.1.0"
