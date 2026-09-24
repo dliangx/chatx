@@ -3,6 +3,7 @@ import { ChatInputView } from "chat_input.slint";
 import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
 import { AppState } from "../components/app_state.slint";
+import { Header } from "../components/header.slint";
 
 export struct MessageData {
     bubble: image,
@@ -38,47 +39,9 @@ export component ChatView inherits Rectangle {
     out property <length> status-h: ChatState.send-status != "" ? 20px : 0px;
     out property <length> _bottom: root.status-h + root.input-h;
 
-    VerticalLayout {
-        width: 100%;
-
-        // 标题栏
-        Rectangle {
-            width: 100%;
-            height: 48px;
-            if AppState.is-mobile:
-            Icon {
-                x: 12px;
-                y: (parent.height - self.size) / 2;
-                size: 24px;
-                glyph: Glyph.left;
-                tint: Theme.fg;
-                TouchArea {
-                    width: 48px;
-                    height: 48px;
-                    clicked => { root.on-back(); }
-                }
-            }
-
-            Text {
-                x: 60px;
-                y: 0px;
-                width: parent.width - 120px;
-                height: 48px;
-                text: "message";
-                font-size: 16px;
-                font-weight: 600;
-                color: Theme.fg;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-
-        // 占位分隔线
-        Rectangle {
-            width: 100%;
-            height: 1px;
-            background: Theme.border;
-        }
+    Header {
+        name: "chat";
+        on-back => { root.on-back() }
     }
 
     ChatInputView {

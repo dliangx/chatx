@@ -1,0 +1,48 @@
+import { Icon, Glyph } from "../components/icon.slint";
+import { Theme } from "../theme.slint";
+import { AppState } from "../components/app_state.slint";
+
+export component Header inherits VerticalLayout {
+    callback on-back();
+    in property <string> name;
+    width: 100%;
+
+    // 标题栏
+        Rectangle {
+        width: 100%;
+        height: 48px;
+        if AppState.is-mobile:
+            Icon {
+            x: 12px;
+            y: (parent.height - self.size) / 2;
+            size: 24px;
+            glyph: Glyph.left;
+            tint: Theme.fg;
+            TouchArea {
+                width: 48px;
+                height: 48px;
+                clicked => { root.on-back(); }
+            }
+        }
+
+        Text {
+            x: 60px;
+            y: 0px;
+            width: parent.width - 120px;
+            height: 48px;
+            text: root.name;
+            font-size: 16px;
+            font-weight: 600;
+            color: Theme.fg;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    // 占位分隔线
+        Rectangle {
+        width: 100%;
+        height: 1px;
+        background: Theme.border;
+    }
+}

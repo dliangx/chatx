@@ -1,3 +1,13 @@
+import { Icon, Glyph } from "../components/icon.slint";
+import { Theme } from "../theme.slint";
+import { AppState } from "../components/app_state.slint";
+import { Header } from "../components/header.slint";
+
 export component DiscoverDetailView inherits Rectangle {
     callback on-back();
+
+    Header {
+        name: "discover";
+        on-back => { root.on-back() }
+    }
 }
