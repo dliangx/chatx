@@ -1,9 +1,8 @@
-import {
-    ScrollView,
-    VerticalBox,
-    HorizontalBox,
-    Button,
-} from "std-widgets.slint";
+import { Button } from "std-widgets.slint";
+import { ChatInputView } from "chat_input.slint";
+import { Icon, Glyph } from "../components/icon.slint";
+import { Theme } from "../theme.slint";
+import { AppState } from "../components/app_state.slint";
 
 export struct MessageData {
     bubble: image,
@@ -14,58 +13,137 @@ export struct MessageData {
     selected: bool,
 }
 
+// 聊天会话状态：本页面私有。Rust 侧收到 opened(chat-id) 后按 chat-id 查询并填充 messages。
+export global ChatState {
+    in property <int> chat-key: -1;
+    in property <[MessageData]> messages: [];
+    in property <string> send-status: "";
+    callback message-sent(int, string);
+}
+
 export component ChatView inherits Rectangle {
     in property <int> chat-id;
-    in property <[MessageData]> messages;
     callback on-back();
     callback open-setting();
     callback press(int);
     callback release(int);
     callback copy-text(string);
-    preferred-height: 932px;
-    preferred-width: 440px;
-    background: #e5e5e5;
 
-    VerticalBox {
+    width: 100%;
+    height: 100%;
+    background: #f5f5f5;
 
-        ScrollView {
-            VerticalBox {
-                width: parent.width;
-                alignment: start;
-                padding: 0px;
+    out property <length> msg-row-h: 56px;
+    out property <length> input-h: 52px;
+    out property <length> status-h: ChatState.send-status != "" ? 20px : 0px;
+    out property <length> _bottom: root.status-h + root.input-h;
 
-                for msg[i] in messages: Rectangle {
-                    width: parent.width;
-                    height: msg.height + 24px;
+    VerticalLayout {
+        width: 100%;
 
-                    TouchArea {
-                        x: msg.is_self ? parent.width - msg.width - 6px : 6px;
-                        y: 4px;
-                        width: msg.width;
-                        height: msg.height;
-                        pointer-event(e) => {
-                            if (e.kind == PointerEventKind.down) {
-                                root.press(i);
-                            } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
-                                root.release(i);
-                            }
-                        }
-                        Image {
-                            source: msg.bubble;
-                            width: msg.width;
-                            height: msg.height;
-                        }
-                    }
+        // 标题栏
+        Rectangle {
+            width: 100%;
+            height: 48px;
+            if AppState.is-mobile:
+            Icon {
+                x: 12px;
+                y: (parent.height - self.size) / 2;
+                size: 24px;
+                glyph: Glyph.left;
+                tint: Theme.fg;
+                TouchArea {
+                    width: 48px;
+                    height: 48px;
+                    clicked => { root.on-back(); }
+                }
+            }
 
-                    if msg.selected: Button {
-                        text: "复制";
-                        x: msg.is_self ? parent.width - msg.width - 6px - 64px : 6px + msg.width + 8px;
-                        y: 4px;
-                        width: 56px;
-                        height: 28px;
-                        clicked => { root.copy-text(msg.text); }
+            Text {
+                x: 60px;
+                y: 0px;
+                width: parent.width - 120px;
+                height: 48px;
+                text: "message";
+                font-size: 16px;
+                font-weight: 600;
+                color: Theme.fg;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        // 占位分隔线
+        Rectangle {
+            width: 100%;
+            height: 1px;
+            background: Theme.border;
+        }
+    }
+
+    ChatInputView {
+        x: 0px;
+        y: parent.height - root.input-h;
+        width: parent.width;
+        height: root.input-h;
+        sent(t) => { ChatState.message-sent(root.chat-id, t); }
+    }
+
+    // 发送状态提示（位于输入区上方）
+    if ChatState.send-status != "":
+    Text {
+        x: 0px;
+        y: parent.height - root.input-h - 20px;
+        width: parent.width;
+        height: 20px;
+        text: ChatState.send-status;
+        color: #6b7280;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    // 消息列表
+    Flickable {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height - root._bottom;
+        viewport-height: 12px + ChatState.messages.length * root.msg-row-h;
+        interactive: ChatState.messages.length > 0;
+
+        for msg[i] in ChatState.messages: Rectangle {
+            x: 0px;
+            y: 12px + i * root.msg-row-h;
+            width: parent.width;
+            height: root.msg-row-h;
+
+            TouchArea {
+                x: msg.is-self ? parent.width - msg.width - 6px : 6px;
+                y: 4px;
+                width: msg.width;
+                height: msg.height;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) {
+                        root.press(i);
+                    } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                        root.release(i);
                     }
                 }
+                Image {
+                    source: msg.bubble;
+                    width: msg.width;
+                    height: msg.height;
+                }
+            }
+
+            if msg.selected: Button {
+                text: "复制";
+                x: msg.is-self ? parent.width - msg.width - 6px - 64px : 6px + msg.width + 8px;
+                y: 4px;
+                width: 56px;
+                height: 28px;
+                clicked => { root.copy-text(msg.text); }
             }
         }
     }

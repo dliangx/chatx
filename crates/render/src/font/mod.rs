@@ -58,6 +58,14 @@ impl FontManager {
         self.ltr_chain = chain.to_vec();
     }
 
+    pub fn ltr_chain(&self) -> &[FontId] {
+        &self.ltr_chain
+    }
+
+    pub fn rtl_chain(&self) -> &[FontId] {
+        &self.rtl_chain
+    }
+
     pub fn set_rtl_chain(&mut self, chain: &[FontId]) {
         self.rtl_chain = chain.to_vec();
     }

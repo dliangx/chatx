@@ -1,9 +1,12 @@
-use slint::SharedString;
+use slint::{Image as SlintImage, SharedPixelBuffer, SharedString};
 use std::cell::RefCell;
 use std::sync::Arc;
 
 use chatx_core::Client;
 use chatx_core::signal::HttpDirectory;
+use render::bubble::parse::parse_text;
+use render::bubble::{Bubble, GroupPos, Side};
+use render::Renderer;
 
 pub mod data;
 use data::ArcBackend;
@@ -17,6 +20,8 @@ thread_local! {
     static CLIENT: RefCell<Option<Arc<Client<Directory>>>> = RefCell::new(None);
     static POOL: RefCell<Option<Arc<sqlx::SqlitePool>>> = RefCell::new(None);
     static BACKEND: RefCell<Option<ArcBackend>> = RefCell::new(None);
+    static RENDERER: RefCell<Option<Renderer>> = RefCell::new(None);
+    static CHAT_LOADED: RefCell<std::collections::HashSet<i32>> = RefCell::new(std::collections::HashSet::new());
 }
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
@@ -49,8 +54,8 @@ pub fn main() {
     let state = ui.global::<AppState>();
     let weak = ui.as_weak();
     state.set_user_id(SharedString::from(""));
-    state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
-    // state.set_is_mobile(true);
+    // state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
+    state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
@@ -70,10 +75,14 @@ pub fn main() {
     }
     {
         let w = weak.clone();
+        let w2 = weak.clone();
         state.on_push_sub(move |page, payload| {
             if let Some(ui) = w.upgrade() {
                 let s = ui.global::<AppState>();
                 push_sub_history(&s, SubPageEntry { page, payload });
+            }
+            if page == SubPageType::ChatRoom {
+                load_chat_messages(w2.clone(), payload);
             }
         });
     }
@@ -155,6 +164,10 @@ pub fn main() {
             st.set_contacts(slint::ModelRc::new(slint::VecModel::from(Vec::<ContactRow>::new())));
             st.set_discover(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
             st.set_data_status(SharedString::new());
+            let cs = ui.global::<ChatState>();
+            cs.set_chat_key(-1);
+            cs.set_messages(slint::ModelRc::new(slint::VecModel::from(Vec::<MessageData>::new())));
+            cs.set_send_status(SharedString::new());
             ui.set_logged_in(false);
         }
     });
@@ -163,6 +176,17 @@ pub fn main() {
         let weak = weak.clone();
         ui.global::<AppState>().on_toggle_like(move |key| {
             toggle_discover_like(weak.clone(), key);
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        ui.global::<ChatState>().on_message_sent(move |key, body| {
+            let b = body.as_str().trim().to_string();
+            if b.is_empty() {
+                return;
+            }
+            send_chat_message(weak.clone(), key, b);
         });
     }
 
@@ -315,6 +339,222 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
     state.set_discover(slint::ModelRc::new(slint::VecModel::from(discover)));
 
     state.set_data_status(SharedString::new());
+}
+
+/// Ensure the bubble renderer exists (fonts + emoji atlas loaded once).
+fn renderer() -> Renderer {
+    let mut r = Renderer::new(render::theme::Theme::default());
+    for path in [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+    ] {
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Some(id) = r.fonts.add_font(bytes) {
+                let chain = r.fonts.ltr_chain().to_vec();
+                r.fonts.set_ltr_chain(&{
+                    let mut v = chain;
+                    v.push(id);
+                    v
+                });
+                let rchain = r.fonts.rtl_chain().to_vec();
+                r.fonts.set_rtl_chain(&{
+                    let mut v = rchain;
+                    v.push(id);
+                    v
+                });
+            }
+        }
+    }
+    let px = r.theme.font_size.max(16.0);
+    if let Ok(bytes) = std::fs::read("/System/Library/Fonts/Apple Color Emoji.ttc") {
+        r.emoji.add_color_font_bytes(&bytes, 0, &['😀','😂','😅','😉','😊','😍','😘','😜','😎','😢','😭','😡','👍','👎','🙏','👏','🎉','🔥','💯','🚀'], px);
+    }
+    r
+}
+
+fn ensure_renderer() -> bool {
+    let exists = RENDERER.with(|s| s.borrow().is_some());
+    if !exists {
+        RENDERER.with(|s| *s.borrow_mut() = Some(renderer()));
+    }
+    true
+}
+
+/// Render one stored text message into a slint [MessageData] row.
+fn render_one_message(
+    r: &mut Renderer,
+    id: u64,
+    sender: &str,
+    text: &str,
+    is_self: bool,
+    time: &str,
+    available_w: u32,
+    scale: f32,
+) -> MessageData {
+    let segs = parse_text(text);
+    let bubble = Bubble {
+        segments: &segs,
+        sender,
+        time,
+        side: if is_self { Side::SelfSide } else { Side::Other },
+        group: GroupPos::Single,
+        avatar: None,
+    };
+    let out = r.render(id, &bubble, available_w, scale).clone();
+    let rgba = out.to_straight_rgba();
+    let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(out.width, out.height);
+    buf.make_mut_bytes().copy_from_slice(&rgba);
+    MessageData {
+        bubble: SlintImage::from_rgba8(buf),
+        width: (out.width as f64 / scale as f64) as f32,
+        height: (out.height as f64 / scale as f64) as f32,
+        is_self,
+        text: SharedString::from(text.to_string()),
+        selected: false,
+    }
+}
+
+/// Load a conversation's messages from SQLite into the ChatState global (memory -> UI).
+fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
+    let client: Option<Arc<Client<HttpDirectory>>> = CLIENT.with(|s| s.borrow().clone());
+    let pool = POOL.with(|s| s.borrow().clone());
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let (Some(client), Some(pool), Some(backend)) = (client, pool, backend) else {
+        return;
+    };
+    let chat_id = {
+        let g = backend.blocking_read();
+        g.chat_id_for(chat_key).map(|s| s.to_string())
+    };
+    let Some(chat_id) = chat_id else { return };
+    let _ = pool;
+    let me_peer = client.peer_base58().to_string();
+    let me = client.user_id().to_string();
+    let title = {
+        let g = backend.blocking_read();
+        g.chats.iter().find(|r| r.key == chat_key).map(|r| r.title.clone()).unwrap_or_default()
+    };
+    let rt = runtime();
+    let ui_weak2 = ui_weak.clone();
+    rt.spawn(async move {
+        let rows = match client.store().load(&chat_id, 200, 0).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.global::<ChatState>()
+                            .set_send_status(SharedString::from(format!("加载消息失败: {e}")));
+                    }
+                });
+                return;
+            }
+        };
+        ensure_renderer();
+        let mut rows = rows;
+        rows.reverse();
+        let rendered: Vec<MessageData> = RENDERER.with(|slot| {
+            let mut g = slot.borrow_mut();
+            let Some(r) = g.as_mut() else { return Vec::new() };
+            rows.iter().enumerate().map(|(i, m)| {
+                let is_self = m.sender == me_peer || m.sender == me;
+                let time = time_label(m.t as i64);
+                let sender = if is_self { "我" } else { &title };
+                render_one_message(r, i as u64, sender, &m.text, is_self, &time, 380, 2.0)
+            }).collect()
+        });
+        if let Some(ui) = ui_weak2.upgrade() {
+            let cs = ui.global::<ChatState>();
+            cs.set_chat_key(chat_key);
+            cs.set_messages(slint::ModelRc::new(slint::VecModel::from(rendered)));
+            cs.set_send_status(SharedString::new());
+        }
+    });
+}
+
+fn time_label(ms: i64) -> String {
+    if ms <= 0 {
+        return "刚刚".into();
+    }
+    let secs = (ms / 1000) as i64;
+    let day_start = (secs / 86_400) * 86_400;
+    let h = ((secs - day_start) / 3600) % 24;
+    let m = ((secs - day_start) % 3600) / 60;
+    format!("{h:02}:{m:02}")
+}
+
+/// Sent callback from ChatView: resolve peer, send via P2P, then re-render the chat.
+fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
+    let client = CLIENT.with(|s| s.borrow().clone());
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let (Some(client), Some(backend)) = (client, backend) else {
+        return;
+    };
+    let chat_id = {
+        let g = backend.blocking_read();
+        g.chat_id_for(key).map(|s| s.to_string())
+    };
+    let Some(chat_id) = chat_id else { return };
+    if let Some(ui) = weak.upgrade() {
+        ui.global::<ChatState>().set_send_status(SharedString::from("发送中…"));
+    }
+    let candidates: Vec<String> = {
+        let mut v: Vec<String> = Vec::new();
+        if let Some(p) = client.other_peer_of(&chat_id) {
+            v.push(p);
+        }
+        for part in chat_id.split('|') {
+            if !part.is_empty() && part != client.peer_base58() && !v.iter().any(|x| x == part) {
+                v.push(part.to_string());
+            }
+        }
+        if v.is_empty() {
+            v.push(chat_id.clone());
+        }
+        v
+    };
+    let rt = runtime();
+    let weak2 = weak.clone();
+    rt.spawn(async move {
+        let mut last_err = String::new();
+        let mut sent = false;
+        'outer: for cand in &candidates {
+            let ur = match client.resolve_user(cand) {
+                Ok(ur) if ur.device.peer_id != client.peer_base58() => ur,
+                _ => continue,
+            };
+            match client.send_dm(&ur.device.peer_id, &body).await {
+                Ok(_) => {
+                    sent = true;
+                    break 'outer;
+                }
+                Err(e) => last_err = e.to_string(),
+            }
+        }
+        if !sent {
+            let msg = if last_err.trim().is_empty() {
+                "对端不在线".to_string()
+            } else {
+                last_err
+            };
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.global::<ChatState>()
+                        .set_send_status(SharedString::from(format!("发送失败: {msg}")));
+                }
+            });
+            return;
+        }
+        {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.global::<ChatState>().set_send_status(SharedString::new());
+                }
+            });
+            load_chat_messages(weak2, key);
+        }
+    });
 }
 
 /// Compact, human time label for the chat list (relative to now).

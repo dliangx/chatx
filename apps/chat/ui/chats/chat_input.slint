@@ -1,6 +1,99 @@
+// 聊天输入区：文本输入 + 发送按钮。
+import { Theme } from "../theme.slint";
+
 export component ChatInputView inherits Rectangle {
-    in property <string> placeholderText;
-    in property <bool> isSendButtonEnabled;
-    in property <bool> isRecording;
-    in property <bool> isRecordingPaused;
+    in property <string> placeholder-text: "发消息…";
+    in-out property <string> text: "";
+    in property <bool> is-recording: false;
+    in property <bool> is-recording-paused: false;
+
+    callback sent(string);
+
+    background: Theme.bg;
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: 1px;
+        background: Theme.border;
+    }
+
+    out property <length> pad: 8px;
+    out property <length> btn-w: 64px;
+    out property <length> spacing: 8px;
+    out property <length> field-w: root.width - 2 * root.pad - root.btn-w - root.spacing;
+
+    Rectangle {
+        x: root.pad;
+        y: root.pad + 1px;
+        width: root.field-w;
+        height: parent.height - 2 * root.pad - 1px;
+        background: #ffffff;
+        border-radius: (parent.height - 2 * root.pad - 1px) / 2;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        placeholder := Text {
+            x: 16px;
+            y: 0px;
+            width: parent.width - 16px;
+            height: parent.height;
+            visible: root.text == "";
+            text: root.placeholder-text;
+            color: Theme.fg-muted;
+            font-size: 15px;
+            vertical-alignment: center;
+        }
+
+        input := TextInput {
+            x: 16px;
+            y: 0px;
+            width: parent.width - 16px;
+            height: parent.height;
+            color: Theme.fg;
+            font-size: 15px;
+            vertical-alignment: center;
+            single-line: true;
+            text <=> root.text;
+            selection-foreground-color: Theme.brand-soft;
+            accepted => { root.send(); }
+        }
+    }
+
+    Rectangle {
+        x: root.width - root.btn-w - root.pad;
+        y: 10px;
+        width: root.btn-w;
+        height: parent.height - 20px;
+        background: #7d54cd;
+        border-radius: (parent.height - 20px) / 2;
+
+        Text {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            text: "发送";
+            color: #ffffff;
+            font-size: 15px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            clicked => { root.send(); }
+        }
+    }
+
+    function send() {
+        let t = root.text;
+        if (t == "") {
+            return;
+        }
+        root.text = "";
+        root.sent(t);
+    }
 }
