@@ -20,9 +20,12 @@ thread_local! {
     static CLIENT: RefCell<Option<Arc<Client<Directory>>>> = RefCell::new(None);
     static POOL: RefCell<Option<Arc<sqlx::SqlitePool>>> = RefCell::new(None);
     static BACKEND: RefCell<Option<ArcBackend>> = RefCell::new(None);
-    static RENDERER: RefCell<Option<Renderer>> = RefCell::new(None);
     static CHAT_LOADED: RefCell<std::collections::HashSet<i32>> = RefCell::new(std::collections::HashSet::new());
 }
+
+/// Shared renderer, initialized lazily (font parsing is expensive) and shared
+/// across worker threads via a mutex so it is only built once.
+static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> = std::sync::OnceLock::new();
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     RUNTIME.with(|slot| {
@@ -54,8 +57,8 @@ pub fn main() {
     let state = ui.global::<AppState>();
     let weak = ui.as_weak();
     state.set_user_id(SharedString::from(""));
-    // state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
-    state.set_is_mobile(true);
+    state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
+    // state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
@@ -189,6 +192,13 @@ pub fn main() {
         });
     }
 
+    {
+        let rt = runtime();
+        rt.spawn(async move {
+            ensure_renderer();
+        });
+    }
+
     ui.run().expect("window run failed");
 }
 
@@ -262,8 +272,8 @@ fn apply_result(
                     match data::load(&pool, &me).await {
                         Ok(backend) => {
                             let backend = Arc::new(tokio::sync::RwLock::new(backend));
-                            BACKEND.with(|s| *s.borrow_mut() = Some(backend.clone()));
                             let _ = slint::invoke_from_event_loop(move || {
+                                BACKEND.with(|s| *s.borrow_mut() = Some(backend.clone()));
                                 if let Some(ui) = weak.upgrade() {
                                     publish_to_views(&ui.global::<AppState>(), backend);
                                 }
@@ -340,49 +350,52 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
     state.set_data_status(SharedString::new());
 }
 
+/// Bundled fonts (SIL OFL / Apache-2.0), embedded at compile time.
+const FONT_LATIN: &[u8] = include_bytes!("../fonts/NotoSans.ttf");
+const FONT_CJK: &[u8] = include_bytes!("../fonts/NotoSansSC.ttf");
+const FONT_EMOJI: &[u8] = include_bytes!("../fonts/NotoColorEmoji.ttf");
+
 /// Ensure the bubble renderer exists (fonts + emoji atlas loaded once).
 fn renderer() -> Renderer {
     let mut r = Renderer::new(render::theme::Theme::default());
-    for path in [
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/STHeiti Medium.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "C:/Windows/Fonts/msyh.ttc",
-    ] {
-        if let Ok(bytes) = std::fs::read(path) {
-            if let Some(id) = r.fonts.add_font(bytes) {
-                let chain = r.fonts.ltr_chain().to_vec();
-                r.fonts.set_ltr_chain(&{
-                    let mut v = chain;
-                    v.push(id);
-                    v
-                });
-                let rchain = r.fonts.rtl_chain().to_vec();
-                r.fonts.set_rtl_chain(&{
-                    let mut v = rchain;
-                    v.push(id);
-                    v
-                });
-            }
+    for bytes in [FONT_LATIN, FONT_CJK] {
+        if let Some(id) = r.fonts.add_font(bytes) {
+            let chain = r.fonts.ltr_chain().to_vec();
+            r.fonts.set_ltr_chain(&{
+                let mut v = chain;
+                v.push(id);
+                v
+            });
+            let rchain = r.fonts.rtl_chain().to_vec();
+            r.fonts.set_rtl_chain(&{
+                let mut v = rchain;
+                v.push(id);
+                v
+            });
         }
     }
     let px = r.theme.font_size.max(16.0);
-    if let Ok(bytes) = std::fs::read("/System/Library/Fonts/Apple Color Emoji.ttc") {
-        r.emoji.add_color_font_bytes(&bytes, 0, &['😀','😂','😅','😉','😊','😍','😘','😜','😎','😢','😭','😡','👍','👎','🙏','👏','🎉','🔥','💯','🚀'], px);
-    }
+    r.emoji.add_color_font_bytes(FONT_EMOJI, 0, &['😀','😂','😅','😉','😊','😍','😘','😜','😎','😢','😭','😡','👍','👎','🙏','👏','🎉','🔥','💯','🚀'], px);
     r
 }
 
-fn ensure_renderer() -> bool {
-    let exists = RENDERER.with(|s| s.borrow().is_some());
-    if !exists {
-        RENDERER.with(|s| *s.borrow_mut() = Some(renderer()));
-    }
-    true
+fn ensure_renderer() {
+    let _ = RENDERER.get_or_init(|| std::sync::Mutex::new(renderer()));
 }
 
-/// Render one stored text message into a slint [MessageData] row.
-fn render_one_message(
+/// Intermediate render result produced on a background thread.
+/// The slint image type is not `Send`, so we pass raw bytes across threads.
+struct RenderedMsg {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    is_self: bool,
+    text: String,
+}
+
+/// Render one message into raw RGBA bytes (background thread; avoids building
+/// the non-`Send` slint image off the UI thread).
+fn render_msg(
     r: &mut Renderer,
     id: u64,
     sender: &str,
@@ -391,7 +404,7 @@ fn render_one_message(
     time: &str,
     available_w: u32,
     scale: f32,
-) -> MessageData {
+) -> RenderedMsg {
     let segs = parse_text(text);
     let bubble = Bubble {
         segments: &segs,
@@ -402,15 +415,25 @@ fn render_one_message(
         avatar: None,
     };
     let out = r.render(id, &bubble, available_w, scale).clone();
-    let rgba = out.to_straight_rgba();
-    let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(out.width, out.height);
-    buf.make_mut_bytes().copy_from_slice(&rgba);
+    RenderedMsg {
+        rgba: out.to_straight_rgba(),
+        width: out.width,
+        height: out.height,
+        is_self,
+        text: text.to_string(),
+    }
+}
+
+/// Build a slint [MessageData] from raw bytes on the UI thread.
+fn to_message_data(m: RenderedMsg, scale: f32) -> MessageData {
+    let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(m.width, m.height);
+    buf.make_mut_bytes().copy_from_slice(&m.rgba);
     MessageData {
         bubble: SlintImage::from_rgba8(buf),
-        width: (out.width as f64 / scale as f64) as f32,
-        height: (out.height as f64 / scale as f64) as f32,
-        is_self,
-        text: SharedString::from(text.to_string()),
+        width: (m.width as f64 / scale as f64) as f32,
+        height: (m.height as f64 / scale as f64) as f32,
+        is_self: m.is_self,
+        text: SharedString::from(m.text),
         selected: false,
     }
 }
@@ -450,24 +473,31 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 return;
             }
         };
+        // Render on a background thread: font parsing is the slow part and must
+        // not block the UI; we only ship raw bytes across to the UI thread.
         ensure_renderer();
         let mut rows = rows;
         rows.reverse();
-        let rendered: Vec<MessageData> = RENDERER.with(|slot| {
-            let mut g = slot.borrow_mut();
-            let Some(r) = g.as_mut() else { return Vec::new() };
+        let rendered: Vec<RenderedMsg> = {
+            let mut r = RENDERER.get().unwrap().lock().unwrap();
             rows.iter().enumerate().map(|(i, m)| {
                 let is_self = m.sender == me_peer || m.sender == me;
                 let time = time_label(m.t as i64);
                 let sender = if is_self { "我" } else { &title };
-                render_one_message(r, i as u64, sender, &m.text, is_self, &time, 380, 2.0)
+                render_msg(&mut r, i as u64, sender, &m.text, is_self, &time, 380, 2.0)
             }).collect()
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak2.upgrade() {
+                let cs = ui.global::<ChatSession>();
+                let messages: Vec<MessageData> = rendered
+                    .into_iter()
+                    .map(|m| to_message_data(m, 2.0))
+                    .collect();
+                cs.set_messages(slint::ModelRc::new(slint::VecModel::from(messages)));
+                cs.set_send_status(SharedString::new());
+            }
         });
-        if let Some(ui) = ui_weak2.upgrade() {
-            let cs = ui.global::<ChatSession>();
-            cs.set_messages(slint::ModelRc::new(slint::VecModel::from(rendered)));
-            cs.set_send_status(SharedString::new());
-        }
     });
 }
 
@@ -588,7 +618,7 @@ fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
     let (post_id, want_liked, me) = {
         let mut g = backend.blocking_write();
         let (liked, _likes) = g.toggle_like(key);
-        (g.post_id_for(key).map(|s| s.to_string()), liked, g.me.clone())
+        (g.post_id_for(key), liked, g.me.clone())
     };
     // memory -> UI
     if let Some(ui) = weak.upgrade() {
@@ -598,7 +628,7 @@ fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
     if let Some(post_id) = post_id {
         let rt = runtime();
         rt.spawn(async move {
-            let _ = data::persist_like_toggle(&pool, &me, &post_id, want_liked).await;
+            let _ = data::persist_like_toggle(&pool, &me, post_id, want_liked).await;
         });
     }
 }

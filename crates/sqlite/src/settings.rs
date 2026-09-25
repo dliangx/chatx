@@ -9,7 +9,7 @@ pub struct Setting {
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
 pub struct Plugin {
-    pub id: String,
+    pub id: i64,
     pub name: String,
     pub version: String,
     pub path: String,
@@ -68,7 +68,7 @@ pub async fn all(pool: &Pool) -> anyhow::Result<Vec<Setting>> {
 
 pub async fn upsert_plugin(
     pool: &Pool,
-    id: &str,
+    id: i64,
     name: &str,
     version: &str,
     path: &str,
@@ -95,7 +95,7 @@ pub async fn upsert_plugin(
     Ok(())
 }
 
-pub async fn get_plugin(pool: &Pool, id: &str) -> anyhow::Result<Option<Plugin>> {
+pub async fn get_plugin(pool: &Pool, id: i64) -> anyhow::Result<Option<Plugin>> {
     sqlx::query_as::<_, Plugin>("SELECT * FROM plugins WHERE id = ?1")
         .bind(id)
         .fetch_optional(pool)
@@ -116,7 +116,7 @@ pub async fn list_plugins(pool: &Pool, include_disabled: bool) -> anyhow::Result
     Ok(rows)
 }
 
-pub async fn set_plugin_enabled(pool: &Pool, id: &str, enabled: bool) -> anyhow::Result<()> {
+pub async fn set_plugin_enabled(pool: &Pool, id: i64, enabled: bool) -> anyhow::Result<()> {
     sqlx::query("UPDATE plugins SET enabled = ?2 WHERE id = ?1")
         .bind(id)
         .bind(enabled)
@@ -125,7 +125,7 @@ pub async fn set_plugin_enabled(pool: &Pool, id: &str, enabled: bool) -> anyhow:
     Ok(())
 }
 
-pub async fn delete_plugin(pool: &Pool, id: &str) -> anyhow::Result<bool> {
+pub async fn delete_plugin(pool: &Pool, id: i64) -> anyhow::Result<bool> {
     let n = sqlx::query("DELETE FROM plugins WHERE id = ?1")
         .bind(id)
         .execute(pool)
@@ -156,13 +156,13 @@ mod tests {
         assert!(delete(&pool, "beta").await.unwrap());
         assert!(get(&pool, "beta").await.unwrap().is_none());
 
-        upsert_plugin(&pool, "p1", "PluginOne", "1.0.0", "/tmp/p", None).await.unwrap();
-        upsert_plugin(&pool, "p1", "PluginOne", "1.1.0", "/tmp/p2", Some("[\"net\"]")).await.unwrap();
-        let p = get_plugin(&pool, "p1").await.unwrap().unwrap();
+        upsert_plugin(&pool, 1, "PluginOne", "1.0.0", "/tmp/p", None).await.unwrap();
+        upsert_plugin(&pool, 1, "PluginOne", "1.1.0", "/tmp/p2", Some("[\"net\"]")).await.unwrap();
+        let p = get_plugin(&pool, 1).await.unwrap().unwrap();
         assert_eq!(p.version, "1.1.0");
-        set_plugin_enabled(&pool, "p1", false).await.unwrap();
+        set_plugin_enabled(&pool, 1, false).await.unwrap();
         assert!(list_plugins(&pool, false).await.unwrap().is_empty());
         assert_eq!(list_plugins(&pool, true).await.unwrap().len(), 1);
-        assert!(delete_plugin(&pool, "p1").await.unwrap());
+        assert!(delete_plugin(&pool, 1).await.unwrap());
     }
 }

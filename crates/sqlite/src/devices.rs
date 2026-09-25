@@ -3,8 +3,8 @@ use sqlx::FromRow;
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
 pub struct Device {
-    pub device_id: String,
-    pub user_id: String,
+    pub device_id: i64,
+    pub user_id: i64,
     pub peer_id: String,
     pub public_key: String,
     pub certificate: Option<String>,
@@ -16,7 +16,7 @@ pub struct Device {
 
 #[derive(Debug, Default, Clone)]
 pub struct DevicePatch {
-    pub user_id: Option<String>,
+    pub user_id: Option<i64>,
     pub peer_id: Option<String>,
     pub public_key: Option<String>,
     pub certificate: Option<String>,
@@ -25,7 +25,7 @@ pub struct DevicePatch {
     pub last_seen: Option<i64>,
 }
 
-pub async fn upsert(pool: &Pool, device_id: &str, patch: &DevicePatch) -> anyhow::Result<()> {
+pub async fn upsert(pool: &Pool, device_id: i64, patch: &DevicePatch) -> anyhow::Result<()> {
     let now = now_ms();
     sqlx::query(
         "INSERT INTO devices (device_id, user_id, peer_id, public_key, certificate, platform, push_token, last_seen, created_at)
@@ -40,7 +40,7 @@ pub async fn upsert(pool: &Pool, device_id: &str, patch: &DevicePatch) -> anyhow
             last_seen   = COALESCE(?8, last_seen)",
     )
     .bind(device_id)
-    .bind(patch.user_id.as_deref())
+    .bind(patch.user_id)
     .bind(patch.peer_id.as_deref())
     .bind(patch.public_key.as_deref())
     .bind(patch.certificate.as_deref())
@@ -53,7 +53,7 @@ pub async fn upsert(pool: &Pool, device_id: &str, patch: &DevicePatch) -> anyhow
     Ok(())
 }
 
-pub async fn get(pool: &Pool, device_id: &str) -> anyhow::Result<Option<Device>> {
+pub async fn get(pool: &Pool, device_id: i64) -> anyhow::Result<Option<Device>> {
     let row = sqlx::query_as::<_, Device>("SELECT * FROM devices WHERE device_id = ?1")
         .bind(device_id)
         .fetch_optional(pool)
@@ -69,7 +69,7 @@ pub async fn get_by_peer(pool: &Pool, peer_id: &str) -> anyhow::Result<Option<De
     Ok(row)
 }
 
-pub async fn list_by_user(pool: &Pool, user_id: &str) -> anyhow::Result<Vec<Device>> {
+pub async fn list_by_user(pool: &Pool, user_id: i64) -> anyhow::Result<Vec<Device>> {
     let rows = sqlx::query_as::<_, Device>("SELECT * FROM devices WHERE user_id = ?1 ORDER BY created_at")
         .bind(user_id)
         .fetch_all(pool)
@@ -77,7 +77,7 @@ pub async fn list_by_user(pool: &Pool, user_id: &str) -> anyhow::Result<Vec<Devi
     Ok(rows)
 }
 
-pub async fn touch_last_seen(pool: &Pool, device_id: &str) -> anyhow::Result<()> {
+pub async fn touch_last_seen(pool: &Pool, device_id: i64) -> anyhow::Result<()> {
     let now = now_ms();
     sqlx::query("UPDATE devices SET last_seen = ?2 WHERE device_id = ?1")
         .bind(device_id)
@@ -87,7 +87,7 @@ pub async fn touch_last_seen(pool: &Pool, device_id: &str) -> anyhow::Result<()>
     Ok(())
 }
 
-pub async fn delete(pool: &Pool, device_id: &str) -> anyhow::Result<bool> {
+pub async fn delete(pool: &Pool, device_id: i64) -> anyhow::Result<bool> {
     let n = sqlx::query("DELETE FROM devices WHERE device_id = ?1")
         .bind(device_id)
         .execute(pool)
@@ -103,12 +103,12 @@ mod tests {
     #[tokio::test]
     async fn upsert_and_list_roundtrip() {
         let pool = open_memory().await.unwrap();
-        crate::users::upsert(&pool, "u1", &crate::users::UserPatch::default()).await.unwrap();
+        crate::users::upsert(&pool, 1, &crate::users::UserPatch::default()).await.unwrap();
         upsert(
             &pool,
-            "d1",
+            101,
             &DevicePatch {
-                user_id: Some("u1".into()),
+                user_id: Some(1),
                 peer_id: Some("peer-1".into()),
                 public_key: Some("pub-1".into()),
                 platform: Some("ios".into()),
@@ -119,9 +119,9 @@ mod tests {
         .unwrap();
         upsert(
             &pool,
-            "d2",
+            102,
             &DevicePatch {
-                user_id: Some("u1".into()),
+                user_id: Some(1),
                 peer_id: Some("peer-2".into()),
                 public_key: Some("pub-2".into()),
                 platform: Some("android".into()),
@@ -131,16 +131,16 @@ mod tests {
         .await
         .unwrap();
 
-        let by_user = list_by_user(&pool, "u1").await.unwrap();
+        let by_user = list_by_user(&pool, 1).await.unwrap();
         assert_eq!(by_user.len(), 2);
 
         let by_peer = get_by_peer(&pool, "peer-2").await.unwrap();
-        assert_eq!(by_peer.unwrap().device_id, "d2");
+        assert_eq!(by_peer.unwrap().device_id, 102);
 
-        touch_last_seen(&pool, "d1").await.unwrap();
-        assert!(get(&pool, "d1").await.unwrap().unwrap().last_seen.is_some());
+        touch_last_seen(&pool, 101).await.unwrap();
+        assert!(get(&pool, 101).await.unwrap().unwrap().last_seen.is_some());
 
-        assert!(delete(&pool, "d2").await.unwrap());
-        assert_eq!(list_by_user(&pool, "u1").await.unwrap().len(), 1);
+        assert!(delete(&pool, 102).await.unwrap());
+        assert_eq!(list_by_user(&pool, 1).await.unwrap().len(), 1);
     }
 }

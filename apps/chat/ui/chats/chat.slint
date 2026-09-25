@@ -65,9 +65,9 @@ export component ChatView inherits Rectangle {
     // 消息列表
     Flickable {
         x: 0px;
-        y: 0px;
+        y: 48px;
         width: parent.width;
-        height: parent.height;
+        height: parent.height - root._bottom - 48px;
         viewport-height: 12px + ChatSession.messages.length * root.msg-row-h;
         interactive: ChatSession.messages.length > 0;
 

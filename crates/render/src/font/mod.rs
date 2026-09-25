@@ -17,11 +17,10 @@ pub struct FontEntry {
 }
 
 impl FontEntry {
-    pub fn load(bytes: Vec<u8>) -> Option<FontEntry> {
-        let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-        let face = rustybuzz::Face::from_slice(leaked, 0)?;
+    pub fn load(bytes: &'static [u8]) -> Option<FontEntry> {
+        let face = rustybuzz::Face::from_slice(bytes, 0)?;
         let units_per_em = face.units_per_em() as f32;
-        let font = fontdue::Font::from_bytes(leaked, FontSettings::default()).ok()?;
+        let font = fontdue::Font::from_bytes(bytes, FontSettings::default()).ok()?;
         Some(FontEntry { face, font, units_per_em })
     }
 
@@ -47,11 +46,18 @@ impl FontManager {
         FontManager::default()
     }
 
-    pub fn add_font(&mut self, bytes: Vec<u8>) -> Option<FontId> {
+    pub fn add_font(&mut self, bytes: &'static [u8]) -> Option<FontId> {
         let entry = FontEntry::load(bytes)?;
         let id = FontId(self.entries.len() as u16);
         self.entries.push(entry);
         Some(id)
+    }
+
+    /// Load a font from owned bytes (leaks the buffer to satisfy the
+    /// `'static` lifetime). Prefer [`Self::add_font`] with a `&'static` slice.
+    pub fn add_font_owned(&mut self, bytes: Vec<u8>) -> Option<FontId> {
+        let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+        self.add_font(leaked)
     }
 
     pub fn set_ltr_chain(&mut self, chain: &[FontId]) {

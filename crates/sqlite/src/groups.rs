@@ -8,10 +8,10 @@ pub const ROLE_OWNER: i64 = 2;
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
 pub struct Group {
-    pub id: String,
+    pub id: i64,
     pub name: String,
     pub avatar_path: Option<String>,
-    pub owner_id: String,
+    pub owner_id: i64,
     pub created_at: i64,
     pub member_count: i64,
     pub last_sync_seq: i64,
@@ -19,7 +19,7 @@ pub struct Group {
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
 pub struct GroupMember {
-    pub group_id: String,
+    pub group_id: i64,
     pub peer_id: String,
     pub nickname: Option<String>,
     pub avatar_path: Option<String>,
@@ -27,7 +27,7 @@ pub struct GroupMember {
     pub joined_at: i64,
 }
 
-pub async fn create(pool: &Pool, id: &str, name: &str, owner_id: &str, avatar_path: Option<&str>) -> anyhow::Result<()> {
+pub async fn create(pool: &Pool, id: i64, name: &str, owner_id: i64, avatar_path: Option<&str>) -> anyhow::Result<()> {
     let now = now_ms();
     let mut trans = pool.begin().await?;
     {
@@ -43,13 +43,13 @@ pub async fn create(pool: &Pool, id: &str, name: &str, owner_id: &str, avatar_pa
         .bind(now)
         .execute(trans.as_mut())
         .await?;
-        upsert_member(trans.as_mut(), id, owner_id, ROLE_OWNER).await?;
+        upsert_member(trans.as_mut(), id, &format!("{owner_id}"), ROLE_OWNER).await?;
     }
     trans.commit().await?;
     Ok(())
 }
 
-pub async fn get(pool: &Pool, id: &str) -> anyhow::Result<Option<Group>> {
+pub async fn get(pool: &Pool, id: i64) -> anyhow::Result<Option<Group>> {
     sqlx::query_as::<_, Group>("SELECT * FROM groups WHERE id = ?1")
         .bind(id)
         .fetch_optional(pool)
@@ -64,7 +64,7 @@ pub async fn list(pool: &Pool) -> anyhow::Result<Vec<Group>> {
         .map_err(Into::into)
 }
 
-pub async fn set_name(pool: &Pool, id: &str, name: &str) -> anyhow::Result<()> {
+pub async fn set_name(pool: &Pool, id: i64, name: &str) -> anyhow::Result<()> {
     sqlx::query("UPDATE groups SET name = ?2 WHERE id = ?1")
         .bind(id)
         .bind(name)
@@ -73,7 +73,7 @@ pub async fn set_name(pool: &Pool, id: &str, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn set_avatar(pool: &Pool, id: &str, path: Option<&str>) -> anyhow::Result<()> {
+pub async fn set_avatar(pool: &Pool, id: i64, path: Option<&str>) -> anyhow::Result<()> {
     sqlx::query("UPDATE groups SET avatar_path = ?2 WHERE id = ?1")
         .bind(id)
         .bind(path)
@@ -82,7 +82,7 @@ pub async fn set_avatar(pool: &Pool, id: &str, path: Option<&str>) -> anyhow::Re
     Ok(())
 }
 
-pub async fn set_last_sync_seq(pool: &Pool, id: &str, seq: i64) -> anyhow::Result<()> {
+pub async fn set_last_sync_seq(pool: &Pool, id: i64, seq: i64) -> anyhow::Result<()> {
     sqlx::query("UPDATE groups SET last_sync_seq = ?2 WHERE id = ?1")
         .bind(id)
         .bind(seq)
@@ -91,7 +91,7 @@ pub async fn set_last_sync_seq(pool: &Pool, id: &str, seq: i64) -> anyhow::Resul
     Ok(())
 }
 
-pub async fn delete(pool: &Pool, id: &str) -> anyhow::Result<bool> {
+pub async fn delete(pool: &Pool, id: i64) -> anyhow::Result<bool> {
     let mut trans = pool.begin().await?;
     {
         sqlx::query("DELETE FROM group_members WHERE group_id = ?1").bind(id).execute(trans.as_mut()).await?;
@@ -116,7 +116,7 @@ pub async fn delete(pool: &Pool, id: &str) -> anyhow::Result<bool> {
 /// Upsert a member inside an open transaction.
 pub async fn upsert_member(
     tx: &mut sqlx::SqliteConnection,
-    group_id: &str,
+    group_id: i64,
     peer_id: &str,
     role: i64,
 ) -> anyhow::Result<()> {
@@ -137,7 +137,7 @@ pub async fn upsert_member(
 }
 
 /// Add a member and refresh `member_count` within one transaction.
-pub async fn add_member(pool: &Pool, group_id: &str, peer_id: &str, role: i64) -> anyhow::Result<()> {
+pub async fn add_member(pool: &Pool, group_id: i64, peer_id: &str, role: i64) -> anyhow::Result<()> {
     let mut trans = pool.begin().await?;
     {
         upsert_member(trans.as_mut(), group_id, peer_id, role).await?;
@@ -147,7 +147,7 @@ pub async fn add_member(pool: &Pool, group_id: &str, peer_id: &str, role: i64) -
 }
 
 /// Remove a member and refresh `member_count` within one transaction.
-pub async fn remove_member(pool: &Pool, group_id: &str, peer_id: &str) -> anyhow::Result<bool> {
+pub async fn remove_member(pool: &Pool, group_id: i64, peer_id: &str) -> anyhow::Result<bool> {
     let mut trans = pool.begin().await?;
     {
         let n = sqlx::query("DELETE FROM group_members WHERE group_id = ?1 AND peer_id = ?2")
@@ -165,7 +165,7 @@ pub async fn remove_member(pool: &Pool, group_id: &str, peer_id: &str) -> anyhow
     Ok(true)
 }
 
-async fn sync_member_count(tx: &mut sqlx::SqliteConnection, group_id: &str) -> anyhow::Result<()> {
+async fn sync_member_count(tx: &mut sqlx::SqliteConnection, group_id: i64) -> anyhow::Result<()> {
     sqlx::query(
         "UPDATE groups SET
             member_count = (SELECT COUNT(*) FROM group_members WHERE group_id = ?1)
@@ -177,7 +177,7 @@ async fn sync_member_count(tx: &mut sqlx::SqliteConnection, group_id: &str) -> a
     Ok(())
 }
 
-pub async fn list_members(pool: &Pool, group_id: &str) -> anyhow::Result<Vec<GroupMember>> {
+pub async fn list_members(pool: &Pool, group_id: i64) -> anyhow::Result<Vec<GroupMember>> {
     let rows = sqlx::query_as::<_, GroupMember>(
         "SELECT * FROM group_members WHERE group_id = ?1 ORDER BY joined_at",
     )
@@ -187,7 +187,7 @@ pub async fn list_members(pool: &Pool, group_id: &str) -> anyhow::Result<Vec<Gro
     Ok(rows)
 }
 
-pub async fn member_ids(pool: &Pool, group_id: &str) -> anyhow::Result<Vec<String>> {
+pub async fn member_ids(pool: &Pool, group_id: i64) -> anyhow::Result<Vec<String>> {
     let rows: Vec<(String,)> =
         sqlx::query_as("SELECT peer_id FROM group_members WHERE group_id = ?1 ORDER BY joined_at")
             .bind(group_id)
@@ -196,7 +196,7 @@ pub async fn member_ids(pool: &Pool, group_id: &str) -> anyhow::Result<Vec<Strin
     Ok(rows.into_iter().map(|(s,)| s).collect())
 }
 
-pub async fn is_member(pool: &Pool, group_id: &str, peer_id: &str) -> anyhow::Result<bool> {
+pub async fn is_member(pool: &Pool, group_id: i64, peer_id: &str) -> anyhow::Result<bool> {
     let row: Option<(i64,)> =
         sqlx::query_as("SELECT 1 FROM group_members WHERE group_id = ?1 AND peer_id = ?2")
             .bind(group_id)
@@ -206,7 +206,7 @@ pub async fn is_member(pool: &Pool, group_id: &str, peer_id: &str) -> anyhow::Re
     Ok(row.is_some())
 }
 
-pub async fn set_member_role(pool: &Pool, group_id: &str, peer_id: &str, role: i64) -> anyhow::Result<()> {
+pub async fn set_member_role(pool: &Pool, group_id: i64, peer_id: &str, role: i64) -> anyhow::Result<()> {
     sqlx::query("UPDATE group_members SET role = ?3 WHERE group_id = ?1 AND peer_id = ?2")
         .bind(group_id)
         .bind(peer_id)
@@ -216,7 +216,7 @@ pub async fn set_member_role(pool: &Pool, group_id: &str, peer_id: &str, role: i
     Ok(())
 }
 
-pub async fn set_member_nickname(pool: &Pool, group_id: &str, peer_id: &str, nickname: Option<&str>) -> anyhow::Result<()> {
+pub async fn set_member_nickname(pool: &Pool, group_id: i64, peer_id: &str, nickname: Option<&str>) -> anyhow::Result<()> {
     sqlx::query("UPDATE group_members SET nickname = ?3 WHERE group_id = ?1 AND peer_id = ?2")
         .bind(group_id)
         .bind(peer_id)
@@ -244,12 +244,12 @@ pub async fn groups_of(pool: &Pool, peer_id: &str) -> anyhow::Result<Vec<Group>>
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
 pub struct GroupMessageRead {
-    pub message_id: String,
+    pub message_id: i64,
     pub peer_id: String,
     pub read_at: i64,
 }
 
-pub async fn mark_read(pool: &Pool, message_id: &str, peer_id: &str) -> anyhow::Result<()> {
+pub async fn mark_read(pool: &Pool, message_id: i64, peer_id: &str) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO group_message_reads (message_id, peer_id, read_at)
          VALUES (?1, ?2, ?3)
@@ -263,7 +263,7 @@ pub async fn mark_read(pool: &Pool, message_id: &str, peer_id: &str) -> anyhow::
     Ok(())
 }
 
-pub async fn readers(pool: &Pool, message_id: &str) -> anyhow::Result<Vec<String>> {
+pub async fn readers(pool: &Pool, message_id: i64) -> anyhow::Result<Vec<String>> {
     let rows: Vec<(String,)> =
         sqlx::query_as("SELECT peer_id FROM group_message_reads WHERE message_id = ?1 ORDER BY read_at")
             .bind(message_id)
@@ -272,7 +272,7 @@ pub async fn readers(pool: &Pool, message_id: &str) -> anyhow::Result<Vec<String
     Ok(rows.into_iter().map(|(s,)| s).collect())
 }
 
-pub async fn read_count(pool: &Pool, message_id: &str) -> anyhow::Result<u32> {
+pub async fn read_count(pool: &Pool, message_id: i64) -> anyhow::Result<u32> {
     let (n,): (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM group_message_reads WHERE message_id = ?1")
             .bind(message_id)
@@ -289,39 +289,39 @@ mod tests {
     #[tokio::test]
     async fn create_and_membership_roundtrip() {
         let pool = open_memory().await.unwrap();
-        create(&pool, "g1", "Test Group", "owner", None).await.unwrap();
-        let g = get(&pool, "g1").await.unwrap().unwrap();
-        assert_eq!(g.owner_id, "owner");
+        create(&pool, 1, "Test Group", 100, None).await.unwrap();
+        let g = get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(g.owner_id, 100);
         assert_eq!(g.member_count, 1, "creator is the initial owner member");
-        assert!(is_member(&pool, "g1", "owner").await.unwrap());
+        assert!(is_member(&pool, 1, "100").await.unwrap());
 
-        add_member(&pool, "g1", "alice", ROLE_MEMBER).await.unwrap();
-        add_member(&pool, "g1", "bob", ROLE_ADMIN).await.unwrap();
-        let g = get(&pool, "g1").await.unwrap().unwrap();
+        add_member(&pool, 1, "alice", ROLE_MEMBER).await.unwrap();
+        add_member(&pool, 1, "bob", ROLE_ADMIN).await.unwrap();
+        let g = get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(g.member_count, 3);
 
-        assert_eq!(member_ids(&pool, "g1").await.unwrap().len(), 3);
-        assert!(groups_of(&pool, "alice").await.unwrap().iter().any(|g| g.id == "g1"));
+        assert_eq!(member_ids(&pool, 1).await.unwrap().len(), 3);
+        assert!(groups_of(&pool, "alice").await.unwrap().iter().any(|g| g.id == 1));
 
-        set_member_role(&pool, "g1", "alice", ROLE_OWNER).await.unwrap();
-        let members = list_members(&pool, "g1").await.unwrap();
+        set_member_role(&pool, 1, "alice", ROLE_OWNER).await.unwrap();
+        let members = list_members(&pool, 1).await.unwrap();
         assert!(members.iter().any(|m| m.peer_id == "alice" && m.role == ROLE_OWNER));
 
-        set_member_nickname(&pool, "g1", "alice", Some("Al")).await.unwrap();
-        assert!(list_members(&pool, "g1").await.unwrap().iter().any(|m| m.nickname.as_deref() == Some("Al")));
+        set_member_nickname(&pool, 1, "alice", Some("Al")).await.unwrap();
+        assert!(list_members(&pool, 1).await.unwrap().iter().any(|m| m.nickname.as_deref() == Some("Al")));
 
-        assert!(remove_member(&pool, "g1", "alice").await.unwrap());
-        assert_eq!(get(&pool, "g1").await.unwrap().unwrap().member_count, 2);
-        assert!(!remove_member(&pool, "g1", "alice").await.unwrap());
+        assert!(remove_member(&pool, 1, "alice").await.unwrap());
+        assert_eq!(get(&pool, 1).await.unwrap().unwrap().member_count, 2);
+        assert!(!remove_member(&pool, 1, "alice").await.unwrap());
 
-        mark_read(&pool, "m1", "owner").await.unwrap();
-        mark_read(&pool, "m1", "bob").await.unwrap();
-        assert_eq!(read_count(&pool, "m1").await.unwrap(), 2);
-        assert_eq!(readers(&pool, "m1").await.unwrap().len(), 2);
+        mark_read(&pool, 1001, "100").await.unwrap();
+        mark_read(&pool, 1001, "bob").await.unwrap();
+        assert_eq!(read_count(&pool, 1001).await.unwrap(), 2);
+        assert_eq!(readers(&pool, 1001).await.unwrap().len(), 2);
 
-        assert!(delete(&pool, "g1").await.unwrap());
-        assert!(get(&pool, "g1").await.unwrap().is_none());
-        assert!(list_members(&pool, "g1").await.unwrap().is_empty());
-        assert!(!delete(&pool, "g1").await.unwrap());
+        assert!(delete(&pool, 1).await.unwrap());
+        assert!(get(&pool, 1).await.unwrap().is_none());
+        assert!(list_members(&pool, 1).await.unwrap().is_empty());
+        assert!(!delete(&pool, 1).await.unwrap());
     }
 }

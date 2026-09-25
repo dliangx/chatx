@@ -25,6 +25,7 @@ pub struct MsgRow {
     pub text: String,
     pub sealed: bool,
     pub t: u64,
+    pub mine: bool,
 }
 
 pub struct Migration {
@@ -114,13 +115,10 @@ pub async fn init(pool: &Pool) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn new_id(prefix: &str) -> String {
-    let mut buf = [0u8; 16];
-    for b in buf.iter_mut() {
-        *b = rand::random();
-    }
-    let hex: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("{prefix}_{hex}")
+/// Generate a unique app-side integer id (63-bit positive value).
+pub fn new_id() -> i64 {
+    let v: u64 = rand::random();
+    (v >> 1) as i64
 }
 
 pub fn now_ms() -> i64 {

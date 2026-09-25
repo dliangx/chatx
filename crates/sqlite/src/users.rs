@@ -1,9 +1,9 @@
-use crate::{now_ms, Pool};
+use crate::{new_id, now_ms, Pool};
 use sqlx::FromRow;
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
 pub struct User {
-    pub id: String,
+    pub id: i64,
     pub username: Option<String>,
     pub nickname: Option<String>,
     pub avatar_path: Option<String>,
@@ -22,7 +22,7 @@ pub struct UserPatch {
     pub public_key: Option<String>,
 }
 
-pub async fn upsert(pool: &Pool, id: &str, patch: &UserPatch) -> anyhow::Result<User> {
+pub async fn upsert(pool: &Pool, id: i64, patch: &UserPatch) -> anyhow::Result<User> {
     let now = now_ms();
     sqlx::query(
         "INSERT INTO users (id, username, nickname, avatar_path, bio, public_key, created_at, updated_at)
@@ -48,7 +48,7 @@ pub async fn upsert(pool: &Pool, id: &str, patch: &UserPatch) -> anyhow::Result<
     row.ok_or_else(|| anyhow::anyhow!("user {id} not found after upsert"))
 }
 
-pub async fn get(pool: &Pool, id: &str) -> anyhow::Result<Option<User>> {
+pub async fn get(pool: &Pool, id: i64) -> anyhow::Result<Option<User>> {
     let row = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?1")
         .bind(id)
         .fetch_optional(pool)
@@ -66,7 +66,7 @@ pub async fn get_by_username(pool: &Pool, username: &str) -> anyhow::Result<Opti
 
 pub async fn list(pool: &Pool, limit: u32, offset: u32) -> anyhow::Result<Vec<User>> {
     let rows = sqlx::query_as::<_, User>(
-        "SELECT * FROM users ORDER BY COALESCE(nickname, username, id) LIMIT ?1 OFFSET ?2",
+        "SELECT * FROM users ORDER BY COALESCE(nickname, username) LIMIT ?1 OFFSET ?2",
     )
     .bind(limit as i64)
     .bind(offset as i64)
@@ -75,7 +75,7 @@ pub async fn list(pool: &Pool, limit: u32, offset: u32) -> anyhow::Result<Vec<Us
     Ok(rows)
 }
 
-/// Fuzzy search across username / nickname / id.
+/// Fuzzy search across username / nickname.
 pub async fn search(pool: &Pool, q: &str, limit: u32) -> anyhow::Result<Vec<User>> {
     if q.is_empty() {
         return list(pool, limit, 0).await;
@@ -83,8 +83,8 @@ pub async fn search(pool: &Pool, q: &str, limit: u32) -> anyhow::Result<Vec<User
     let like = format!("%{q}%");
     let rows = sqlx::query_as::<_, User>(
         "SELECT * FROM users
-         WHERE username LIKE ?1 OR nickname LIKE ?1 OR id LIKE ?1
-         ORDER BY COALESCE(nickname, username, id)
+         WHERE username LIKE ?1 OR nickname LIKE ?1
+         ORDER BY COALESCE(nickname, username)
          LIMIT ?2",
     )
     .bind(&like)
@@ -94,7 +94,7 @@ pub async fn search(pool: &Pool, q: &str, limit: u32) -> anyhow::Result<Vec<User
     Ok(rows)
 }
 
-pub async fn delete(pool: &Pool, id: &str) -> anyhow::Result<bool> {
+pub async fn delete(pool: &Pool, id: i64) -> anyhow::Result<bool> {
     let n = sqlx::query("DELETE FROM users WHERE id = ?1")
         .bind(id)
         .execute(pool)
@@ -109,6 +109,33 @@ pub async fn count(pool: &Pool) -> anyhow::Result<u32> {
     Ok(n as u32)
 }
 
+/// Find-or-create a user by its text identity (username). Used by the legacy
+/// message shim to map a string sender onto an integer user id.
+pub async fn ensure_identity(pool: &Pool, username: &str) -> anyhow::Result<i64> {
+    if let Some(u) = get_by_username(pool, username).await? {
+        return Ok(u.id);
+    }
+    let id = new_id();
+    let now = now_ms();
+    sqlx::query("INSERT INTO users (id, username, created_at) VALUES (?1, ?2, ?3)")
+        .bind(id)
+        .bind(username)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    Ok(id)
+}
+
+/// Reverse lookup: integer user id -> text identity (username).
+pub async fn username(pool: &Pool, id: i64) -> anyhow::Result<Option<String>> {
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT username FROM users WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.and_then(|(u,)| u))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,7 +146,7 @@ mod tests {
         let pool = open_memory().await.unwrap();
         let u = upsert(
             &pool,
-            "u1",
+            1,
             &UserPatch {
                 username: Some("alice".into()),
                 nickname: Some("Alice".into()),
@@ -128,7 +155,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(u.id, "u1");
+        assert_eq!(u.id, 1);
         assert_eq!(u.nickname.as_deref(), Some("Alice"));
 
         let found = get_by_username(&pool, "alice").await.unwrap();
@@ -136,7 +163,7 @@ mod tests {
 
         upsert(
             &pool,
-            "u1",
+            1,
             &UserPatch {
                 nickname: Some("Alicia".into()),
                 ..Default::default()
@@ -145,15 +172,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            get(&pool, "u1").await.unwrap().unwrap().nickname.as_deref(),
+            get(&pool, 1).await.unwrap().unwrap().nickname.as_deref(),
             Some("Alicia")
         );
 
         let hits = search(&pool, "alic", 10).await.unwrap();
         assert_eq!(hits.len(), 1);
 
-        assert!(delete(&pool, "u1").await.unwrap());
-        assert!(!delete(&pool, "u1").await.unwrap());
-        assert!(get(&pool, "u1").await.unwrap().is_none());
+        assert!(delete(&pool, 1).await.unwrap());
+        assert!(!delete(&pool, 1).await.unwrap());
+        assert!(get(&pool, 1).await.unwrap().is_none());
     }
 }

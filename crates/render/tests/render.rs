@@ -23,9 +23,9 @@ fn make_manager() -> Option<FontManager> {
     let naskh = load(NASKH)?;
 
     let mut m = FontManager::new();
-    let l0 = m.add_font(arial)?;
-    let l1 = m.add_font(stheiti)?;
-    let r0 = m.add_font(naskh)?;
+    let l0 = m.add_font_owned(arial)?;
+    let l1 = m.add_font_owned(stheiti)?;
+    let r0 = m.add_font_owned(naskh)?;
     m.set_ltr_chain(&[l0, l1]);
     m.set_rtl_chain(&[r0, l0]);
     Some(m)

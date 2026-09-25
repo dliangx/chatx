@@ -55,9 +55,9 @@ fn load_fonts(fonts: &mut FontManager) {
     if let (Some(arial), Some(stheiti), Some(naskh)) =
         (load(ARIAL), load(STHEITI), load(NASKH))
     {
-        let l0 = fonts.add_font(arial).unwrap();
-        let l1 = fonts.add_font(stheiti).unwrap();
-        let r0 = fonts.add_font(naskh).unwrap();
+        let l0 = fonts.add_font_owned(arial).unwrap();
+        let l1 = fonts.add_font_owned(stheiti).unwrap();
+        let r0 = fonts.add_font_owned(naskh).unwrap();
         fonts.set_ltr_chain(&[l0, l1]);
         fonts.set_rtl_chain(&[r0, l0]);
     }

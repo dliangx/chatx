@@ -29,6 +29,7 @@ pub fn dm_chat_id(peer_a: &str, peer_b: &str) -> String {
 pub struct Store {
     msgs: parking_lot::RwLock<Vec<StoredMsg>>,
     db: Option<SqlitePool>,
+    me: String,
 }
 
 impl Default for Store {
@@ -42,13 +43,15 @@ impl Store {
         Self {
             msgs: parking_lot::RwLock::new(Vec::new()),
             db: None,
+            me: String::new(),
         }
     }
 
-    pub fn with_sql(db: SqlitePool) -> Self {
+    pub fn with_sql(db: SqlitePool, me: impl Into<String>) -> Self {
         Self {
             msgs: parking_lot::RwLock::new(Vec::new()),
             db: Some(db),
+            me: me.into(),
         }
     }
 
@@ -58,11 +61,11 @@ impl Store {
             let mut asc: Vec<StoredMsg> = rows
                 .into_iter()
                 .map(|m| StoredMsg {
-                    chat_id: m.conversation_id,
-                    sender: m.sender_id,
-                    text: m.text_content.unwrap_or_default(),
-                    sealed: m.is_encrypted,
-                    t: m.timestamp as u64,
+                    chat_id: m.chat_id,
+                    sender: m.sender,
+                    text: m.text,
+                    sealed: m.sealed,
+                    t: m.t,
                 })
                 .collect();
             asc.reverse();
@@ -83,6 +86,7 @@ impl Store {
         };
         self.msgs.write().push(msg.clone());
         if let Some(db) = &self.db {
+            let mine = msg.sender == self.me;
             let _ = sqlite::messages::insert_row(
                 db,
                 &sqlite::MsgRow {
@@ -91,6 +95,7 @@ impl Store {
                     text: msg.text,
                     sealed: msg.sealed,
                     t: msg.t,
+                    mine,
                 },
             )
             .await;
@@ -113,11 +118,11 @@ impl Store {
             return Ok(rows
                 .into_iter()
                 .map(|m| StoredMsg {
-                    chat_id: m.conversation_id,
-                    sender: m.sender_id,
-                    text: m.text_content.unwrap_or_default(),
-                    sealed: m.is_encrypted,
-                    t: m.timestamp as u64,
+                    chat_id: m.chat_id,
+                    sender: m.sender,
+                    text: m.text,
+                    sealed: m.sealed,
+                    t: m.t,
                 })
                 .collect());
         }
@@ -179,7 +184,7 @@ mod tests {
     #[tokio::test]
     async fn push_persists_and_roundtrips() {
         let db = sqlite::open_memory().await.unwrap();
-        let store = Store::with_sql(db.clone());
+        let store = Store::with_sql(db.clone(), "QmMe");
         let chat = dm_chat_id("QmMe", "QmOther");
 
         store.push(&chat, "QmMe", "hi", false).await;
@@ -217,13 +222,14 @@ mod tests {
                     text: txt.into(),
                     sealed: false,
                     t: 10 + i as u64,
+                    mine: false,
                 },
             )
             .await
             .unwrap();
         }
 
-        let store = Store::with_sql(db);
+        let store = Store::with_sql(db, "QmMe");
         assert_eq!(store.len(), 0, "buffer empty before load");
         let n = store.hydrate(&chat).await.unwrap();
         assert_eq!(n, 3, "all 3 rows loaded");

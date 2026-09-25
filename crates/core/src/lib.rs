@@ -53,7 +53,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         let (running, events) = sw::boot(&device).await?;
         let db_path = base.join(profile).join("messages.db");
         let db = sqlite::open(&db_path).await?;
-        let store = Arc::new(Store::with_sql(db));
+        let store = Arc::new(Store::with_sql(db, device.peer_base58().to_string()));
 
         let groups_dir = DeviceIdentity::base_groups_dir(base, profile);
         let mut groups = BTreeMap::new();

@@ -4,8 +4,8 @@ use sqlx::FromRow;
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
 pub struct Friendship {
-    pub user_low: String,
-    pub user_high: String,
+    pub user_low: i64,
+    pub user_high: i64,
     pub created_at: i64,
 }
 
@@ -18,8 +18,8 @@ pub const FR_IGNORED: &str = "ignored";
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
 pub struct FriendRequest {
     pub id: i64,
-    pub from_id: String,
-    pub to_id: String,
+    pub from_id: i64,
+    pub to_id: i64,
     pub status: String,
     pub message: Option<String>,
     pub created_at: i64,
@@ -28,57 +28,57 @@ pub struct FriendRequest {
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
 pub struct Follow {
-    pub follower_id: String,
-    pub following_id: String,
+    pub follower_id: i64,
+    pub following_id: i64,
     pub created_at: i64,
 }
 
-fn ordered_pair(a: &str, b: &str) -> (String, String) {
+fn ordered_pair(a: i64, b: i64) -> (i64, i64) {
     if a <= b {
-        (a.to_string(), b.to_string())
+        (a, b)
     } else {
-        (b.to_string(), a.to_string())
+        (b, a)
     }
 }
 
-pub async fn add(pool: &Pool, a: &str, b: &str) -> anyhow::Result<()> {
+pub async fn add(pool: &Pool, a: i64, b: i64) -> anyhow::Result<()> {
     let (low, high) = ordered_pair(a, b);
     sqlx::query(
         "INSERT OR IGNORE INTO friendships (user_low, user_high, created_at) VALUES (?1, ?2, ?3)",
     )
-    .bind(&low)
-    .bind(&high)
+    .bind(low)
+    .bind(high)
     .bind(now_ms())
     .execute(pool)
     .await?;
     Ok(())
 }
 
-pub async fn remove(pool: &Pool, a: &str, b: &str) -> anyhow::Result<bool> {
+pub async fn remove(pool: &Pool, a: i64, b: i64) -> anyhow::Result<bool> {
     let (low, high) = ordered_pair(a, b);
     let n = sqlx::query("DELETE FROM friendships WHERE user_low = ?1 AND user_high = ?2")
-        .bind(&low)
-        .bind(&high)
+        .bind(low)
+        .bind(high)
         .execute(pool)
         .await?;
     Ok(n.rows_affected() > 0)
 }
 
-pub async fn has(pool: &Pool, a: &str, b: &str) -> anyhow::Result<bool> {
+pub async fn has(pool: &Pool, a: i64, b: i64) -> anyhow::Result<bool> {
     let (low, high) = ordered_pair(a, b);
     let row: Option<(i64,)> =
         sqlx::query_as("SELECT 1 FROM friendships WHERE user_low = ?1 AND user_high = ?2")
-            .bind(&low)
-            .bind(&high)
+            .bind(low)
+            .bind(high)
             .fetch_optional(pool)
             .await?;
     Ok(row.is_some())
 }
 
-pub async fn friends_of(pool: &Pool, user_id: &str) -> anyhow::Result<Vec<String>> {
-    let mut out: Vec<String> = Vec::new();
+pub async fn friends_of(pool: &Pool, user_id: i64) -> anyhow::Result<Vec<i64>> {
+    let mut out: Vec<i64> = Vec::new();
     {
-        let rows: Vec<(String,)> =
+        let rows: Vec<(i64,)> =
             sqlx::query_as("SELECT user_high FROM friendships WHERE user_low = ?1 ORDER BY user_high")
                 .bind(user_id)
                 .fetch_all(pool)
@@ -86,7 +86,7 @@ pub async fn friends_of(pool: &Pool, user_id: &str) -> anyhow::Result<Vec<String
         out.extend(rows.into_iter().map(|(s,)| s));
     }
     {
-        let rows: Vec<(String,)> =
+        let rows: Vec<(i64,)> =
             sqlx::query_as("SELECT user_low FROM friendships WHERE user_high = ?1 ORDER BY user_low")
                 .bind(user_id)
                 .fetch_all(pool)
@@ -96,7 +96,7 @@ pub async fn friends_of(pool: &Pool, user_id: &str) -> anyhow::Result<Vec<String
     Ok(out)
 }
 
-pub async fn common_friends(pool: &Pool, a: &str, b: &str) -> anyhow::Result<Vec<String>> {
+pub async fn common_friends(pool: &Pool, a: i64, b: i64) -> anyhow::Result<Vec<i64>> {
     let mut mine = friends_of(pool, a).await?;
     let theirs = friends_of(pool, b).await?;
     mine.retain(|x| theirs.iter().any(|y| y == x));
@@ -104,7 +104,7 @@ pub async fn common_friends(pool: &Pool, a: &str, b: &str) -> anyhow::Result<Vec
     Ok(mine)
 }
 
-pub async fn count(pool: &Pool, user_id: &str) -> anyhow::Result<u32> {
+pub async fn count(pool: &Pool, user_id: i64) -> anyhow::Result<u32> {
     let (n,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM friendships WHERE user_low = ?1 OR user_high = ?1",
     )
@@ -117,7 +117,7 @@ pub async fn count(pool: &Pool, user_id: &str) -> anyhow::Result<u32> {
 
 // --- friend requests -------------------------------------------------------
 
-pub async fn send_request(pool: &Pool, from_id: &str, to_id: &str, message: Option<&str>) -> anyhow::Result<i64> {
+pub async fn send_request(pool: &Pool, from_id: i64, to_id: i64, message: Option<&str>) -> anyhow::Result<i64> {
     if from_id == to_id {
         anyhow::bail!("cannot friend-request yourself");
     }
@@ -139,7 +139,7 @@ pub async fn send_request(pool: &Pool, from_id: &str, to_id: &str, message: Opti
     Ok(row.0)
 }
 
-pub async fn list_inbox(pool: &Pool, user_id: &str, status: Option<&str>) -> anyhow::Result<Vec<FriendRequest>> {
+pub async fn list_inbox(pool: &Pool, user_id: i64, status: Option<&str>) -> anyhow::Result<Vec<FriendRequest>> {
     let status = status.unwrap_or(FR_PENDING);
     let rows = sqlx::query_as::<_, FriendRequest>(
         "SELECT * FROM friend_requests WHERE to_id = ?1 AND status = ?2
@@ -152,7 +152,7 @@ pub async fn list_inbox(pool: &Pool, user_id: &str, status: Option<&str>) -> any
     Ok(rows)
 }
 
-pub async fn list_sent(pool: &Pool, user_id: &str) -> anyhow::Result<Vec<FriendRequest>> {
+pub async fn list_sent(pool: &Pool, user_id: i64) -> anyhow::Result<Vec<FriendRequest>> {
     let rows = sqlx::query_as::<_, FriendRequest>(
         "SELECT * FROM friend_requests WHERE from_id = ?1 ORDER BY created_at DESC",
     )
@@ -162,8 +162,8 @@ pub async fn list_sent(pool: &Pool, user_id: &str) -> anyhow::Result<Vec<FriendR
     Ok(rows)
 }
 
-pub async fn respond(pool: &Pool, request_id: i64, acceptor: &str, accept: bool) -> anyhow::Result<bool> {
-    let existing: Option<(String, String, String)> = sqlx::query_as(
+pub async fn respond(pool: &Pool, request_id: i64, acceptor: i64, accept: bool) -> anyhow::Result<bool> {
+    let existing: Option<(i64, i64, String)> = sqlx::query_as(
         "SELECT from_id, to_id, status FROM friend_requests WHERE id = ?1",
     )
     .bind(request_id)
@@ -196,7 +196,7 @@ pub async fn respond(pool: &Pool, request_id: i64, acceptor: &str, accept: bool)
         .await?;
 
     if accept {
-        add(pool, &from_id, &to_id).await?;
+        add(pool, from_id, to_id).await?;
     }
     Ok(true)
 }
@@ -211,7 +211,7 @@ pub async fn cancel(pool: &Pool, request_id: i64) -> anyhow::Result<bool> {
 
 // --- follows ---------------------------------------------------------------
 
-pub async fn follow(pool: &Pool, follower: &str, following: &str) -> anyhow::Result<bool> {
+pub async fn follow(pool: &Pool, follower: i64, following: i64) -> anyhow::Result<bool> {
     if follower == following {
         return Ok(false);
     }
@@ -226,7 +226,7 @@ pub async fn follow(pool: &Pool, follower: &str, following: &str) -> anyhow::Res
     Ok(n.rows_affected() > 0)
 }
 
-pub async fn unfollow(pool: &Pool, follower: &str, following: &str) -> anyhow::Result<bool> {
+pub async fn unfollow(pool: &Pool, follower: i64, following: i64) -> anyhow::Result<bool> {
     let n = sqlx::query("DELETE FROM follows WHERE follower_id = ?1 AND following_id = ?2")
         .bind(follower)
         .bind(following)
@@ -235,7 +235,7 @@ pub async fn unfollow(pool: &Pool, follower: &str, following: &str) -> anyhow::R
     Ok(n.rows_affected() > 0)
 }
 
-pub async fn is_following(pool: &Pool, follower: &str, following: &str) -> anyhow::Result<bool> {
+pub async fn is_following(pool: &Pool, follower: i64, following: i64) -> anyhow::Result<bool> {
     let row: Option<(i64,)> =
         sqlx::query_as("SELECT 1 FROM follows WHERE follower_id = ?1 AND following_id = ?2")
             .bind(follower)
@@ -245,8 +245,8 @@ pub async fn is_following(pool: &Pool, follower: &str, following: &str) -> anyho
     Ok(row.is_some())
 }
 
-pub async fn followers(pool: &Pool, user_id: &str) -> anyhow::Result<Vec<String>> {
-    let rows: Vec<(String,)> =
+pub async fn followers(pool: &Pool, user_id: i64) -> anyhow::Result<Vec<i64>> {
+    let rows: Vec<(i64,)> =
         sqlx::query_as("SELECT follower_id FROM follows WHERE following_id = ?1 ORDER BY follower_id")
             .bind(user_id)
             .fetch_all(pool)
@@ -254,8 +254,8 @@ pub async fn followers(pool: &Pool, user_id: &str) -> anyhow::Result<Vec<String>
     Ok(rows.into_iter().map(|(s,)| s).collect())
 }
 
-pub async fn following(pool: &Pool, user_id: &str) -> anyhow::Result<Vec<String>> {
-    let rows: Vec<(String,)> =
+pub async fn following(pool: &Pool, user_id: i64) -> anyhow::Result<Vec<i64>> {
+    let rows: Vec<(i64,)> =
         sqlx::query_as("SELECT following_id FROM follows WHERE follower_id = ?1 ORDER BY following_id")
             .bind(user_id)
             .fetch_all(pool)
@@ -271,48 +271,48 @@ mod tests {
     #[tokio::test]
     async fn friendships_roundtrip() {
         let pool = open_memory().await.unwrap();
-        add(&pool, "alice", "bob").await.unwrap();
-        assert!(has(&pool, "bob", "alice").await.unwrap(), "symmetric");
-        assert!(!has(&pool, "alice", "carol").await.unwrap());
-        assert_eq!(count(&pool, "alice").await.unwrap(), 1);
-        assert_eq!(friends_of(&pool, "bob").await.unwrap(), vec!["alice".to_string()]);
-        assert!(remove(&pool, "alice", "bob").await.unwrap());
-        assert!(!remove(&pool, "alice", "bob").await.unwrap());
+        add(&pool, 1, 2).await.unwrap();
+        assert!(has(&pool, 2, 1).await.unwrap(), "symmetric");
+        assert!(!has(&pool, 1, 3).await.unwrap());
+        assert_eq!(count(&pool, 1).await.unwrap(), 1);
+        assert_eq!(friends_of(&pool, 2).await.unwrap(), vec![1]);
+        assert!(remove(&pool, 1, 2).await.unwrap());
+        assert!(!remove(&pool, 1, 2).await.unwrap());
     }
 
     #[tokio::test]
     async fn friend_request_accept_and_reject_flow() {
         let pool = open_memory().await.unwrap();
-        let id = send_request(&pool, "bob", "alice", Some("hi?")).await.unwrap();
-        let inbox = list_inbox(&pool, "alice", None).await.unwrap();
+        let id = send_request(&pool, 2, 1, Some("hi?")).await.unwrap();
+        let inbox = list_inbox(&pool, 1, None).await.unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].id, id);
 
-        assert!(respond(&pool, id, "alice", true).await.unwrap());
-        assert!(has(&pool, "alice", "bob").await.unwrap(), "acceptance creates friendship");
+        assert!(respond(&pool, id, 1, true).await.unwrap());
+        assert!(has(&pool, 1, 2).await.unwrap(), "acceptance creates friendship");
 
-        let id2 = send_request(&pool, "carol", "alice", None).await.unwrap();
-        assert!(respond(&pool, id2, "alice", false).await.unwrap(), "recipients may reject");
+        let id2 = send_request(&pool, 3, 1, None).await.unwrap();
+        assert!(respond(&pool, id2, 1, false).await.unwrap(), "recipients may reject");
 
-        let id3 = send_request(&pool, "dave", "alice", None).await.unwrap();
-        assert!(!respond(&pool, id3, "carol", true).await.unwrap(), "third parties cannot respond");
+        let id3 = send_request(&pool, 4, 1, None).await.unwrap();
+        assert!(!respond(&pool, id3, 3, true).await.unwrap(), "third parties cannot respond");
 
-        let id4 = send_request(&pool, "alice", "eve", None).await.unwrap();
+        let id4 = send_request(&pool, 1, 5, None).await.unwrap();
         assert!(cancel(&pool, id4).await.unwrap(), "sender may cancel pending");
     }
 
     #[tokio::test]
     async fn follow_unfollow_lists() {
         let pool = open_memory().await.unwrap();
-        assert!(follow(&pool, "a", "b").await.unwrap());
-        assert!(!follow(&pool, "b", "b").await.unwrap(), "no self-follow");
-        assert!(!follow(&pool, "a", "b").await.unwrap(), "duplicate follow no-op");
+        assert!(follow(&pool, 1, 2).await.unwrap());
+        assert!(!follow(&pool, 2, 2).await.unwrap(), "no self-follow");
+        assert!(!follow(&pool, 1, 2).await.unwrap(), "duplicate follow no-op");
 
-        assert!(is_following(&pool, "a", "b").await.unwrap());
-        assert_eq!(followers(&pool, "b").await.unwrap(), vec!["a".to_string()]);
-        assert_eq!(following(&pool, "a").await.unwrap(), vec!["b".to_string()]);
+        assert!(is_following(&pool, 1, 2).await.unwrap());
+        assert_eq!(followers(&pool, 2).await.unwrap(), vec![1]);
+        assert_eq!(following(&pool, 1).await.unwrap(), vec![2]);
 
-        assert!(unfollow(&pool, "a", "b").await.unwrap());
-        assert!(!is_following(&pool, "a", "b").await.unwrap());
+        assert!(unfollow(&pool, 1, 2).await.unwrap());
+        assert!(!is_following(&pool, 1, 2).await.unwrap());
     }
 }

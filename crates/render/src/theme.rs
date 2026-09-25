@@ -37,7 +37,7 @@ impl Default for Theme {
             radius: 12.0,
             padding_x: 12.0,
             padding_y: 8.0,
-            font_size: 16.0,
+            font_size: 14.0,
             line_height: 1.4,
             time_font_size: 11.0,
             avatar_size: 36.0,
