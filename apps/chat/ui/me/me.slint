@@ -7,6 +7,7 @@ import { Theme } from "../theme.slint";
 
 export component MeView inherits Rectangle {
     background: #f5f5f5;
+    in-out property <int> selected-key: -1;
 
     callback navigate-to(SubPageType, int);
 
@@ -17,13 +18,13 @@ export component MeView inherits Rectangle {
         VerticalLayout {
             width: 100%;
             spacing: 0px;
-            padding-left: 8px;
             SettingItem {
                 width: 100%;
                 id: 1;
                 icon: Glyph.collection;
                 title: "收藏";
-                clicked => { root.navigate-to(SubPageType.SettingsGeneral, 0); }
+                selected: root.selected-key == 1;
+                clicked => { root.selected-key = 1; root.navigate-to(SubPageType.SettingsGeneral, 0); }
             }
 
             SettingItem {
@@ -31,7 +32,8 @@ export component MeView inherits Rectangle {
                 id: 2;
                 icon: Glyph.setting;
                 title: "设置";
-                clicked => { root.navigate-to(SubPageType.SettingsMain, 0); }
+                selected: root.selected-key == 2;
+                clicked => { root.selected-key = 2; root.navigate-to(SubPageType.SettingsMain, 0); }
             }
         }
     }

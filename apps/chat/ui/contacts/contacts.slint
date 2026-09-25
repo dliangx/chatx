@@ -1,15 +1,11 @@
 import { SubPageType } from "../components/nav_state.slint";
+import { ContactRow } from "../components/app_state.slint";
 import { ContactListItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
 
-export struct ContactRow {
-    id: int,
-    peer_id: string,
-    name: string,
-}
-
 export component ContactListView inherits Rectangle {
     in property <[ContactRow]> rows: [];
+    in-out property <int> selected-key: -1;
 
     width: 100%;
     height: 100%;
@@ -46,8 +42,9 @@ export component ContactListView inherits Rectangle {
             id: row.id;
             peer_id: row.peer_id;
             title: row.name;
+            selected: row.id == root.selected-key;
 
-            clicked => { root.navigate-to(SubPageType.ContactProfile, row.id); }
+            clicked => { root.selected-key = row.id; root.navigate-to(SubPageType.ContactProfile, row.id); }
         }
     }
 }

@@ -1,4 +1,5 @@
 import { SubPageType } from "components/nav_state.slint";
+import { AppState } from "components/app_state.slint";
 import { ChatView } from "chats/chat.slint";
 import { ChatSettingView } from "chats/chat_setting.slint";
 import { ContactProfileView } from "contacts/profile.slint";
@@ -18,14 +19,14 @@ export component SubPageView inherits Rectangle {
     callback navigate-to(SubPageType, int);
 
     in-out property <bool> slid-in: false;
-    x: root.slid-in ? 0px : root.width;
+    x: AppState.is-mobile ? (root.slid-in ? 0px : root.width) : 0px;
     animate x {
         duration: 280ms;
         easing: ease-out;
     }
     Timer {
         interval: 16ms;
-        running: !root.slid-in;
+        running: AppState.is-mobile && !root.slid-in;
         triggered => { root.slid-in = true; }
     }
 

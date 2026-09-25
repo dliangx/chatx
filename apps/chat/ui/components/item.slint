@@ -1,5 +1,6 @@
 import { Icon, Glyph, Variant } from "./icon.slint";
 import { Theme } from "../theme.slint";
+import { AppState } from "./app_state.slint";
 
 export component ChatListItem inherits Rectangle {
     in property <int> id;
@@ -7,9 +8,10 @@ export component ChatListItem inherits Rectangle {
     in property <string> title;
     in property <string> time;
     in property <string> content;
+    in property <bool> selected: false;
     callback clicked(int);
 
-    background: transparent;
+    background: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand : transparent;
 
     HorizontalLayout {
         width: 100%;
@@ -34,7 +36,7 @@ export component ChatListItem inherits Rectangle {
                 text: root.title;
                 font-size: 14px;
                 font-weight: 800;
-                color: Theme.fg;
+                color: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand-soft : Theme.fg;
                 overflow: elide;
                 vertical-alignment: bottom;
             }
@@ -44,7 +46,7 @@ export component ChatListItem inherits Rectangle {
                 height: 24px;
                 text: root.content;
                 font-size: 12px;
-                color: Theme.fg-muted;
+                color: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand-soft : Theme.fg-muted;
                 overflow: elide;
                 vertical-alignment: top;
             }
@@ -56,7 +58,7 @@ export component ChatListItem inherits Rectangle {
             font-size: 12px;
             horizontal-alignment: right;
             vertical-alignment: center;
-            color: Theme.fg-muted;
+            color: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand-soft : Theme.fg-muted;
         }
     }
 
@@ -68,7 +70,7 @@ export component ChatListItem inherits Rectangle {
         background: Theme.border;
     }
 
-    TouchArea {
+    ta := TouchArea {
         width: 100%;
         height: 100%;
         clicked => { root.clicked(root.id); }
@@ -80,9 +82,10 @@ export component ContactListItem inherits Rectangle {
     in property <image> image;
     in property <string> peer_id;
     in property <string> title;
+    in property <bool> selected: false;
     callback clicked();
 
-    background: transparent;
+    background: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand : transparent;
 
     HorizontalLayout {
         width: 100%;
@@ -102,12 +105,12 @@ export component ContactListItem inherits Rectangle {
             text: root.title;
             font-size: 14px;
             font-weight: 800;
-            color: Theme.fg;
+            color: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand-soft : Theme.fg;
             vertical-alignment: center;
         }
     }
 
-    TouchArea {
+    ta := TouchArea {
         width: 100%;
         height: 100%;
         clicked => { root.clicked(); }
@@ -118,27 +121,29 @@ export component SettingItem inherits Rectangle {
     in property <int> id;
     in property <Glyph> icon;
     in property <string> title;
+    in property <bool> selected: false;
     callback clicked(int);
     height: 48px;
+    background: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand : transparent;
 
     Icon {
-        x: 0px;
+        x: 8px;
         y: (parent.height - self.size) / 2;
         size: 24px;
         glyph: root.icon;
         variant: Variant.raw;
-        tint: Theme.fg;
+        tint: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand-soft : Theme.fg;
     }
 
     Text {
-        x: 32px;
+        x: 40px;
         y: 0px;
         width: parent.width - 32px;
         height: parent.height;
         vertical-alignment: center;
         text: root.title;
         font-size: 14px;
-        color: Theme.fg;
+        color: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand-soft : Theme.fg;
     }
 
     Icon {
@@ -147,18 +152,18 @@ export component SettingItem inherits Rectangle {
         size: 20px;
         glyph: Glyph.right;
         variant: Variant.raw;
-        tint: Theme.fg;
+        tint: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand-soft : Theme.fg;
     }
 
     Rectangle {
-        x: 32px;
+        x: 40px;
         y: 48px;
         width: 100%;
         height: 1px;
         background: #ececec;
     }
 
-    TouchArea {
+    ta := TouchArea {
         width: 100%;
         height: 100%;
         clicked => { root.clicked(root.id); }
@@ -178,6 +183,7 @@ export component PlantItem inherits Rectangle {
         text: root.key;
         font-size: 14px;
         color: Theme.fg;
+        vertical-alignment: center;
     }
 
     Text {
@@ -188,5 +194,6 @@ export component PlantItem inherits Rectangle {
         text: root.value;
         font-size: 14px;
         color: Theme.fg;
+        vertical-alignment: center;
     }
 }

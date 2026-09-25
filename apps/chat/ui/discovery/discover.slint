@@ -1,14 +1,7 @@
 import { CardView } from "../components/card.slint";
 import { Theme } from "../theme.slint";
 import { SubPageType } from "../components/nav_state.slint";
-
-export struct DiscoverCard {
-    id: int,
-    title: string,
-    user: string,
-    likes: int,
-    liked: bool,
-}
+import { DiscoverCard } from "../components/app_state.slint";
 
 export component DiscoverView inherits Rectangle {
     in property <[DiscoverCard]> cards: [];

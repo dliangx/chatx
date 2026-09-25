@@ -4,9 +4,28 @@ import {
     SubPageEntry,
     GlobalOverlayType,
 } from "nav_state.slint";
-import { ConversationRow } from "../chats/chat_list.slint";
-import { ContactRow } from "../contacts/contacts.slint";
-import { DiscoverCard } from "../discovery/discover.slint";
+
+export struct ConversationRow {
+    chat-id: int,
+    title: string,
+    preview: string,
+    is-group: bool,
+    time-label: string,
+}
+
+export struct ContactRow {
+    id: int,
+    peer_id: string,
+    name: string,
+}
+
+export struct DiscoverCard {
+    id: int,
+    title: string,
+    user: string,
+    likes: int,
+    liked: bool,
+}
 
 export global AppState {
     in-out property <NavigationState> nav-state: { active-tab:0, tabs: [], global-overlay: GlobalOverlayType.None };
