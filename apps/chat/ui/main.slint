@@ -57,6 +57,7 @@ export component MainWindow inherits Window {
     Rectangle {
         width: 100%;
         height: 100%;
+        clip: true;
 
         if AppState.nav-state.active-tab >= 0:
         VerticalLayout {

@@ -17,6 +17,18 @@ export component SubPageView inherits Rectangle {
     callback go-back();
     callback navigate-to(SubPageType, int);
 
+    in-out property <bool> slid-in: false;
+    x: root.slid-in ? 0px : root.width;
+    animate x {
+        duration: 280ms;
+        easing: ease-out;
+    }
+    Timer {
+        interval: 16ms;
+        running: !root.slid-in;
+        triggered => { root.slid-in = true; }
+    }
+
     // 指针挡板：铺满全屏吸收所有点击，阻断穿透到下层 tab 页（置于最底层）
     TouchArea {
         width: parent.width;

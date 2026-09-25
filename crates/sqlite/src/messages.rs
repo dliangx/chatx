@@ -198,8 +198,8 @@ async fn load_rows(
 ) -> anyhow::Result<Vec<MsgRow>> {
     let limit = limit.unwrap_or(-1);
     let offset = offset.unwrap_or(0);
-    let rows: Vec<(String, Option<String>, bool, i64)> = sqlx::query_as(
-        "SELECT COALESCE(u.username, '') AS sender, m.text_content, m.is_encrypted, m.timestamp
+    let rows: Vec<(i64, String, Option<String>, bool, i64)> = sqlx::query_as(
+        "SELECT m.id, COALESCE(u.username, '') AS sender, m.text_content, m.is_encrypted, m.timestamp
          FROM messages m
          LEFT JOIN users u ON u.id = m.sender_id
          WHERE m.conversation_id = ?1
@@ -213,7 +213,8 @@ async fn load_rows(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(sender, text, sealed, t)| MsgRow {
+        .map(|(id, sender, text, sealed, t)| MsgRow {
+            id,
             chat_id: chat_id.to_string(),
             sender,
             text: text.unwrap_or_default(),
@@ -301,6 +302,7 @@ mod tests {
             insert_row(
                 &pool,
                 &LegacyRow {
+                    id: 0,
                     chat_id: "c".into(),
                     sender: "s".into(),
                     text: text.into(),
@@ -338,6 +340,7 @@ mod tests {
         insert_row(
             &pool,
             &LegacyRow {
+                id: 0,
                 chat_id: "dm".into(),
                 sender: "a".into(),
                 text: "hi".into(),

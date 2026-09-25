@@ -3,6 +3,7 @@ use sqlx::SqlitePool;
 
 #[derive(Debug, Clone)]
 pub struct StoredMsg {
+    pub id: i64,
     pub chat_id: String,
     pub sender: String,
     pub text: String,
@@ -61,6 +62,7 @@ impl Store {
             let mut asc: Vec<StoredMsg> = rows
                 .into_iter()
                 .map(|m| StoredMsg {
+                    id: m.id,
                     chat_id: m.chat_id,
                     sender: m.sender,
                     text: m.text,
@@ -78,6 +80,7 @@ impl Store {
     pub async fn push(&self, chat_id: &str, sender: &str, text: &str, sealed: bool) {
         let t = now_ms();
         let msg = StoredMsg {
+            id: t as i64,
             chat_id: chat_id.to_string(),
             sender: sender.to_string(),
             text: text.to_string(),
@@ -90,6 +93,7 @@ impl Store {
             let _ = sqlite::messages::insert_row(
                 db,
                 &sqlite::MsgRow {
+                    id: 0,
                     chat_id: msg.chat_id,
                     sender: msg.sender,
                     text: msg.text,
@@ -118,6 +122,7 @@ impl Store {
             return Ok(rows
                 .into_iter()
                 .map(|m| StoredMsg {
+                    id: m.id,
                     chat_id: m.chat_id,
                     sender: m.sender,
                     text: m.text,
@@ -217,6 +222,7 @@ mod tests {
             sqlite::messages::insert_row(
                 &db,
                 &sqlite::MsgRow {
+                    id: 0,
                     chat_id: chat.clone(),
                     sender: "peer".into(),
                     text: txt.into(),

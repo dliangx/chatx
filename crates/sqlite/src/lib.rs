@@ -20,6 +20,7 @@ pub use sqlx::sqlite::SqlitePoolOptions;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MsgRow {
+    pub id: i64,
     pub chat_id: String,
     pub sender: String,
     pub text: String,

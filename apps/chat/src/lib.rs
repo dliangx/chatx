@@ -80,13 +80,14 @@ pub fn main() {
         let w = weak.clone();
         let w2 = weak.clone();
         state.on_push_sub(move |page, payload| {
+            if page == SubPageType::ChatRoom {
+                load_chat_messages(w2.clone(), payload);
+            }
             if let Some(ui) = w.upgrade() {
                 let s = ui.global::<AppState>();
                 push_sub_history(&s, SubPageEntry { page, payload });
             }
-            if page == SubPageType::ChatRoom {
-                load_chat_messages(w2.clone(), payload);
-            }
+
         });
     }
     {
@@ -480,11 +481,18 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
         rows.reverse();
         let rendered: Vec<RenderedMsg> = {
             let mut r = RENDERER.get().unwrap().lock().unwrap();
-            rows.iter().enumerate().map(|(i, m)| {
+            rows.iter().map(|m| {
                 let is_self = m.sender == me_peer || m.sender == me;
                 let time = time_label(m.t as i64);
                 let sender = if is_self { "我" } else { &title };
-                render_msg(&mut r, i as u64, sender, &m.text, is_self, &time, 380, 2.0)
+                // Key the texture cache by rendered content (not the row id), so
+                // editing a message in the DB invalidates the stale bubble.
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(&m.text, &mut h);
+                std::hash::Hash::hash(sender, &mut h);
+                std::hash::Hash::hash(&is_self, &mut h);
+                std::hash::Hash::hash(&time, &mut h);
+                render_msg(&mut r, std::hash::Hasher::finish(&h), sender, &m.text, is_self, &time, 380, 2.0)
             }).collect()
         };
         let _ = slint::invoke_from_event_loop(move || {
