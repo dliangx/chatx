@@ -14,9 +14,8 @@ export struct MessageData {
     selected: bool,
 }
 
-// 聊天会话状态：本页面私有。Rust 侧收到 opened(chat-id) 后按 chat-id 查询并填充 messages。
-export global ChatState {
-    in property <int> chat-key: -1;
+export global ChatSession {
+    in property <bool> connect-status: false;
     in property <[MessageData]> messages: [];
     in property <string> send-status: "";
     callback message-sent(int, string);
@@ -36,9 +35,8 @@ export component ChatView inherits Rectangle {
 
     out property <length> msg-row-h: 56px;
     out property <length> input-h: 52px;
-    out property <length> status-h: ChatState.send-status != "" ? 20px : 0px;
+    out property <length> status-h: ChatSession.send-status != "" ? 20px : 0px;
     out property <length> _bottom: root.status-h + root.input-h;
-
     Header {
         name: "chat";
         on-back => { root.on-back() }
@@ -49,33 +47,31 @@ export component ChatView inherits Rectangle {
         y: parent.height - root.input-h;
         width: parent.width;
         height: root.input-h;
-        sent(t) => { ChatState.message-sent(root.chat-id, t); }
+        sent(t) => { ChatSession.message-sent(root.chat-id, t); }
     }
-
-    // 发送状态提示（位于输入区上方）
-    if ChatState.send-status != "":
+// 发送状态提示（位于输入区上方）
+    if ChatSession.send-status != "":
     Text {
         x: 0px;
         y: parent.height - root.input-h - 20px;
         width: parent.width;
         height: 20px;
-        text: ChatState.send-status;
+        text: ChatSession.send-status;
         color: #6b7280;
         font-size: 12px;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-
     // 消息列表
     Flickable {
         x: 0px;
         y: 0px;
         width: parent.width;
-        height: parent.height - root._bottom;
-        viewport-height: 12px + ChatState.messages.length * root.msg-row-h;
-        interactive: ChatState.messages.length > 0;
+        height: parent.height;
+        viewport-height: 12px + ChatSession.messages.length * root.msg-row-h;
+        interactive: ChatSession.messages.length > 0;
 
-        for msg[i] in ChatState.messages: Rectangle {
+        for msg[i] in ChatSession.messages: Rectangle {
             x: 0px;
             y: 12px + i * root.msg-row-h;
             width: parent.width;

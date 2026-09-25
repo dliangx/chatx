@@ -164,8 +164,7 @@ pub fn main() {
             st.set_contacts(slint::ModelRc::new(slint::VecModel::from(Vec::<ContactRow>::new())));
             st.set_discover(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
             st.set_data_status(SharedString::new());
-            let cs = ui.global::<ChatState>();
-            cs.set_chat_key(-1);
+            let cs = ui.global::<ChatSession>();
             cs.set_messages(slint::ModelRc::new(slint::VecModel::from(Vec::<MessageData>::new())));
             cs.set_send_status(SharedString::new());
             ui.set_logged_in(false);
@@ -181,7 +180,7 @@ pub fn main() {
 
     {
         let weak = weak.clone();
-        ui.global::<ChatState>().on_message_sent(move |key, body| {
+        ui.global::<ChatSession>().on_message_sent(move |key, body| {
             let b = body.as_str().trim().to_string();
             if b.is_empty() {
                 return;
@@ -416,7 +415,7 @@ fn render_one_message(
     }
 }
 
-/// Load a conversation's messages from SQLite into the ChatState global (memory -> UI).
+/// Load a conversation's messages from SQLite into the ChatSession global (memory -> UI).
 fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     let client: Option<Arc<Client<HttpDirectory>>> = CLIENT.with(|s| s.borrow().clone());
     let pool = POOL.with(|s| s.borrow().clone());
@@ -444,7 +443,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             Err(e) => {
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak.upgrade() {
-                        ui.global::<ChatState>()
+                        ui.global::<ChatSession>()
                             .set_send_status(SharedString::from(format!("加载消息失败: {e}")));
                     }
                 });
@@ -465,8 +464,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             }).collect()
         });
         if let Some(ui) = ui_weak2.upgrade() {
-            let cs = ui.global::<ChatState>();
-            cs.set_chat_key(chat_key);
+            let cs = ui.global::<ChatSession>();
             cs.set_messages(slint::ModelRc::new(slint::VecModel::from(rendered)));
             cs.set_send_status(SharedString::new());
         }
@@ -497,7 +495,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     };
     let Some(chat_id) = chat_id else { return };
     if let Some(ui) = weak.upgrade() {
-        ui.global::<ChatState>().set_send_status(SharedString::from("发送中…"));
+        ui.global::<ChatSession>().set_send_status(SharedString::from("发送中…"));
     }
     let candidates: Vec<String> = {
         let mut v: Vec<String> = Vec::new();
@@ -540,7 +538,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
             };
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    ui.global::<ChatState>()
+                    ui.global::<ChatSession>()
                         .set_send_status(SharedString::from(format!("发送失败: {msg}")));
                 }
             });
@@ -549,7 +547,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    ui.global::<ChatState>().set_send_status(SharedString::new());
+                    ui.global::<ChatSession>().set_send_status(SharedString::new());
                 }
             });
             load_chat_messages(weak2, key);
