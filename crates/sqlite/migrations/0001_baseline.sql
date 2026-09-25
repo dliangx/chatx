@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     id                  INTEGER PRIMARY KEY,    -- conversation id (app-generated)
     type                INTEGER NOT NULL,       -- 0=DM, 1=group
     name                TEXT,                   -- routing key (DM: peer pair string; group: group id)
-    peer_id             INTEGER,                -- DM peer's user id (for profile resolution)
+    peer_id             TEXT,                   -- DM peer's identity (libp2p PeerId / username)
     avatar_path         TEXT,                   -- avatar
     last_message_id     INTEGER,                -- last message ID (denormalized)
     last_message_preview TEXT,                  -- last message preview (denormalized)

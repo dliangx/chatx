@@ -69,6 +69,28 @@ pub async fn get_by_peer(pool: &Pool, peer_id: &str) -> anyhow::Result<Option<De
     Ok(row)
 }
 
+/// Resolve a libp2p PeerId to a user id, creating a user + device record on
+/// first sight. Used by the message shim to map a string sender onto an int id.
+pub async fn ensure_user_by_peer(pool: &Pool, peer_id: &str) -> anyhow::Result<i64> {
+    if let Some(d) = get_by_peer(pool, peer_id).await? {
+        return Ok(d.user_id);
+    }
+    let user_id = crate::users::ensure_identity(pool, peer_id).await?;
+    let device_id = crate::new_id();
+    upsert(
+        pool,
+        device_id,
+        &DevicePatch {
+            user_id: Some(user_id),
+            peer_id: Some(peer_id.into()),
+            public_key: Some(String::new()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(user_id)
+}
+
 pub async fn list_by_user(pool: &Pool, user_id: i64) -> anyhow::Result<Vec<Device>> {
     let rows = sqlx::query_as::<_, Device>("SELECT * FROM devices WHERE user_id = ?1 ORDER BY created_at")
         .bind(user_id)

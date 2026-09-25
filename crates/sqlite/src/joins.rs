@@ -53,7 +53,8 @@ pub async fn chat_list(pool: &Pool, me: &str, limit: u32) -> anyhow::Result<Vec<
             g.owner_id   AS group_owner_id,
             g.member_count AS member_count
          FROM conversations c
-         LEFT JOIN users u ON u.id = c.peer_id
+         LEFT JOIN devices d ON d.peer_id = c.peer_id
+         LEFT JOIN users u ON u.id = d.user_id
          LEFT JOIN groups g ON g.id = c.id
          ORDER BY c.is_pinned DESC, COALESCE(c.last_message_time, 0) DESC
          LIMIT ?1",
@@ -377,7 +378,7 @@ pub async fn group_online_snapshot(pool: &Pool, group_id: i64) -> anyhow::Result
 mod tests {
     use super::*;
     use crate::{
-        conversations::{self, ConversationPatch}, groups, messages::{self, NewMessage},
+        conversations::{self, ConversationPatch}, devices, groups, messages::{self, NewMessage},
         open_memory, users, users::UserPatch,
     };
 
@@ -385,7 +386,7 @@ mod tests {
     async fn chat_list_resolves_dm_profile_and_group() {
         let pool = open_memory().await.unwrap();
 
-        // DM conversation id == peer user id (2) so the profile join resolves.
+        // DM conversation resolves peer profile via devices.peer_id -> users.
         users::upsert(
             &pool,
             2,
@@ -397,7 +398,19 @@ mod tests {
         )
         .await
         .unwrap();
-        conversations::upsert(&pool, 2, &ConversationPatch { type_: Some(0), name: None, peer_id: Some(2), avatar_path: None }).await.unwrap();
+        devices::upsert(
+            &pool,
+            2,
+            &devices::DevicePatch {
+                user_id: Some(2),
+                peer_id: Some("12D3KooWBea".into()),
+                public_key: Some("pk-bea".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        conversations::upsert(&pool, 2, &ConversationPatch { type_: Some(0), name: None, peer_id: Some("12D3KooWBea".into()), avatar_path: None }).await.unwrap();
         messages::insert(&pool, &NewMessage::text(2, 1, "hello")).await.unwrap();
 
         // Group conversation

@@ -8,6 +8,7 @@
 //! The target file is removed first so the seed is idempotent.
 
 use sqlite::conversations::{self, ConversationPatch};
+use sqlite::devices;
 use sqlite::groups;
 use sqlite::messages::{self, NewMessage};
 use sqlite::social;
@@ -44,14 +45,14 @@ async fn seed(pool: &Pool, me: &str) -> anyhow::Result<()> {
     )
     .await?;
 
-    // Friends / contacts.
+    // Friends / contacts. peer_id is a libp2p PeerId (base58) string.
     let friends = [
-        (101i64, "alice", "Alice", "打羽毛球、看展"),
-        (102, "bob", "Bob", "后端工程师"),
-        (103, "carol", "Carol", "产品经理"),
-        (104, "dave", "Dave", "设计师"),
+        (101i64, "alice", "Alice", "打羽毛球、看展", "12D3KooWAlice"),
+        (102, "bob", "Bob", "后端工程师", "12D3KooWBob"),
+        (103, "carol", "Carol", "产品经理", "12D3KooWCarol"),
+        (104, "dave", "Dave", "设计师", "12D3KooWDave"),
     ];
-    for (id, username, nickname, bio) in friends {
+    for (id, username, nickname, bio, peer_id) in friends {
         users::upsert(
             pool,
             id,
@@ -59,6 +60,17 @@ async fn seed(pool: &Pool, me: &str) -> anyhow::Result<()> {
                 username: Some(username.into()),
                 nickname: Some(nickname.into()),
                 bio: Some(bio.into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+        devices::upsert(
+            pool,
+            id,
+            &devices::DevicePatch {
+                user_id: Some(id),
+                peer_id: Some(peer_id.into()),
+                public_key: Some(format!("pk-{username}")),
                 ..Default::default()
             },
         )
@@ -73,17 +85,18 @@ async fn seed(pool: &Pool, me: &str) -> anyhow::Result<()> {
     social::follow(pool, 101, me_id).await?; // Alice 回关（互关）
     social::follow(pool, me_id, 102).await?; // 我关注 Bob（单向）
 
-    // DM conversations: `name` = routing key, `peer_id` = peer user id.
+    // DM conversations: `name` = routing key, `peer_id` = libp2p PeerId.
     seed_dm(
         pool,
         me_id,
         101,
+        "12D3KooWAlice",
         "dm:alice",
         &["你好呀", "在吗？", "周末一起去打球吗"],
     )
     .await?;
-    seed_dm(pool, me_id, 102, "dm:bob", &["项目进度如何？", "下周三上线"]).await?;
-    seed_dm(pool, me_id, 103, "dm:carol", &["今晚一起吃饭？"]).await?;
+    seed_dm(pool, me_id, 102, "12D3KooWBob", "dm:bob", &["项目进度如何？", "下周三上线"]).await?;
+    seed_dm(pool, me_id, 103, "12D3KooWCarol", "dm:carol", &["今晚一起吃饭？"]).await?;
 
     // One group conversation.
     let group_id = 200;
@@ -125,7 +138,8 @@ async fn seed(pool: &Pool, me: &str) -> anyhow::Result<()> {
 async fn seed_dm(
     pool: &Pool,
     me_id: i64,
-    peer_id: i64,
+    peer_user_id: i64,
+    peer_id: &str,
     route_key: &str,
     texts: &[&str],
 ) -> anyhow::Result<()> {
@@ -136,7 +150,7 @@ async fn seed_dm(
         &ConversationPatch {
             type_: Some(0),
             name: Some(route_key.into()),
-            peer_id: Some(peer_id),
+            peer_id: Some(peer_id.into()),
             avatar_path: None,
         },
     )
@@ -145,7 +159,7 @@ async fn seed_dm(
     let base = sqlite::now_ms();
     for (i, t) in texts.iter().enumerate() {
         let mine = i % 2 == 1;
-        let sender = if mine { me_id } else { peer_id };
+        let sender = if mine { me_id } else { peer_user_id };
         messages::insert(
             pool,
             &NewMessage {

@@ -142,7 +142,11 @@ pub async fn insert(pool: &Pool, m: &NewMessage) -> anyhow::Result<i64> {
 /// `users.id` via `conversations::ensure_dm` / `users::ensure_identity`.
 pub async fn insert_row(pool: &Pool, m: &MsgRow) -> anyhow::Result<()> {
     let conversation_id = conversations::ensure_dm(pool, &m.chat_id).await?;
-    let sender_id = crate::users::ensure_identity(pool, &m.sender).await?;
+    let sender_id = crate::devices::ensure_user_by_peer(pool, &m.sender).await?;
+    // A message from the peer reveals the DM's peer identity.
+    if !m.mine {
+        conversations::set_peer_id(pool, conversation_id, &m.sender).await?;
+    }
     insert(
         pool,
         &NewMessage {

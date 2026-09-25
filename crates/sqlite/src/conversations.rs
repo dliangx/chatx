@@ -12,7 +12,7 @@ pub struct Conversation {
     pub id: i64,
     pub type_: i64,
     pub name: Option<String>,
-    pub peer_id: Option<i64>,
+    pub peer_id: Option<String>,
     pub avatar_path: Option<String>,
     pub last_message_id: Option<i64>,
     pub last_message_preview: Option<String>,
@@ -29,7 +29,7 @@ pub struct Conversation {
 pub struct ConversationPatch {
     pub type_: Option<i64>,
     pub name: Option<String>,
-    pub peer_id: Option<i64>,
+    pub peer_id: Option<String>,
     pub avatar_path: Option<String>,
 }
 
@@ -47,7 +47,7 @@ pub async fn upsert(pool: &Pool, id: i64, patch: &ConversationPatch) -> anyhow::
     .bind(id)
     .bind(t)
     .bind(&patch.name)
-    .bind(patch.peer_id)
+    .bind(patch.peer_id.as_deref())
     .bind(&patch.avatar_path)
     .execute(pool)
     .await?;
@@ -91,6 +91,16 @@ pub async fn ensure_dm(pool: &Pool, chat_id: &str) -> anyhow::Result<i64> {
         .execute(pool)
         .await?;
     Ok(id)
+}
+
+/// Record the DM peer's identity (libp2p PeerId / username) if not already set.
+pub async fn set_peer_id(pool: &Pool, id: i64, peer_id: &str) -> anyhow::Result<()> {
+    sqlx::query("UPDATE conversations SET peer_id = COALESCE(peer_id, ?2) WHERE id = ?1")
+        .bind(id)
+        .bind(peer_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Update the denormalized last-message fields after a new message lands.
