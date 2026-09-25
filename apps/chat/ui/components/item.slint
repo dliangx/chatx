@@ -26,23 +26,27 @@ export component ChatListItem inherits Rectangle {
 
         VerticalLayout {
             horizontal-stretch: 1;
-            spacing: 2px;
+            spacing: 8px;
 
             Text {
                 width: 100%;
+                height: 24px;
                 text: root.title;
                 font-size: 14px;
                 font-weight: 800;
                 color: Theme.fg;
                 overflow: elide;
+                vertical-alignment: bottom;
             }
 
             Text {
                 width: 100%;
+                height: 24px;
                 text: root.content;
                 font-size: 12px;
                 color: Theme.fg-muted;
                 overflow: elide;
+                vertical-alignment: top;
             }
         }
 
@@ -54,6 +58,14 @@ export component ChatListItem inherits Rectangle {
             vertical-alignment: center;
             color: Theme.fg-muted;
         }
+    }
+
+    Rectangle {
+        x: 56px;
+        y: root.height;
+        width: 100%;
+        height: 1px;
+        background: Theme.border;
     }
 
     TouchArea {
@@ -91,6 +103,7 @@ export component ContactListItem inherits Rectangle {
             font-size: 14px;
             font-weight: 800;
             color: Theme.fg;
+            vertical-alignment: center;
         }
     }
 
