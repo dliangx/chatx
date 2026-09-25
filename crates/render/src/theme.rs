@@ -25,7 +25,7 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Theme {
         Theme {
-            bubble_self: Rgba::rgb(0x95, 0xEC, 0x69),
+            bubble_self: Rgba::rgb(0xD5, 0xC0, 0xEC),
             bubble_other: Rgba::rgb(0xFF, 0xFF, 0xFF),
             text_self: Rgba::rgb(0x00, 0x00, 0x00),
             text_other: Rgba::rgb(0x00, 0x00, 0x00),
