@@ -1,8 +1,9 @@
 import { ScrollView, VerticalBox } from "std-widgets.slint";
 import { SubPageType } from "../components/nav_state.slint";
-import { Icon, Glyph } from "../components/icon.slint";
-import { SettingItem } from "../components/item.slint";
+import { Icon, Glyph, Variant } from "../components/icon.slint";
+import { SettingItem, ProfileItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
+import { AppState } from "../components/app_state.slint";
 
 
 export component MeView inherits Rectangle {
@@ -10,11 +11,12 @@ export component MeView inherits Rectangle {
     in-out property <int> selected-key: -1;
 
     callback navigate-to(SubPageType, int);
+    ProfileItem { }
 
     ScrollView {
         width: 100%;
-        height: 100%;
-
+        height: parent.height - 100px;
+        y: 100px;
         VerticalLayout {
             width: 100%;
             spacing: 0px;

@@ -103,12 +103,14 @@ export component MainWindow inherits Window {
                     navigate-to(t, p) => { AppState.push-sub(t, p); }
                 }
             }
-
-            BottomNavBar {
-                active-tab: AppState.nav-state.active-tab;
-                tab-clicked(i) => { root.select_tab(i); }
-            }
         }
+        BottomNavBar {
+            y: root.height - 58px;
+            height: 58px;
+            active-tab: AppState.nav-state.active-tab;
+            tab-clicked(i) => { root.select_tab(i); }
+        }
+
         for entry[i] in AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history: SubPageView {
             width: 100%;
             height: 100%;

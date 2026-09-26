@@ -52,6 +52,7 @@ pub struct DiscoverRow {
 #[derive(Debug, Clone, Default)]
 pub struct DataBackend {
     pub me: String,
+    pub my_nickname: String,
     pub chats: Vec<ChatRow>,
     pub contacts: Vec<ContactRow>,
     pub discover: Vec<DiscoverRow>,
@@ -110,6 +111,11 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<DataBackend> {
 
     // Resolve the string account id onto an integer user row id.
     let me_id = sqlite::users::ensure_identity(pool, me).await?;
+    let my_nickname = sqlite::users::get(pool, me_id)
+        .await?
+        .and_then(|u| u.nickname)
+        .unwrap_or_default();
+    b.my_nickname = my_nickname;
 
     // ---- chat list ----
     let items = sqlite::joins::chat_list(pool, me, 200).await?;

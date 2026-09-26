@@ -2,6 +2,61 @@ import { Icon, Glyph, Variant } from "./icon.slint";
 import { Theme } from "../theme.slint";
 import { AppState } from "./app_state.slint";
 
+export component ProfileItem inherits Rectangle {
+    in property <image> image;
+    HorizontalLayout {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100px;
+        padding: 16px;
+        spacing: 12px;
+
+        Rectangle {
+            width: 56px;
+            height: 56px;
+            border-radius: 4px;
+            background: #e4e4e4;
+
+            Image {
+                width: 40px;
+                height: 40px;
+                source: root.image;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 3px;
+
+            Text {
+                width: 100%;
+                text: AppState.user-id;
+                font-size: 18px;
+                font-weight: 800;
+                color: Theme.fg;
+                overflow: elide;
+            }
+
+            Text {
+                width: 100%;
+                text: AppState.nickname;
+                font-size: 14px;
+                color: Theme.fg-muted;
+                overflow: elide;
+            }
+
+            Text {
+                width: 100%;
+                text: AppState.peer-id;
+                font-size: 12px;
+                color: Theme.fg-muted;
+                overflow: elide;
+            }
+        }
+    }
+}
+
 export component ChatListItem inherits Rectangle {
     in property <int> id;
     in property <image> image;
@@ -20,10 +75,17 @@ export component ChatListItem inherits Rectangle {
         padding-right: 8px;
         spacing: 10px;
 
-        Image {
-            width: 40px;
-            height: 40px;
-            source: root.image;
+        Rectangle {
+            width: parent.height - 8px;
+            height: parent.height - 8px;
+            border-radius: 4px;
+            background: #e4e4e4;
+
+            Image {
+                width: 40px;
+                height: 40px;
+                source: root.image;
+            }
         }
 
         VerticalLayout {
@@ -71,7 +133,9 @@ export component ChatListItem inherits Rectangle {
     }
 
     ta := TouchArea {
-        width: 100%;
+        x: 48px;
+        y: 0px;
+        width: parent.width - 48px;
         height: 100%;
         clicked => { root.clicked(root.id); }
     }
@@ -94,10 +158,17 @@ export component ContactListItem inherits Rectangle {
         padding-right: 8px;
         spacing: 10px;
 
-        Image {
-            width: 40px;
-            height: 40px;
-            source: root.image;
+        Rectangle {
+            width: parent.height - 8px;
+            height: parent.height - 8px;
+            border-radius: 4px;
+            background: #e4e4e4;
+
+            Image {
+                width: 40px;
+                height: 40px;
+                source: root.image;
+            }
         }
 
         Text {
