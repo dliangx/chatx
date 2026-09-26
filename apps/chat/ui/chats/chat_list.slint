@@ -1,6 +1,7 @@
 // 会话列表：1:1 会话 + 群，聚合自 Rust 侧。
 import { SubPageType } from "../components/nav_state.slint";
 import { ConversationRow } from "../components/app_state.slint";
+import { AppState } from "../components/app_state.slint";
 import { ChatListItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
 import { SearchBar } from "../components/search.slint";
@@ -49,7 +50,7 @@ export component ChatListView inherits Rectangle {
         x: 0px;
         y: root.status == "" ? 48px : 74px;
         width: parent.width;
-        height: parent.height;
+        height: root.status == "" ? (parent.height - 48px - (AppState.is-mobile ? 58px : 0px)) : (parent.height - 74px - (AppState.is-mobile ? 58px : 0px));
         viewport-height: root.viewport-h;
         interactive: true;
 

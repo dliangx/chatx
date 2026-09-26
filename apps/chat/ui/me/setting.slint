@@ -1,6 +1,9 @@
 import { SubPageType } from "../components/nav_state.slint";
 import { Horizontal } from "../../material-1.0/material.slint";
 import { Header } from "../components/header.slint";
+import { SettingItem } from "../components/item.slint";
+import { Glyph } from "../components/icon.slint";
+import { AppState } from "../components/app_state.slint";
 
 export component SettingView inherits Rectangle {
     width: 100%;
@@ -12,5 +15,14 @@ export component SettingView inherits Rectangle {
     Header {
         name: "setting";
         on-back => { root.on-back() }
+    }
+
+    SettingItem {
+        y: 49px;
+        width: 100%;
+        id: 1;
+        icon: Glyph.close-circle;
+        title: "退出登录";
+        clicked => { AppState.logout(); }
     }
 }

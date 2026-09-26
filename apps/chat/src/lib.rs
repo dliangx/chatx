@@ -52,6 +52,23 @@ fn default_server() -> Arc<Directory> {
     Arc::new(Directory::default_server())
 }
 
+fn autologin_path() -> std::path::PathBuf {
+    keystore_path(&profile()).with_file_name("autologin")
+}
+
+/// Persist the passphrase in a local file so the app can auto-login next time.
+fn save_passphrase(_user_id: &str, pass: &str) {
+    let _ = std::fs::write(autologin_path(), pass.as_bytes());
+}
+
+fn load_passphrase(_user_id: &str) -> Option<String> {
+    std::fs::read_to_string(autologin_path()).ok()
+}
+
+fn clear_passphrase(_user_id: &str) {
+    let _ = std::fs::remove_file(autologin_path());
+}
+
 pub fn main() {
     let ui = MainWindow::new().expect("window init failed");
     let state = ui.global::<AppState>();
@@ -64,7 +81,25 @@ pub fn main() {
         .ok();
     if let Some(uid) = existing_uid {
         ui.set_auth_message(SharedString::from("please logging in "));
-        state.set_user_id(SharedString::from(uid));
+        state.set_user_id(SharedString::from(uid.clone()));
+
+        // 免登陆：存有 passphrase 则自动登录（先进入主界面，后台登录）
+        if let Some(pass) = load_passphrase(&uid) {
+            ui.set_logged_in(true);
+            let profile = profile();
+            let dir = default_server();
+            let weak = weak.clone();
+            let rt = runtime();
+            rt.spawn(async move {
+                let res = Client::login(&profile, &pass, uid.clone(), dir).await;
+                if res.is_err() {
+                    clear_passphrase(&uid);
+                }
+                let _ = slint::invoke_from_event_loop(move || {
+                    apply_result(weak, uid, res);
+                });
+            });
+        }
     }
 
     {
@@ -122,6 +157,9 @@ pub fn main() {
             let rt = runtime();
             rt.spawn(async move {
                 let res = Client::login(&profile, &pass, uid.clone(), dir).await;
+                if res.is_ok() {
+                    save_passphrase(&uid, &pass);
+                }
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.set_auth_busy(false);
@@ -147,6 +185,9 @@ pub fn main() {
             let rt = runtime();
             rt.spawn(async move {
                 let res = Client::bootstrap(&profile, uid.clone(), &pass, dir).await;
+                if res.is_ok() {
+                    save_passphrase(&uid, &pass);
+                }
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.set_auth_busy(false);
@@ -158,12 +199,16 @@ pub fn main() {
     }
 
     let w = weak.clone();
-    ui.on_logout(move || {
+    ui.global::<AppState>().on_logout(move || {
         CLIENT.with(|s| *s.borrow_mut() = None);
         POOL.with(|s| *s.borrow_mut() = None);
         BACKEND.with(|s| *s.borrow_mut() = None);
         if let Some(ui) = w.upgrade() {
             let st = ui.global::<AppState>();
+            let uid = st.get_user_id().to_string();
+            if !uid.is_empty() {
+                clear_passphrase(&uid);
+            }
             st.set_chats(slint::ModelRc::new(slint::VecModel::from(Vec::<ConversationRow>::new())));
             st.set_contacts(slint::ModelRc::new(slint::VecModel::from(Vec::<ContactRow>::new())));
             st.set_discover(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
@@ -295,6 +340,7 @@ fn apply_result(
         Err(err) => {
             if let Some(ui) = weak.upgrade() {
                 ui.set_auth_message(SharedString::from(err.to_string()));
+                ui.set_logged_in(false);
             }
             return;
         }

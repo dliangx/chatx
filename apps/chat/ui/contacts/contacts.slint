@@ -1,5 +1,6 @@
 import { SubPageType } from "../components/nav_state.slint";
 import { ContactRow } from "../components/app_state.slint";
+import { AppState } from "../components/app_state.slint";
 import { ContactListItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
 import { SearchBar } from "../components/search.slint";
@@ -35,7 +36,7 @@ export component ContactListView inherits Rectangle {
         x: 0px;
         y: 48px;
         width: parent.width;
-        height: parent.height;
+        height: parent.height - 48px - (AppState.is-mobile ? 58px : 0px);
         viewport-height: root.viewport-h;
         interactive: true;
 

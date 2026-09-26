@@ -2,6 +2,7 @@ import { CardView } from "../components/card.slint";
 import { Theme } from "../theme.slint";
 import { SubPageType } from "../components/nav_state.slint";
 import { DiscoverCard } from "../components/app_state.slint";
+import { AppState } from "../components/app_state.slint";
 import { SearchBar } from "../components/search.slint";
 
 export component DiscoverView inherits Rectangle {
@@ -35,7 +36,7 @@ export component DiscoverView inherits Rectangle {
         x: 0px;
         y: 48px;
         width: parent.width;
-        height: parent.height;
+        height: parent.height - 48px - (AppState.is-mobile ? 58px : 0px);
         viewport-height: root.viewport-h;
         interactive: true;
 

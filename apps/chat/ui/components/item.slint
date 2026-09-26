@@ -71,19 +71,18 @@ export component ChatListItem inherits Rectangle {
     HorizontalLayout {
         width: 100%;
         height: 100%;
+        padding: 4px;
         padding-left: 8px;
-        padding-right: 8px;
+        padding-right: 12px;
         spacing: 10px;
 
         Rectangle {
             width: parent.height - 8px;
             height: parent.height - 8px;
-            border-radius: 4px;
+            border-radius: 8px;
             background: #e4e4e4;
 
             Image {
-                width: 40px;
-                height: 40px;
                 source: root.image;
             }
         }
@@ -154,19 +153,17 @@ export component ContactListItem inherits Rectangle {
     HorizontalLayout {
         width: 100%;
         height: 100%;
+        padding: 4px;
         padding-left: 8px;
-        padding-right: 8px;
         spacing: 10px;
 
         Rectangle {
             width: parent.height - 8px;
             height: parent.height - 8px;
-            border-radius: 4px;
+            border-radius: 8px;
             background: #e4e4e4;
 
             Image {
-                width: 40px;
-                height: 40px;
                 source: root.image;
             }
         }

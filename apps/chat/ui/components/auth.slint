@@ -1,4 +1,4 @@
-import { FilledButton, TextButton } from "@material";
+import { Theme } from "../theme.slint";
 
 component AuthInput inherits Rectangle {
     in-out property <string> text;
@@ -6,21 +6,25 @@ component AuthInput inherits Rectangle {
     in property <bool> enabled: true;
     callback accepted();
 
-    background: #1f2433;
+    background: #ffffff;
     border-radius: 8px;
-    min-height: 56px;
+    border-width: 1px;
+    border-color: Theme.border;
+    min-height: 48px;
 
     input := TextInput {
         x: 16px;
-        y: 14px;
+        y: 0px;
         width: parent.width - 32px;
-        height: parent.height - 28px;
-        color: #ffffff;
-        font-size: 20px;
+        height: parent.height;
+        color: Theme.fg;
+        font-size: 16px;
         horizontal-alignment: center;
+        vertical-alignment: center;
         single-line: true;
         text <=> root.text;
-        selection-foreground-color: #14161f;
+        selection-foreground-color: white;
+        selection-background-color: Theme.brand;
         enabled: root.enabled;
         opacity: root.enabled ? 1 : 0.5;
         accepted => { root.accepted(); }
@@ -28,15 +32,43 @@ component AuthInput inherits Rectangle {
 
     placeholder-label := Text {
         x: 16px;
-        y: 14px;
+        y: 0px;
         width: parent.width - 32px;
-        height: parent.height - 28px;
+        height: parent.height;
         visible: root.text == "";
-        color: #6b7280;
-        font-size: 20px;
+        color: Theme.fg-muted;
+        font-size: 16px;
         horizontal-alignment: center;
         vertical-alignment: center;
         text: root.placeholder;
+    }
+}
+
+component BrandButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 48px;
+    border-radius: 24px;
+    background: root.enabled ? Theme.brand : Theme.fg-muted;
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.text;
+        color: white;
+        font-size: 16px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
     }
 }
 
@@ -54,7 +86,7 @@ export component AuthView inherits Rectangle {
 
     width: 100%;
     height: 100%;
-    background: #14161f;
+    background: Theme.bg;
 
     VerticalLayout {
         alignment: center;
@@ -64,9 +96,9 @@ export component AuthView inherits Rectangle {
 
         Text {
             text: "ChatX";
-            font-size: 30px;
-            font-weight: 600;
-            color: #ffffff;
+            font-size: 32px;
+            font-weight: 800;
+            color: Theme.fg;
             width: 100%;
             horizontal-alignment: center;
         }
@@ -74,7 +106,7 @@ export component AuthView inherits Rectangle {
         Text {
             text: root.is-register ? "注册新账户" : "登录";
             font-size: 16px;
-            color: #9aa0b4;
+            color: Theme.fg-muted;
             width: 100%;
             horizontal-alignment: center;
         }
@@ -82,7 +114,7 @@ export component AuthView inherits Rectangle {
         HorizontalLayout {
             alignment: center;
             AuthInput {
-                width: min(parent.width, 500px);
+                width: min(parent.width, 420px);
                 placeholder: "用户";
                 text <=> root.uid;
                 accepted => { root.submit(); }
@@ -92,7 +124,7 @@ export component AuthView inherits Rectangle {
         HorizontalLayout {
             alignment: center;
             AuthInput {
-                width: min(parent.width, 500px);
+                width: min(parent.width, 420px);
                 placeholder: "密码";
                 text <=> root.pass;
                 accepted => { root.submit(); }
@@ -101,7 +133,7 @@ export component AuthView inherits Rectangle {
 
         Text {
             text: root.auth-error != "" ? root.auth-error : root.message;
-            color: #ff6b6b;
+            color: Theme.brand;
             font-size: 14px;
             width: 100%;
             horizontal-alignment: center;
@@ -110,8 +142,8 @@ export component AuthView inherits Rectangle {
 
         HorizontalLayout {
             alignment: center;
-            FilledButton {
-                width: min(parent.width, 500px);
+            BrandButton {
+                width: min(parent.width, 420px);
                 text: root.busy ? "处理中…" : (root.is-register ? "注册" : "登录");
                 enabled: !root.busy;
                 clicked => { root.submit(); }
@@ -120,10 +152,25 @@ export component AuthView inherits Rectangle {
 
         HorizontalLayout {
             alignment: center;
-            TextButton {
-                width: min(parent.width, 500px);
-                text: root.is-register ? "已有账户？去登录" : "没有账户？去注册";
-                clicked => { root.is-register = !root.is-register; }
+            Rectangle {
+                width: min(parent.width, 420px);
+                height: 40px;
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: root.is-register ? "已有账户？去登录" : "没有账户？去注册";
+                    color: Theme.brand;
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => { root.is-register = !root.is-register; }
+                }
             }
         }
     }
