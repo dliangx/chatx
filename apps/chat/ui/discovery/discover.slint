@@ -2,6 +2,7 @@ import { CardView } from "../components/card.slint";
 import { Theme } from "../theme.slint";
 import { SubPageType } from "../components/nav_state.slint";
 import { DiscoverCard } from "../components/app_state.slint";
+import { SearchBar } from "../components/search.slint";
 
 export component DiscoverView inherits Rectangle {
     in property <[DiscoverCard]> cards: [];
@@ -17,6 +18,10 @@ export component DiscoverView inherits Rectangle {
     out property <length> card-h: root.col-w * 4 / 3 + 90px;        // 卡片高（与 CardView.content-h 一致）
     out property <length> viewport-h: root.gap + root.cards.length * (root.card-h + root.gap) / 2;
 
+    SearchBar {
+        y: 0px;
+    }
+
     if root.cards.length == 0:
     Text {
         y: 180px;
@@ -28,7 +33,7 @@ export component DiscoverView inherits Rectangle {
 
     Flickable {
         x: 0px;
-        y: 0px;
+        y: 48px;
         width: parent.width;
         height: parent.height;
         viewport-height: root.viewport-h;

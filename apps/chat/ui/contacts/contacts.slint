@@ -2,6 +2,7 @@ import { SubPageType } from "../components/nav_state.slint";
 import { ContactRow } from "../components/app_state.slint";
 import { ContactListItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
+import { SearchBar } from "../components/search.slint";
 
 export component ContactListView inherits Rectangle {
     in property <[ContactRow]> rows: [];
@@ -14,6 +15,10 @@ export component ContactListView inherits Rectangle {
 
     out property <length> row-h: 48px;
     out property <length> viewport-h: root.rows.length * root.row-h;
+
+    SearchBar {
+        y: 0px;
+    }
 
     if root.rows.length == 0:
     Text {
@@ -28,7 +33,7 @@ export component ContactListView inherits Rectangle {
 
     Flickable {
         x: 0px;
-        y: 0px;
+        y: 48px;
         width: parent.width;
         height: parent.height;
         viewport-height: root.viewport-h;

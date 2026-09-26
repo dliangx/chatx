@@ -3,6 +3,7 @@ import { SubPageType } from "../components/nav_state.slint";
 import { ConversationRow } from "../components/app_state.slint";
 import { ChatListItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
+import { SearchBar } from "../components/search.slint";
 
 export component ChatListView inherits Rectangle {
     in property <[ConversationRow]> rows: [];
@@ -17,9 +18,13 @@ export component ChatListView inherits Rectangle {
     out property <length> row-h: 56px;
     out property <length> viewport-h: root.rows.length * root.row-h;
 
+    SearchBar {
+        y: 0px;
+    }
+
     if root.status != "":
     Text {
-        y: 0px;
+        y: 48px;
         width: parent.width;
         height: 26px;
         text: root.status;
@@ -42,7 +47,7 @@ export component ChatListView inherits Rectangle {
 
     Flickable {
         x: 0px;
-        y: 0px;
+        y: root.status == "" ? 48px : 74px;
         width: parent.width;
         height: parent.height;
         viewport-height: root.viewport-h;
