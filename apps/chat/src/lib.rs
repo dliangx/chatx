@@ -209,6 +209,7 @@ pub fn main() {
             if !uid.is_empty() {
                 clear_passphrase(&uid);
             }
+            clear_sub_history(&st);
             st.set_chats(slint::ModelRc::new(slint::VecModel::from(Vec::<ConversationRow>::new())));
             st.set_contacts(slint::ModelRc::new(slint::VecModel::from(Vec::<ContactRow>::new())));
             st.set_discover(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
@@ -292,6 +293,8 @@ fn clear_sub_history(app: &AppState) {
         })
         .collect();
     let mut nav = app.get_nav_state();
+    nav.active_tab = 0;
+    nav.global_overlay = GlobalOverlayType::None;
     nav.tabs = slint::ModelRc::new(slint::VecModel::from(tabs));
     app.set_nav_state(nav);
 }
