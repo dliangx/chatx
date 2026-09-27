@@ -1,3 +1,196 @@
+import { Icon, Glyph } from "../components/icon.slint";
+import { Theme } from "../theme.slint";
+import { Header } from "../components/header.slint";
+import { AppState, ContactRow } from "../components/app_state.slint";
+
+component CRow inherits Rectangle {
+    in property <string> name;
+    in property <image> image;
+    in property <string> peer-id;
+    in-out property <bool> checked: false;
+    callback toggled(bool);
+
+    background: #ffffff;
+
+    Rectangle {
+        x: 12px;
+        y: (parent.height - 36px) / 2;
+        width: 36px;
+        height: 36px;
+        border-radius: 8px;
+        background: #e4e4e4;
+
+        Image {
+            source: root.image;
+        }
+    }
+
+    Text {
+        x: 60px;
+
+        width: parent.width - 116px;
+        text: root.name;
+        font-size: 15px;
+        font-weight: 600;
+        vertical-alignment: center;
+        color: Theme.fg;
+        overflow: elide;
+    }
+
+    Rectangle {
+        x: parent.width - 52px;
+        y: (parent.height - 22px) / 2;
+        width: 22px;
+        height: 22px;
+        border-radius: 6px;
+        background: root.checked ? Theme.brand : #ffffff;
+        border-width: 1px;
+        border-color: root.checked ? Theme.brand : #c9c9c9;
+
+        if root.checked:
+        Icon {
+            x: 3px;
+            y: 2px;
+            size: 16px;
+            glyph: Glyph.selected;
+            tint: white;
+        }
+    }
+
+    TouchArea {
+        x: 44px;
+        y: 0px;
+        width: parent.width - 44px;
+        height: 100%;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+
+    Rectangle {
+        x: 12px;
+        y: 56px;
+        width: 100%;
+        height: 1px;
+        background: Theme.border;
+    }
+}
+
 export component AddGroupView inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: Theme.bg;
     callback on-back();
+
+    in-out property <int> count: 0;
+
+    out property <bool> has-selection: root.count > 0;
+
+    Header {
+        name: "新建群聊";
+        on-back => { root.on-back(); }
+    }
+
+    Text {
+        x: 16px;
+        y: 58px;
+        text: "选择群成员(可多选)";
+        font-size: 13px;
+        color: Theme.fg-muted;
+    }
+
+    if AppState.contacts.length == 0:
+    Text {
+        x: 0px;
+        y: 240px;
+        width: parent.width;
+        text: "暂无联系人，先添加联系人再建群";
+        color: #9aa0b4;
+        font-size: 14px;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+
+    out property <length> row-h: 48px;
+
+    Flickable {
+        x: 0px;
+        y: 84px;
+        width: parent.width;
+        height: parent.height - 84px - 64px - (AppState.is-mobile ? 58px : 0px);
+        viewport-height: AppState.contacts.length * root.row-h;
+        interactive: true;
+
+        for row[i] in AppState.contacts: CRow {
+            x: 0px;
+            y: root.row-h * i;
+            width: parent.width;
+            height: root.row-h;
+            name: row.name;
+            image: row.image;
+            peer-id: row.peer_id;
+            toggled(sel) => {
+                root.count = sel ? root.count + 1 : root.count - 1;
+            }
+        }
+    }
+
+    Rectangle {
+        x: 0px;
+        y: parent.height - 64px - (AppState.is-mobile ? 58px : 0px);
+        width: 100%;
+        height: 64px;
+        background: #ffffff;
+
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 1px;
+            background: Theme.border;
+        }
+
+        Text {
+            x: 16px;
+            y: 0px;
+            width: parent.width - 160px;
+            height: 100%;
+            text: root.has-selection ? "已选择成员" : "尚未选择成员";
+            font-size: 14px;
+            color: Theme.fg-muted;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            x: parent.width - 136px;
+            y: 16px;
+            width: 120px;
+            height: 32px;
+            border-radius: 6px;
+            background: root.has-selection ? Theme.brand : #d8ccf0;
+
+            Text {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 100%;
+                text: "创建群聊";
+                font-size: 14px;
+                color: white;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => {
+                    if root.has-selection {
+                        root.on-back();
+                    }
+                }
+            }
+        }
+    }
 }

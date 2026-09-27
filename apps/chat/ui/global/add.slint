@@ -1,0 +1,97 @@
+import { Icon, Glyph } from "../components/icon.slint";
+import { Theme } from "../theme.slint";
+import { AppState } from "../components/app_state.slint";
+import { SubPageType, GlobalOverlayType } from "../components/nav_state.slint";
+
+component MenuRow inherits Rectangle {
+    in property <Glyph> icon;
+    in property <string> label;
+    callback clicked();
+    height: 44px;
+
+    Icon {
+        x: 12px;
+        y: (parent.height - self.size) / 2;
+        size: 18px;
+        glyph: root.icon;
+        tint: Theme.fg;
+    }
+
+    Text {
+        x: 40px;
+        width: parent.width - 52px;
+        height: 100%;
+        text: root.label;
+        font-size: 14px;
+        color: Theme.fg;
+        vertical-alignment: center;
+    }
+
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component AddMenuView inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    clip: true;
+
+    // 关闭挡板：置于最底层，菜单内的 TouchArea 声明在其上层可正常接收点击
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; }
+    }
+
+    Rectangle {
+        width: 176px;
+        height: 5 * 44px + 8px;
+        x: (AppState.is-mobile ? root.width : 280px) - 176px - 8px;
+        y: 56px;
+        border-radius: 8px;
+        background: #ffffff;
+        drop-shadow-blur: 16px;
+        drop-shadow-color: #00000033;
+
+        VerticalLayout {
+            width: 100%;
+            height: 100%;
+            padding: 4px;
+            spacing: 0px;
+
+            MenuRow {
+                icon: Glyph.scan;
+                label: "扫描";
+                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.open-scanner(); }
+            }
+
+            MenuRow {
+                icon: Glyph.friends-add;
+                label: "添加朋友";
+                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddContact, 0); }
+            }
+
+            MenuRow {
+                icon: Glyph.add-circle;
+                label: "新建群聊";
+                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddGroup, 0); }
+            }
+
+            MenuRow {
+                icon: Glyph.meeting;
+                label: "发起会议";
+                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.start-meeting(); }
+            }
+
+            MenuRow {
+                icon: Glyph.share;
+                label: "桌面共享";
+                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.start-screen-share(); }
+            }
+        }
+    }
+}

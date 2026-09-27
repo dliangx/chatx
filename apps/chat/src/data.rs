@@ -35,6 +35,7 @@ pub struct ContactRow {
     pub name: String,
     pub is_following: bool,
     pub follows_me: bool,
+    pub image: String,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +157,7 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<DataBackend> {
             .unwrap_or_else(|| f.user_id.to_string());
         let user_id = f.user_id;
         b.contact_key_to_id.insert(key, user_id);
+        let image = f.avatar_path.clone().unwrap_or_default();
         b.contacts.push(ContactRow {
             key,
             user_id,
@@ -165,6 +167,7 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<DataBackend> {
             name,
             is_following: f.i_follow_them,
             follows_me: f.they_follow_me,
+            image,
         });
     }
 

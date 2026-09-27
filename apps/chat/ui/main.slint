@@ -24,6 +24,7 @@ import { QrCodeView } from "global/qrcode.slint";
 import { AudioView } from "global/audio.slint";
 import { VideoView } from "global/video.slint";
 import { ScreenShareView } from "global/screen.slint";
+import { AddMenuView } from "global/add.slint";
 
 export component MainWindow inherits Window {
 
@@ -204,4 +205,5 @@ export component MainWindow inherits Window {
     if AppState.nav-state.global-overlay == GlobalOverlayType.AudioCall: AudioView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.ScreenShare: ScreenShareView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.QrCode: QrCodeView { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu: AddMenuView { }
 }

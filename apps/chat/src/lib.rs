@@ -443,6 +443,7 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
         .iter()
         .map(|r| ContactRow {
             id: r.key,
+            image: slint::Image::load_from_path(std::path::Path::new(&r.image)).unwrap_or_default(),
             peer_id: SharedString::from(r.peer_id.clone()),
             name: SharedString::from(r.name.clone()),
         })

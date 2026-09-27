@@ -1,3 +1,18 @@
+import { Icon, Glyph } from "../components/icon.slint";
+import { Theme } from "../theme.slint";
+import { Header } from "../components/header.slint";
+import { SubPageType } from "../components/nav_state.slint";
+import { AppState, ContactRow } from "../components/app_state.slint";
+
+
 export component AddContactView inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: Theme.bg;
     callback on-back();
+
+    Header {
+        name: "添加朋友";
+        on-back => { root.on-back(); }
+    }
 }

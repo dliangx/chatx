@@ -15,6 +15,7 @@ export struct ConversationRow {
 
 export struct ContactRow {
     id: int,
+    image: image,
     peer_id: string,
     name: string,
 }
@@ -35,7 +36,6 @@ export global AppState {
     callback logout();
     in-out property <bool> is-mobile: true;
     in-out property <bool> search-active: false;
-    in-out property <bool> menu-open: false;
     in-out property <string> user-id: "";
     in-out property <string> nickname: "";
     in-out property <string> peer-id: "";
