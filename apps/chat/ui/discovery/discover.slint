@@ -4,6 +4,7 @@ import { SubPageType } from "../components/nav_state.slint";
 import { DiscoverCard } from "../components/app_state.slint";
 import { AppState } from "../components/app_state.slint";
 import { SearchBar } from "../components/search.slint";
+import { AddMenu } from "../components/search.slint";
 
 export component DiscoverView inherits Rectangle {
     in property <[DiscoverCard]> cards: [];
@@ -21,6 +22,11 @@ export component DiscoverView inherits Rectangle {
 
     SearchBar {
         y: 0px;
+    }
+
+    AddMenu {
+        x: root.width - 184px;
+        y: 52px;
     }
 
     if root.cards.length == 0:

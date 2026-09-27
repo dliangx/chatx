@@ -35,6 +35,7 @@ export global AppState {
     callback logout();
     in-out property <bool> is-mobile: true;
     in-out property <bool> search-active: false;
+    in-out property <bool> menu-open: false;
     in-out property <string> user-id: "";
     in-out property <string> nickname: "";
     in-out property <string> peer-id: "";
@@ -44,7 +45,6 @@ export global AppState {
     in property <int> font-size: 16;
     in property <string> theme: "light";
 
-    // ---- 数据模型（内存优先，启动时从 sqlite 载入，运行期读内存）----
     in property <[ConversationRow]> chats: [];
     in property <[ContactRow]> contacts: [];
     in property <[DiscoverCard]> discover: [];
@@ -52,4 +52,7 @@ export global AppState {
     callback toggle-like(int);
     callback show-qr-code();
     callback close-qr-code();
+    callback open-scanner();
+    callback start-screen-share();
+    callback start-meeting();
 }

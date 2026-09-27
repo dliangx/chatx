@@ -5,6 +5,7 @@ import { AppState } from "../components/app_state.slint";
 import { ChatListItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
 import { SearchBar } from "../components/search.slint";
+import { AddMenu } from "../components/search.slint";
 
 export component ChatListView inherits Rectangle {
     in property <[ConversationRow]> rows: [];
@@ -66,5 +67,10 @@ export component ChatListView inherits Rectangle {
             selected: row.chat-id == root.selected-key;
             clicked(id) => { root.selected-key = id; root.navigate-to(SubPageType.ChatRoom, id); }
         }
+    }
+
+    AddMenu {
+        x: root.width - 184px;
+        y: 52px;
     }
 }
