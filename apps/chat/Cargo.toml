@@ -12,6 +12,7 @@ sqlite = { path = "../../crates/sqlite" }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+qrcode = { workspace = true }
 
 [build-dependencies]
 slint-build = {workspace = true}

@@ -15,6 +15,7 @@ export component MeView inherits Rectangle {
         name: AppState.user-id;
         nickname: AppState.nickname;
         peer-id: AppState.peer-id;
+        show-qr => { AppState.show-qr-code(); }
     }
 
     ScrollView {

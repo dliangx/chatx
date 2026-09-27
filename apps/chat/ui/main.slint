@@ -20,6 +20,7 @@ import { ChatSession } from "chats/chat.slint";
 export { ChatSession } from "chats/chat.slint";
 import { ScanView } from "global/scan.slint";
 import { ImageViewer } from "global/image.slint";
+import { QrCodeView } from "global/qrcode.slint";
 import { AudioView } from "global/audio.slint";
 import { VideoView } from "global/video.slint";
 import { ScreenShareView } from "global/screen.slint";
@@ -202,4 +203,5 @@ export component MainWindow inherits Window {
     if AppState.nav-state.global-overlay == GlobalOverlayType.VideoCall: VideoView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.AudioCall: AudioView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.ScreenShare: ScreenShareView { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.QrCode: QrCodeView { }
 }

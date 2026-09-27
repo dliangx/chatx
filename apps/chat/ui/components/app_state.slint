@@ -38,6 +38,7 @@ export global AppState {
     in-out property <string> user-id: "";
     in-out property <string> nickname: "";
     in-out property <string> peer-id: "";
+    in property <image> qr-image;
     in property <string> lang: "cn";
     in property <string> font;
     in property <int> font-size: 16;
@@ -49,4 +50,6 @@ export global AppState {
     in property <[DiscoverCard]> discover: [];
     in property <string> data-status: "";
     callback toggle-like(int);
+    callback show-qr-code();
+    callback close-qr-code();
 }

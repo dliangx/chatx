@@ -75,7 +75,7 @@ pub fn main() {
     let weak = ui.as_weak();
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
-    // state.set_is_mobile(true);
+    state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
@@ -229,6 +229,30 @@ pub fn main() {
     }
 
     {
+        let w = weak.clone();
+        ui.global::<AppState>().on_show_qr_code(move || {
+            if let Some(ui) = w.upgrade() {
+                let st = ui.global::<AppState>();
+                let mut nav = st.get_nav_state();
+                nav.global_overlay = GlobalOverlayType::QrCode;
+                st.set_nav_state(nav);
+            }
+        });
+    }
+
+    {
+        let w = weak.clone();
+        ui.global::<AppState>().on_close_qr_code(move || {
+            if let Some(ui) = w.upgrade() {
+                let st = ui.global::<AppState>();
+                let mut nav = st.get_nav_state();
+                nav.global_overlay = GlobalOverlayType::None;
+                st.set_nav_state(nav);
+            }
+        });
+    }
+
+    {
         let weak = weak.clone();
         ui.global::<ChatSession>().on_message_sent(move |key, body| {
             let b = body.as_str().trim().to_string();
@@ -299,6 +323,40 @@ fn clear_sub_history(app: &AppState) {
     app.set_nav_state(nav);
 }
 
+/// Render a QR code for `text` as an RGBA slint image (black modules on white).
+fn qr_image(text: &str) -> slint::Image {
+    use qrcode::{Color, QrCode};
+    let code = match QrCode::new(text.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return slint::Image::default(),
+    };
+    let n = code.width();
+    let scale = 8usize;
+    let size = n * scale;
+    let colors = code.to_colors();
+    let mut rgba = vec![255u8; size * size * 4];
+    for y in 0..n {
+        for x in 0..n {
+            if colors[y * n + x] == Color::Dark {
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let px = x * scale + dx;
+                        let py = y * scale + dy;
+                        let i = (py * size + px) * 4;
+                        rgba[i] = 0;
+                        rgba[i + 1] = 0;
+                        rgba[i + 2] = 0;
+                        rgba[i + 3] = 255;
+                    }
+                }
+            }
+        }
+    }
+    let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(size as u32, size as u32);
+    buf.make_mut_bytes().copy_from_slice(&rgba);
+    slint::Image::from_rgba8(buf)
+}
+
 fn apply_result(
     weak: slint::Weak<MainWindow>,
     user_id: String,
@@ -328,7 +386,8 @@ fn apply_result(
                                 BACKEND.with(|s| *s.borrow_mut() = Some(backend.clone()));
                                 if let Some(ui) = weak.upgrade() {
                                     let state = ui.global::<AppState>();
-                                    state.set_peer_id(SharedString::from(peer));
+                                    state.set_peer_id(SharedString::from(peer.clone()));
+                                    state.set_qr_image(qr_image(&peer));
                                     state.set_nickname(SharedString::from(nickname));
                                     publish_to_views(&state, backend);
                                 }

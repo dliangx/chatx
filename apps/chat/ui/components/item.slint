@@ -7,6 +7,7 @@ export component ProfileItem inherits Rectangle {
     in property <string> name;
     in property <string> nickname;
     in property <string> peer-id;
+    callback show-qr();
     HorizontalLayout {
         x: 0px;
         y: 0px;
@@ -49,12 +50,28 @@ export component ProfileItem inherits Rectangle {
                 overflow: elide;
             }
 
-            Text {
+            HorizontalLayout {
                 width: 100%;
-                text: root.peer-id;
-                font-size: 12px;
-                color: Theme.fg-muted;
-                overflow: elide;
+                spacing: 4px;
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.peer-id;
+                    font-size: 12px;
+                    color: Theme.fg-muted;
+                    overflow: elide;
+                }
+
+                Icon {
+                    size: 16px;
+                    glyph: Glyph.qrcode;
+                    tint: Theme.fg-muted;
+                    TouchArea {
+                        width: 24px;
+                        height: 24px;
+                        clicked => { root.show-qr(); }
+                    }
+                }
             }
         }
     }
