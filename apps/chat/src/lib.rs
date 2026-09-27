@@ -304,6 +304,7 @@ fn apply_result(
     match res {
         Ok((client, _acct)) => {
             let pool = client.store().pool();
+            let peer = client.peer_base58().to_string();
             let client = Arc::new(client);
             client.heartbeat();
             CLIENT.with(|s| *s.borrow_mut() = Some(client));
@@ -318,10 +319,15 @@ fn apply_result(
                     match data::load(&pool, &me).await {
                         Ok(backend) => {
                             let backend = Arc::new(tokio::sync::RwLock::new(backend));
+                            let nickname = backend.read().await.my_nickname.clone();
+                            let peer = peer.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 BACKEND.with(|s| *s.borrow_mut() = Some(backend.clone()));
                                 if let Some(ui) = weak.upgrade() {
-                                    publish_to_views(&ui.global::<AppState>(), backend);
+                                    let state = ui.global::<AppState>();
+                                    state.set_peer_id(SharedString::from(peer));
+                                    state.set_nickname(SharedString::from(nickname));
+                                    publish_to_views(&state, backend);
                                 }
                             });
                         }

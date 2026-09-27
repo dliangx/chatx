@@ -11,7 +11,11 @@ export component MeView inherits Rectangle {
     in-out property <int> selected-key: -1;
 
     callback navigate-to(SubPageType, int);
-    ProfileItem { }
+    ProfileItem {
+        name: AppState.user-id;
+        nickname: AppState.nickname;
+        peer-id: AppState.peer-id;
+    }
 
     ScrollView {
         width: 100%;
