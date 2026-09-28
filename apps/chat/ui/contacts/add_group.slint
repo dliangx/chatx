@@ -143,7 +143,7 @@ export component AddGroupView inherits Rectangle {
         x: 0px;
         y: 84px;
         width: parent.width;
-        height: parent.height - 84px - 64px - (AppState.is-mobile ? 58px : 0px);
+        height: parent.height - 84px - 64px;
         viewport-height: AppState.contacts.length * root.row-h;
         interactive: true;
 
@@ -168,7 +168,7 @@ export component AddGroupView inherits Rectangle {
 
     Rectangle {
         x: 0px;
-        y: parent.height - 64px - (AppState.is-mobile ? 58px : 0px);
+        y: parent.height - 64px;
         width: 100%;
         height: 64px;
         background: #ffffff;

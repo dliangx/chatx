@@ -68,7 +68,7 @@ export component AddMenuView inherits Rectangle {
             MenuRow {
                 icon: Glyph.scan;
                 label: "扫描";
-                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.open-scanner(); }
+                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.QrScanner; }
             }
 
             if AppState.nav-state.active-tab == 2:
