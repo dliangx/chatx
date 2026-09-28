@@ -12,6 +12,9 @@ use render::Renderer;
 pub mod data;
 use data::ArcBackend;
 
+#[cfg(target_os = "macos")]
+use camera::Camera;
+
 slint::include_modules!();
 
 type Directory = HttpDirectory;
@@ -24,6 +27,7 @@ thread_local! {
     static CHAT_LOADED: RefCell<std::collections::HashSet<i32>> = RefCell::new(std::collections::HashSet::new());
     static GROUP_PICKED: RefCell<Vec<i32>> = RefCell::new(Vec::new());
     static PUMP_STARTED: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static CAMERA: RefCell<Option<Camera>> = RefCell::new(None);
 }
 
 /// Shared renderer, initialized lazily (font parsing is expensive) and shared
@@ -300,6 +304,71 @@ pub fn main() {
                 return;
             }
             send_chat_message(weak.clone(), key, b);
+        });
+    }
+
+    {
+        let w = weak.clone();
+        ui.global::<AppState>().on_scanner_start(move || {
+            let Some(ui) = w.upgrade() else {
+                return;
+            };
+            let state = ui.global::<AppState>();
+            state.set_scan_found(false);
+            state.set_scan_result(SharedString::new());
+            state.set_scan_status(SharedString::from("摄像头已启动，请对准二维码…"));
+
+            #[cfg(target_os = "macos")]
+            {
+                CAMERA.with(|slot| {
+                    if slot.borrow().is_none() {
+                        *slot.borrow_mut() = Some(Camera::new());
+                    }
+                    let mut guard = slot.borrow_mut();
+                    let cam = guard.as_mut().expect("camera inited");
+                    if !cam.is_running() {
+                        match cam.start() {
+                            Ok(_) => {
+                                let wsink = w.clone();
+                                cam.set_sink(move |text: String| {
+                                    let wk = wsink.clone();
+                                    let _ = slint::invoke_from_event_loop(move || {
+                                        if let Some(ui2) = wk.upgrade() {
+                                            let st = ui2.global::<AppState>();
+                                            st.set_scan_found(true);
+                                            st.set_scan_result(SharedString::from(text));
+                                        }
+                                    });
+                                });
+                            }
+                            Err(err) => {
+                                state.set_scan_status(SharedString::from(format!(
+                                    "无法启动摄像头: {err}"
+                                )));
+                            }
+                        }
+                    }
+                });
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                state.set_scan_status(SharedString::from("当前平台不支持摄像头扫描"));
+            }
+        });
+    }
+
+    {
+        let w = weak.clone();
+        ui.global::<AppState>().on_scanner_stop(move || {
+            #[cfg(target_os = "macos")]
+            CAMERA.with(|slot| {
+                if let Some(cam) = slot.borrow_mut().as_mut() {
+                    cam.stop();
+                }
+            });
+            if let Some(ui) = w.upgrade() {
+                ui.global::<AppState>().set_scan_status(SharedString::new());
+            }
         });
     }
 

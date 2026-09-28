@@ -1,1 +1,276 @@
-export component ScanView { }
+import { Theme } from "../theme.slint";
+import { AppState } from "../components/app_state.slint";
+import { GlobalOverlayType } from "../components/nav_state.slint";
+import { Icon, Glyph } from "../components/icon.slint";
+
+export component ScanView inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: #000000;
+    clip: true;
+
+    in-out property <bool> bootstrapped: false;
+
+    // 首次打开即启动摄像头（Timer 只触发一次，之后 bootstrapped = true）
+    Timer {
+        interval: 16ms;
+        running: !root.bootstrapped;
+        triggered => {
+            if (!root.bootstrapped && !AppState.scan-found) {
+                AppState.scanner-start();
+            }
+            root.bootstrapped = true;
+            // 立即变更目标值，触发首次动画，避免绿线等 2.8s 才开始动
+            root.scan-line-pos = 232px;
+        }
+    }
+
+    in-out property <length> scan-line-pos: 6px;
+
+    Timer {
+        interval: 2400ms;
+        running: true;
+        triggered => {
+            root.scan-line-pos = root.scan-line-pos >= 232px ? 6px : 232px;
+        }
+    }
+
+    // 顶栏：关闭按钮 + 标题（绝对定位）
+    Rectangle {
+        x: 16px;
+        y: 28px;
+        width: 32px;
+        height: 32px;
+        border-radius: 16px;
+        background: #ffffff2a;
+
+        Icon {
+            x: 7px;
+            y: 7px;
+            glyph: Glyph.close-circle;
+            size: 18px;
+            tint: #ffffff;
+        }
+
+        TouchArea {
+            width: 32px;
+            height: 32px;
+            clicked => {
+                AppState.scanner-stop();
+                AppState.nav-state.global-overlay = GlobalOverlayType.None;
+            }
+        }
+    }
+
+    Text {
+        x: 0px;
+        y: 28px;
+        width: parent.width;
+        height: 32px;
+        text: "扫描";
+        font-size: 17px;
+        font-weight: 600;
+        color: #ffffff;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    // 取景框：中央 240×240，八个白色 L 形线段拼出四个角；
+    // 内部有一条绿色扫描线以 0.28s 周期往返移动。
+    Rectangle {
+        x: (parent.width - 240px) / 2;
+        y: (parent.height - 240px) / 2;
+        width: 240px;
+        height: 240px;
+        visible: !AppState.scan-found;
+        clip: true;
+
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: 3px;
+            height: 26px;
+            background: #ffffff;
+        }
+
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: 26px;
+            height: 3px;
+            background: #ffffff;
+        }
+
+        Rectangle {
+            x: 237px;
+            y: 0px;
+            width: 3px;
+            height: 26px;
+            background: #ffffff;
+        }
+
+        Rectangle {
+            x: 214px;
+            y: 0px;
+            width: 26px;
+            height: 3px;
+            background: #ffffff;
+        }
+
+        Rectangle {
+            x: 0px;
+            y: 214px;
+            width: 3px;
+            height: 26px;
+            background: #ffffff;
+        }
+
+        Rectangle {
+            x: 0px;
+            y: 237px;
+            width: 26px;
+            height: 3px;
+            background: #ffffff;
+        }
+
+        Rectangle {
+            x: 237px;
+            y: 214px;
+            width: 3px;
+            height: 26px;
+            background: #ffffff;
+        }
+
+        Rectangle {
+            x: 214px;
+            y: 237px;
+            width: 26px;
+            height: 3px;
+            background: #ffffff;
+        }
+
+        Rectangle {
+            x: 6px;
+            y: root.scan-line-pos;
+            width: parent.width - 12px;
+            height: 2px;
+            background: #09bb07;
+            animate y {
+                duration: 2.4s;
+                easing: ease-in-out;
+            }
+        }
+    }
+
+    // 状态文字
+    if !AppState.scan-found:
+    Text {
+        x: 0px;
+        y: (parent.height - 240px) / 2 + 270px;
+        width: parent.width;
+        text: AppState.scan-status;
+        font-size: 14px;
+        color: #ffffffcc;
+        horizontal-alignment: center;
+    }
+
+    // 识别结果卡片
+    if AppState.scan-found:
+    Rectangle {
+        x: (parent.width - 320px) / 2;
+        y: (parent.height - 360px) / 2;
+        width: 320px;
+        height: 320px;
+        border-radius: 12px;
+        background: #f6f6f6;
+        clip: true;
+
+        Text {
+            x: 16px;
+            y: 12px;
+            width: parent.width - 32px;
+            text: "识别结果";
+            font-size: 16px;
+            font-weight: 600;
+            color: Theme.fg;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            x: 16px;
+            y: 44px;
+            width: parent.width - 32px;
+            height: 208px;
+            text: AppState.scan-result;
+            font-size: 14px;
+            color: Theme.fg;
+            wrap: word-wrap;
+        }
+
+        // 继续扫描
+        Rectangle {
+            x: 16px;
+            y: parent.height - 72px;
+            width: parent.width / 2 - 24px;
+            height: 32px;
+            border-radius: 16px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #cccccc;
+
+            Text {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 100%;
+                text: "继续扫描";
+                font-size: 13px;
+                color: Theme.fg;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => {
+                    AppState.scan-found = false;
+                    AppState.scan-result = "";
+                    AppState.scanner-start();
+                }
+            }
+        }
+
+        // 去处理（按识别结果走）
+        Rectangle {
+            x: parent.width / 2 + 8px;
+            y: parent.height - 72px;
+            width: parent.width / 2 - 24px;
+            height: 32px;
+            border-radius: 16px;
+            background: Theme.brand;
+
+            Text {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 100%;
+                text: "去添加";
+                font-size: 13px;
+                color: white;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => {
+                    AppState.scanner-stop();
+                    AppState.nav-state.global-overlay = GlobalOverlayType.None;
+                    AppState.search-users(AppState.scan-result);
+                }
+            }
+        }
+    }
+}

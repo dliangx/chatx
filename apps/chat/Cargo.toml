@@ -13,6 +13,7 @@ sqlx = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 qrcode = { workspace = true }
+camera = { path = "../../crates/camera" }
 
 [build-dependencies]
 slint-build = {workspace = true}

@@ -70,4 +70,11 @@ export global AppState {
     callback pick-group-member(int);
     callback unpick-group-member(int);
     callback create-group();
+
+    // QR scanner (camera overlay)
+    in property <bool> scan-found: false;
+    in property <string> scan-status: "";
+    in property <string> scan-result: "";
+    callback scanner-start();
+    callback scanner-stop();
 }

@@ -1,14 +1,15 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Camera capture + native QR-code recognition.
+//!
+//! On macOS this uses AVFoundation (`AVCaptureMetadataOutput`) together with
+//! Apple's built-in QR decoder — no external barcode library required.
+//! Other platforms provide a no-op fallback that reports "unsupported".
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(not(target_os = "macos"))]
+mod fallback;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+#[cfg(target_os = "macos")]
+pub use macos::Camera;
+#[cfg(not(target_os = "macos"))]
+pub use fallback::Camera;
