@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use chatx_core::Client;
 use chatx_core::group::MemberInfo;
-use chatx_core::signal::HttpDirectory;
+use chatx_core::signal::{DirectoryClient, HttpDirectory};
 use render::bubble::parse::parse_text;
 use render::bubble::{Bubble, GroupPos, Side};
 use render::Renderer;
@@ -276,6 +276,19 @@ pub fn main() {
                 nav.global_overlay = GlobalOverlayType::None;
                 st.set_nav_state(nav);
             }
+        });
+    }
+
+    {
+        let w = weak.clone();
+        ui.global::<AppState>().on_search_users(move |q| {
+            search_users(w.clone(), q.to_string());
+        });
+    }
+    {
+        let w = weak.clone();
+        ui.global::<AppState>().on_add_contact(move |username| {
+            add_contact(w.clone(), username.to_string());
         });
     }
 
@@ -967,6 +980,161 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
             false
         }
     }
+}
+
+/// Search for a user on the server (by username) or locally (by scanned Peer
+/// ID), then surface the profile in the AddContactView.
+fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
+    let q: String = q_raw.chars().filter(|c| !c.is_whitespace()).collect();
+    if q.is_empty() {
+        return;
+    }
+
+    let pool = POOL.with(|s| s.borrow().clone());
+    let client = CLIENT.with(|s| s.borrow().clone());
+    match (pool, client) {
+        (Some(pool), Some(client)) => {
+            let my_peer = client.peer_base58();
+        let rt = runtime();
+        let q2 = q.clone();
+        rt.spawn(async move {
+            // (1) Try to resolve as a username against the directory.
+            if let Ok(ur) = client.resolve_user(&q) {
+                let uname = ur.user.user_id.clone();
+                if let Ok(Some(user)) = sqlite::users::get_by_username(&pool, &uname).await {
+                    let name = user.nickname.clone().unwrap_or_else(|| user.username.clone().unwrap_or_default());
+                    let peer = sqlite::devices::get_by_peer(&pool, &my_peer).await.ok().flatten().map(|d| d.peer_id).unwrap_or(my_peer.clone());
+                    let row = SearchUser {
+                        name: SharedString::from(name),
+                        username: SharedString::from(uname),
+                        peer_id: SharedString::from(peer),
+                    };
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.global::<AppState>().set_search_results(slint::ModelRc::new(slint::VecModel::from(vec![row])));
+                            ui.global::<AppState>().set_add_status(SharedString::new());
+                        }
+                    });
+                    return;
+                }
+            }
+            // (2) Try to resolve as a Peer ID (scan) against the directory.
+            if let Ok(dev) = client.dir().resolve_device(&q) {
+                let uname = dev.user_id.clone();
+                if let Ok(Some(user)) = sqlite::users::get_by_username(&pool, &uname).await {
+                    let name = user.nickname.clone().unwrap_or_else(|| user.username.clone().unwrap_or_default());
+                    let row = SearchUser {
+                        name: SharedString::from(name),
+                        username: SharedString::from(uname),
+                        peer_id: SharedString::from(q.clone()),
+                    };
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.global::<AppState>().set_search_results(slint::ModelRc::new(slint::VecModel::from(vec![row])));
+                            ui.global::<AppState>().set_add_status(SharedString::new());
+                        }
+                    });
+                    return;
+                }
+            }
+            // (3) Fallback: local db only.
+            if let Ok(Some(user)) = sqlite::users::get_by_username(&pool, &q2).await {
+                let name = user.nickname.clone().unwrap_or_else(|| user.username.clone().unwrap_or_default());
+                let row = SearchUser {
+                    name: SharedString::from(name),
+                    username: SharedString::from(q2.clone()),
+                    peer_id: SharedString::new(),
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.global::<AppState>().set_search_results(slint::ModelRc::new(slint::VecModel::from(vec![row])));
+                        ui.global::<AppState>().set_add_status(SharedString::new());
+                    }
+                });
+                return;
+            }
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.global::<AppState>().set_add_status(SharedString::from(format!("找不到用户: {q2}")));
+                }
+            });
+        });
+        }
+        _ => {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.global::<AppState>().set_add_status(SharedString::from("尚未登录或后端未就绪"));
+                }
+            });
+        }
+    }
+}
+
+/// Mark `username` as a friend in the local DB (and refresh the in-memory
+/// contact list so the UI updates).
+fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
+    let username: String = username_raw.chars().filter(|c| !c.is_whitespace()).collect();
+    if username.is_empty() {
+        return;
+    }
+
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let pool = POOL.with(|s| s.borrow().clone());
+    let (Some(backend), Some(pool)) = (backend.clone(), pool) else {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<AppState>().set_add_status(SharedString::from("尚未登录或后端未就绪"));
+            }
+        });
+        return;
+    };
+
+    // Already a contact? Short-circuit before hitting sqlite.
+    if backend.blocking_read().has_contact(&username, &username) {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<AppState>().set_add_status(SharedString::from("已在通讯录中"));
+            }
+        });
+        return;
+    }
+    let me = backend.blocking_read().me.clone();
+
+    let rt = runtime();
+    rt.spawn(async move {
+        if let Err(e) = do_add(&pool, &me, &username, &backend).await {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.global::<AppState>().set_add_status(SharedString::from(format!("添加失败: {e}")));
+                }
+            });
+            return;
+        }
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                let state = ui.global::<AppState>();
+                publish_to_views(&state, backend.clone());
+                state.set_add_status(SharedString::from("已添加到通讯录"));
+            }
+        });
+    });
+}
+
+async fn do_add(pool: &sqlx::SqlitePool, me: &str, username: &str, backend: &ArcBackend) -> anyhow::Result<()> {
+    let me_id = sqlite::users::ensure_identity(pool, me).await?;
+    let their_id = sqlite::users::ensure_identity(pool, username).await?;
+    sqlite::social::add(pool, me_id, their_id).await?;
+    let (name, image) = {
+        if let Ok(Some(u)) = sqlite::users::get(pool, their_id).await {
+            (u.nickname.clone().unwrap_or_else(|| u.username.clone().unwrap_or_default()),
+             u.avatar_path.clone().unwrap_or_default())
+        } else {
+            (username.to_string(), String::new())
+        }
+    };
+    let mut g = backend.blocking_write();
+    g.append_contact(their_id, username.to_string(), name, image);
+    Ok(())
 }
 
 /// Show a transient global error dialog (transparent backdrop, message + 知道了).

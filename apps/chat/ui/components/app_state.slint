@@ -28,6 +28,12 @@ export struct DiscoverCard {
     liked: bool,
 }
 
+export struct SearchUser {
+    name: string,
+    username: string,
+    peer_id: string,
+}
+
 export global AppState {
     in-out property <NavigationState> nav-state: { active-tab:0, tabs: [], global-overlay: GlobalOverlayType.None };
     callback push-sub(SubPageType, int);
@@ -39,6 +45,11 @@ export global AppState {
     in-out property <string> user-id: "";
     in-out property <string> nickname: "";
     in-out property <string> peer-id: "";
+
+    in property <string> add-status: "";
+    in property <[SearchUser]> search-results: [];
+    callback search-users(string);
+    callback add-contact(string);
     in property <image> qr-image;
     in property <string> lang: "cn";
     in property <string> font;

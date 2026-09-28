@@ -2,8 +2,75 @@ import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
 import { Header } from "../components/header.slint";
 import { SubPageType } from "../components/nav_state.slint";
-import { AppState, ContactRow } from "../components/app_state.slint";
+import { ProfileItem } from "../components/item.slint";
+import { AppState, SearchUser } from "../components/app_state.slint";
 
+component ResultRow inherits Rectangle {
+    in property <string> name;
+    in property <string> username;
+    in property <string> peer_id;
+    in property <bool> is_local;
+    width: 100%;
+    height: 132px;
+    background: Theme.bg;
+
+    ProfileItem {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: 100px;
+        name: root.name;
+        nickname: root.is_local ? "通过扫码添加" : root.username;
+        peer-id: root.peer_id;
+        show-qr => { AppState.show-qr-code(); }
+    }
+
+    Rectangle {
+        x: 0px;
+        y: 100px;
+        width: parent.width;
+        height: 1px;
+        background: #ececec;
+    }
+
+    Text {
+        x: 16px;
+        y: 100px;
+        width: parent.width - 120px;
+        height: 32px;
+        text: "添加到通讯录";
+        font-size: 14px;
+        color: Theme.fg-muted;
+        vertical-alignment: center;
+    }
+
+    Rectangle {
+        x: parent.width - 100px;
+        y: 105px;
+        width: 84px;
+        height: 22px;
+        border-radius: 11px;
+        background: Theme.brand;
+
+        Text {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            text: "添加";
+            font-size: 13px;
+            color: white;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            clicked => { AppState.add-contact(root.username); }
+        }
+    }
+}
 
 export component AddContactView inherits Rectangle {
     width: 100%;
@@ -14,5 +81,81 @@ export component AddContactView inherits Rectangle {
     Header {
         name: "添加朋友";
         on-back => { root.on-back(); }
+    }
+
+    Rectangle {
+        x: 16px;
+        y: 60px;
+        width: parent.width - 32px;
+        height: 40px;
+        border-radius: 8px;
+        background: #e8e8e8;
+
+        Icon {
+            x: 10px;
+            y: (parent.height - self.size) / 2;
+            size: 18px;
+            glyph: Glyph.search;
+            tint: Theme.fg-muted;
+        }
+
+        input := TextInput {
+            x: 38px;
+            y: 0px;
+            width: parent.width - 38px;
+            height: parent.height;
+            font-size: 15px;
+            color: Theme.fg;
+            vertical-alignment: center;
+            single-line: true;
+            selection-background-color: Theme.brand;
+            selection-foreground-color: white;
+            accepted => {
+                let q = input.text;
+                if (q != "") {
+                    AppState.search-users(q);
+                }
+            }
+        }
+    }
+
+    if AppState.search-results.length == 0 && AppState.add-status == "":
+    Text {
+        x: 16px;
+        y: 110px;
+        width: parent.width - 32px;
+        text: "输入用户名或扫码得到的 Peer ID 查找服务器上的用户";
+        font-size: 13px;
+        color: Theme.fg-muted;
+    }
+
+    if AppState.add-status != "":
+    Text {
+        x: 16px;
+        y: 110px;
+        width: parent.width - 32px;
+        text: AppState.add-status;
+        font-size: 13px;
+        color: #1a7f37;
+    }
+
+    Flickable {
+        x: 0px;
+        y: 132px;
+        width: parent.width;
+        height: parent.height - 132px - (AppState.is-mobile ? 58px : 0px);
+        interactive: true;
+        viewport-height: AppState.search-results.length * 132px;
+
+        for r[i] in AppState.search-results: ResultRow {
+            x: 0px;
+            y: 132px * i;
+            width: parent.width;
+            height: 132px;
+            name: r.name;
+            username: r.username;
+            peer_id: r.peer_id;
+            is_local: r.username == "";
+        }
     }
 }

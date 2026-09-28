@@ -69,24 +69,37 @@ export component AddMenuView inherits Rectangle {
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.open-scanner(); }
             }
 
+            if AppState.nav-state.active-tab == 2:
+            MenuRow {
+                icon: Glyph.fill;
+                label: "笔记";
+                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddNote, 0); }
+            }
+            if AppState.nav-state.active-tab == 2:
+            MenuRow {
+                icon: Glyph.picture;
+                label: "分享此刻";
+                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddMoment, 0); }
+            }
+            if AppState.nav-state.active-tab != 2:
             MenuRow {
                 icon: Glyph.friends-add;
                 label: "添加朋友";
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddContact, 0); }
             }
-
+            if AppState.nav-state.active-tab != 2:
             MenuRow {
                 icon: Glyph.add-circle;
                 label: "新建群聊";
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddGroup, 0); }
             }
-
+            if AppState.nav-state.active-tab != 2:
             MenuRow {
                 icon: Glyph.meeting;
                 label: "发起会议";
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.start-meeting(); }
             }
-
+            if AppState.nav-state.active-tab != 2:
             MenuRow {
                 icon: Glyph.share;
                 label: "桌面共享";

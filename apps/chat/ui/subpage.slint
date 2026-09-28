@@ -10,6 +10,8 @@ import { AddGroupView } from "contacts/add_group.slint";
 import { DiscoverDetailView } from "discovery/discover_detail.slint";
 import { PomegranateSeedView } from "discovery/pomegranate_seed.slint";
 import { MyCollectView } from "me/my_collect.slint";
+import { AddMomentView } from "discovery/moment.slint";
+import { AddNoteView } from "discovery/note.slint";
 
 export component SubPageView inherits Rectangle {
     in property <SubPageType> page;
@@ -61,6 +63,12 @@ export component SubPageView inherits Rectangle {
         on-back => { root.go-back(); }
     }
     if root.page == SubPageType.AddContact: AddContactView {
+        on-back => { root.go-back(); }
+    }
+    if root.page == SubPageType.AddMoment: AddMomentView {
+        on-back => { root.go-back(); }
+    }
+    if root.page == SubPageType.AddNote: AddNoteView {
         on-back => { root.go-back(); }
     }
     if root.page == SubPageType.AddGroup: AddGroupView {

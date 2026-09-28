@@ -124,6 +124,27 @@ impl DataBackend {
         });
         key
     }
+
+    /// Append a new friend to the in-memory contact list.
+    pub fn append_contact(&mut self, user_id: i64, peer_id: String, name: String, image: String) -> i32 {
+        let key = self.bump();
+        self.contact_key_to_id.insert(key, user_id);
+        self.contacts.push(ContactRow {
+            key,
+            user_id,
+            peer_id,
+            name,
+            is_following: false,
+            follows_me: false,
+            image,
+        });
+        key
+    }
+
+    /// True if a contact already exists for `peer_id` or `name`.
+    pub fn has_contact(&self, peer_id: &str, name: &str) -> bool {
+        self.contacts.iter().any(|c| c.peer_id == peer_id || c.name == name)
+    }
 }
 
 pub type ArcBackend = Arc<RwLock<DataBackend>>;
