@@ -16,6 +16,8 @@ import { AuthView } from "components/auth.slint";
 import { Horizontal } from "../material-1.0/ui/components/horizontal.slint";
 import { AppState } from "components/app_state.slint";
 export { AppState } from "components/app_state.slint";
+import { ProfileState } from "components/app_state.slint";
+export { ProfileState } from "components/app_state.slint";
 import { ChatSession } from "chats/chat.slint";
 export { ChatSession } from "chats/chat.slint";
 import { ScanView } from "global/scan.slint";
@@ -188,12 +190,17 @@ export component MainWindow inherits Window {
             width: root.width - 280px - 58px;
             height: 100%;
 
-            for entry[i] in AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history: SubPageView {
+            // 桌面端只渲染栈顶一个子页实例，避免层叠多实例
+            if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 0:
+            SubPageView {
                 width: 100%;
                 height: 100%;
-                visible: i == AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top;
-                page: entry.page;
-                payload: entry.payload;
+                page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                    AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top
+                ].page;
+                payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                    AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top
+                ].payload;
                 go-back() => { AppState.pop-sub(); }
                 navigate-to(t, p) => { AppState.push-sub(t, p); }
             }

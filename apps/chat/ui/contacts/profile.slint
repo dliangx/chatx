@@ -1,13 +1,206 @@
+import { ScrollView } from "std-widgets.slint";
 import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
-import { AppState } from "../components/app_state.slint";
+import { AppState, ProfileState } from "../components/app_state.slint";
 import { Header } from "../components/header.slint";
+import { ProfileItem, SettingItem } from "../components/item.slint";
+
 export component ContactProfileView inherits Rectangle {
     in property <int> user-id;
     callback on-back();
 
-    Header {
-        name: "profile";
-        on-back => { root.on-back() }
+    out property <length> content-w: min(500px, root.width);
+    out property <length> content-x: (root.width - root.content-w) / 2;
+
+    out property <bool> is-mine: ProfileState.key == root.user-id;
+
+    Timer {
+        interval: 40ms;
+        running: root.visible && !root.is-mine;
+        triggered => {
+            ProfileState.request-load(root.user-id);
+        }
+    }
+
+    Rectangle {
+        x: root.content-x;
+        y: 0px;
+        width: root.content-w;
+        height: 100%;
+        clip: true;
+        background: Theme.bg;
+        visible: root.is-mine;
+
+        Header {
+            name: "profile";
+            on-back => { root.on-back(); }
+        }
+
+        ProfileItem {
+            y: 49px;
+            width: 100%;
+            image: ProfileState.avatar;
+            name: ProfileState.name;
+            nickname: ProfileState.username;
+            peer-id: ProfileState.peer-id;
+            show-qr => { AppState.show-qr-code(); }
+        }
+
+        ScrollView {
+            x: 0px;
+            y: 149px;
+            width: parent.width;
+            height: parent.height - 149px - 58px;
+
+            VerticalLayout {
+                width: 100%;
+                spacing: 0px;
+
+                if ProfileState.status != "":
+                Text {
+                    width: 100%;
+                    height: 28px;
+                    text: ProfileState.status;
+                    font-size: 12px;
+                    color: #6b7280;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                if ProfileState.bio != "":
+                VerticalLayout {
+                    width: 100%;
+                    padding-top: 14px;
+                    padding-bottom: 14px;
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: ProfileState.bio;
+                        font-size: 13px;
+                        color: Theme.fg;
+                        wrap: word-wrap;
+                    }
+                }
+
+                VerticalLayout {
+                    width: 100%;
+                    height: 44px;
+                    padding-left: 16px;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: ProfileState.created-at != "" ? ("加入于 " + ProfileState.created-at) : "加入日期未同步";
+                        font-size: 13px;
+                        color: #6b7280;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                Rectangle {
+                    width: 100%;
+                    height: 1px;
+                    background: Theme.border;
+                }
+
+                VerticalLayout {
+                    width: 100%;
+                    height: 28px;
+                    padding-left: 16px;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Moment";
+                        font-size: 13px;
+                        font-weight: 600;
+                        color: #6b7280;
+                        vertical-alignment: center;
+                    }
+                }
+
+                if ProfileState.has-moment:
+                VerticalLayout {
+                    width: 100%;
+                    padding-top: 4px;
+                    padding-bottom: 14px;
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    if ProfileState.moment-time != "":
+                    Text {
+                        horizontal-stretch: 1;
+                        text: ProfileState.moment-time + (ProfileState.moment-likes > 0 ? ("   ·   " + ProfileState.moment-likes + " 赞") : "");
+                        font-size: 12px;
+                        color: #9aa0b4;
+                        overflow: elide;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: ProfileState.moment-text;
+                        font-size: 14px;
+                        color: Theme.fg;
+                        wrap: word-wrap;
+                    }
+                }
+
+                if !ProfileState.has-moment:
+                VerticalLayout {
+                    width: 100%;
+                    height: 44px;
+                    padding-left: 16px;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "还没有发表 Moment";
+                        font-size: 13px;
+                        color: #9aa0b4;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    width: 100%;
+                    height: 8px;
+                    background: Theme.bg;
+                }
+
+                HorizontalLayout {
+                    width: 100%;
+                    height: 48px;
+                    SettingItem {
+                        width: 50%;
+                        id: 1;
+                        icon: Glyph.chat;
+                        title: "Messages";
+                        clicked => { ProfileState.open-conversation(root.user-id); }
+                    }
+
+                    SettingItem {
+                        width: 50%;
+                        id: 2;
+                        icon: Glyph.call;
+                        title: "Voice Call";
+                        clicked => { ProfileState.start-voice-call(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    width: 100%;
+                    height: 48px;
+                    SettingItem {
+                        width: 50%;
+                        id: 3;
+                        icon: Glyph.video;
+                        title: "Video Call";
+                        clicked => { ProfileState.start-video-call(); }
+                    }
+
+                    SettingItem {
+                        width: 50%;
+                        id: 4;
+                        icon: Glyph.share;
+                        title: "Screen Share";
+                        clicked => { ProfileState.start-screen-share(); }
+                    }
+                }
+            }
+        }
     }
 }

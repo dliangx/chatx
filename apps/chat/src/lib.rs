@@ -5,6 +5,7 @@ use std::sync::Arc;
 use chatx_core::Client;
 use chatx_core::group::MemberInfo;
 use chatx_core::signal::{DirectoryClient, HttpDirectory};
+use chatx_core::store::dm_chat_id;
 use render::bubble::parse::parse_text;
 use render::bubble::{Bubble, GroupPos, Side};
 use render::Renderer;
@@ -33,6 +34,11 @@ thread_local! {
 /// Shared renderer, initialized lazily (font parsing is expensive) and shared
 /// across worker threads via a mutex so it is only built once.
 static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> = std::sync::OnceLock::new();
+
+/// Monotonic id for profile loads (each request gets a fresh id).
+static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Id of the most-recent profile load; stale ones are dropped before publishing.
+static PROFILE_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     RUNTIME.with(|slot| {
@@ -293,6 +299,38 @@ pub fn main() {
         let w = weak.clone();
         ui.global::<AppState>().on_add_contact(move |username| {
             add_contact(w.clone(), username.to_string());
+        });
+    }
+
+    // ---- Contact profile actions ----
+    {
+        let weak = weak.clone();
+        ui.global::<ProfileState>().on_request_load(move |key| {
+            load_profile_data(weak.clone(), key);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<ProfileState>().on_open_conversation(move |key| {
+            open_conversation_with_contact(weak.clone(), key);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<ProfileState>().on_start_voice_call(move || {
+            show_call_overlay(weak.clone(), GlobalOverlayType::AudioCall);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<ProfileState>().on_start_video_call(move || {
+            show_call_overlay(weak.clone(), GlobalOverlayType::VideoCall);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<ProfileState>().on_start_screen_share(move || {
+            show_call_overlay(weak.clone(), GlobalOverlayType::ScreenShare);
         });
     }
 
@@ -1215,6 +1253,196 @@ fn show_app_error(weak: slint::Weak<MainWindow>, msg: String) {
             let mut nav = state.get_nav_state();
             nav.global_overlay = GlobalOverlayType::Error;
             state.set_nav_state(nav);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Contact profile page: data load + actions
+// ---------------------------------------------------------------------------
+
+/// Switch to a global call overlay (audio / video / screen share).
+fn show_call_overlay(weak: slint::Weak<MainWindow>, overlay: GlobalOverlayType) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            let state = ui.global::<AppState>();
+            let mut nav = state.get_nav_state();
+            nav.global_overlay = overlay;
+            state.set_nav_state(nav);
+        }
+    });
+}
+
+/// Convert a unix timestamp (ms or s) to `YYYY-MM-DD`.
+fn fmt_profile_date(ms: i64) -> String {
+    if ms <= 0 {
+        return String::new();
+    }
+    let t = if ms > 10_000_000_000 { ms / 1000 } else { ms };
+    let (y, m, d) = civil_date((t / 86_400) as i64);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Days-since-epoch to Y/M/D (Howard Hinnant's civil_from_days).
+fn civil_date(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_1;
+    let doe = (z - era * 146_1).unsigned_abs();
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as i64;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as i64, d)
+}
+
+/// Publish a status-only update (key is set, data fields left blank) for a
+/// given contact key.
+fn publish_profile_status(weak: slint::Weak<MainWindow>, key: i32, msg: SharedString) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            let ps = ui.global::<ProfileState>();
+            ps.set_key(key);
+            ps.set_status(msg);
+        }
+    });
+}
+
+/// Load the profile (bio, created_at, avatar, latest moment) for a contact
+/// keyed by its in-memory `id` and publish it into the ProfileState global.
+/// A monotonic sequence guard drops out-of-order async results so a stale load
+/// (e.g. a contact you already navigated away from) can't clobber the newest one.
+fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let pool = POOL.with(|s| s.borrow().clone());
+    let (Some(backend), Some(pool)) = (backend, pool) else {
+        publish_profile_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
+        return;
+    };
+    let Some(user_id) = backend.blocking_read().contact_id_for(key) else {
+        publish_profile_status(weak, key, SharedString::from("联系人已失效"));
+        return;
+    };
+    // Real peer id (username key used for directory lookups) for display / DM.
+    let peer_id = backend
+        .blocking_read()
+        .peer_id_for(key)
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+
+    // Each request gets a fresh id; a stale one is dropped before publishing.
+    let seq = PROFILE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    PROFILE_LATEST.store(seq, std::sync::atomic::Ordering::SeqCst);
+    let my_key = key;
+
+    let rt = runtime();
+    let weak2 = weak.clone();
+    rt.spawn(async move {
+        let st = match sqlite::users::get(&pool, user_id).await {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                if PROFILE_LATEST.load(std::sync::atomic::Ordering::SeqCst) == seq {
+                    publish_profile_status(weak2, my_key, SharedString::from("该用户未在本机同步"));
+                }
+                return;
+            }
+            Err(e) => {
+                if PROFILE_LATEST.load(std::sync::atomic::Ordering::SeqCst) == seq {
+                    publish_profile_status(weak2, my_key, SharedString::from(format!("读取失败: {e}")));
+                }
+                return;
+            }
+        };
+        let (avatar_path, name, username, bio, created_at, moment) = {
+            let m = sqlite::joins::author_feed(&pool, user_id, 1, 0)
+                .await
+                .ok()
+                .and_then(|v| v.into_iter().next());
+            (
+                st.avatar_path.clone().unwrap_or_default(),
+                st.nickname
+                    .clone()
+                    .unwrap_or_else(|| st.username.clone().unwrap_or_default()),
+                st.username.clone().unwrap_or_default(),
+                st.bio.clone().unwrap_or_default(),
+                st.created_at,
+                m.map(|m| {
+                    (
+                        m.content.unwrap_or_default(),
+                        m.timestamp,
+                        m.like_count as i32,
+                    )
+                }),
+            )
+        };
+        // Drop if a newer request superseded this one.
+        if PROFILE_LATEST.load(std::sync::atomic::Ordering::SeqCst) != seq {
+            return;
+        }
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak2.upgrade() else { return };
+            let ps = ui.global::<ProfileState>();
+            let avatar = slint::Image::load_from_path(std::path::Path::new(&avatar_path))
+                .unwrap_or_default();
+            let (has_moment, mt, mtime, ml) = match moment {
+                Some((text, ts, likes)) => (true, text, ts, likes),
+                None => (false, String::new(), 0, 0),
+            };
+            ps.set_key(my_key);
+            ps.set_avatar(avatar);
+            ps.set_name(SharedString::from(name));
+            ps.set_username(SharedString::from(username));
+            ps.set_peer_id(SharedString::from(peer_id));
+            ps.set_bio(SharedString::from(bio));
+            ps.set_created_at(SharedString::from(fmt_profile_date(created_at)));
+            ps.set_has_moment(has_moment);
+            ps.set_moment_text(SharedString::from(mt));
+            ps.set_moment_time(SharedString::from(fmt_profile_date(mtime)));
+            ps.set_moment_likes(ml);
+            ps.set_status(SharedString::new());
+        });
+    });
+}
+
+/// Open (or create) a 1:1 conversation row with the picked contact and
+/// navigate to it.
+fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
+    let client = CLIENT.with(|s| s.borrow().clone());
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let (Some(client), Some(backend)) = (client, backend) else {
+        publish_profile_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
+        return;
+    };
+    let username = {
+        let g = backend.blocking_read();
+        g.peer_id_for(key).map(|s| s.to_string())
+    };
+    let Some(username) = username else {
+        publish_profile_status(weak, key, SharedString::from("联系人已失效"));
+        return;
+    };
+    let Some(ur) = client.resolve_user(&username).ok() else {
+        publish_profile_status(weak, key, SharedString::from("该用户未注册，无法发起会话"));
+        return;
+    };
+    let me_peer = client.peer_base58();
+    let chat_id = dm_chat_id(&me_peer, &ur.device.peer_id);
+    let title = ur.user.user_id.clone();
+    let new_key = match backend.blocking_read().chats.iter().find(|c| c.chat_id == chat_id).map(|c| c.key) {
+        Some(k) => k,
+        None => {
+            let mut g = backend.blocking_write();
+            g.append_chat(chat_id, title, false)
+        }
+    };
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            let state = ui.global::<AppState>();
+            publish_to_views(&state, backend.clone());
+            load_chat_messages(ui.as_weak(), new_key);
+            push_sub_history(&state, SubPageEntry { page: SubPageType::ChatRoom, payload: new_key })
         }
     });
 }

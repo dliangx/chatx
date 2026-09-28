@@ -78,3 +78,24 @@ export global AppState {
     callback scanner-start();
     callback scanner-stop();
 }
+
+export global ProfileState {
+    in-out property <int> key: -1;
+    in property <image> avatar;
+    in property <string> name;
+    in property <string> username;
+    in property <string> peer-id;
+    in property <string> bio;
+    in property <string> created-at;
+    in property <bool> has-moment: false;
+    in property <string> moment-text;
+    in property <string> moment-time;
+    in property <int> moment-likes: 0;
+    in property <string> status;
+
+    callback request-load(int);
+    callback open-conversation(int);
+    callback start-voice-call();
+    callback start-video-call();
+    callback start-screen-share();
+}
