@@ -77,6 +77,12 @@ impl DataBackend {
         self.contact_key_to_id.get(&key).copied()
     }
 
+    /// Resolve a contact list key to its stored peer/user id text (the value
+    /// used for directory lookups), if the contact still exists.
+    pub fn peer_id_for(&self, key: i32) -> Option<&str> {
+        self.contacts.iter().find(|r| r.key == key).map(|r| r.peer_id.as_str())
+    }
+
     pub fn post_id_for(&self, key: i32) -> Option<i64> {
         self.feed_post_to_key.iter().find_map(|(post_id, k)| if *k == key { Some(*post_id) } else { None })
     }
@@ -97,6 +103,26 @@ impl DataBackend {
         if let Some(row) = self.chats.iter_mut().find(|r| r.key == key) {
             row.unread = 0;
         }
+    }
+
+    /// Append a fresh conversation row (e.g. a brand-new group).
+    pub fn append_chat(&mut self, chat_id: String, title: String, is_group: bool) -> i32 {
+        let key = self.bump();
+        self.chat_key_to_id.insert(key, chat_id.clone());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.chats.push(ChatRow {
+            key,
+            chat_id,
+            title,
+            preview: String::new(),
+            is_group,
+            time_ms: now_ms,
+            unread: 0,
+        });
+        key
     }
 }
 
@@ -158,12 +184,15 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<DataBackend> {
         let user_id = f.user_id;
         b.contact_key_to_id.insert(key, user_id);
         let image = f.avatar_path.clone().unwrap_or_default();
+        // Directory `users` table is keyed by the login username (see core
+        // heartbeat `user_id: account.user_id()`), so store the username here —
+        // it is the key `resolve_user` needs. Fall back to the int id only if
+        // the username is missing.
+        let peer_id = f.username.clone().unwrap_or_else(|| user_id.to_string());
         b.contacts.push(ContactRow {
             key,
             user_id,
-            // We store peer_id == user_id (as text) until devices are exposed through core.
-            // The p2p transport can resolve by username/peer later.
-            peer_id: user_id.to_string(),
+            peer_id,
             name,
             is_following: f.i_follow_them,
             follows_me: f.they_follow_me,

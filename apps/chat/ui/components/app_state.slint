@@ -49,10 +49,15 @@ export global AppState {
     in property <[ContactRow]> contacts: [];
     in property <[DiscoverCard]> discover: [];
     in property <string> data-status: "";
+    in property <string> group-status: "";
+    in-out property <string> error-message: "";
     callback toggle-like(int);
     callback show-qr-code();
     callback close-qr-code();
     callback open-scanner();
     callback start-screen-share();
     callback start-meeting();
+    callback pick-group-member(int);
+    callback unpick-group-member(int);
+    callback create-group();
 }

@@ -18,6 +18,16 @@ pub trait DirectoryClient: Sync + Send {
     fn resolve_device(&self, peer_id: &str) -> anyhow::Result<DeviceRecord>;
     fn resolve_user(&self, user_id: &str) -> anyhow::Result<UserRecord>;
     fn resolve_user_and_device(&self, user_id: &str) -> anyhow::Result<UserResolve>;
+    fn resolve_user_registered(&self, user_id: &str) -> anyhow::Result<UserResolve> {
+        let user = self.resolve_user(user_id)?;
+        let device = self
+            .list_devices(&user.user_id)
+            .into_iter()
+            .filter(|d| d.status == DeviceStatus::Approved)
+            .max_by_key(|d| d.seen)
+            .ok_or_else(|| anyhow::anyhow!("user {} has no APPROVED device", user.user_id))?;
+        Ok(UserResolve { user, device })
+    }
     fn list_devices(&self, user_id: &str) -> Vec<DeviceRecord>;
     fn list_users(&self, exclude: &str) -> Vec<UserResolve>;
     fn list_pending(&self, user_id: &str) -> Vec<DeviceRecord>;

@@ -26,7 +26,7 @@ pub struct Client<D: DirectoryClient + ?Sized> {
     dir: Arc<D>,
     running: Arc<Running>,
     store: Arc<Store>,
-    events: sw::EventRx,
+    events: tokio::sync::Mutex<sw::EventRx>,
     groups: RwLock<BTreeMap<String, Group>>,
     groups_dir: std::path::PathBuf,
 }
@@ -74,7 +74,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             dir,
             running,
             store,
-            events,
+            events: tokio::sync::Mutex::new(events),
             groups: RwLock::new(groups),
             groups_dir,
         })
@@ -535,6 +535,12 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         self.dir.resolve_user_and_device(user_id)
     }
 
+    /// Resolve a user that only needs to be registered (an approved device
+    /// exists), regardless of whether it is currently online.
+    pub fn resolve_user_registered(&self, user_id: &str) -> anyhow::Result<UserResolve> {
+        self.dir.resolve_user_registered(user_id)
+    }
+
     pub fn online_users(&self) -> Vec<UserResolve> {
         self.dir.list_users(self.device.peer_base58())
     }
@@ -620,8 +626,13 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         Ok(k)
     }
 
-    pub async fn next_event(&mut self) -> Option<sw::ChatEvent> {
-        self.events.recv().await
+    pub async fn next_event(&self) -> Option<sw::ChatEvent> {
+        self.events.lock().await.recv().await
+    }
+
+    /// Try to receive a single already-buffered event without blocking.
+    pub async fn try_next_event(&self) -> Option<sw::ChatEvent> {
+        self.events.lock().await.try_recv().ok()
     }
 
     pub async fn process_inbound(&self, evt: &sw::ChatEvent) -> anyhow::Result<Option<InboundGroup>> {
@@ -909,59 +920,71 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         Ok(())
     }
 
-    pub async fn drain_inbound(&mut self) -> Vec<String> {
-        let mut out = Vec::new();
-        while let Ok(evt) = self.events.try_recv() {
-            match evt {
-                sw::ChatEvent::Text { peer, req } => {
-                    let peer_b58 = peer.to_base58();
-                    match req.kind {
-                        message::MsgKind::Dm => {
-                            let text = req.text.clone().unwrap_or_default();
-                            let chat = store::dm_chat_id(&self.peer_base58(), &peer_b58);
-                            self.store.push(&chat, &peer_b58, &text, req.sealed.is_some()).await;
-                            out.push(chat);
-                        }
-                        _ => {
-                            if let Ok(Some(r)) = self.apply_inbound(&req).await {
-                                let gid = match r {
-                                    InboundGroup::Key { group_id } => group_id,
-                                    InboundGroup::Message { group_id, .. } => group_id,
-                                };
-                                out.push(gid);
+    /// Process a single inbound event. Returns the touched chat/group id, if
+    /// the event produced a new stored message. Safe to call from a shared
+    /// `Arc<Client>` on a dedicated pump task.
+    pub async fn process_event(&self, evt: sw::ChatEvent) -> Option<String> {
+        use sw::ChatEvent as E;
+        match evt {
+            E::Text { peer, req } => {
+                let peer_b58 = peer.to_base58();
+                match req.kind {
+                    message::MsgKind::Dm => {
+                        let text = req.text.clone().unwrap_or_default();
+                        let chat = store::dm_chat_id(&self.peer_base58(), &peer_b58);
+                        self.store.push(&chat, &peer_b58, &text, req.sealed.is_some()).await;
+                        Some(chat)
+                    }
+                    _ => {
+                        if let Ok(Some(r)) = self.apply_inbound(&req).await {
+                            match r {
+                                InboundGroup::Key { group_id } => Some(group_id),
+                                InboundGroup::Message { group_id, .. } => Some(group_id),
                             }
+                        } else {
+                            None
                         }
                     }
                 }
-                sw::ChatEvent::GroupPacket { topic, from, data } => {
-                    let Some(group_id) = sw::topic_to_group_id(&topic) else {
-                        continue;
-                    };
-                    if from.to_base58() == self.peer_base58() {
-                        continue;
+            }
+            E::GroupPacket { topic, from, data } => {
+                let group_id = sw::topic_to_group_id(&topic)?;
+                if from.to_base58() == self.peer_base58() {
+                    return None;
+                }
+                if !self.group_member(&group_id) {
+                    return None;
+                }
+                let wire = match group::parse_group_wire(&data) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        tracing::warn!("parse group wire for {group_id}: {e}");
+                        return None;
                     }
-                    if !self.group_member(&group_id) {
-                        continue;
+                };
+                if wire.env.group_id != group_id {
+                    return None;
+                }
+                match self.open_group_message(&group_id, &wire.env) {
+                    Ok(_text) => {
+                        let _ = self.store_group_inbound(&wire.env).await;
+                        Some(group_id)
                     }
-                    let wire = match group::parse_group_wire(&data) {
-                        Ok(w) => w,
-                        Err(e) => {
-                            tracing::warn!("parse group wire for {group_id}: {e}");
-                            continue;
-                        }
-                    };
-                    if wire.env.group_id != group_id {
-                        continue;
-                    }
-                    match self.open_group_message(&group_id, &wire.env) {
-                        Ok(_text) => {
-                            let _ = self.store_group_inbound(&wire.env).await;
-                            out.push(group_id);
-                        }
-                        Err(e) => tracing::warn!("open group msg {group_id}: {e}"),
+                    Err(e) => {
+                        tracing::warn!("open group msg {group_id}: {e}");
+                        None
                     }
                 }
-                _ => {}
+            }
+            _ => None,
+        }
+    }
+
+    pub async fn drain_inbound(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Some(evt) = self.try_next_event().await {
+            if let Some(id) = self.process_event(evt).await {
+                out.push(id);
             }
         }
         out

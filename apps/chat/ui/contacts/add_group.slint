@@ -110,6 +110,31 @@ export component AddGroupView inherits Rectangle {
         font-size: 14px;
         horizontal-alignment: center;
         wrap: word-wrap;
+        padding-left: 24px;
+        padding-right: 24px;
+    }
+
+    if AppState.group-status != "":
+    Rectangle {
+        x: 8px;
+        y: 84px;
+        width: parent.width - 16px;
+        height: 44px;
+        border-radius: 8px;
+        background: #fff2f0;
+
+        Text {
+            x: 8px;
+            y: 0;
+            width: parent.width - 16px;
+            height: 100%;
+            text: AppState.group-status;
+            font-size: 13px;
+            color: #ff4d4f;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            overflow: elide;
+        }
     }
 
     out property <length> row-h: 48px;
@@ -131,6 +156,11 @@ export component AddGroupView inherits Rectangle {
             image: row.image;
             peer-id: row.peer_id;
             toggled(sel) => {
+                if sel {
+                    AppState.pick-group-member(row.id);
+                } else {
+                    AppState.unpick-group-member(row.id);
+                }
                 root.count = sel ? root.count + 1 : root.count - 1;
             }
         }
@@ -187,7 +217,7 @@ export component AddGroupView inherits Rectangle {
                 height: 100%;
                 clicked => {
                     if root.has-selection {
-                        root.on-back();
+                        AppState.create-group();
                     }
                 }
             }
