@@ -49,8 +49,10 @@ export component AddMenuView inherits Rectangle {
 
     Rectangle {
         width: 176px;
-        height: 5 * 44px + 8px;
-        x: (AppState.is-mobile ? root.width : 280px) - 176px - 8px;
+        height: AppState.nav-state.active-tab == 2 ?
+            (AppState.is-mobile ? (3 * 44px + 8px) : (2 * 44px + 8px)) :
+            (AppState.is-mobile ? (5 * 44px + 8px) : (4 * 44px + 8px));
+        x: (AppState.is-mobile ? root.width : 340px) - 176px - 8px;
         y: 56px;
         border-radius: 8px;
         background: #ffffff;
@@ -62,7 +64,7 @@ export component AddMenuView inherits Rectangle {
             height: 100%;
             padding: 4px;
             spacing: 0px;
-
+            if AppState.is-mobile:
             MenuRow {
                 icon: Glyph.scan;
                 label: "扫描";
