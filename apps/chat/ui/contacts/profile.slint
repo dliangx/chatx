@@ -9,7 +9,7 @@ export component ContactProfileView inherits Rectangle {
     in property <int> user-id;
     callback on-back();
 
-    out property <length> content-w: min(500px, root.width);
+    out property <length> content-w: max(350px, min(500px, root.width));
     out property <length> content-x: (root.width - root.content-w) / 2;
 
     out property <bool> is-mine: ProfileState.key == root.user-id;
@@ -25,6 +25,7 @@ export component ContactProfileView inherits Rectangle {
     Rectangle {
         x: root.content-x;
         y: 0px;
+
         width: root.content-w;
         height: 100%;
         clip: true;
