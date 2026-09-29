@@ -44,7 +44,7 @@ export component ContactListView inherits Rectangle {
     fk := Flickable {
         x: 0px;
         y: root.list-top;
-        width: parent.width - root.bar-w;
+        width: parent.width;
         height: parent.height - root.list-top - root.bottom;
         viewport-height: root.rows.length * root.row-h;
         interactive: true;
@@ -82,7 +82,7 @@ export component ContactListView inherits Rectangle {
             (j == root.letters.length - 1 || -fk.viewport-y < root.letters[j + 1].target * root.row-h);
 
         Rectangle {
-            visible: parent.active;
+            visible: AppState.is-mobile && parent.active;
             x: 0px;
             y: 0px;
             width: parent.width;
@@ -94,6 +94,7 @@ export component ContactListView inherits Rectangle {
         Text {
             x: 0px;
             y: 0px;
+            visible: AppState.is-mobile;
             width: parent.width;
             height: parent.height;
             text: le.letter;
