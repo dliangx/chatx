@@ -1089,6 +1089,7 @@ dependencies = [
  "chatx-core",
  "qrcode",
  "render",
+ "serde_json",
  "slint",
  "slint-build",
  "sqlite",

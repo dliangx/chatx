@@ -1,13 +1,295 @@
 import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
-import { AppState } from "../components/app_state.slint";
 import { Header } from "../components/header.slint";
+import { ChatInputView } from "../chats/chat_input.slint";
+
+export struct CommentRow {
+    name: string,
+    text: string,
+    is-mine: bool,
+    time-label: string,
+}
+
+export global PostDetailState {
+    in property <int> key: -1;
+    in property <string> title;
+    in property <string> author;
+    in property <string> liked-by;
+    in property <string> time;
+    in property <bool> liked: false;
+    in property <int> likes: 0;
+    in property <int> comments: 0;
+    in property <[image]> media: [];
+    in property <[CommentRow]> comment-list: [];
+    in property <string> status;
+
+    callback request-load(int);
+    callback toggle-like(int);
+    callback add-comment(int, string);
+}
 
 export component DiscoverDetailView inherits Rectangle {
+    in property <int> key;
     callback on-back();
+
+    width: 100%;
+    height: 100%;
+    background: Theme.bg;
+
+    // 顶部各段（从上往下：标题 → 作者 → 媒体 → 点赞行 → 点赞人 → 分隔线 → 评论区标题）。
+    out property <length> input-h: 52px;
+    out property <length> status-h: PostDetailState.status != "" ? 20px : 0px;
+    out property <length> bottom: root.status-h + root.input-h;
+    out property <length> row-h: 64px;
+    out property <length> title-h: PostDetailState.title != "" ? 56px : 0px;
+    out property <length> media-h: PostDetailState.media.length == 1 ? root.width * 4 / 3 : PostDetailState.media.length > 1 ? root.width : 0px;
+    out property <length> like-by-h: PostDetailState.liked-by != "" ? 24px : 0px;
+    out property <length> top-h:
+        10px + root.title-h
+        + 10px + (root.title-h > 0 ? 20px : 0px)
+        + (root.media-h > 0 ? root.media-h + 8px : 0px)
+        + 30px + root.like-by-h + 10px
+        + 1px + 28px;
+    out property <length> view-h: root.top-h + PostDetailState.comment-list.length * root.row-h + 48px;
+
+    // media-row 起点
+    out property <length> media-y: 10px + root.title-h + (root.title-h > 0 ? 30px : 0px);
+    // 点赞行起点
+    out property <length> like-y: root.media-y + root.media-h + (root.media-h > 0 ? 8px : 0px);
+
+    // 首次可见时拉取该 post 的详情（帖子 + 点赞 + 评论 + 媒体）。
+    Timer {
+        interval: 40ms;
+        running: root.visible && PostDetailState.key != root.key;
+        triggered => {
+            PostDetailState.request-load(root.key);
+        }
+    }
 
     Header {
         name: "discover";
         on-back => { root.on-back() }
+    }
+
+    if PostDetailState.status != "":
+    Text {
+        x: 0px;
+        y: parent.height - root.bottom - 20px;
+        width: parent.width;
+        height: 20px;
+        text: PostDetailState.status;
+        color: #6b7280;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ChatInputView {
+        x: 0px;
+        y: parent.height - root.input-h;
+        width: parent.width;
+        height: root.input-h;
+        placeholder-text: "写下你的评论…";
+        sent(t) => { PostDetailState.add-comment(root.key, t); }
+    }
+
+    Flickable {
+        x: 0px;
+        y: 48px;
+        width: parent.width;
+        height: parent.height - root.bottom - 48px;
+        viewport-height: root.view-h;
+        interactive: root.view-h > parent.height - root.bottom - 48px;
+
+        // 帖子标题
+        if PostDetailState.title != "":
+        Text {
+            x: 16px;
+            y: 10px;
+            width: parent.width - 32px;
+            height: 56px;
+            text: PostDetailState.title;
+            font-size: 17px;
+            font-weight: 700;
+            color: Theme.fg;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+
+        // 作者 + 时间
+        Text {
+            x: 16px;
+            y: 10px + (PostDetailState.title != "" ? 56px : 0px) + 10px;
+            width: parent.width - 32px;
+            height: 20px;
+            text: (PostDetailState.author != "" ? PostDetailState.author + "   ·   " : "") + PostDetailState.time;
+            font-size: 13px;
+            vertical-alignment: center;
+            overflow: elide;
+            color: Theme.fg-muted;
+        }
+
+        // 媒体（单张 3:4，多张取第一张 1:1 并显示数量）
+        if PostDetailState.media.length > 0:
+        Rectangle {
+            x: 0px;
+            y: root.media-y;
+            width: parent.width;
+            height: root.media-h;
+            background: #111;
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: PostDetailState.media[0];
+                image-fit: cover;
+            }
+            if PostDetailState.media.length > 1:
+            Text {
+                x: parent.width - 50px;
+                y: parent.height - 28px;
+                width: 42px;
+                height: 22px;
+                text: PostDetailState.media.length;
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                color: #ffffff;
+            }
+        }
+
+        // 点赞心形
+        Icon {
+            x: 18px;
+            y: root.like-y + 4px;
+            size: 22px;
+            glyph: Glyph.heart;
+            tint: PostDetailState.liked ? #ff2442 : Theme.fg-muted;
+        }
+
+        // 点赞数
+        Text {
+            x: 46px;
+            y: root.like-y;
+            width: 120px;
+            height: 22px;
+            text: PostDetailState.likes;
+            font-size: 13px;
+            vertical-alignment: center;
+            color: PostDetailState.liked ? #ff2442 : Theme.fg-muted;
+        }
+
+        // 评论数（贴右）
+        Text {
+            x: parent.width - 160px;
+            y: root.like-y;
+            width: 140px;
+            height: 22px;
+            text: PostDetailState.comments + " 条评论";
+            font-size: 13px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            color: Theme.fg-muted;
+        }
+
+        // 点赞热区
+        TouchArea {
+            x: 12px;
+            y: root.like-y - 2px;
+            width: 150px;
+            height: 28px;
+            clicked => { PostDetailState.toggle-like(root.key); }
+        }
+
+        // 点赞人（谁觉得好，心形行下方）
+        if PostDetailState.liked-by != "":
+        Text {
+            x: 16px;
+            y: root.like-y + 26px;
+            width: parent.width - 32px;
+            height: 18px;
+            text: PostDetailState.liked-by;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+            color: #ff2442;
+        }
+
+        // 分隔线
+        Rectangle {
+            x: 0px;
+            y: root.like-y + 30px + root.like-by-h;
+            width: parent.width;
+            height: 1px;
+            background: Theme.border;
+        }
+
+        // 评论区标题
+        Text {
+            x: 16px;
+            y: root.like-y + 31px + root.like-by-h;
+            width: parent.width - 32px;
+            height: 26px;
+            text: PostDetailState.comment-list.length > 0 ? ("共 " + PostDetailState.comment-list.length + " 条评论") : "评论";
+            font-size: 14px;
+            font-weight: 600;
+            vertical-alignment: center;
+            color: Theme.fg;
+        }
+
+        // 空状态
+        if PostDetailState.comment-list.length == 0:
+        Text {
+            x: 0px;
+            y: root.top-h + 16px;
+            width: parent.width;
+            height: 28px;
+            text: "还没有评论，快写下第一条吧";
+            font-size: 13px;
+            horizontal-alignment: center;
+            color: Theme.fg-muted;
+        }
+
+        // 评论列表
+        for c[i] in PostDetailState.comment-list: Rectangle {
+            x: 0px;
+            y: root.top-h + i * root.row-h;
+            width: parent.width;
+            height: root.row-h;
+            background: c.is-mine ? Theme.brand-soft : Colors.transparent;
+
+            Rectangle {
+                x: 16px;
+                y: 8px;
+                width: 36px;
+                height: 36px;
+                border-radius: 18px;
+                background: c.is-mine ? Theme.brand : #a0aec0;
+            }
+
+            Text {
+                x: 62px;
+                y: 6px;
+                width: parent.width - 70px;
+                height: 18px;
+                text: c.name;
+                font-size: 13px;
+                font-weight: 600;
+                vertical-alignment: center;
+                overflow: elide;
+                color: c.is-mine ? Theme.brand : Theme.fg-muted;
+            }
+
+            Text {
+                x: 62px;
+                y: 26px;
+                width: parent.width - 70px;
+                height: 30px;
+                text: c.text;
+                font-size: 14px;
+                wrap: word-wrap;
+                overflow: elide;
+                color: Theme.fg;
+            }
+        }
     }
 }

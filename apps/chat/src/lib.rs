@@ -40,6 +40,11 @@ static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 /// Id of the most-recent profile load; stale ones are dropped before publishing.
 static PROFILE_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Monotonic id for post-detail loads (each request gets a fresh id).
+static POST_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Id of the most-recent post-detail load; stale ones are dropped before publishing.
+static POST_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     RUNTIME.with(|slot| {
         if slot.borrow().is_none() {
@@ -342,6 +347,30 @@ pub fn main() {
                 return;
             }
             send_chat_message(weak.clone(), key, b);
+        });
+    }
+
+    // ---- Discover post detail: load / like / comment ----
+    {
+        let weak = weak.clone();
+        ui.global::<PostDetailState>().on_request_load(move |key| {
+            load_post_detail(weak.clone(), key);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<PostDetailState>().on_toggle_like(move |key| {
+            toggle_detail_like(weak.clone(), key);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<PostDetailState>().on_add_comment(move |key, body| {
+            let b = body.as_str().trim().to_string();
+            if b.is_empty() {
+                return;
+            }
+            add_post_comment(weak.clone(), key, b);
         });
     }
 
@@ -1443,6 +1472,266 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
             publish_to_views(&state, backend.clone());
             load_chat_messages(ui.as_weak(), new_key);
             push_sub_history(&state, SubPageEntry { page: SubPageType::ChatRoom, payload: new_key })
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Discover post detail page: load / like / comment
+// ---------------------------------------------------------------------------
+
+/// Publish a status-only update for a post-detail key (data fields untouched).
+fn publish_detail_status(weak: slint::Weak<MainWindow>, key: i32, msg: SharedString) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            let ps = ui.global::<PostDetailState>();
+            ps.set_key(key);
+            ps.set_status(msg);
+        }
+    });
+}
+
+fn detail_key_post(backend: &ArcBackend, key: i32) -> Option<i64> {
+    backend.blocking_read().post_id_for(key)
+}
+
+/// Parse the `social_posts.media_urls` column into a list of URLs/paths.
+/// Accepts either a JSON array (`["a.jpg","b.jpg"]`) or a single raw path/URL
+/// (no brackets, no commas). Returns an empty vec on any failure.
+fn parse_media_urls(s: &str) -> Vec<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Vec::new();
+    }
+    // Try JSON array first; fall back to treating as a single path.
+    if let Ok(v) = serde_json::from_str::<Vec<String>>(t) {
+        let v: Vec<String> = v.into_iter().filter(|x| !x.trim().is_empty()).collect();
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    // Single path/URL (no brackets).
+    if !t.starts_with('[') {
+        return vec![t.to_string()];
+    }
+    Vec::new()
+}
+
+/// Load a post's detail (post, like state, likers, comments) from SQLite and
+/// publish it into the PostDetailState global. A monotonic sequence guard drops
+/// out-of-order async results so a stale load can't clobber the newest one.
+fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let pool = POOL.with(|s| s.borrow().clone());
+    let (Some(backend), Some(pool)) = (backend, pool) else {
+        publish_detail_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
+        return;
+    };
+    let Some(post_id) = detail_key_post(&backend, key) else {
+        publish_detail_status(weak, key, SharedString::from("帖子已失效"));
+        return;
+    };
+    // Author name + own id are pulled on the UI thread up-front; the async task below
+    // runs inside a tokio runtime and can't call `blocking_read` on the backend.
+    let (author, me) = {
+        let g = backend.blocking_read();
+        (
+            g.discover
+                .iter()
+                .find(|r| r.key == key)
+                .map(|r| r.author.clone())
+                .unwrap_or_default(),
+            g.me.clone(),
+        )
+    };
+
+    let seq = POST_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    POST_LATEST.store(seq, std::sync::atomic::Ordering::SeqCst);
+
+    let rt = runtime();
+    let weak2 = weak.clone();
+    rt.spawn(async move {
+        let post = match sqlite::social_feed::get_post(&pool, post_id).await {
+            Ok(Some(p)) => p,
+            _ => {
+                if POST_LATEST.load(std::sync::atomic::Ordering::SeqCst) == seq {
+                    publish_detail_status(weak2, key, SharedString::from("帖子不存在"));
+                }
+                return;
+            }
+        };
+
+        let me_id = sqlite::users::ensure_identity(&pool, &me).await.unwrap_or(0);
+        let i_liked = sqlite::social_feed::has_liked(&pool, post_id, me_id).await.unwrap_or(false);
+        // Resolve each liker to a display name for the "who liked" line.
+        let mut likers: Vec<String> = Vec::new();
+        if let Ok(ids) = sqlite::social_feed::likers(&pool, post_id).await {
+            for uid in ids.iter().cloned().take(20) {
+                let name = match sqlite::users::get(&pool, uid).await {
+                    Ok(Some(u)) => u
+                        .nickname
+                        .clone()
+                        .unwrap_or_else(|| u.username.clone().unwrap_or_default()),
+                    _ => uid.to_string(),
+                };
+                if !name.is_empty() {
+                    likers.push(name);
+                }
+            }
+        }
+        let likers_line = if likers.is_empty() {
+            String::new()
+        } else {
+            let head = likers.join("、");
+            if likers.len() > 5 {
+                format!("{} 等 {} 人觉得很赞", head, likers.len())
+            } else {
+                format!("{} 觉得很赞", head)
+            }
+        };
+
+        let comments = match sqlite::joins::post_comments(&pool, post_id, 200, 0).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                if POST_LATEST.load(std::sync::atomic::Ordering::SeqCst) == seq {
+                    publish_detail_status(weak2, key, SharedString::from(format!("读取评论失败: {e}")));
+                }
+                return;
+            }
+        };
+
+        // media_urls may be a JSON array of URLs/paths or a single path; keep the
+        // raw strings for the UI thread to load (slint::Image is not Send).
+        let media_urls = match post.media_urls.clone() {
+            Some(s) if !s.trim().is_empty() => parse_media_urls(&s),
+            _ => Vec::new(),
+        };
+
+        // Drop if a newer request superseded this one.
+        if POST_LATEST.load(std::sync::atomic::Ordering::SeqCst) != seq {
+            return;
+        }
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak2.upgrade() else { return };
+            let ps = ui.global::<PostDetailState>();
+            ps.set_key(key);
+            ps.set_title(SharedString::from(post.content.clone().unwrap_or_default()));
+            ps.set_author(SharedString::from(author));
+            ps.set_time(SharedString::from(fmt_time(post.timestamp)));
+            ps.set_liked(i_liked);
+            ps.set_likes(post.like_count as i32);
+            ps.set_comments(post.comment_count as i32);
+            ps.set_liked_by(SharedString::from(likers_line));
+            // Load media on the UI thread (slint::Image is not Send).
+            let media: Vec<SlintImage> = media_urls
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .filter_map(|p| SlintImage::load_from_path(std::path::Path::new(&p)).ok())
+                .collect();
+            ps.set_media(slint::ModelRc::new(slint::VecModel::from(media)));
+            let rows: Vec<CommentRow> = comments
+                .iter()
+                .map(|c| CommentRow {
+                    name: SharedString::from(
+                        c.author_nickname
+                            .clone()
+                            .unwrap_or_else(|| c.author_id.to_string()),
+                    ),
+                    text: SharedString::from(c.content.clone()),
+                    is_mine: me_id != 0 && c.author_id == me_id,
+                    time_label: SharedString::from(fmt_time(c.created_at)),
+                })
+                .collect();
+            ps.set_comment_list(slint::ModelRc::new(slint::VecModel::from(rows)));
+            ps.set_status(SharedString::new());
+        });
+    });
+}
+
+/// Toggle a like on the post shown in the detail view: memory first (so the
+/// count/heart update immediately), then async persist to SQLite.
+fn toggle_detail_like(weak: slint::Weak<MainWindow>, key: i32) {
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let pool = POOL.with(|s| s.borrow().clone());
+    let (Some(backend), Some(pool)) = (backend, pool) else {
+        publish_detail_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
+        return;
+    };
+    let post_id = detail_key_post(&backend, key);
+    let (want_liked, likes) = {
+        let mut g = backend.blocking_write();
+        let (liked, likes) = g.toggle_like(key);
+        (liked, likes)
+    };
+    // Refresh memory -> UI (updates the discover feed + the detail view).
+    if let Some(ui) = weak.upgrade() {
+        publish_to_views(&ui.global::<AppState>(), backend.clone());
+        let ps = ui.global::<PostDetailState>();
+        ps.set_liked(want_liked);
+        ps.set_likes(likes as i32);
+    }
+    if let Some(post_id) = post_id {
+        let rt = runtime();
+        let me = backend.blocking_read().me.clone();
+        rt.spawn(async move {
+            let _ = data::persist_like_toggle(&pool, &me, post_id, want_liked).await;
+        });
+    }
+}
+
+/// Add a comment to the post shown in the detail view: persist to SQLite,
+/// prepend it to the comment list, and bump the comment count.
+fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let pool = POOL.with(|s| s.borrow().clone());
+    let (Some(backend), Some(pool)) = (backend, pool) else {
+        publish_detail_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
+        return;
+    };
+    let Some(post_id) = detail_key_post(&backend, key) else {
+        publish_detail_status(weak, key, SharedString::from("帖子已失效"));
+        return;
+    };
+    let (my_name, me) = {
+        let g = backend.blocking_read();
+        let n = g.my_nickname.clone();
+        let me = g.me.clone();
+        (if n.is_empty() { me.clone() } else { n }, me)
+    };
+    let rt = runtime();
+    rt.spawn(async move {
+        let me_id = match sqlite::users::ensure_identity(&pool, &me).await {
+            Ok(id) => id,
+            Err(e) => {
+                publish_detail_status(weak.clone(), key, SharedString::from(format!("评论失败: {e}")));
+                return;
+            }
+        };
+        match sqlite::social_feed::add_comment(&pool, post_id, me_id, &body, None).await {
+            Ok(_) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let ps = ui.global::<PostDetailState>();
+                    let mut list: Vec<CommentRow> = {
+                        use slint::Model;
+                        let m = ps.get_comment_list();
+                        (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+                    };
+                    let new = CommentRow {
+                        name: SharedString::from(my_name),
+                        text: SharedString::from(body),
+                        is_mine: true,
+                        time_label: SharedString::from("刚刚"),
+                    };
+                    list.insert(0, new);
+                    ps.set_comment_list(slint::ModelRc::new(slint::VecModel::from(list)));
+                    ps.set_comments((ps.get_comments() as i64 + 1) as i32);
+                    ps.set_status(SharedString::new());
+                });
+            }
+            Err(e) => {
+                publish_detail_status(weak, key, SharedString::from(format!("评论失败: {e}")));
+            }
         }
     });
 }
