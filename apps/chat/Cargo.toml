@@ -15,6 +15,7 @@ anyhow = { workspace = true }
 serde_json = { workspace = true }
 qrcode = { workspace = true }
 camera = { path = "../../crates/camera" }
+pinyin = "0.11"
 
 [build-dependencies]
 slint-build = {workspace = true}

@@ -9,6 +9,7 @@
 //!   - We never read SQLite on a per-frame basis; only on start or when the
 //!     caller asks for a full refresh.
 
+use pinyin::ToPinyin;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,9 +34,29 @@ pub struct ContactRow {
     pub user_id: i64,
     pub peer_id: String,
     pub name: String,
+    /// WeChat-style A-Z section the contact belongs in (pinyin initial).
+    pub letter: char,
     pub is_following: bool,
     pub follows_me: bool,
     pub image: String,
+}
+
+/// Group a contact name into its A-Z letter section (WeChat contacts style).
+///
+/// CJK names resolve to the pinyin initial of their first character (e.g.
+/// "李雷" -> 'L'); other names use their first alphabetic character. Any name
+/// without a resolvable initial (digits, symbols, empty) falls into the
+/// catch-all '#' section.
+pub fn contact_letter(name: &str) -> char {
+    for c in name.chars() {
+        if c.is_ascii_alphabetic() {
+            return c.to_ascii_uppercase();
+        }
+        if let Some(p) = c.to_pinyin() {
+            return p.first_letter().chars().next().unwrap_or('#').to_ascii_uppercase();
+        }
+    }
+    '#'
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +154,7 @@ impl DataBackend {
             key,
             user_id,
             peer_id,
+            letter: contact_letter(&name),
             name,
             is_following: false,
             follows_me: false,
@@ -214,12 +236,19 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<DataBackend> {
             key,
             user_id,
             peer_id,
+            letter: contact_letter(&name),
             name,
             is_following: f.i_follow_them,
             follows_me: f.they_follow_me,
             image,
         });
     }
+
+    // WeChat-style ordering: group by letter ('#' last), alphabetical inside.
+    let rank = |c: char| if c == '#' { '[' } else { c }; // '[' sorts just after 'Z'
+    b.contacts.sort_by(|a, b| rank(a.letter)
+        .cmp(&rank(b.letter))
+        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
 
     // ---- discovery feed ----
     let posts = sqlite::joins::feed(pool, me_id, true, 200, 0).await?;

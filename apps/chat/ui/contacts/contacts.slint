@@ -1,12 +1,18 @@
 import { SubPageType } from "../components/nav_state.slint";
-import { ContactRow } from "../components/app_state.slint";
-import { AppState } from "../components/app_state.slint";
+import {
+    ContactRow,
+    LetterEntry,
+    AppState,
+} from "../components/app_state.slint";
 import { ContactListItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
 import { SearchBar } from "../components/search.slint";
 
+// 微信风格联系人列表：联系人按拼音首字母排序，右侧固定 A–Z 字母索引条，
+// 点击字母可跳转到对应分组的首个联系人。
 export component ContactListView inherits Rectangle {
     in property <[ContactRow]> rows: [];
+    in property <[LetterEntry]> letters: [];
     in-out property <int> selected-key: -1;
 
     width: 100%;
@@ -14,8 +20,10 @@ export component ContactListView inherits Rectangle {
     background: Theme.bg;
     callback navigate-to(SubPageType, int);
 
-    out property <length> row-h: 48px;
-    out property <length> viewport-h: root.rows.length * root.row-h;
+    out property <length> row-h: 52px;
+    out property <length> bar-w: 28px;
+    out property <length> list-top: 48px;
+    out property <length> bottom: AppState.is-mobile ? 58px : 0px;
 
     SearchBar {
         y: 0px;
@@ -32,26 +40,76 @@ export component ContactListView inherits Rectangle {
         wrap: word-wrap;
     }
 
-    Flickable {
+    // 左侧滚动列表。
+    fk := Flickable {
         x: 0px;
-        y: 48px;
-        width: parent.width;
-        height: parent.height - 48px - (AppState.is-mobile ? 58px : 0px);
-        viewport-height: root.viewport-h;
+        y: root.list-top;
+        width: parent.width - root.bar-w;
+        height: parent.height - root.list-top - root.bottom;
+        viewport-height: root.rows.length * root.row-h;
         interactive: true;
 
-        for row[i] in root.rows: ContactListItem {
+        for r[i] in root.rows: ContactListItem {
             x: 0px;
             y: root.row-h * i;
             width: parent.width;
             height: root.row-h;
-            id: row.id;
-            image: row.image;
-            peer_id: row.peer_id;
-            title: row.name;
-            selected: row.id == root.selected-key;
+            id: r.id;
+            image: r.image;
+            peer_id: r.peer_id;
+            title: r.name;
+            selected: r.id == root.selected-key;
 
-            clicked => { root.selected-key = row.id; root.navigate-to(SubPageType.ContactProfile, row.id); }
+            clicked => {
+                root.selected-key = r.id;
+                root.navigate-to(SubPageType.ContactProfile, r.id);
+            }
+        }
+    }
+
+    // 右侧 A–Z 字母索引条（只显示当前列表中出现的字母，等分高度）。
+    // active：当前滚动到的字母（随 fk.viewport-y 实时变化），高亮显示。
+    for le[j] in root.letters: Rectangle {
+        x: parent.width - root.bar-w - 8px;
+        y: root.list-top + 6px + j * ((parent.height - root.list-top - root.bottom - 12px) / root.letters.length);
+        width: root.bar-w;
+        height: (parent.height - root.list-top - root.bottom - 12px) / root.letters.length;
+        background: transparent;
+
+        // 当前滚动到的字母：scroll 位置落在本字母分组范围内即高亮。
+        out property <bool> active:
+            (-fk.viewport-y >= root.letters[j].target * root.row-h) &&
+            (j == root.letters.length - 1 || -fk.viewport-y < root.letters[j + 1].target * root.row-h);
+
+        Rectangle {
+            visible: parent.active;
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.width;
+            background: Theme.brand;
+            border-radius: parent.width / 2;
+        }
+
+        Text {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            text: le.letter;
+            color: parent.active ? white : Theme.brand;
+            font-size: parent.active ? 14px : 10px;
+            font-weight: 800;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        TouchArea {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            clicked => { fk.viewport-y = -(root.row-h * le.target); }
         }
     }
 }

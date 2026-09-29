@@ -20,6 +20,13 @@ export struct ContactRow {
     name: string,
 }
 
+// One slot in the right-side A–Z index bar (only letters present included).
+export struct LetterEntry {
+    letter: string,
+    // index (in the sorted contact list) of the first contact of this letter.
+    target: int,
+}
+
 export struct DiscoverCard {
     id: int,
     title: string,
@@ -58,6 +65,7 @@ export global AppState {
 
     in property <[ConversationRow]> chats: [];
     in property <[ContactRow]> contacts: [];
+    in property <[LetterEntry]> contact-letters: [];
     in property <[DiscoverCard]> discover: [];
     in property <string> data-status: "";
     in property <string> group-status: "";

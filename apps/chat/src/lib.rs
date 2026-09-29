@@ -93,7 +93,7 @@ pub fn main() {
     let weak = ui.as_weak();
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
-    state.set_is_mobile(true);
+    // state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
@@ -230,6 +230,7 @@ pub fn main() {
             clear_sub_history(&st);
             st.set_chats(slint::ModelRc::new(slint::VecModel::from(Vec::<ConversationRow>::new())));
             st.set_contacts(slint::ModelRc::new(slint::VecModel::from(Vec::<ContactRow>::new())));
+            st.set_contact_letters(slint::ModelRc::new(slint::VecModel::from(Vec::<LetterEntry>::new())));
             st.set_discover(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
             st.set_data_status(SharedString::new());
             let cs = ui.global::<ChatSession>();
@@ -667,7 +668,17 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
 
 /// Push the in-memory backend rows into the slint view models (memory -> UI).
 fn publish_to_views(state: &AppState, backend: ArcBackend) {
-    let snapshot = backend.blocking_read().clone();
+    let mut snapshot = backend.blocking_read().clone();
+
+    // WeChat-style order: A..Z by pinyin initial, '#' catch-all last,
+    // alphabetical within a section. Computed here so every publish path
+    // (initial load, appended friend) keeps the right-side index in order.
+    let rank = |c: char| if c == '#' { '[' } else { c };
+    snapshot
+        .contacts
+        .sort_by(|a, b| rank(data::contact_letter(&a.name))
+            .cmp(&rank(data::contact_letter(&b.name)))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
 
     let chats: Vec<ConversationRow> = snapshot
         .chats
@@ -682,6 +693,14 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
 
+    // Letter of each contact (pinyin initial) — the backend already sorted the
+    // list by this, so consecutive same-letter entries form a WeChat-style section.
+    let contact_letters: Vec<char> = snapshot
+        .contacts
+        .iter()
+        .map(|r| data::contact_letter(&r.name))
+        .collect();
+
     let contacts: Vec<ContactRow> = snapshot
         .contacts
         .iter()
@@ -692,7 +711,25 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
             name: SharedString::from(r.name.clone()),
         })
         .collect();
+
+    // A–Z index bar entries: one per distinct letter, in list order (A..Z, '#'
+    // last), targeting the index of the first contact of that letter.
+    let mut letter_entries: Vec<(char, i32)> = Vec::new();
+    for (i, &ltr) in contact_letters.iter().enumerate() {
+        if letter_entries.last().map(|(c, _)| *c).map_or(true, |c| c != ltr) {
+            letter_entries.push((ltr, i as i32));
+        }
+    }
+    let letters_model: Vec<LetterEntry> = letter_entries
+        .into_iter()
+        .map(|(ltr, target)| LetterEntry {
+            letter: SharedString::from(ltr.to_string()),
+            target,
+        })
+        .collect();
+
     state.set_contacts(slint::ModelRc::new(slint::VecModel::from(contacts)));
+    state.set_contact_letters(slint::ModelRc::new(slint::VecModel::from(letters_model)));
 
     let discover: Vec<DiscoverCard> = snapshot
         .discover

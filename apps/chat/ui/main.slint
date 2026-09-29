@@ -89,6 +89,7 @@ export component MainWindow inherits Window {
                     width: 100%;
                     height: 100%;
                     rows: AppState.contacts;
+                    letters: AppState.contact-letters;
                     navigate-to(t, p) => { AppState.push-sub(t, p); }
                 }
 
@@ -161,6 +162,7 @@ export component MainWindow inherits Window {
                 width: 100%;
                 height: 100%;
                 rows: AppState.contacts;
+                letters: AppState.contact-letters;
                 navigate-to(t, p) => { AppState.push-sub(t, p); }
             }
 
