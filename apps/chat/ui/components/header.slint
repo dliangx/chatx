@@ -37,6 +37,13 @@ export component Header inherits VerticalLayout {
             horizontal-alignment: center;
             vertical-alignment: center;
         }
+
+        Rectangle {
+            x: parent.width - 48px;
+            width: 48px;
+            height: 48px;
+            @children
+        }
     }
 
     // 占位分隔线
