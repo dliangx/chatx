@@ -83,15 +83,26 @@ export component AddGroupView inherits Rectangle {
     background: Theme.bg;
     callback on-back();
 
+    in property <int> group-type;
     in-out property <int> count: 0;
 
     out property <bool> has-selection: root.count > 0;
 
+    if group-type == 0:
     Header {
-        name: "新建群聊";
+        name: "Add Group";
         on-back => { root.on-back(); }
     }
-
+    if group-type == 1:
+    Header {
+        name: "Start Meeting";
+        on-back => { root.on-back(); }
+    }
+    if group-type == 2:
+    Header {
+        name: "Screen Share";
+        on-back => { root.on-back(); }
+    }
     Text {
         x: 16px;
         y: 58px;
@@ -205,7 +216,10 @@ export component AddGroupView inherits Rectangle {
                 y: 0px;
                 width: 100%;
                 height: 100%;
-                text: "创建群聊";
+
+                text: group-type == 0 ? "创建群聊"
+                    : (group-type == 1 ? "发起会议"
+                    : (group-type == 2 ? "桌面共享" : ""));
                 font-size: 14px;
                 color: white;
                 horizontal-alignment: center;

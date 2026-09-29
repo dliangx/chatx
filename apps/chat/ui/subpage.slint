@@ -72,6 +72,7 @@ export component SubPageView inherits Rectangle {
         on-back => { root.go-back(); }
     }
     if root.page == SubPageType.AddGroup: AddGroupView {
+        group-type: root.payload;
         on-back => { root.go-back(); }
     }
     if root.page == SubPageType.DiscoverDetail: DiscoverDetailView {

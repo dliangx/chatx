@@ -93,7 +93,7 @@ pub fn main() {
     let weak = ui.as_weak();
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
-    // state.set_is_mobile(true);
+    state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();

@@ -99,13 +99,13 @@ export component AddMenuView inherits Rectangle {
             MenuRow {
                 icon: Glyph.meeting;
                 label: "发起会议";
-                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.start-meeting(); }
+                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddGroup, 1); }
             }
             if AppState.nav-state.active-tab != 2:
             MenuRow {
                 icon: Glyph.share;
                 label: "桌面共享";
-                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.start-screen-share(); }
+                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddGroup, 2); }
             }
         }
     }
