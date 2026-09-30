@@ -4,7 +4,7 @@ import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
 import { AppState } from "../components/app_state.slint";
 import { Header } from "../components/header.slint";
-
+import { GlobalOverlayType } from "../components/nav_state.slint";
 export struct MessageData {
     bubble: image,
     width: length,
@@ -40,6 +40,24 @@ export component ChatView inherits Rectangle {
     Header {
         name: "chat";
         on-back => { root.on-back() }
+
+        Icon {
+            width: 32px;
+            height: 32px;
+            size: 18px;
+            glyph: Glyph.add;
+            tint: Theme.fg;
+            TouchArea {
+                width: 48px;
+                height: 48px;
+                clicked => {
+                    AppState.add-menu-type = 1;
+                    AppState.nav-state.global-overlay = AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu
+                        ? GlobalOverlayType.None
+                        : GlobalOverlayType.AddMenu;
+                }
+            }
+        }
     }
 
     ChatInputView {

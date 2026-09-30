@@ -70,6 +70,7 @@ export component SearchBar inherits HorizontalLayout {
             width: 100%;
             height: 100%;
             clicked => {
+                AppState.add-menu-type = 0;
                 AppState.nav-state.global-overlay = AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu
                     ? GlobalOverlayType.None
                     : GlobalOverlayType.AddMenu;

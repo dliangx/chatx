@@ -323,12 +323,6 @@ pub fn main() {
     }
     {
         let weak = weak.clone();
-        ui.global::<ProfileState>().on_start_voice_call(move || {
-            show_call_overlay(weak.clone(), GlobalOverlayType::AudioCall);
-        });
-    }
-    {
-        let weak = weak.clone();
         ui.global::<ProfileState>().on_start_video_call(move || {
             show_call_overlay(weak.clone(), GlobalOverlayType::VideoCall);
         });

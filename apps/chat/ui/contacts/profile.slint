@@ -21,7 +21,6 @@ export global ProfileState {
 
     callback request-load(int);
     callback open-conversation(int);
-    callback start-voice-call();
     callback start-video-call();
     callback start-screen-share();
 }
@@ -188,7 +187,7 @@ export component ContactProfileView inherits Rectangle {
                     height: 48px;
                     SettingItem {
                         show-left: false;
-                        width: 50%;
+                        width: 33%;
                         id: 1;
                         icon: Glyph.chat;
                         title: "Messages";
@@ -197,21 +196,8 @@ export component ContactProfileView inherits Rectangle {
 
                     SettingItem {
                         show-left: false;
-                        width: 50%;
+                        width: 33%;
                         id: 2;
-                        icon: Glyph.call;
-                        title: "Voice Call";
-                        clicked => { ProfileState.start-voice-call(); }
-                    }
-                }
-
-                HorizontalLayout {
-                    width: 100%;
-                    height: 48px;
-                    SettingItem {
-                        show-left: false;
-                        width: 50%;
-                        id: 3;
                         icon: Glyph.video;
                         title: "Video Call";
                         clicked => { ProfileState.start-video-call(); }
@@ -219,9 +205,9 @@ export component ContactProfileView inherits Rectangle {
 
                     SettingItem {
                         show-left: false;
-                        width: 50%;
-                        id: 4;
-                        icon: Glyph.share;
+                        width: 33%;
+                        id: 3;
+                        icon: Glyph.meeting;
                         title: "Screen Share";
                         clicked => { ProfileState.start-screen-share(); }
                     }

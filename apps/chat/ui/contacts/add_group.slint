@@ -3,6 +3,19 @@ import { Theme } from "../theme.slint";
 import { Header } from "../components/header.slint";
 import { AppState, ContactRow } from "../components/app_state.slint";
 
+export struct Row {
+    peer_id: string,
+    username: string,
+}
+
+export global AddGroupState {
+    in property <[Row]> selected-rows;
+
+    callback open-group-conversation();
+    callback start-video-call();
+    callback start-screen-share();
+}
+
 component CRow inherits Rectangle {
     in property <string> name;
     in property <image> image;
@@ -218,7 +231,7 @@ export component AddGroupView inherits Rectangle {
                 height: 100%;
 
                 text: group-type == 0 ? "创建群聊"
-                    : (group-type == 1 ? "发起会议"
+                    : (group-type == 1 ? "视频会议"
                     : (group-type == 2 ? "桌面共享" : ""));
                 font-size: 14px;
                 color: white;

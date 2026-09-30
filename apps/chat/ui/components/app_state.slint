@@ -70,6 +70,8 @@ export global AppState {
     in property <string> data-status: "";
     in property <string> group-status: "";
     in-out property <string> error-message: "";
+    in property <int> add-menu-type:0;
+
     callback toggle-like(int);
     callback show-qr-code();
     callback close-qr-code();
@@ -86,5 +88,3 @@ export global AppState {
     callback scanner-start();
     callback scanner-stop();
 }
-
-

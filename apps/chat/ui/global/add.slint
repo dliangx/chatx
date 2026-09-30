@@ -40,6 +40,26 @@ export component AddMenuView inherits Rectangle {
     background: transparent;
     clip: true;
 
+    function calcHeight() -> int {
+        if AppState.is-mobile {
+            if AppState.add-menu-type == 0 && AppState.nav-state.active-tab == 2 {
+                return 3;
+            } else if AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2 {
+                return 5;
+            }
+        } else {
+            if AppState.add-menu-type == 0 && AppState.nav-state.active-tab == 2 {
+                return 2;
+            } else if AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2 {
+                return 4;
+            }
+        }
+        if AppState.add-menu-type == 1 {
+            return 2;
+        }
+        return 0;
+    }
+
     // 关闭挡板：置于最底层，菜单内的 TouchArea 声明在其上层可正常接收点击
     TouchArea {
         width: 100%;
@@ -49,9 +69,7 @@ export component AddMenuView inherits Rectangle {
 
     Rectangle {
         width: 176px;
-        height: AppState.nav-state.active-tab == 2 ?
-            (AppState.is-mobile ? (3 * 44px + 8px) : (2 * 44px + 8px)) :
-            (AppState.is-mobile ? (5 * 44px + 8px) : (4 * 44px + 8px));
+        height: calcHeight() * 44px + 8px;
         x: (AppState.is-mobile ? root.width : 340px) - 176px - 8px;
         y: 56px;
         border-radius: 8px;
@@ -64,48 +82,61 @@ export component AddMenuView inherits Rectangle {
             height: 100%;
             padding: 4px;
             spacing: 0px;
-            if AppState.is-mobile:
+
+            if AppState.is-mobile && AppState.add-menu-type == 0:
             MenuRow {
                 icon: Glyph.scan;
                 label: "扫描";
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.QrScanner; }
             }
 
-            if AppState.nav-state.active-tab == 2:
+            if AppState.add-menu-type == 0 && AppState.nav-state.active-tab == 2:
             MenuRow {
                 icon: Glyph.fill;
                 label: "笔记";
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddNote, 0); }
             }
-            if AppState.nav-state.active-tab == 2:
+            if AppState.add-menu-type == 0 && AppState.nav-state.active-tab == 2:
             MenuRow {
                 icon: Glyph.picture;
                 label: "分享此刻";
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddMoment, 0); }
             }
-            if AppState.nav-state.active-tab != 2:
+            if AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2:
             MenuRow {
                 icon: Glyph.friends-add;
                 label: "添加朋友";
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddContact, 0); }
             }
-            if AppState.nav-state.active-tab != 2:
+            if AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2:
             MenuRow {
                 icon: Glyph.add-circle;
                 label: "新建群聊";
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddGroup, 0); }
             }
-            if AppState.nav-state.active-tab != 2:
+            if  AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2:
             MenuRow {
-                icon: Glyph.meeting;
-                label: "发起会议";
+                icon: Glyph.video;
+                label: "视频会议";
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddGroup, 1); }
             }
-            if AppState.nav-state.active-tab != 2:
+            if  AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2:
             MenuRow {
-                icon: Glyph.share;
+                icon: Glyph.meeting;
                 label: "桌面共享";
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddGroup, 2); }
+            }
+            if  AppState.add-menu-type == 1:
+            MenuRow {
+                icon: Glyph.video;
+                label: "视频会议";
+                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.VideoCall; }
+            }
+            if  AppState.add-menu-type == 1:
+            MenuRow {
+                icon: Glyph.meeting;
+                label: "桌面共享";
+                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.ScreenShare; }
             }
         }
     }
