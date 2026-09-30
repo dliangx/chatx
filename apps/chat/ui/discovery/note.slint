@@ -1,13 +1,143 @@
 import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
-import { AppState } from "../components/app_state.slint";
 import { Header } from "../components/header.slint";
 
+export global NoteState {
+    in-out property <string> draft: "";
+
+    callback note-saved(string);
+}
+
 export component AddNoteView inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: Theme.bg;
     callback on-back();
 
-    Header {
-        name: "note";
-        on-back => { root.on-back() }
+    out property <length> footer-h: 64px;
+
+    VerticalLayout {
+        width: parent.width;
+        height: parent.height;
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 0px;
+        padding-bottom: 0px;
+        spacing: 8px;
+
+        Header {
+            name: "note";
+            on-back => { root.on-back(); }
+        }
+
+        // 内容：白底圆角框填充剩余空间，长文可滚动
+        Rectangle {
+            vertical-stretch: 1;
+            border-radius: 10px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: Theme.border;
+            clip: true;
+
+            Flickable {
+                x: 1px;
+                y: 1px;
+                width: parent.width - 2px;
+                height: parent.height - 2px;
+                interactive: true;
+
+                TextInput {
+                    x: 12px;
+                    y: 12px;
+                    width: parent.width - 24px;
+                    min-height: parent.height - 24px;
+                    text <=> NoteState.draft;
+                    font-size: 15px;
+                    color: Theme.fg;
+                    vertical-alignment: top;
+                    wrap: word-wrap;
+                    single-line: false;
+                    selection-background-color: Theme.brand-soft;
+                    selection-foreground-color: Theme.brand;
+                }
+            }
+        }
+
+        // 底部：语音（左） + 状态 + 保存（右）
+        Rectangle {
+            height: root.footer-h;
+            background: Theme.bg;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            // 语音识别 → 后端待接
+            Rectangle {
+                x: 16px;
+                y: (root.footer-h - 38px) / 2;
+                width: 38px;
+                height: 38px;
+                border-radius: 19px;
+                background: Theme.brand-soft;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                Icon {
+                    x: (parent.width - self.size) / 2;
+                    y: (parent.height - self.size) / 2;
+                    size: 22px;
+                    glyph: Glyph.siri;
+                    tint: Theme.fg;
+                }
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => { /* 后端待接：打开语音识别 */ }
+                }
+            }
+
+            Text {
+                x: 66px;
+                y: 0px;
+                width: parent.width - 190px;
+                height: parent.height;
+                text: NoteState.draft != "" ? "已输入内容" : "输入标题和正文…";
+                font-size: 13px;
+                color: Theme.fg-muted;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                x: parent.width - 128px;
+                y: (root.footer-h - 32px) / 2;
+                width: 112px;
+                height: 32px;
+                border-radius: 16px;
+                background: NoteState.draft != "" ? Theme.brand : #c9c9c9;
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: "保存";
+                    font-size: 14px;
+                    color: #ffffff;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => {
+                        if NoteState.draft != "" {
+                            NoteState.note-saved(NoteState.draft);
+                            NoteState.draft = "";
+                            root.on-back();
+                        }
+                    }
+                }
+            }
+        }
     }
 }

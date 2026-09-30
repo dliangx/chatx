@@ -28,7 +28,7 @@ export component MeView inherits Rectangle {
 
             SettingItem {
                 width: 100%;
-                id: 2;
+                id: 1;
                 icon: Glyph.notes;
                 title: "我的笔记";
                 selected: root.selected-key == 1;
@@ -37,11 +37,11 @@ export component MeView inherits Rectangle {
 
             SettingItem {
                 width: 100%;
-                id: 1;
+                id: 2;
                 icon: Glyph.collection;
                 title: "我的收藏";
-                selected: root.selected-key == 1;
-                clicked => { root.selected-key = 1; root.navigate-to(SubPageType.MyCollect, 0); }
+                selected: root.selected-key == 2;
+                clicked => { root.selected-key = 2; root.navigate-to(SubPageType.MyCollect, 0); }
             }
 
             SettingItem {
@@ -49,8 +49,8 @@ export component MeView inherits Rectangle {
                 id: 3;
                 icon: Glyph.share;
                 title: "我的分享";
-                selected: root.selected-key == 1;
-                clicked => { root.selected-key = 1; root.navigate-to(SubPageType.MyShare, 0); }
+                selected: root.selected-key == 3;
+                clicked => { root.selected-key = 3; root.navigate-to(SubPageType.MyShare, 0); }
             }
 
             SettingItem {
@@ -58,8 +58,8 @@ export component MeView inherits Rectangle {
                 id: 4;
                 icon: Glyph.setting;
                 title: "设置";
-                selected: root.selected-key == 2;
-                clicked => { root.selected-key = 2; root.navigate-to(SubPageType.Settings, 0); }
+                selected: root.selected-key == 4;
+                clicked => { root.selected-key = 4; root.navigate-to(SubPageType.Settings, 0); }
             }
         }
     }
