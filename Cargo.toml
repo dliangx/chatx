@@ -20,8 +20,8 @@ license = "MIT OR Apache-2.0"
 chatx-core = { path = "crates/core" }
 chatx-render = { path = "crates/render" }
 
-slint = "^1.17"
-slint-build = "^1.17"
+slint = "^1.18"
+slint-build = "^1.18"
 fontdue = "^0.9"
 rustybuzz = "^0.20"
 unicode-linebreak = "0.1"

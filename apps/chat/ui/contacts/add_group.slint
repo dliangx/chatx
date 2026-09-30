@@ -134,8 +134,6 @@ export component AddGroupView inherits Rectangle {
         font-size: 14px;
         horizontal-alignment: center;
         wrap: word-wrap;
-        padding-left: 24px;
-        padding-right: 24px;
     }
 
     if AppState.group-status != "":
@@ -168,7 +166,7 @@ export component AddGroupView inherits Rectangle {
         y: 84px;
         width: parent.width;
         height: parent.height - 84px - 64px;
-        viewport-height: AppState.contacts.length * root.row-h;
+        content-height: AppState.contacts.length * root.row-h;
         interactive: true;
 
         for row[i] in AppState.contacts: CRow {

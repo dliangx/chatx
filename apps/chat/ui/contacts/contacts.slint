@@ -46,7 +46,7 @@ export component ContactListView inherits Rectangle {
         y: root.list-top;
         width: parent.width;
         height: parent.height - root.list-top - root.bottom;
-        viewport-height: root.rows.length * root.row-h;
+        content-height: root.rows.length * root.row-h;
         interactive: true;
 
         for r[i] in root.rows: ContactListItem {
@@ -68,7 +68,7 @@ export component ContactListView inherits Rectangle {
     }
 
     // 右侧 A–Z 字母索引条（只显示当前列表中出现的字母，等分高度）。
-    // active：当前滚动到的字母（随 fk.viewport-y 实时变化），高亮显示。
+    // active：当前滚动到的字母（随 fk.content-y 实时变化），高亮显示。
     for le[j] in root.letters: Rectangle {
         x: parent.width - root.bar-w - 8px;
         y: root.list-top + 6px + j * ((parent.height - root.list-top - root.bottom - 12px) / root.letters.length);
@@ -78,8 +78,8 @@ export component ContactListView inherits Rectangle {
 
         // 当前滚动到的字母：scroll 位置落在本字母分组范围内即高亮。
         out property <bool> active:
-            (-fk.viewport-y >= root.letters[j].target * root.row-h) &&
-            (j == root.letters.length - 1 || -fk.viewport-y < root.letters[j + 1].target * root.row-h);
+            (-fk.content-y >= root.letters[j].target * root.row-h) &&
+            (j == root.letters.length - 1 || -fk.content-y < root.letters[j + 1].target * root.row-h);
 
         Rectangle {
             visible: AppState.is-mobile && parent.active;
@@ -110,7 +110,7 @@ export component ContactListView inherits Rectangle {
             y: 0px;
             width: parent.width;
             height: parent.height;
-            clicked => { fk.viewport-y = -(root.row-h * le.target); }
+            clicked => { fk.content-y = -(root.row-h * le.target); }
         }
     }
 }

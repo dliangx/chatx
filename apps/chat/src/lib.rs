@@ -626,10 +626,9 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
 /// After an inbound message touched a conversation, patch its chat-list row and
 /// reload the message list if that conversation is the one currently shown.
 async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
-    let client = CLIENT.with(|s| s.borrow().clone());
     let pool = POOL.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
-    let (Some(client), Some(pool), Some(backend)) = (client, pool, backend) else {
+    let (Some(pool), Some(backend)) = (pool, backend) else {
         return;
     };
     {

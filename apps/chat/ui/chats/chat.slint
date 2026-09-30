@@ -86,7 +86,7 @@ export component ChatView inherits Rectangle {
         y: 48px;
         width: parent.width;
         height: parent.height - root._bottom - 48px;
-        viewport-height: 12px + ChatSession.messages.length * root.msg-row-h;
+        content-height: 12px + ChatSession.messages.length * root.msg-row-h;
         interactive: ChatSession.messages.length > 0;
 
         for msg[i] in ChatSession.messages: Rectangle {

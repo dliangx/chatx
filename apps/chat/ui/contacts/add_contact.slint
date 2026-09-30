@@ -145,7 +145,7 @@ export component AddContactView inherits Rectangle {
         width: parent.width;
         height: parent.height - 132px - (AppState.is-mobile ? 58px : 0px);
         interactive: true;
-        viewport-height: AppState.search-results.length * 132px;
+        content-height: AppState.search-results.length * 132px;
 
         for r[i] in AppState.search-results: ResultRow {
             x: 0px;

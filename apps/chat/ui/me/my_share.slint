@@ -39,7 +39,7 @@ export component MyShareView inherits Rectangle {
         y: 49px;
         width: parent.width;
         height: parent.height - 49px - (AppState.is-mobile ? 58px : 0px);
-        viewport-height: root.viewport-h;
+        content-height: root.viewport-h;
         interactive: true;
 
         for card[i] in root.cards: CardView {
