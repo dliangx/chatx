@@ -250,6 +250,32 @@ pub async fn feed(pool: &Pool, viewer: i64, include_friend_posts: bool, limit: u
     Ok(rows)
 }
 
+/// Posts the given user has liked OR commented on (the "my collection" view).
+pub async fn posts_liked_or_commented_by(pool: &Pool, user_id: i64, limit: u32, offset: u32) -> anyhow::Result<Vec<FeedItem>> {
+    let rows = sqlx::query_as::<_, FeedItem>(
+        "SELECT
+            p.id, p.author_id, p.content, p.media_urls, p.visibility, p.timestamp,
+            p.like_count, p.comment_count,
+            u.nickname    AS author_nickname,
+            u.username    AS author_username,
+            u.avatar_path AS author_avatar,
+            EXISTS(SELECT 1 FROM social_likes l WHERE l.post_id = p.id AND l.user_id = ?1) AS i_liked
+         FROM social_posts p
+         LEFT JOIN users u ON u.id = p.author_id
+         WHERE
+            EXISTS(SELECT 1 FROM social_likes l WHERE l.post_id = p.id AND l.user_id = ?1)
+         OR EXISTS(SELECT 1 FROM social_comments c WHERE c.post_id = p.id AND c.author_id = ?1)
+         ORDER BY p.timestamp DESC
+         LIMIT ?2 OFFSET ?3",
+    )
+    .bind(user_id)
+    .bind(limit as i64)
+    .bind(offset as i64)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// Author's public posts (profile page).
 pub async fn author_feed(pool: &Pool, author_id: i64, limit: u32, offset: u32) -> anyhow::Result<Vec<FeedItem>> {
     let rows = sqlx::query_as::<_, FeedItem>(

@@ -232,6 +232,8 @@ pub fn main() {
             st.set_contacts(slint::ModelRc::new(slint::VecModel::from(Vec::<ContactRow>::new())));
             st.set_contact_letters(slint::ModelRc::new(slint::VecModel::from(Vec::<LetterEntry>::new())));
             st.set_discover(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
+            st.set_my_collect(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
+            st.set_my_share(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
             st.set_data_status(SharedString::new());
             let cs = ui.global::<ChatSession>();
             cs.set_messages(slint::ModelRc::new(slint::VecModel::from(Vec::<MessageData>::new())));
@@ -737,6 +739,32 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
         })
         .collect();
     state.set_discover(slint::ModelRc::new(slint::VecModel::from(discover)));
+
+    let my_collect: Vec<DiscoverCard> = snapshot
+        .my_collect
+        .iter()
+        .map(|r| DiscoverCard {
+            id: r.key,
+            title: SharedString::from(r.title.clone()),
+            user: SharedString::from(r.author.clone()),
+            likes: r.likes as i32,
+            liked: r.liked,
+        })
+        .collect();
+    state.set_my_collect(slint::ModelRc::new(slint::VecModel::from(my_collect)));
+
+    let my_share: Vec<DiscoverCard> = snapshot
+        .my_share
+        .iter()
+        .map(|r| DiscoverCard {
+            id: r.key,
+            title: SharedString::from(r.title.clone()),
+            user: SharedString::from(r.author.clone()),
+            likes: r.likes as i32,
+            liked: r.liked,
+        })
+        .collect();
+    state.set_my_share(slint::ModelRc::new(slint::VecModel::from(my_share)));
 
     state.set_data_status(SharedString::new());
 }

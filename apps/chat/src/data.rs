@@ -78,9 +78,16 @@ pub struct DataBackend {
     pub chats: Vec<ChatRow>,
     pub contacts: Vec<ContactRow>,
     pub discover: Vec<DiscoverRow>,
+    /// Posts I have liked or commented on ("我的收藏").
+    pub my_collect: Vec<DiscoverRow>,
+    /// Posts I have authored/published ("我发布的").
+    pub my_share: Vec<DiscoverRow>,
     chat_key_to_id: HashMap<i32, String>,
     contact_key_to_id: HashMap<i32, i64>,
-    feed_post_to_key: HashMap<i64, i32>,
+    /// Shared key <-> post_id maps so one post is one row key across all feed lists
+    /// (discover / my_collect / my_share reference the same post by the same key).
+    key_to_post: HashMap<i32, i64>,
+    post_to_key: HashMap<i64, i32>,
     next_key: i32,
 }
 
@@ -105,18 +112,34 @@ impl DataBackend {
     }
 
     pub fn post_id_for(&self, key: i32) -> Option<i64> {
-        self.feed_post_to_key.iter().find_map(|(post_id, k)| if *k == key { Some(*post_id) } else { None })
+        self.key_to_post.get(&key).copied()
     }
 
-    /// Apply a like/unlike toggle to memory. Returns the new liked state.
-    pub fn toggle_like(&mut self, key: i32) -> (bool, i64) {
-        if let Some(row) = self.discover.iter_mut().find(|r| r.key == key) {
-            row.liked = !row.liked;
-            row.likes += if row.liked { 1 } else { -1 };
-            (row.liked, row.likes)
-        } else {
-            (false, 0)
+    /// Assign (or reuse) a stable row key for a social post. The same post always
+    /// maps to the same key, so all feed lists (discover / my_collect / my_share)
+    /// can reference it and a like toggle updates every row that shows it.
+    pub fn key_for_post(&mut self, post_id: i64) -> i32 {
+        if let Some(k) = self.post_to_key.get(&post_id) {
+            return *k;
         }
+        let key = self.bump();
+        self.post_to_key.insert(post_id, key);
+        self.key_to_post.insert(key, post_id);
+        key
+    }
+
+    /// Apply a like/unlike toggle to every list that contains `key`.
+    /// Returns the new liked state + count of the first row touched.
+    pub fn toggle_like(&mut self, key: i32) -> (bool, i64) {
+        let mut result = (false, 0);
+        for row in self.discover.iter_mut().chain(self.my_collect.iter_mut()).chain(self.my_share.iter_mut()) {
+            if row.key == key {
+                row.liked = !row.liked;
+                row.likes += if row.liked { 1 } else { -1 };
+                result = (row.liked, row.likes);
+            }
+        }
+        result
     }
 
     /// Apply an unread-count bump / clear for a conversation.
@@ -253,9 +276,38 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<DataBackend> {
     // ---- discovery feed ----
     let posts = sqlite::joins::feed(pool, me_id, true, 200, 0).await?;
     for p in posts {
-        let key = b.bump();
-        b.feed_post_to_key.insert(p.id, key);
+        let key = b.key_for_post(p.id);
         b.discover.push(DiscoverRow {
+            key,
+            post_id: p.id,
+            title: p.content.unwrap_or_default(),
+            author: p.author_nickname
+                .unwrap_or_else(|| p.author_username.unwrap_or_default()),
+            likes: p.like_count,
+            liked: p.i_liked,
+        });
+    }
+
+    // ---- my collection (liked or commented) ----
+    let collected = sqlite::joins::posts_liked_or_commented_by(pool, me_id, 200, 0).await?;
+    for p in collected {
+        let key = b.key_for_post(p.id);
+        b.my_collect.push(DiscoverRow {
+            key,
+            post_id: p.id,
+            title: p.content.unwrap_or_default(),
+            author: p.author_nickname
+                .unwrap_or_else(|| p.author_username.unwrap_or_default()),
+            likes: p.like_count,
+            liked: p.i_liked,
+        });
+    }
+
+    // ---- my published (authored) ----
+    let published = sqlite::joins::author_feed(pool, me_id, 200, 0).await?;
+    for p in published {
+        let key = b.key_for_post(p.id);
+        b.my_share.push(DiscoverRow {
             key,
             post_id: p.id,
             title: p.content.unwrap_or_default(),
@@ -333,7 +385,8 @@ mod tests {
     fn toggle_like_math() {
         let mut b = DataBackend { me: "me".into(), ..Default::default() };
         let key = 42;
-        b.feed_post_to_key.insert(1, key);
+        b.post_to_key.insert(1, key);
+        b.key_to_post.insert(key, 1);
         b.discover.push(DiscoverRow {
             key,
             post_id: 1,

@@ -65,10 +65,16 @@ export component SubPageView inherits Rectangle {
         on-back => { root.go-back(); }
     }
     if root.page == SubPageType.MyCollect: MyCollectView {
+        cards: AppState.my_collect;
         on-back => { root.go-back(); }
+        navigate-to(page, id) => { root.navigate-to(page, id); }
+        like-toggled(id) => { AppState.toggle-like(id); }
     }
     if root.page == SubPageType.MyShare: MyShareView {
+        cards: AppState.my_share;
         on-back => { root.go-back(); }
+        navigate-to(page, id) => { root.navigate-to(page, id); }
+        like-toggled(id) => { AppState.toggle-like(id); }
     }
     if root.page == SubPageType.AddContact: AddContactView {
         on-back => { root.go-back(); }
