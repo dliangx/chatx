@@ -12,6 +12,8 @@ import { PomegranateSeedView } from "discovery/pomegranate_seed.slint";
 import { MyCollectView } from "me/my_collect.slint";
 import { AddMomentView } from "discovery/moment.slint";
 import { AddNoteView } from "discovery/note.slint";
+import { MyNoteView } from "me/my_note.slint";
+import { MyShareView } from "me/my_share.slint";
 
 export component SubPageView inherits Rectangle {
     in property <SubPageType> page;
@@ -55,11 +57,17 @@ export component SubPageView inherits Rectangle {
         group-id: root.payload;
         on-back => { root.go-back(); }
     }
-    if root.page == SubPageType.SettingsMain: SettingView {
+    if root.page == SubPageType.Settings: SettingView {
         on-back => { root.go-back(); }
         open-sub(page) => { root.navigate-to(page, 0); }
     }
-    if root.page == SubPageType.SettingsGeneral: MyCollectView {
+    if root.page == SubPageType.MyNote: MyNoteView {
+        on-back => { root.go-back(); }
+    }
+    if root.page == SubPageType.MyCollect: MyCollectView {
+        on-back => { root.go-back(); }
+    }
+    if root.page == SubPageType.MyShare: MyShareView {
         on-back => { root.go-back(); }
     }
     if root.page == SubPageType.AddContact: AddContactView {
