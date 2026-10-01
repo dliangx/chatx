@@ -13,9 +13,15 @@ export component DiscoverView inherits Rectangle {
     background: Theme.bg;
 
     out property <length> gap: 8px;
-    out property <length> col-w: (root.width - 3 * root.gap) / 2;   // 单列卡片宽
-    out property <length> card-h: root.col-w * 4 / 3 + 90px;        // 卡片高（与 CardView.content-h 一致）
-    out property <length> viewport-h: root.gap + root.cards.length * (root.card-h + root.gap) / 2;
+    out property <int> n-cols: (AppState.is-mobile) ? 2 : 1;
+    out property <length> col-w: (root.width - (root.n-cols + 1) * root.gap) / root.n-cols;
+    out property <length> card-h: root.col-w * 4 / 3 + 90px;
+    out property <int> n-rows: (root.cards.length > 0)
+        ? floor((root.cards.length + root.n-cols - 1) / root.n-cols)
+        : 0;
+    out property <length> viewport-h: (root.n-rows > 0)
+        ? root.gap + root.n-rows * (root.card-h + root.gap)
+        : 0px;
 
     SearchBar {
         y: 0px;
@@ -39,8 +45,8 @@ export component DiscoverView inherits Rectangle {
         interactive: true;
 
         for card[i] in root.cards: CardView {
-            x: root.gap + (root.col-w + root.gap) * Math.mod(i, 2);
-            y: root.gap + (root.card-h + root.gap) * floor(i / 2);
+            x: root.gap + (root.col-w + root.gap) * Math.mod(i, root.n-cols);
+            y: root.gap + (root.card-h + root.gap) * floor(i / root.n-cols);
             width: root.col-w;
             title: card.title;
             user: card.user;

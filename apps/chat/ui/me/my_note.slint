@@ -10,11 +10,9 @@ export component MyNoteView inherits Rectangle {
     height: 100%;
     background: Theme.bg;
 
-    // 两侧外边距 12px：卡片区域 = 容器宽 − 24px（两列各占 50% + 中间 8px 间隔，由 Rust 侧算）
     out property <int> card-area-w: (root.width >= 24px) ? (root.width - 24px) / 1px : 0;
     in-out property <bool> layout-fired: false;
 
-    // 首帧立即推送一次宽度，此后 resize 触发 changed 继续推送
     Timer {
         interval: 1ms;
         running: root.card-area-w > 0 && !root.layout-fired;
@@ -98,25 +96,22 @@ export component MyNoteView inherits Rectangle {
                         card.show-del = false;
                     }
                 }
+                changed pressed => {
+                    if (!self.pressed) {
+                        card.suppress = false;
+                    }
+                }
             }
 
-            // 长按 5s 触发删除条
             Timer {
-                interval: 5000ms;
+                interval: 2000ms;
                 running: lp.pressed && !card.show-del;
                 triggered => {
                     card.show-del = true;
                     card.suppress = true;
-                    clear-suppress.start();
                 }
             }
 
-            clear-suppress := Timer {
-                interval: 300ms;
-                triggered => { card.suppress = false; }
-            }
-
-            // 长按后出现在卡片底部的删除条
             if card.show-del:
             Rectangle {
                 x: 0px;
