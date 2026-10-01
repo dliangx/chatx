@@ -2,7 +2,7 @@ import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
 import { Header } from "../components/header.slint";
 import { ChatInputView } from "../chats/chat_input.slint";
-import { AppState } from "../components/app_state.slint";
+import { SubPageType, AppState } from "../components/app_state.slint";
 
 export struct CommentRow {
     name: string,
@@ -64,9 +64,17 @@ export component DiscoverDetailView inherits Rectangle {
 
     Header {
         name: "discover";
-        back-vis: true;
+        back-vis: back-vis();
     }
 
+    function back-vis() -> bool {
+        if AppState.nav-state.active-tab == 3 && AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                    AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top].page == SubPageType.DiscoverDetail {
+            return true;
+        } else {
+            return false;
+        }
+    }
     if PostDetailState.status != "":
     Text {
         x: 0px;
