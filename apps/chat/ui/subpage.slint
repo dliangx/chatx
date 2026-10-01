@@ -76,7 +76,9 @@ export component SubPageView inherits Rectangle {
         group-id: root.payload;
     }
     if root.page == SubPageType.Settings: SettingView { }
-    if root.page == SubPageType.MyNote: MyNoteView { }
+    if root.page == SubPageType.MyNote: MyNoteView {
+        notes: AppState.my_notes;
+    }
     if root.page == SubPageType.MyCollect: MyCollectView {
         cards: AppState.my_collect;
         like-toggled(id) => { AppState.toggle-like(id); }

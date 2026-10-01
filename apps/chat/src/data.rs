@@ -52,6 +52,16 @@ pub struct DiscoverRow {
     pub liked: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct NoteRowData {
+    /// Stable 32-bit UI key (Slint `int` is 32-bit; note ids are 64-bit).
+    pub key: i32,
+    /// Underlying SQLite note id (64-bit), used for DB writes/deletes.
+    pub note_id: i64,
+    pub content: String,
+    pub created_at: i64,
+}
+
 /// In-memory state for one account. All reads by the UI go through this.
 /// Writes mutate this first, then fire-and-forget persistence to SQLite.
 #[derive(Debug, Clone, Default)]
@@ -65,12 +75,17 @@ pub struct DataBackend {
     pub my_collect: Vec<DiscoverRow>,
     /// Posts I have authored/published ("我发布的").
     pub my_share: Vec<DiscoverRow>,
+    /// My personal notes ("我的笔记"), newest first.
+    pub notes: Vec<NoteRowData>,
     chat_key_to_id: HashMap<i32, String>,
     contact_key_to_id: HashMap<i32, i64>,
     /// Shared key <-> post_id maps so one post is one row key across all feed lists
     /// (discover / my_collect / my_share reference the same post by the same key).
     key_to_post: HashMap<i32, i64>,
     post_to_key: HashMap<i64, i32>,
+    /// Stable key <-> note id maps (UI keys are 32-bit, note ids are 64-bit).
+    key_to_note: HashMap<i32, i64>,
+    note_to_key: HashMap<i64, i32>,
     next_key: i32,
 }
 
@@ -109,6 +124,22 @@ impl DataBackend {
         self.post_to_key.insert(post_id, key);
         self.key_to_post.insert(key, post_id);
         key
+    }
+
+    /// Assign (or reuse) a stable 32-bit UI key for a note id (notes use 64-bit
+    /// ids, but Slint `int` is 32-bit, so the UI always refers to a note by key).
+    pub fn key_for_note(&mut self, note_id: i64) -> i32 {
+        if let Some(k) = self.note_to_key.get(&note_id) {
+            return *k;
+        }
+        let key = self.bump();
+        self.note_to_key.insert(note_id, key);
+        self.key_to_note.insert(key, note_id);
+        key
+    }
+
+    pub fn note_id_for(&self, key: i32) -> Option<i64> {
+        self.key_to_note.get(&key).copied()
     }
 
     /// Apply a like/unlike toggle to every list that contains `key`.
@@ -355,6 +386,24 @@ pub async fn persist_like_toggle(pool: &SqlitePool, me: &str, post_id: i64, want
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_key_mapping() {
+        let mut b = DataBackend::default();
+        // These two 64-bit ids share the same low 32 bits, so a naive
+        // `id as i32` would alias them; the stable key must not.
+        let id_a: i64 = 0x0000_0000_0000_0001;
+        let id_b: i64 = 0x0001_0000_0000_0001;
+        assert_eq!(id_a as u32, id_b as u32);
+        let k1 = b.key_for_note(id_a);
+        let k2 = b.key_for_note(id_b);
+        assert_ne!(k1, k2);
+        assert_eq!(b.note_id_for(k1), Some(id_a));
+        assert_eq!(b.note_id_for(k2), Some(id_b));
+        // Reusing the same note id returns the same key.
+        assert_eq!(b.key_for_note(id_a), k1);
+        assert_eq!(b.note_id_for(999), None);
+    }
 
     #[test]
     fn toggle_like_math() {

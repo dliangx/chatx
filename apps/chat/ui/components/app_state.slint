@@ -80,6 +80,16 @@ export struct DiscoverCard {
     liked: bool,
 }
 
+export struct NoteRow {
+    id: int,
+    content: string,
+    created-label: string,
+    card-x: int,
+    card-y: int,
+    card-w: int,
+    card-h: int,
+}
+
 export struct SearchUser {
     name: string,
     username: string,
@@ -114,6 +124,9 @@ export global AppState {
     in property <[DiscoverCard]> discover: [];
     in property <[DiscoverCard]> my_collect: [];
     in property <[DiscoverCard]> my_share: [];
+    in property <[NoteRow]> my_notes: [];
+    in-out property <int> my-notes-content-h: 0;
+    in-out property <int> my-notes-w: 0;
     in property <string> data-status: "";
     in property <string> group-status: "";
     in-out property <string> error-message: "";
@@ -121,6 +134,8 @@ export global AppState {
     in-out property <length> xp: 0px;
 
     callback toggle-like(int);
+    callback delete-note(int);
+    callback notes-layout(int);
     callback show-qr-code();
     callback close-qr-code();
     callback start-screen-share();

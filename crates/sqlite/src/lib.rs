@@ -9,6 +9,7 @@ pub mod devices;
 pub mod groups;
 pub mod joins;
 pub mod messages;
+pub mod notes;
 pub mod settings;
 pub mod server;
 pub mod social;
@@ -38,6 +39,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
         sql: include_str!("../migrations/0001_baseline.sql"),
+    },
+    Migration {
+        version: 2,
+        sql: include_str!("../migrations/0002_notes.sql"),
     },
 ];
 

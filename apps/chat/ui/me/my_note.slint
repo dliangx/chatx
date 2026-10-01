@@ -1,15 +1,154 @@
 import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
-import { HorizontalBox, VerticalBox } from "std-widgets.slint";
-import { SubPageType, AppState } from "../components/app_state.slint";
+import { NoteRow, AppState } from "../components/app_state.slint";
 import { Header } from "../components/header.slint";
 
 export component MyNoteView inherits Rectangle {
+    in property <[NoteRow]> notes: [];
+
     width: 100%;
     height: 100%;
-    background: #f5f5f5;
+    background: Theme.bg;
+
+    // 两侧外边距 12px：卡片区域 = 容器宽 − 24px（两列各占 50% + 中间 8px 间隔，由 Rust 侧算）
+    out property <int> card-area-w: (root.width >= 24px) ? (root.width - 24px) / 1px : 0;
+    in-out property <bool> layout-fired: false;
+
+    // 首帧立即推送一次宽度，此后 resize 触发 changed 继续推送
+    Timer {
+        interval: 1ms;
+        running: root.card-area-w > 0 && !root.layout-fired;
+        triggered => {
+            root.layout-fired = true;
+            AppState.notes-layout(root.card-area-w);
+        }
+    }
+
+    changed card-area-w => {
+        root.layout-fired = true;
+        AppState.notes-layout(root.card-area-w);
+    }
 
     Header {
-        name: "My Note";
+        name: "我的笔记";
+    }
+
+    if root.notes.length == 0:
+    Text {
+        y: 180px;
+        text: "暂无笔记";
+        horizontal-alignment: center;
+        font-size: 14px;
+        color: Theme.fg-muted;
+    }
+
+    Flickable {
+        x: 0px;
+        y: 49px;
+        width: parent.width;
+        height: parent.height - 49px - (AppState.is-mobile ? 58px : 0px);
+        content-height: AppState.my-notes-content-h * 1px;
+        interactive: true;
+
+        for note[i] in root.notes: card := Rectangle {
+            in-out property <bool> show-del: false;
+            in-out property <bool> suppress: false;
+
+            x: 12px + note.card-x * 1px;
+            y: note.card-y * 1px;
+            width: note.card-w * 1px;
+            height: note.card-h * 1px;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: (card.show-del) ? #ff2442 : Theme.border;
+            background: #ffffff;
+            clip: true;
+
+            Text {
+                x: 14px;
+                y: 12px;
+                width: parent.width - 28px;
+                height: parent.height - 12px - 24px - 12px;
+                text: note.content;
+                font-size: 15px;
+                color: Theme.fg;
+                wrap: word-wrap;
+                overflow: elide;
+                vertical-alignment: top;
+            }
+
+            Text {
+                x: 14px;
+                y: parent.height - 36px;
+                width: parent.width - 28px;
+                height: 24px;
+                text: note.created-label;
+                font-size: 12px;
+                vertical-alignment: center;
+                color: Theme.fg-muted;
+            }
+
+            lp := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => {
+                    if (card.suppress) {
+                        card.suppress = false;
+                    } else if (card.show-del) {
+                        card.show-del = false;
+                    }
+                }
+            }
+
+            // 长按 5s 触发删除条
+            Timer {
+                interval: 5000ms;
+                running: lp.pressed && !card.show-del;
+                triggered => {
+                    card.show-del = true;
+                    card.suppress = true;
+                    clear-suppress.start();
+                }
+            }
+
+            clear-suppress := Timer {
+                interval: 300ms;
+                triggered => { card.suppress = false; }
+            }
+
+            // 长按后出现在卡片底部的删除条
+            if card.show-del:
+            Rectangle {
+                x: 0px;
+                y: parent.height - 48px;
+                width: parent.width;
+                height: 48px;
+                background: #fbeaea;
+
+                Icon {
+                    x: (parent.width - 26px) / 2 - 16px;
+                    y: (parent.height - 26px) / 2;
+                    size: 26px;
+                    glyph: Glyph.delete;
+                    tint: #e11d3a;
+                }
+
+                Text {
+                    x: (parent.width - 26px) / 2 + 14px;
+                    width: 60px;
+                    height: parent.height;
+                    text: "删除";
+                    font-size: 14px;
+                    vertical-alignment: center;
+                    color: #e11d3a;
+                }
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => { AppState.delete-note(note.id); }
+                }
+            }
+        }
     }
 }

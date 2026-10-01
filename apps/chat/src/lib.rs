@@ -135,6 +135,9 @@ pub fn main() {
             if page == SubPageType::ChatRoom {
                 load_chat_messages(w2.clone(), payload);
             }
+            if page == SubPageType::MyNote {
+                refresh_my_notes(w2.clone());
+            }
             if let Some(ui) = w.upgrade() {
                 let s = ui.global::<AppState>();
                 push_sub_history(&s, SubPageEntry { page, payload });
@@ -245,6 +248,26 @@ pub fn main() {
         let weak = weak.clone();
         ui.global::<AppState>().on_toggle_like(move |key| {
             toggle_discover_like(weak.clone(), key);
+        });
+    }
+
+    // ---- My note: save (from AddNoteView) / delete ----
+    {
+        let weak = weak.clone();
+        ui.global::<NoteState>().on_note_saved(move |text| {
+            save_my_note(weak.clone(), text.to_string());
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<AppState>().on_delete_note(move |id| {
+            delete_my_note(weak.clone(), id);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<AppState>().on_notes_layout(move |w| {
+            relayout_notes(weak.clone(), w);
         });
     }
 
@@ -1090,6 +1113,210 @@ fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
             let _ = data::persist_like_toggle(&pool, &me, post_id, want_liked).await;
         });
     }
+}
+
+/// Compute masonry positions for the note cards at the given logical container
+/// width. Cards flow bottom-up into the currently-shortest column, so column
+/// heights differ — the classic "waterfall" look.
+///
+/// Returns (rows, content_height). `rows` already carry their absolute
+/// x / y / width / height so the Slint layer only has to paint them.
+fn layout_my_notes(
+    notes: &[data::NoteRowData],
+    container_w: i32,
+    is_mobile: bool,
+) -> (Vec<NoteRow>, i32) {
+    const GAP: i32 = 8;
+    const MIN_CARD_H: i32 = 132;
+    const FONT_SIZE: i32 = 15;
+    const LINE_H: i32 = 18;
+    const PAD_X: i32 = 28;
+    const PAD_TOP: i32 = 12;
+    const LABEL_H: i32 = 24;
+    const PAD_BOTTOM: i32 = 12;
+
+    let n_cols = if is_mobile { 1 } else { 2 } as usize;
+    let card_w = if n_cols > 1 {
+        ((container_w - (n_cols - 1) as i32 * GAP) / n_cols as i32).max(1)
+    } else {
+        container_w
+    };
+    let inner_w = (card_w - PAD_X).max(0);
+
+    // col_top[j] = the y where the next card in column j should be placed.
+    let mut col_top = vec![GAP; n_cols as usize];
+    let mut rows: Vec<NoteRow> = Vec::with_capacity(notes.len());
+    let mut content_h = 0i32;
+
+    // Effective units: 1.0 for CJK / full-width chars, 0.6 for Latin / digits
+    // (average Latin glyph ≈ 0.6em). Divide by units_per_line to get lines.
+    let units_per_line = inner_w as f64 / FONT_SIZE as f64;
+
+    for n in notes {
+        let mut units: f64 = 0.0;
+        for ch in n.content.chars() {
+            let full = (ch as u32) >= 0x1100
+                && ((ch as u32 <= 0x11FF)
+                    || (0x2E80..=0x9FFF).contains(&(ch as u32))
+                    || (0xAC00..=0xD7FF).contains(&(ch as u32))
+                    || (0xFF00..=0xFFEF).contains(&(ch as u32)));
+            units += if full { 1.0 } else { 0.6 };
+        }
+        let lines = if units_per_line > 0.0 {
+            (units / units_per_line).ceil() as i32
+        } else {
+            1
+        };
+        let card_h = (PAD_TOP + lines * LINE_H + LABEL_H + PAD_BOTTOM).max(MIN_CARD_H);
+
+        // place into the currently-shortest column
+        let mut c = 0;
+        for j in 1..col_top.len() {
+            if col_top[j] < col_top[c] {
+                c = j;
+            }
+        }
+        let y = col_top[c];
+        let x = (c as i32) * (card_w + GAP);
+        col_top[c] = y + card_h + GAP;
+        content_h = (y + card_h).max(content_h);
+
+        rows.push(NoteRow {
+            id: n.key,
+            content: SharedString::from(n.content.clone()),
+            created_label: SharedString::from(fmt_time(n.created_at)),
+            card_x: x,
+            card_y: y,
+            card_w,
+            card_h,
+        });
+    }
+    (rows, content_h)
+}
+
+/// Publish the backend's notes into the Slint `my_notes` view model, laying
+/// them out as a masonry grid. Uses the last known card-area width from
+/// `AppState.my-notes-w` (pushed by MyNoteView on resize); falls back to the
+/// main window width if that hasn't been set yet.
+fn publish_my_notes(state: &AppState, backend: &ArcBackend) {
+    let notes = backend.blocking_read().notes.clone();
+    let w = state.get_my_notes_w().max(1);
+    let (rows, content_h) = layout_my_notes(&notes, w, state.get_is_mobile());
+    state.set_my_notes(slint::ModelRc::new(slint::VecModel::from(rows)));
+    state.set_my_notes_content_h(content_h);
+}
+
+/// MyNoteView reports its actual card-area width (on first render and on
+/// resize) → re-layout the cards at that width.
+fn relayout_notes(weak: slint::Weak<MainWindow>, w: i32) {
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let Some(backend) = backend else { return; };
+    if let Some(ui) = weak.upgrade() {
+        let state = ui.global::<AppState>();
+        state.set_my_notes_w(w.max(1));
+        publish_my_notes(&state, &backend);
+    }
+}
+
+/// Load a user's notes from SQLite into the backend, then publish to the UI.
+/// DB work runs on the tokio runtime; the backend mutation + publish happen on
+/// the event-loop thread (where blocking is allowed).
+fn refresh_my_notes(weak: slint::Weak<MainWindow>) {
+    let pool = POOL.with(|s| s.borrow().clone());
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let Some(backend) = backend else { return; };
+    let me = backend.blocking_read().me.clone();
+    if me.is_empty() {
+        return;
+    }
+    let Some(pool) = pool else { return; };
+    let rt = runtime();
+    rt.spawn(async move {
+        let me_id = sqlite::users::ensure_identity(&pool, &me).await.unwrap_or(0);
+        let stored = sqlite::notes::list_notes(&pool, me_id).await.unwrap_or_default();
+        let _ = slint::invoke_from_event_loop(move || {
+            {
+                let mut g = backend.blocking_write();
+                for n in stored {
+                    let key = g.key_for_note(n.id);
+                    if !g.notes.iter().any(|x| x.note_id == n.id) {
+                        g.notes.push(data::NoteRowData {
+                            key,
+                            note_id: n.id,
+                            content: n.content,
+                            created_at: n.created_at,
+                        });
+                    }
+                }
+            }
+            if let Some(ui) = weak.upgrade() {
+                publish_my_notes(&ui.global::<AppState>(), &backend);
+            }
+        });
+    });
+}
+
+/// Persist a freshly-written note to SQLite, add it to the backend, publish.
+fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
+    let pool = POOL.with(|s| s.borrow().clone());
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let (Some(pool), Some(backend)) = (pool, backend) else { return; };
+    let me = backend.blocking_read().me.clone();
+    if me.is_empty() || content.trim().is_empty() {
+        return;
+    }
+    let rt = runtime();
+    rt.spawn(async move {
+        let me_id = match sqlite::users::ensure_identity(&pool, &me).await {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        let created = match sqlite::notes::create_note(&pool, me_id, &content).await {
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            {
+                let mut g = backend.blocking_write();
+                let now = created.updated_at.unwrap_or(created.created_at);
+                let key = g.key_for_note(created.id);
+                g.notes.insert(
+                    0,
+                    data::NoteRowData {
+                        key,
+                        note_id: created.id,
+                        content: created.content,
+                        created_at: now,
+                    },
+                );
+            }
+            if let Some(ui) = weak.upgrade() {
+                publish_my_notes(&ui.global::<AppState>(), &backend);
+            }
+        });
+    });
+}
+
+/// Delete a note by its stable UI key: remove from backend + SQLite, publish.
+fn delete_my_note(weak: slint::Weak<MainWindow>, key: i32) {
+    let pool = POOL.with(|s| s.borrow().clone());
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let (Some(pool), Some(backend)) = (pool, backend) else { return; };
+    let note_id = { backend.blocking_read().note_id_for(key) };
+    let Some(note_id) = note_id else { return; };
+    {
+        let mut g = backend.blocking_write();
+        g.notes.retain(|n| n.note_id != note_id);
+    }
+    let rt = runtime();
+    rt.spawn(async move {
+        let _ = sqlite::notes::delete_note(&pool, note_id).await;
+    });
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            publish_my_notes(&ui.global::<AppState>(), &backend);
+        }
+    });
 }
 
 /// Resolve the picked contact keys to directory members, create the group in
