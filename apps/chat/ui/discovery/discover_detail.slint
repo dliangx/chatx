@@ -2,6 +2,7 @@ import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
 import { Header } from "../components/header.slint";
 import { ChatInputView } from "../chats/chat_input.slint";
+import { AppState } from "../components/app_state.slint";
 
 export struct CommentRow {
     name: string,
@@ -30,7 +31,6 @@ export global PostDetailState {
 
 export component DiscoverDetailView inherits Rectangle {
     in property <int> key;
-    callback on-back();
 
     width: 100%;
     height: 100%;
@@ -52,9 +52,7 @@ export component DiscoverDetailView inherits Rectangle {
         + 1px + 28px;
     out property <length> view-h: root.top-h + PostDetailState.comment-list.length * root.row-h + 48px;
 
-    // media-row 起点
     out property <length> media-y: 10px + root.title-h + (root.title-h > 0 ? 30px : 0px);
-    // 点赞行起点
     out property <length> like-y: root.media-y + root.media-h + (root.media-h > 0 ? 8px : 0px);
 
     // 首次可见时拉取该 post 的详情（帖子 + 点赞 + 评论 + 媒体）。
@@ -68,7 +66,6 @@ export component DiscoverDetailView inherits Rectangle {
 
     Header {
         name: "discover";
-        on-back => { root.on-back() }
     }
 
     if PostDetailState.status != "":
@@ -101,7 +98,6 @@ export component DiscoverDetailView inherits Rectangle {
         content-height: root.view-h;
         interactive: root.view-h > parent.height - root.bottom - 48px;
 
-        // 帖子标题
         if PostDetailState.title != "":
         Text {
             x: 16px;
@@ -116,7 +112,6 @@ export component DiscoverDetailView inherits Rectangle {
             overflow: elide;
         }
 
-        // 作者 + 时间
         Text {
             x: 16px;
             y: 10px + (PostDetailState.title != "" ? 56px : 0px) + 10px;
@@ -129,7 +124,6 @@ export component DiscoverDetailView inherits Rectangle {
             color: Theme.fg-muted;
         }
 
-        // 媒体（单张 3:4，多张取第一张 1:1 并显示数量）
         if PostDetailState.media.length > 0:
         Rectangle {
             x: 0px;
@@ -143,6 +137,7 @@ export component DiscoverDetailView inherits Rectangle {
                 source: PostDetailState.media[0];
                 image-fit: cover;
             }
+
             if PostDetailState.media.length > 1:
             Text {
                 x: parent.width - 50px;
@@ -157,7 +152,6 @@ export component DiscoverDetailView inherits Rectangle {
             }
         }
 
-        // 点赞心形
         Icon {
             x: 18px;
             y: root.like-y + 4px;
@@ -166,7 +160,6 @@ export component DiscoverDetailView inherits Rectangle {
             tint: PostDetailState.liked ? #ff2442 : Theme.fg-muted;
         }
 
-        // 点赞数
         Text {
             x: 46px;
             y: root.like-y;
@@ -178,7 +171,6 @@ export component DiscoverDetailView inherits Rectangle {
             color: PostDetailState.liked ? #ff2442 : Theme.fg-muted;
         }
 
-        // 评论数（贴右）
         Text {
             x: parent.width - 160px;
             y: root.like-y;
@@ -191,7 +183,6 @@ export component DiscoverDetailView inherits Rectangle {
             color: Theme.fg-muted;
         }
 
-        // 点赞热区
         TouchArea {
             x: 12px;
             y: root.like-y - 2px;
@@ -200,7 +191,6 @@ export component DiscoverDetailView inherits Rectangle {
             clicked => { PostDetailState.toggle-like(root.key); }
         }
 
-        // 点赞人（谁觉得好，心形行下方）
         if PostDetailState.liked-by != "":
         Text {
             x: 16px;
@@ -214,7 +204,6 @@ export component DiscoverDetailView inherits Rectangle {
             color: #ff2442;
         }
 
-        // 分隔线
         Rectangle {
             x: 0px;
             y: root.like-y + 30px + root.like-by-h;
@@ -223,7 +212,6 @@ export component DiscoverDetailView inherits Rectangle {
             background: Theme.border;
         }
 
-        // 评论区标题
         Text {
             x: 16px;
             y: root.like-y + 31px + root.like-by-h;
@@ -236,7 +224,6 @@ export component DiscoverDetailView inherits Rectangle {
             color: Theme.fg;
         }
 
-        // 空状态
         if PostDetailState.comment-list.length == 0:
         Text {
             x: 0px;
@@ -249,7 +236,6 @@ export component DiscoverDetailView inherits Rectangle {
             color: Theme.fg-muted;
         }
 
-        // 评论列表
         for c[i] in PostDetailState.comment-list: Rectangle {
             x: 0px;
             y: root.top-h + i * root.row-h;

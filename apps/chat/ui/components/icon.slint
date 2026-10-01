@@ -1,20 +1,3 @@
-// 图标集合，路径数据取自 apps/chat/icon/*.svg（1024 网格），按 glyph 名解析。
-//
-// 三种形态（variant）：
-//   - raw     原始：直接用源 SVG 轮廓形状填充（保留自带圆角/线条），无额外描边
-//   - stroked 描边 / 线性：对同一轮廓线做 stroke，可用 weight 调粗细
-//   - filled  填充 / 实心：去除反绕内圈的纯外轮廓，nonzero 填成实心块
-//
-// 注意：并非所有 glyph 都有 filled 版——仅 chat / contact / app / me 提供实心
-// （它们是导航四页的图标）。其余 glyph 若以 variant: filled 使用则不渲染，
-// 请对这些使用 variant: raw（默认）或 stroked。
-//
-// 用法：
-//     import { Icon, Glyph, Variant } from "components/icon.slint";
-//     Icon { glyph: Glyph.chat; size: 24px; }                            // Raw 原始（默认）
-//     Icon { glyph: Glyph.chat; size: 24px; variant: Variant.stroked; } // Stroked 描边
-//     Icon { glyph: Glyph.chat; size: 24px; variant: Variant.filled; }  // Filled 实心
-
 import { Theme } from "../theme.slint";
 
 export enum Glyph {
@@ -54,14 +37,12 @@ export enum Glyph {
     volume-close,
 }
 
-// 渲染形态：raw 原始（源 SVG 填色）/ stroked 描边线性 / filled 实心
 export enum Variant {
     raw,
     stroked,
     filled,
 }
 
-// 1024 网格轮廓线（源自 SVG）：raw → 按源形状填充；stroked → 描边线性（weight 以网格单位计，56 ≈ 24px 下 1.3px）。
 export component Outline inherits Path {
     in property <length> size: 24px;
     in property <brush> tint: Theme.fg;
@@ -78,7 +59,6 @@ export component Outline inherits Path {
     stroke-line-join: round;
 }
 
-// 1024 网格填充 / 实心：已去除反绕内圈的纯外轮廓，nonzero 填成实心。
 export component Filled inherits Path {
     in property <length> size: 24px;
     in property <brush> tint: Theme.fg;
@@ -93,9 +73,7 @@ export component Icon inherits Rectangle {
     in property <Glyph> glyph;
     in property <length> size: 24px;
     in property <brush> tint: Theme.fg;
-    /// 渲染形态：raw（默认）/ stroked / filled（仅限有实心版的 glyph）
     in property <Variant> variant: Variant.raw;
-    /// 描边粗细，仅 stroked 有效（网格单位）
     in property <float> weight: 56;
 
     width: root.size;

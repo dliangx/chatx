@@ -1,7 +1,10 @@
 import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
-import { AppState } from "../components/app_state.slint";
-import { SubPageType, GlobalOverlayType } from "../components/nav_state.slint";
+import {
+    SubPageType,
+    GlobalOverlayType,
+    AppState,
+} from "../components/app_state.slint";
 
 component MenuRow inherits Rectangle {
     in property <Glyph> icon;
@@ -60,7 +63,6 @@ export component AddMenuView inherits Rectangle {
         return 0;
     }
 
-    // 关闭挡板：置于最底层，菜单内的 TouchArea 声明在其上层可正常接收点击
     TouchArea {
         width: 100%;
         height: 100%;

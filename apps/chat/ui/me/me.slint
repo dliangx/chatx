@@ -1,16 +1,14 @@
 import { ScrollView, VerticalBox } from "std-widgets.slint";
-import { SubPageType } from "../components/nav_state.slint";
 import { Icon, Glyph, Variant } from "../components/icon.slint";
 import { SettingItem, ProfileItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
-import { AppState } from "../components/app_state.slint";
+import { SubPageType, AppState } from "../components/app_state.slint";
 
 
 export component MeView inherits Rectangle {
     background: #f5f5f5;
     in-out property <int> selected-key: -1;
 
-    callback navigate-to(SubPageType, int);
     ProfileItem {
         name: AppState.user-id;
         nickname: AppState.nickname;
@@ -32,7 +30,7 @@ export component MeView inherits Rectangle {
                 icon: Glyph.notes;
                 title: "我的笔记";
                 selected: root.selected-key == 1;
-                clicked => { root.selected-key = 1; root.navigate-to(SubPageType.MyNote, 0); }
+                clicked => { root.selected-key = 1; AppState.push-sub(SubPageType.MyNote, 0); }
             }
 
             SettingItem {
@@ -41,7 +39,7 @@ export component MeView inherits Rectangle {
                 icon: Glyph.collection;
                 title: "我的收藏";
                 selected: root.selected-key == 2;
-                clicked => { root.selected-key = 2; root.navigate-to(SubPageType.MyCollect, 0); }
+                clicked => { root.selected-key = 2; AppState.push-sub(SubPageType.MyCollect, 0); }
             }
 
             SettingItem {
@@ -50,7 +48,7 @@ export component MeView inherits Rectangle {
                 icon: Glyph.share;
                 title: "我的分享";
                 selected: root.selected-key == 3;
-                clicked => { root.selected-key = 3; root.navigate-to(SubPageType.MyShare, 0); }
+                clicked => { root.selected-key = 3; AppState.push-sub(SubPageType.MyShare, 0); }
             }
 
             SettingItem {
@@ -59,7 +57,7 @@ export component MeView inherits Rectangle {
                 icon: Glyph.setting;
                 title: "设置";
                 selected: root.selected-key == 4;
-                clicked => { root.selected-key = 4; root.navigate-to(SubPageType.Settings, 0); }
+                clicked => { root.selected-key = 4; AppState.push-sub(SubPageType.Settings, 0); }
             }
         }
     }

@@ -27,7 +27,6 @@ export global ProfileState {
 
 export component ContactProfileView inherits Rectangle {
     in property <int> user-id;
-    callback on-back();
 
     out property <length> content-w: max(350px, min(500px, root.width));
     out property <length> content-x: (root.width - root.content-w) / 2;
@@ -54,7 +53,6 @@ export component ContactProfileView inherits Rectangle {
 
         Header {
             name: "profile";
-            on-back => { root.on-back(); }
         }
 
         ProfileItem {

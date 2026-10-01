@@ -1,5 +1,5 @@
-import { SubPageType } from "../components/nav_state.slint";
 import {
+    SubPageType,
     ContactRow,
     LetterEntry,
     AppState,
@@ -8,8 +8,6 @@ import { ContactListItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
 import { SearchBar } from "../components/search.slint";
 
-// 微信风格联系人列表：联系人按拼音首字母排序，右侧固定 A–Z 字母索引条，
-// 点击字母可跳转到对应分组的首个联系人。
 export component ContactListView inherits Rectangle {
     in property <[ContactRow]> rows: [];
     in property <[LetterEntry]> letters: [];
@@ -18,7 +16,6 @@ export component ContactListView inherits Rectangle {
     width: 100%;
     height: 100%;
     background: Theme.bg;
-    callback navigate-to(SubPageType, int);
 
     out property <length> row-h: 52px;
     out property <length> bar-w: 28px;
@@ -40,7 +37,6 @@ export component ContactListView inherits Rectangle {
         wrap: word-wrap;
     }
 
-    // 左侧滚动列表。
     fk := Flickable {
         x: 0px;
         y: root.list-top;
@@ -62,13 +58,11 @@ export component ContactListView inherits Rectangle {
 
             clicked => {
                 root.selected-key = r.id;
-                root.navigate-to(SubPageType.ContactProfile, r.id);
+                AppState.push-sub(SubPageType.ContactProfile, r.id);
             }
         }
     }
 
-    // 右侧 A–Z 字母索引条（只显示当前列表中出现的字母，等分高度）。
-    // active：当前滚动到的字母（随 fk.content-y 实时变化），高亮显示。
     for le[j] in root.letters: Rectangle {
         x: parent.width - root.bar-w - 8px;
         y: root.list-top + 6px + j * ((parent.height - root.list-top - root.bottom - 12px) / root.letters.length);
@@ -76,7 +70,6 @@ export component ContactListView inherits Rectangle {
         height: (parent.height - root.list-top - root.bottom - 12px) / root.letters.length;
         background: transparent;
 
-        // 当前滚动到的字母：scroll 位置落在本字母分组范围内即高亮。
         out property <bool> active:
             (-fk.content-y >= root.letters[j].target * root.row-h) &&
             (j == root.letters.length - 1 || -fk.content-y < root.letters[j + 1].target * root.row-h);

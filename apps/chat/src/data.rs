@@ -1,14 +1,3 @@
-//! App-side in-memory data layer for the chat / contacts / discovery tabs.
-//!
-//! Strategy (per the product requirements):
-//!   - At startup (after login) we load rows from SQLite into memory
-//!     (`DataBackend`) and push them to the slint views.
-//!   - While running, the UI reads from memory (the slint row arrays are the
-//!     memory). Any data change first updates memory, then asynchronously
-//!     persists to SQLite.
-//!   - We never read SQLite on a per-frame basis; only on start or when the
-//!     caller asks for a full refresh.
-
 use pinyin::ToPinyin;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -41,12 +30,6 @@ pub struct ContactRow {
     pub image: String,
 }
 
-/// Group a contact name into its A-Z letter section (WeChat contacts style).
-///
-/// CJK names resolve to the pinyin initial of their first character (e.g.
-/// "李雷" -> 'L'); other names use their first alphabetic character. Any name
-/// without a resolvable initial (digits, symbols, empty) falls into the
-/// catch-all '#' section.
 pub fn contact_letter(name: &str) -> char {
     for c in name.chars() {
         if c.is_ascii_alphabetic() {
@@ -194,11 +177,6 @@ impl DataBackend {
 
 pub type ArcBackend = Arc<RwLock<DataBackend>>;
 
-/// Load all rows for `me` straight from SQLite into a fresh backend.
-///
-/// NOTE: called from an async runtime; safe to call at most once per session.
-/// We do not cache the pool inside the backend — the app keeps a copy of the
-/// pool for follow-up async persistence.
 pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<DataBackend> {
     let mut b = DataBackend { me: me.to_string(), ..Default::default() };
 
@@ -320,9 +298,6 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<DataBackend> {
     Ok(b)
 }
 
-/// Re-read a single conversation chat-list preview & unread from SQLite (e.g.
-/// after receiving a message) and patch the in-memory row; returns whether the
-/// row changed.
 pub async fn refresh_chat_row(pool: &SqlitePool, b: &mut DataBackend, chat_id: &str) -> anyhow::Result<bool> {
     // Use full chat_list to find the matching entry (cheap for a local sqlite on a single user).
     let items = sqlite::joins::chat_list(pool, &b.me, 200).await?;

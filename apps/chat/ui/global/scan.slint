@@ -1,6 +1,5 @@
 import { Theme } from "../theme.slint";
-import { AppState } from "../components/app_state.slint";
-import { GlobalOverlayType } from "../components/nav_state.slint";
+import { GlobalOverlayType, AppState } from "../components/app_state.slint";
 import { Icon, Glyph } from "../components/icon.slint";
 
 export component ScanView inherits Rectangle {
@@ -11,7 +10,6 @@ export component ScanView inherits Rectangle {
 
     in-out property <bool> bootstrapped: false;
 
-    // 首次打开即启动摄像头（Timer 只触发一次，之后 bootstrapped = true）
     Timer {
         interval: 16ms;
         running: !root.bootstrapped;
@@ -20,7 +18,6 @@ export component ScanView inherits Rectangle {
                 AppState.scanner-start();
             }
             root.bootstrapped = true;
-            // 立即变更目标值，触发首次动画，避免绿线等 2.8s 才开始动
             root.scan-line-pos = 232px;
         }
     }
@@ -35,7 +32,6 @@ export component ScanView inherits Rectangle {
         }
     }
 
-    // 顶栏：关闭按钮 + 标题（绝对定位）
     Rectangle {
         x: 16px;
         y: 28px;
@@ -75,8 +71,6 @@ export component ScanView inherits Rectangle {
         vertical-alignment: center;
     }
 
-    // 取景框：中央 240×240，八个白色 L 形线段拼出四个角；
-    // 内部有一条绿色扫描线以 0.28s 周期往返移动。
     Rectangle {
         x: (parent.width - 240px) / 2;
         y: (parent.height - 240px) / 2;
@@ -162,7 +156,6 @@ export component ScanView inherits Rectangle {
         }
     }
 
-    // 状态文字
     if !AppState.scan-found:
     Text {
         x: 0px;
@@ -174,7 +167,6 @@ export component ScanView inherits Rectangle {
         horizontal-alignment: center;
     }
 
-    // 识别结果卡片
     if AppState.scan-found:
     Rectangle {
         x: (parent.width - 320px) / 2;
@@ -207,7 +199,6 @@ export component ScanView inherits Rectangle {
             wrap: word-wrap;
         }
 
-        // 继续扫描
         Rectangle {
             x: 16px;
             y: parent.height - 72px;
@@ -241,7 +232,6 @@ export component ScanView inherits Rectangle {
             }
         }
 
-        // 去处理（按识别结果走）
         Rectangle {
             x: parent.width / 2 + 8px;
             y: parent.height - 72px;

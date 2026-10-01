@@ -1,5 +1,4 @@
-import { SubPageType } from "components/nav_state.slint";
-import { AppState } from "components/app_state.slint";
+import { SubPageType, AppState } from "components/app_state.slint";
 import { ChatView } from "chats/chat.slint";
 import { ChatSettingView } from "chats/chat_setting.slint";
 import { ContactProfileView } from "contacts/profile.slint";
@@ -18,23 +17,47 @@ import { MyShareView } from "me/my_share.slint";
 export component SubPageView inherits Rectangle {
     in property <SubPageType> page;
     in property <int> payload;
+    in property <bool> animate-in: true;
     background: #f5f5f5;
-    callback go-back();
-    callback navigate-to(SubPageType, int);
 
     in-out property <bool> slid-in: false;
-    x: AppState.is-mobile ? (root.slid-in ? 0px : root.width) : 0px;
+    in-out property <bool> animating: false;
+    in-out property <int> prev-top: -1;
+    x: (AppState.is-mobile && root.animate-in) ? (root.slid-in ? 0px : root.width) : 0px;
     animate x {
-        duration: 280ms;
+        duration: (root.animate-in && root.animating) ? 280ms : 0ms;
         easing: ease-out;
     }
     Timer {
         interval: 16ms;
-        running: AppState.is-mobile && !root.slid-in;
-        triggered => { root.slid-in = true; }
+        running: root.animate-in && AppState.is-mobile && !root.slid-in;
+        triggered => {
+            root.animating = true;
+            root.slid-in = true;
+        }
     }
 
-    // 指针挡板：铺满全屏吸收所有点击，阻断穿透到下层 tab 页（置于最底层）
+    changed page => {
+        if root.animate-in {
+            let top = AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top;
+            if AppState.is-mobile && top > root.prev-top {
+                root.animating = false;
+                root.slid-in = false;
+            }
+            root.prev-top = top;
+        }
+    }
+    changed payload => {
+        if root.animate-in {
+            let top = AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top;
+            if AppState.is-mobile && top > root.prev-top {
+                root.animating = false;
+                root.slid-in = false;
+            }
+            root.prev-top = top;
+        }
+    }
+
     TouchArea {
         width: parent.width;
         height: parent.height;
@@ -42,58 +65,34 @@ export component SubPageView inherits Rectangle {
 
     if root.page == SubPageType.ChatRoom: ChatView {
         chat-id: root.payload;
-        on-back => { root.go-back(); }
-        open-setting => { root.navigate-to(SubPageType.ChatSetting, root.payload); }
     }
     if root.page == SubPageType.ChatSetting: ChatSettingView {
         chat-id: root.payload;
-        on-back => { root.go-back(); }
     }
     if root.page == SubPageType.ContactProfile: ContactProfileView {
         user-id: root.payload;
-        on-back => { root.go-back(); }
     }
     if root.page == SubPageType.GroupProfile: GroupProfileView {
         group-id: root.payload;
-        on-back => { root.go-back(); }
     }
-    if root.page == SubPageType.Settings: SettingView {
-        on-back => { root.go-back(); }
-        open-sub(page) => { root.navigate-to(page, 0); }
-    }
-    if root.page == SubPageType.MyNote: MyNoteView {
-        on-back => { root.go-back(); }
-    }
+    if root.page == SubPageType.Settings: SettingView { }
+    if root.page == SubPageType.MyNote: MyNoteView { }
     if root.page == SubPageType.MyCollect: MyCollectView {
         cards: AppState.my_collect;
-        on-back => { root.go-back(); }
-        navigate-to(page, id) => { root.navigate-to(page, id); }
         like-toggled(id) => { AppState.toggle-like(id); }
     }
     if root.page == SubPageType.MyShare: MyShareView {
         cards: AppState.my_share;
-        on-back => { root.go-back(); }
-        navigate-to(page, id) => { root.navigate-to(page, id); }
         like-toggled(id) => { AppState.toggle-like(id); }
     }
-    if root.page == SubPageType.AddContact: AddContactView {
-        on-back => { root.go-back(); }
-    }
-    if root.page == SubPageType.AddMoment: AddMomentView {
-        on-back => { root.go-back(); }
-    }
-    if root.page == SubPageType.AddNote: AddNoteView {
-        on-back => { root.go-back(); }
-    }
+    if root.page == SubPageType.AddContact: AddContactView { }
+    if root.page == SubPageType.AddMoment: AddMomentView { }
+    if root.page == SubPageType.AddNote: AddNoteView { }
     if root.page == SubPageType.AddGroup: AddGroupView {
         group-type: root.payload;
-        on-back => { root.go-back(); }
     }
     if root.page == SubPageType.DiscoverDetail: DiscoverDetailView {
         key: root.payload;
-        on-back => { root.go-back(); }
     }
-    if root.page == SubPageType.PomegranateSeed: PomegranateSeedView {
-        on-back => { root.go-back(); }
-    }
+    if root.page == SubPageType.PomegranateSeed: PomegranateSeedView { }
 }

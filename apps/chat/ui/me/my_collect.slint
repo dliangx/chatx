@@ -1,14 +1,12 @@
 import { CardView } from "../components/card.slint";
 import { Theme } from "../theme.slint";
-import { SubPageType } from "../components/nav_state.slint";
 import { DiscoverCard } from "../components/app_state.slint";
-import { AppState } from "../components/app_state.slint";
+import { SubPageType, AppState } from "../components/app_state.slint";
 import { Header } from "../components/header.slint";
 
 export component MyCollectView inherits Rectangle {
     in property <[DiscoverCard]> cards: [];
-    callback on-back();
-    callback navigate-to(SubPageType, int);
+
     callback like-toggled(int);
 
     width: 100%;
@@ -22,7 +20,6 @@ export component MyCollectView inherits Rectangle {
 
     Header {
         name: "我的收藏";
-        on-back => { root.on-back(); }
     }
 
     if root.cards.length == 0:
@@ -51,7 +48,7 @@ export component MyCollectView inherits Rectangle {
             is-liked: card.liked;
             likes: card.likes;
             id: card.id;
-            clicked(id) => { root.navigate-to(SubPageType.DiscoverDetail, id); }
+            clicked(id) => { AppState.push-sub(SubPageType.DiscoverDetail, id); }
             like-toggled => { root.like-toggled(card.id); }
         }
     }

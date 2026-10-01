@@ -101,7 +101,6 @@ pub fn main() {
         ui.set_auth_message(SharedString::from("please logging in "));
         state.set_user_id(SharedString::from(uid.clone()));
 
-        // 免登陆：存有 passphrase 则自动登录（先进入主界面，后台登录）
         if let Some(pass) = load_passphrase(&uid) {
             ui.set_logged_in(true);
             let profile = profile();
@@ -455,7 +454,9 @@ fn push_sub_history(app: &AppState, entry: SubPageEntry) {
     if active >= v.len() { return; }
     let tab = v.get_mut(active).unwrap();
     let h = tab.sub_history.clone();
+    let keep = if tab.sub_top < 0 { 0 } else { tab.sub_top as usize + 1 };
     let mut v2: Vec<SubPageEntry> = (0..h.row_count()).filter_map(|i| h.row_data(i)).collect();
+    v2.truncate(keep);
     v2.push(entry);
     tab.sub_history = slint::ModelRc::new(slint::VecModel::from(v2));
     tab.sub_top = tab.sub_history.row_count() as i32 - 1;
@@ -467,8 +468,7 @@ fn pop_sub_history(app: &AppState) {
     let mut nav = app.get_nav_state();
     let active = nav.active_tab as usize;
     use slint::Model;
-    let tabs_model = nav.tabs.clone();
-    let mut v: Vec<TabState> = (0..tabs_model.row_count()).filter_map(|i| tabs_model.row_data(i)).collect();
+    let mut v: Vec<TabState> = (0..nav.tabs.row_count()).filter_map(|i| nav.tabs.row_data(i)).collect();
     if active >= v.len() { return; }
     let tab = v.get_mut(active).unwrap();
     let next_top = tab.sub_top - 1;

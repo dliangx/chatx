@@ -1,10 +1,3 @@
-import {
-    NavigationState,
-    TabState,
-    SubPageEntry,
-    SubPageType,
-    GlobalOverlayType,
-} from "components/nav_state.slint";
 import { ChatListView } from "chats/chat_list.slint";
 import { ContactListView } from "contacts/contacts.slint";
 import { DiscoverView } from "discovery/discover.slint";
@@ -13,8 +6,17 @@ import { BottomNavBar } from "components/bottom_nav.slint";
 import { LeftNavBar } from "components/left_nav.slint";
 import { SubPageView } from "./subpage.slint";
 import { AuthView } from "components/auth.slint";
-import { AppState } from "components/app_state.slint";
-export { AppState } from "components/app_state.slint";
+import {
+    NavigationState,
+    TabState,
+    SubPageEntry,
+    SubPageType,
+    GlobalOverlayType,
+    AppState,
+} from "components/app_state.slint";
+export {
+    AppState,
+} from "components/app_state.slint";
 import { ProfileState } from "contacts/profile.slint";
 export { ProfileState } from "contacts/profile.slint";
 import { ChatSession } from "chats/chat.slint";
@@ -80,7 +82,6 @@ export component MainWindow inherits Window {
                     height: 100%;
                     rows: AppState.chats;
                     status: AppState.data-status;
-                    navigate-to(t, p) => { AppState.push-sub(t, p); }
                 }
 
                 ContactListView {
@@ -89,7 +90,6 @@ export component MainWindow inherits Window {
                     height: 100%;
                     rows: AppState.contacts;
                     letters: AppState.contact-letters;
-                    navigate-to(t, p) => { AppState.push-sub(t, p); }
                 }
 
                 DiscoverView {
@@ -97,7 +97,6 @@ export component MainWindow inherits Window {
                     width: 100%;
                     height: 100%;
                     cards: AppState.discover;
-                    navigate-to(t, p) => { AppState.push-sub(t, p); }
                     like-toggled(id) => { AppState.toggle-like(id); }
                 }
 
@@ -105,7 +104,6 @@ export component MainWindow inherits Window {
                     visible: AppState.nav-state.active-tab == 3;
                     width: 100%;
                     height: 100%;
-                    navigate-to(t, p) => { AppState.push-sub(t, p); }
                 }
             }
         }
@@ -116,16 +114,27 @@ export component MainWindow inherits Window {
             tab-clicked(i) => { root.select_tab(i); }
         }
 
+        if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 1:
+        SubPageView {
+            width: 100%;
+            height: 100%;
+            animate-in: false;
+            page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                    AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top - 1].page;
+            payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                    AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top - 1].payload;
+            z: 1;
+        }
+
         if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 0:
             SubPageView {
             width: 100%;
             height: 100%;
+            z: 2;
             page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
                     AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top].page;
             payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
                     AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top].payload;
-            go-back() => { AppState.pop-sub(); }
-            navigate-to(t, p) => { AppState.push-sub(t, p); }
         }
     }
 
@@ -153,7 +162,6 @@ export component MainWindow inherits Window {
                 height: 100%;
                 rows: AppState.chats;
                 status: AppState.data-status;
-                navigate-to(t, p) => { AppState.push-sub(t, p); }
             }
 
             ContactListView {
@@ -162,7 +170,6 @@ export component MainWindow inherits Window {
                 height: 100%;
                 rows: AppState.contacts;
                 letters: AppState.contact-letters;
-                navigate-to(t, p) => { AppState.push-sub(t, p); }
             }
 
             DiscoverView {
@@ -170,7 +177,6 @@ export component MainWindow inherits Window {
                 width: 100%;
                 height: 100%;
                 cards: AppState.discover;
-                navigate-to(t, p) => { AppState.push-sub(t, p); }
                 like-toggled(id) => { AppState.toggle-like(id); }
             }
 
@@ -178,7 +184,6 @@ export component MainWindow inherits Window {
                 visible: AppState.nav-state.active-tab == 3;
                 width: 100%;
                 height: 100%;
-                navigate-to(t, p) => { AppState.push-sub(t, p); }
             }
         }
 
@@ -194,7 +199,6 @@ export component MainWindow inherits Window {
             width: root.width - 280px - 58px;
             height: 100%;
 
-            // 桌面端只渲染栈顶一个子页实例，避免层叠多实例
             if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 0:
             SubPageView {
                 width: 100%;
@@ -203,8 +207,6 @@ export component MainWindow inherits Window {
                     AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top].page;
                 payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
                     AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top].payload;
-                go-back() => { AppState.pop-sub(); }
-                navigate-to(t, p) => { AppState.push-sub(t, p); }
             }
         }
     }

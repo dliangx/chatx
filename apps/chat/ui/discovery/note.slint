@@ -1,6 +1,7 @@
 import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
 import { Header } from "../components/header.slint";
+import { AppState } from "../components/app_state.slint";
 
 export global NoteState {
     in-out property <string> draft: "";
@@ -12,7 +13,6 @@ export component AddNoteView inherits Rectangle {
     width: 100%;
     height: 100%;
     background: Theme.bg;
-    callback on-back();
 
     out property <length> footer-h: 64px;
 
@@ -27,10 +27,8 @@ export component AddNoteView inherits Rectangle {
 
         Header {
             name: "note";
-            on-back => { root.on-back(); }
         }
 
-        // 内容：白底圆角框填充剩余空间，长文可滚动
         Rectangle {
             vertical-stretch: 1;
             border-radius: 10px;
@@ -63,7 +61,6 @@ export component AddNoteView inherits Rectangle {
             }
         }
 
-        // 底部：语音（左） + 状态 + 保存（右）
         Rectangle {
             height: root.footer-h;
             background: Theme.bg;
@@ -71,7 +68,6 @@ export component AddNoteView inherits Rectangle {
             border-width: 1px;
             border-color: Theme.border;
 
-            // 语音识别 → 后端待接
             Rectangle {
                 x: 16px;
                 y: (root.footer-h - 38px) / 2;
@@ -133,7 +129,7 @@ export component AddNoteView inherits Rectangle {
                         if NoteState.draft != "" {
                             NoteState.note-saved(NoteState.draft);
                             NoteState.draft = "";
-                            root.on-back();
+                            AppState.pop-sub();
                         }
                     }
                 }

@@ -1,9 +1,56 @@
-import {
-    NavigationState,
-    SubPageType,
-    SubPageEntry,
-    GlobalOverlayType,
-} from "nav_state.slint";
+
+export enum PageType {
+    Chat,
+    Contact,
+    Discover,
+    Me,
+}
+
+export enum SubPageType {
+    ChatRoom,
+    ChatSetting,
+    AddGroup,
+    GroupProfile,
+    ContactProfile,
+    AddContact,
+    AddMoment,
+    AddNote,
+    DiscoverDetail,
+    PomegranateSeed,
+    Settings,
+    MyNote,
+    MyCollect,
+    MyShare,
+    LanguagePicker,
+}
+
+export enum GlobalOverlayType {
+    None,
+    ImageViewer,
+    QrScanner,
+    AudioCall,
+    VideoCall,
+    ScreenShare,
+    QrCode,
+    AddMenu,
+    Error,
+}
+
+export struct SubPageEntry {
+    page: SubPageType,
+    payload: int,
+}
+
+export struct TabState {
+    sub-history: [SubPageEntry],
+    sub-top: int,
+}
+
+export struct NavigationState {
+    active-tab: int,
+    tabs: [TabState],
+    global-overlay: GlobalOverlayType,
+}
 
 export struct ConversationRow {
     chat-id: int,
@@ -20,10 +67,8 @@ export struct ContactRow {
     name: string,
 }
 
-// One slot in the right-side A–Z index bar (only letters present included).
 export struct LetterEntry {
     letter: string,
-    // index (in the sorted contact list) of the first contact of this letter.
     target: int,
 }
 

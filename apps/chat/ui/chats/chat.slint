@@ -2,9 +2,9 @@ import { Button } from "std-widgets.slint";
 import { ChatInputView } from "chat_input.slint";
 import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
-import { AppState } from "../components/app_state.slint";
+import { GlobalOverlayType, AppState } from "../components/app_state.slint";
 import { Header } from "../components/header.slint";
-import { GlobalOverlayType } from "../components/nav_state.slint";
+
 export struct MessageData {
     bubble: image,
     width: length,
@@ -23,7 +23,6 @@ export global ChatSession {
 
 export component ChatView inherits Rectangle {
     in property <int> chat-id;
-    callback on-back();
     callback open-setting();
     callback press(int);
     callback release(int);
@@ -39,7 +38,6 @@ export component ChatView inherits Rectangle {
     out property <length> _bottom: root.status-h + root.input-h;
     Header {
         name: "chat";
-        on-back => { root.on-back() }
 
         Icon {
             width: 32px;
@@ -67,7 +65,7 @@ export component ChatView inherits Rectangle {
         height: root.input-h;
         sent(t) => { ChatSession.message-sent(root.chat-id, t); }
     }
-// 发送状态提示（位于输入区上方）
+
     if ChatSession.send-status != "":
     Text {
         x: 0px;
@@ -80,7 +78,6 @@ export component ChatView inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-    // 消息列表
     Flickable {
         x: 0px;
         y: 48px;

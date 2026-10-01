@@ -1,13 +1,11 @@
 import { CardView } from "../components/card.slint";
 import { Theme } from "../theme.slint";
-import { SubPageType } from "../components/nav_state.slint";
 import { DiscoverCard } from "../components/app_state.slint";
-import { AppState } from "../components/app_state.slint";
+import { SubPageType, AppState } from "../components/app_state.slint";
 import { SearchBar } from "../components/search.slint";
 
 export component DiscoverView inherits Rectangle {
     in property <[DiscoverCard]> cards: [];
-    callback navigate-to(SubPageType, int);
     callback like-toggled(int);
 
     width: 100%;
@@ -49,7 +47,7 @@ export component DiscoverView inherits Rectangle {
             is-liked: card.liked;
             likes: card.likes;
             id: card.id;
-            clicked(id) => { root.navigate-to(SubPageType.DiscoverDetail, id); }
+            clicked(id) => { AppState.push-sub(SubPageType.DiscoverDetail, id); }
             like-toggled => { root.like-toggled(card.id); }
         }
     }

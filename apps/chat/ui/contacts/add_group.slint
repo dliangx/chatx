@@ -94,7 +94,6 @@ export component AddGroupView inherits Rectangle {
     width: 100%;
     height: 100%;
     background: Theme.bg;
-    callback on-back();
 
     in property <int> group-type;
     in-out property <int> count: 0;
@@ -104,17 +103,14 @@ export component AddGroupView inherits Rectangle {
     if group-type == 0:
     Header {
         name: "Add Group";
-        on-back => { root.on-back(); }
     }
     if group-type == 1:
     Header {
         name: "Start Meeting";
-        on-back => { root.on-back(); }
     }
     if group-type == 2:
     Header {
         name: "Screen Share";
-        on-back => { root.on-back(); }
     }
     Text {
         x: 16px;

@@ -500,10 +500,10 @@ async fn add_member_receives_group_key() {
     let base = TmpBase::new("addmem");
     let (dir_a, dir_b) = InMemoryDirectory::pair();
 
-    let (mut alice, _) = Client::bootstrap_in(base.path(), "am-a", "alice", "p", dir_a.clone())
+    let (alice, _) = Client::bootstrap_in(base.path(), "am-a", "alice", "p", dir_a.clone())
         .await
         .expect("bootstrap alice");
-    let (mut bob, _) = Client::bootstrap_in(base.path(), "am-b", "bob", "p", dir_b.clone())
+    let (bob, _) = Client::bootstrap_in(base.path(), "am-b", "bob", "p", dir_b.clone())
         .await
         .expect("bootstrap bob");
 
