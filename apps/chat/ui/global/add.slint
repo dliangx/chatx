@@ -43,6 +43,13 @@ export component AddMenuView inherits Rectangle {
     background: transparent;
     clip: true;
 
+    function calcx() -> length {
+        if AppState.add-menu-type == 1 {
+            return AppState.xp - 176px - 8px;
+        }
+        return (AppState.is-mobile ? root.width : 340px) - 176px - 8px;
+    }
+
     function calcHeight() -> int {
         if AppState.is-mobile {
             if AppState.add-menu-type == 0 && AppState.nav-state.active-tab == 2 {
@@ -72,7 +79,7 @@ export component AddMenuView inherits Rectangle {
     Rectangle {
         width: 176px;
         height: calcHeight() * 44px + 8px;
-        x: (AppState.is-mobile ? root.width : 340px) - 176px - 8px;
+        x: calcx();
         y: 56px;
         border-radius: 8px;
         background: #ffffff;

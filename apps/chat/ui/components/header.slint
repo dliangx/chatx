@@ -4,12 +4,13 @@ import { AppState } from "../components/app_state.slint";
 
 export component Header inherits VerticalLayout {
     in property <string> name;
+    in property <bool> back-vis:false;
     width: 100%;
 
     Rectangle {
         width: 100%;
         height: 48px;
-        if AppState.is-mobile:
+        if AppState.is-mobile || back-vis:
             Icon {
             x: 8px;
             y: (parent.height - self.size) / 2;

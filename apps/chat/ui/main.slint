@@ -50,6 +50,10 @@ export component MainWindow inherits Window {
     preferred-height: AppState.is-mobile ? 844px : 768px;
     preferred-width: AppState.is-mobile ? 390px : 1024px;
 
+    changed width => {
+        AppState.xp = root.width;
+    }
+
     if !root.logged-in:
     AuthView {
         message: root.auth-message;

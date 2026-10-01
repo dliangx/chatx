@@ -36,7 +36,6 @@ export component DiscoverDetailView inherits Rectangle {
     height: 100%;
     background: Theme.bg;
 
-    // 顶部各段（从上往下：标题 → 作者 → 媒体 → 点赞行 → 点赞人 → 分隔线 → 评论区标题）。
     out property <length> input-h: 52px;
     out property <length> status-h: PostDetailState.status != "" ? 20px : 0px;
     out property <length> bottom: root.status-h + root.input-h;
@@ -55,7 +54,6 @@ export component DiscoverDetailView inherits Rectangle {
     out property <length> media-y: 10px + root.title-h + (root.title-h > 0 ? 30px : 0px);
     out property <length> like-y: root.media-y + root.media-h + (root.media-h > 0 ? 8px : 0px);
 
-    // 首次可见时拉取该 post 的详情（帖子 + 点赞 + 评论 + 媒体）。
     Timer {
         interval: 40ms;
         running: root.visible && PostDetailState.key != root.key;
@@ -66,6 +64,7 @@ export component DiscoverDetailView inherits Rectangle {
 
     Header {
         name: "discover";
+        back-vis: true;
     }
 
     if PostDetailState.status != "":
