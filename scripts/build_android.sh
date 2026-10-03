@@ -8,7 +8,8 @@
 #   5. apksigner     → signed debug APK at apps/platform/android/build/Chatx.apk
 #
 # Requires: .cargo/env-android.sh already sourced, or this script sources it.
-# Mode:     debug (default, fast) or release (set RELEASE=1)
+# Mode:     release (default) or debug (set RELEASE=0)
+#           Rebuild even if a cached artifact exists: REBUILD=1
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,8 +18,8 @@ cd "$ROOT"
 # ── 1. env ─────────────────────────────────────────────────────────────────
 source "$ROOT/.cargo/env-android.sh"
 
-MODE="debug"
-if [[ "${RELEASE:-0}" == "1" ]]; then MODE="release"; fi
+MODE="release"
+if [[ "${RELEASE:-1}" == "0" ]]; then MODE="debug"; fi
 TARGET="aarch64-linux-android"
 OUT_DIR="$ROOT/apps/platform/android/build"
 SO_SRC="$ROOT/target/$TARGET/$MODE/libchatx.so"

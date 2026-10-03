@@ -8,8 +8,8 @@
 #            containing  chatx.exe + chatx.bat (double-click launcher)
 #
 # Usage:
-#   .\scripts\build_windows.ps1                    # Debug, windows-gnu
-#   .\scripts\build_windows.ps1 -Release           # Release (recommended)
+#   .\scripts\build_windows.ps1                    # Release (default), windows-gnu
+#   .\scripts\build_windows.ps1 -Debug             # Debug build (fast iteration)
 #   .\scripts\build_windows.ps1 -Msvc              # MSVC toolchain instead of MinGW
 #   .\scripts\build_windows.ps1 -Clean             # wipe the target dir first
 #
@@ -22,6 +22,7 @@
 [CmdletBinding()]
 param(
     [switch]$Release,
+    [switch]$Debug,
     [switch]$Msvc,
     [switch]$Clean,
     [string]$Target = ""
@@ -38,7 +39,8 @@ if ($Target -eq "") {
     if ($Msvc) { $Target = "x86_64-pc-windows-msvc" }
     else       { $Target = "x86_64-pc-windows-gnu" }
 }
-$Mode = if ($Release) { "release" } else { "debug" }
+$Mode = if ($Debug) { "debug" } else { "release" }
+if ($Mode -eq "release") { $Release = $true } else { $Release = $false }
 
 function Say($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Ok($m)  { Write-Host "    $m" -ForegroundColor Green }
@@ -72,7 +74,7 @@ MSVC target selected but 'link.exe' is not on PATH.
   Options:
     1) Re-run from a "Developer PowerShell for VS" (or open VS and run).
     2) Install "C++ build tools" from Visual Studio Installer.
-    3) Or drop -Msvc and use MinGW instead:   .\scripts\build_windows.ps1 -Release
+    3) Or drop -Msvc and use MinGW instead:   .\scripts\build_windows.ps1
 "@
     }
 }

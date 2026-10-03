@@ -5,8 +5,8 @@
 # `chatx` binary target. Native to macOS, so it runs here out of the box.
 #
 # Usage:
-#   ./scripts/build_osx.sh                 # Debug build → build/macos/Chatx.app
-#   ./scripts/build_osx.sh --release       # Release build (recommended for distribution)
+#   ./scripts/build_osx.sh                 # Release build (default) → build/macos/Chatx.app
+#   ./scripts/build_osx.sh --debug         # Debug build (fast iteration)
 #   ./scripts/build_osx.sh --dmg          # Also bundle into Chatx.dmg
 #   ./scripts/build_osx.sh --sign "Developer ID Application: <Name> (TEAM)"
 #   ./scripts/build_osx.sh --clean        # Wipe cargo macos artifacts first
@@ -19,7 +19,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-RELEASE=""
+RELEASE="release"
 DMG=0
 SIGN_IDENTITY=""
 CLEAN=0

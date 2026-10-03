@@ -12,8 +12,8 @@
 # machine — the summary at the end lists them.
 #
 # Usage:
-#   ./scripts/build_linux.sh                  # Debug, host arch (gnu)
-#   ./scripts/build_linux.sh --release        # Release (recommended)
+#   ./scripts/build_linux.sh                  # Release (default), host arch (gnu)
+#   ./scripts/build_linux.sh --debug          # Debug build (fast iteration)
 #   ./scripts/build_linux.sh --musl          # glibc -> musl (static C runtime)
 #   ./scripts/build_linux.sh --target aarch64-unknown-linux-gnu
 #   ./scripts/build_linux.sh --clean
@@ -24,7 +24,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-RELEASE=""
+RELEASE="release"
 MUSL=0
 TARGET="${TARGET:-x86_64-unknown-linux-gnu}"
 CLEAN=0
