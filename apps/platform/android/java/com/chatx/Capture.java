@@ -4,7 +4,7 @@ import android.app.Activity;
 import android.content.pm.PackageManager;
 import android.graphics.ImageFormat;
 import android.graphics.Rect;
-import android.graphics.Size;
+import android.util.Size;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
@@ -137,7 +137,7 @@ public final class Capture {
             // Prefer a back-facing camera; fall back to the first one.
             String cameraId = null;
             try {
-                for (String id : cm.getCameraIds()) {
+                for (String id : cm.getCameraIdList()) {
                     Integer facing = cm.getCameraCharacteristics(id)
                         .get(CameraCharacteristics.LENS_FACING);
                     if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
@@ -146,7 +146,7 @@ public final class Capture {
                     }
                 }
                 if (cameraId == null) {
-                    String[] ids = cm.getCameraIds();
+                    String[] ids = cm.getCameraIdList();
                     if (ids.length == 0) {
                         Log.e(TAG, "[camera] no cameras found");
                         return;
