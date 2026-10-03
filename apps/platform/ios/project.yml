@@ -10,9 +10,25 @@
 # Workflow:
 #   cd apps/platform/ios && xcodegen generate
 #   open Chatx.xcodeproj            # Run in Xcode
-#   # or headless:
-#   xcodebuild -project Chatx.xcodeproj -scheme Chatx \
-#     -destination 'platform=iOS Simulator,name=iPhone 17' build
+#   # or headless (verified working):
+#     xcodebuild -project Chatx.xcodeproj -target Chatx -configuration Debug \
+#       -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17' build
+#   # → artifact: build/Debug-iphonesimulator/Chatx.app
+#
+# Building runs `build_for_ios_with_cargo.bash` (a shell build phase), which:
+#   1. compiles Sources/ChatxScreenCapture.m (ObjC, ARC) against the current
+#      iOS SDK into build/chatx_screen_capture.o;
+#   2. `cargo build -p chatx` for the right rustc triple (aarch64-apple-ios-sim
+#      for simulator / aarch64-apple-ios for device) with feature `has-ios-shim`;
+#   3. links the .o into the final `chatx` binary — `apps/chat/build.rs` reads
+#      CHATX_IOS_SHIM and emits cargo:rustc-link-arg, so the shim (and its
+#      Frameworks: ReplayKit/CoreMedia/CoreVideo) are added ONLY to the final
+#      chatx link, not to every dependency dylib;
+#   4. copies the binary into Chatx.app/Chatx and ad-hoc signs it.
+#
+# NOTE: `RUSTFLAGS=-C link-args=...` must NOT be used to inject the shim —
+# that flag is global and pollutes every dependency dylib's link, breaking
+# crates that have no ObjC runtime. The build.rs path above is the safe one.
 
 name: Chatx
 options:

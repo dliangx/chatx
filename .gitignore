@@ -73,3 +73,6 @@ apps/platform/android/build/
 
 # Derived data / build products
 target/ios-derived/
+
+apps/platform/ios/DerivedData/
+apps/platform/ios/build/

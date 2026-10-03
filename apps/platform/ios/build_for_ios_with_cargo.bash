@@ -21,15 +21,27 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 
 # ── pick rustup target triple ────────────────────────────────────────────────
-if [ "${SDK_NAME}" = "iphonesimulator" ]; then
+# SDK_NAME arrives versioned from xcodebuild (e.g. `iphonesimulator27.0`,
+# `iphoneos17.0`), so match on the *family* substring rather than the exact
+# name. Failing this check would silently cross-build the simulator slice as
+# a device slice (or worse, link the ObjC sim shim into a device binary).
+SDK_FAMILY="${SDK_NAME:-iphoneos}"
+case "${SDK_FAMILY}" in
+  *simulator*) IS_SIM=1 ;;
+  *)           IS_SIM=0 ;;
+esac
+if [ "${IS_SIM}" = "1" ]; then
+  # rustc triple for cargo; clang needs the `-simulator` spelling (not `-sim`).
   case "${ARCHS}" in
-    *arm64*)  TRIPLE="aarch64-apple-ios-sim" ;;
-    *x86_64*) TRIPLE="x86_64-apple-ios-sim"  ;;
-    *)        TRIPLE="aarch64-apple-ios-sim" ;;
+    *arm64*)  TRIPLE="aarch64-apple-ios-sim";   CLANG_TRIPLE="arm64-apple-ios16.0-simulator" ;;
+    *x86_64*) TRIPLE="x86_64-apple-ios-sim";    CLANG_TRIPLE="x86_64-apple-ios16.0-simulator" ;;
+    *)        TRIPLE="aarch64-apple-ios-sim";   CLANG_TRIPLE="arm64-apple-ios16.0-simulator" ;;
   esac
 else
   TRIPLE="aarch64-apple-ios"
+  CLANG_TRIPLE="arm64-apple-ios16.0"
 fi
+echo "==> rust target: ${TRIPLE}   clang target: ${CLANG_TRIPLE}  (SDK_NAME=${SDK_FAMILY}, ARCHS=${ARCHS:-arm64})"
 
 # ── mode ─────────────────────────────────────────────────────────────────────
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
@@ -56,10 +68,9 @@ if [ -n "${CLANG_BIN}" ] && [ -n "${SDK_ROOT}" ] && [ -d "${SDK_ROOT}" ] \
   # Framework is present → real SDK on this host. Compile the shim.
   mkdir -p "$(dirname "$OBJC_OUT")"
   if [ ! -x "$OBJC_OUT" ] || [ "$OBJC_SHIM" -nt "$OBJC_OUT" ]; then
-    echo "==> clang ${TRIPLE}  ->  ${OBJC_OUT}"
+    echo "==> clang ${CLANG_TRIPLE}  ->  ${OBJC_OUT}"
     "${CLANG_BIN}" \
-      -target "${TRIPLE}" \
-      -arch arm64 \
+      -target "${CLANG_TRIPLE}" \
       -isysroot "${SDK_ROOT}" \
       -std=gnu11 \
       -fobjc-arc \
@@ -81,7 +92,14 @@ if [ "$HAS_SHIM" = "1" ]; then
   FEATURES="--features bridge/has-ios-shim"
 fi
 
-# ── cargo build ──────────────────────────────────────────────────────────────
+# ── wire the shim into chatx's link ──────────────────────────────────────────
+# We do NOT use RUSTFLAGS=-C link-args: that is global and would inject the
+# ObjC object into EVERY dependency dylib's link (e.g. `if-watch`), which
+# fails because those have no ObjC runtime. Instead we export CHATX_IOS_SHIM
+# so `apps/chat/build.rs` emits `cargo:rustc-link-arg=<shim.o>` for the
+# chatx bin — the object is added only to the final `chatx` executable link.
+export CHATX_IOS_SHIM="${SHIM_O:-}"
+
 REBUILD=0
 if [ ! -x "$BIN_SRC" ]; then
   REBUILD=1
@@ -90,24 +108,16 @@ else
            "$ROOT/apps/chat/src/lib.rs" \
            "$ROOT/crates/bridge/src/lib.rs" \
            "$ROOT/crates/bridge/src/ffi.rs" \
-           "$ROOT/crates/bridge/src/shim_impl.rs"; do
+           "$ROOT/crates/bridge/src/shim_impl.rs" \
+           "$ROOT/apps/chat/build.rs"; do
     if [ -e "$f" ] && [ "$f" -nt "$BIN_SRC" ]; then REBUILD=1; break; fi
   done
   if [ -n "$SHIM_O" ] && [ "$SHIM_O" -nt "$BIN_SRC" ]; then REBUILD=1; fi
 fi
 
 if [ "$REBUILD" = "1" ]; then
-  echo "==> cargo build -p chatx --target $TRIPLE $CARGO_FLAGS $FEATURES"
-  if [ -n "$SHIM_O" ]; then
-    # Use RUSTFLAGS to force-link the shim into the final binary. `-Wl,-force_load`
-    # makes the linker pull in all symbols of the .o even if none are
-    # referenced (the `chatx_screen_capture_*` fns *are* referenced from the
-    # bridge crate, but force_load is defensive against future symbol pruning).
-    RUSTFLAGS="-C link-args=-Wl,-force_load,${SHIM_O}" \
-      cargo build -p chatx --target "$TRIPLE" $CARGO_FLAGS $FEATURES
-  else
-    cargo build -p chatx --target "$TRIPLE" $CARGO_FLAGS
-  fi
+  echo "==> cargo build -p chatx --target $TRIPLE $CARGO_FLAGS $FEATURES (CHATX_IOS_SHIM=${CHATX_IOS_SHIM:-<none>})"
+  cargo build -p chatx --target "$TRIPLE" $CARGO_FLAGS $FEATURES
 fi
 
 [ -x "$BIN_SRC" ] || { echo "✗ rust binary not found: $BIN_SRC" >&2; exit 1; }
