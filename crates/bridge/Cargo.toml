@@ -1,0 +1,16 @@
+[package]
+name = "bridge"
+version = "0.1.0"
+edition = "2024"
+description = "Stable C-ABI bridge between the native capture shell (Swift / Kotlin) and the Rust core."
+
+[lib]
+name = "bridge"
+
+[dependencies]
+
+# Android JNI wrapper. Target-gated so iOS / desktop never resolve it.
+[target.'cfg(target_os = "android")'.dependencies.jni]
+# 0.21 has a stable `convert_byte_array` API on JNIEnv; 0.22 split
+# Env/EnvUnowned and is FFI-hostile for simple bridges.
+version = "0.21"
