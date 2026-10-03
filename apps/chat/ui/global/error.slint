@@ -7,6 +7,18 @@ export component ErrorView inherits Rectangle {
     background: #00000055;
     clip: true;
 
+    in property <bool> success: AppState.error-is-success;
+
+    Timer {
+        interval: 3000ms;
+        running: true;
+        triggered => {
+            self.running = false;
+            AppState.nav-state.global-overlay = GlobalOverlayType.None;
+            AppState.error-message = "";
+        }
+    }
+
     TouchArea {
         width: 100%;
         height: 100%;
@@ -27,9 +39,9 @@ export component ErrorView inherits Rectangle {
         Icon {
             x: (parent.width - 28px) / 2;
             y: 20px;
-            glyph: Glyph.close-circle;
+            glyph: root.success ? Glyph.finish : Glyph.close-circle;
             size: 28px;
-            tint: #c44e4e;
+            tint: root.success ? #4ea86b : #c44e4e;
         }
 
         Text {
@@ -41,6 +53,7 @@ export component ErrorView inherits Rectangle {
             font-size: 14px;
             color: #ffffffcc;
             wrap: word-wrap;
+            horizontal-alignment: center;
         }
     }
 }

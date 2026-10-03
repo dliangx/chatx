@@ -1341,11 +1341,17 @@ fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
     rt.spawn(async move {
         let me_id = match sqlite::users::ensure_identity(&pool, &me).await {
             Ok(id) => id,
-            Err(_) => return,
+            Err(_) => {
+                show_app_error(weak.clone(), String::from("笔记保存失败"));
+                return;
+            }
         };
         let created = match sqlite::notes::create_note(&pool, me_id, &content).await {
             Ok(n) => n,
-            Err(_) => return,
+            Err(_) => {
+                show_app_error(weak.clone(), String::from("笔记保存失败"));
+                return;
+            }
         };
         let _ = slint::invoke_from_event_loop(move || {
             {
@@ -1365,6 +1371,7 @@ fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
             if let Some(ui) = weak.upgrade() {
                 publish_my_notes(&ui.global::<AppState>(), &backend);
             }
+            show_app_notice(weak, String::from("笔记保存完成"), true);
         });
     });
 }
@@ -1632,10 +1639,16 @@ async fn do_add(pool: &sqlx::SqlitePool, me: &str, username: &str, backend: &Arc
 
 /// Show a transient global error dialog (transparent backdrop, message + 知道了).
 fn show_app_error(weak: slint::Weak<MainWindow>, msg: String) {
+    show_app_notice(weak, msg, false);
+}
+
+/// Show a transient global notice dialog; `success` picks the green checkmark style.
+fn show_app_notice(weak: slint::Weak<MainWindow>, msg: String, success: bool) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             let state = ui.global::<AppState>();
             state.set_error_message(SharedString::from(msg));
+            state.set_error_is_success(success);
             let mut nav = state.get_nav_state();
             nav.global_overlay = GlobalOverlayType::Error;
             state.set_nav_state(nav);
