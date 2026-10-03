@@ -63,3 +63,13 @@ analysis/
 analysis/plans/
 .ralphy
 tmp/
+
+
+# Android: build products (APK, d8 classes.dex, aapt base, JNI lib, signing idsig)
+apps/platform/android/build/
+
+# Desktop packaging output from scripts/build_{osx,linux,windows}.sh|ps1
+/build/
+
+# Derived data / build products
+target/ios-derived/

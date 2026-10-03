@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.chatx">
+
+    <!-- Chatx is a realtime-comms client. These are the minimum permissions
+         for the C-step shell (login + messaging). Camera/mic/screen will be
+         added in step A when the Kotlin capture layer lands. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <application
+        android:label="Chatx"
+        android:allowBackup="true"
+        android:extractNativeLibs="true">
+
+        <!-- Shell is a thin NativeActivity subclass (in the APK's classes.dex)
+             that auto-starts the Kotlin capture loop on create. Slint's
+             SlintAndroidJavaHelper lives in a separate dex embedded into
+             libchatx.so and is loaded by Slint itself at runtime. The Rust
+             `android_main(app: AndroidApp)` entrypoint is invoked by
+             NativeActivity; `libchatx.so` is resolved via lib_name. -->
+        <activity
+            android:name="com.chatx.Shell"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:hardwareAccelerated="true"
+            android:launchMode="singleTask">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="chatx" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
