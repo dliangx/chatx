@@ -92,16 +92,14 @@ fn clear_passphrase(_user_id: &str) {
     let _ = std::fs::remove_file(autologin_path());
 }
 
-/// Application entry shared by every platform.
-///
-/// - Desktop: called from `main.rs` (`fn main`).
-/// - iOS: the platform `main` (Rust binary) calls this.
-/// - Android: `android_main` (see below) calls this once Slint's android
-///   backend has initialised the activity.
-///
-/// Sets up the window, wires every Slint callback into the tokio-based
-/// business logic, and blocks in `ui.run()` (the Slint event loop).
 pub fn run_app() {
+    // Mobile only: install the bridge consumers. iOS and Android both use
+    // the same bridge crate (jni.rs on Android, ffi.rs on iOS); desktop
+    // uses the native `screen` and `camera` crates directly and has no
+    // bridge at all, so this cfg is a no-op there.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    install_bridge_sinks();
+
     let ui = MainWindow::new().expect("window init failed");
     let state = ui.global::<AppState>();
     let weak = ui.as_weak();
@@ -465,26 +463,14 @@ pub fn run_app() {
     ui.run().expect("window run failed");
 }
 
-/// Android entry point (see slint::android module docs). The `android-activity`
-/// crate provides the `android_main` C entry symbol; this function is the
-/// Rust-side callback invoked by Slint once the native activity is attached.
-/// We initialise the Slint android backend and then drive the shared
-/// `run_app()` which blocks in the Slint event loop — exactly like desktop.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub fn android_main(app: slint::android::AndroidApp) {
     slint::android::init(app).unwrap();
-    // Install the capture sinks that the Kotlin shell calls into (see
-    // `crates/bridge/src/jni.rs`). Frame callbacks arrive on the capture
-    // thread; we hop to the Slint event loop before touching the UI.
-    install_bridge_sinks();
     run_app();
 }
 
-/// Install the Rust-side consumers for the bridge JNI entry points. Until the
-/// webrtc layer (M7) lands, the sinks log frames to stderr so we can verify
-/// the full Kotlin → JNI → Rust pipeline on a device.
-#[cfg(target_os = "android")]
+#[allow(dead_code)]
 fn install_bridge_sinks() {
     use std::sync::atomic::{AtomicU64, Ordering};
     static FRAME_N: AtomicU64 = AtomicU64::new(0);
@@ -503,7 +489,7 @@ fn install_bridge_sinks() {
         }
     }));
     bridge::set_screen_consumer(Box::new(move |bytes, w, h, fmt| {
-        eprintln!("[bridge] screen {}x{} {}B fmt={}", w, h, bytes.len(), fmt);
+        on_screen_frame(bytes, w, h, fmt);
     }));
 }
 
@@ -1771,16 +1757,25 @@ fn end_voice_call(weak: slint::Weak<MainWindow>) {
     }
 }
 
-/// Log a captured screen frame (accounting + a heartbeat print). Real screen
-/// *transfer* to a peer needs a video codec (M7b) and is intentionally not in
-/// scope here — this is the capture-side funnel.
-fn handle_screen_frame(_bytes: Vec<u8>, w: u32, h: u32) {
+/// Shared screen-frame funnel. One handler covers both paths:
+/// - desktop `Screen::set_sink` (RGBA8888, no fmt) wraps its `(Vec<u8>,w,h)`
+///   sink with a tiny closure that forwards into this.
+/// - iOS / Android arrive via `bridge::set_screen_consumer` with the native
+///   `fmt` (1 = RGBA8888 for MediaProjection, 7 = BGRA8888 for RPScreenRecorder).
+fn on_screen_frame(_bytes: &[u8], w: u32, h: u32, fmt: u32) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     if n % 30 == 0 {
-        eprintln!("[screen] frame #{} {}x{}", n, w, h);
+        eprintln!("[screen] frame #{} {}x{} fmt={}", n, w, h, fmt);
     }
+}
+
+/// Desktop-only wrapper: adapt the `Screen` sink's owned `Vec<u8>` to the
+/// shared handler (which takes `&[u8]`).
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn screen_sink_adapter(bytes: Vec<u8>, w: u32, h: u32) {
+    on_screen_frame(&bytes, w, h, /*RGBA8888*/ 1);
 }
 
 /// Begin a screen share: on desktop this starts the local [`screen`] capture
@@ -1797,7 +1792,7 @@ fn begin_screen_share(weak: slint::Weak<MainWindow>) {
             let mut guard = slot.borrow_mut();
             let scr = guard.as_mut().expect("screen inited");
             if !scr.is_running() {
-                scr.set_sink(handle_screen_frame);
+                scr.set_sink(screen_sink_adapter);
                 if let Err(err) = scr.start() {
                     eprintln!("[screen] start failed: {err}");
                 }
@@ -1882,10 +1877,6 @@ fn publish_profile_status(weak: slint::Weak<MainWindow>, key: i32, msg: SharedSt
     });
 }
 
-/// Load the profile (bio, created_at, avatar, latest moment) for a contact
-/// keyed by its in-memory `id` and publish it into the ProfileState global.
-/// A monotonic sequence guard drops out-of-order async results so a stale load
-/// (e.g. a contact you already navigated away from) can't clobber the newest one.
 fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.with(|s| s.borrow().clone());
     let pool = POOL.with(|s| s.borrow().clone());
@@ -2074,8 +2065,7 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
         publish_detail_status(weak, key, SharedString::from("帖子已失效"));
         return;
     };
-    // Author name + own id are pulled on the UI thread up-front; the async task below
-    // runs inside a tokio runtime and can't call `blocking_read` on the backend.
+
     let (author, me) = {
         let g = backend.blocking_read();
         (
