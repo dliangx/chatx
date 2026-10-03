@@ -2,5 +2,12 @@
 name = "audio"
 version = "0.1.0"
 edition = "2024"
+description = "Cross-platform mic/speaker I/O around cpal, normalised to s16le mono/stereo for the chatx call path."
+
+[lib]
+name = "audio"
 
 [dependencies]
+# cpal provides Core Audio (macOS/iOS) / WASAPI (Windows) / Oboe-OpenSLES
+# (Android) / ALSA (Linux). 0.16 has the modern sample-host API.
+cpal = "0.16"
