@@ -1,0 +1,77 @@
+# Xcodegen specification for the Chatx iOS shell.
+#
+# Slint runs as a native Rust binary on iOS (see
+# https://docs.slint.dev/latest/docs/slint/guide/platforms/mobile/ios/).
+# This project wraps that binary: Xcode provides the .app bundle; the
+# `UIApplicationSceneManifest` opts into the UIKit scene lifecycle and
+# slint's `SlintWindowSceneDelegate` (from slint's winit backend) attaches
+# the Slint window to the scene it connects.
+#
+# Workflow:
+#   cd apps/platform/ios && xcodegen generate
+#   open Chatx.xcodeproj            # Run in Xcode
+#   # or headless:
+#   xcodebuild -project Chatx.xcodeproj -scheme Chatx \
+#     -destination 'platform=iOS Simulator,name=iPhone 17' build
+
+name: Chatx
+options:
+  bundleIdPrefix: com.chatx
+
+settings:
+  base:
+    # The app is 100% Rust; keep Xcode's own Swift/ObjC compile to a minimum.
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  Chatx:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    info:
+      # xcodegen synthesises Info.plist from these keys. See `Info.plist`
+      # after `xcodegen generate`.
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Chatx
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        CFBundleLocalizations: [en]
+
+        # Slint / ProMotion: allow full refresh rate on ProMotion iPhones.
+        CADisableMinimumFrameDurationOnPhone: true
+        UILaunchScreen:
+          - ImageRespectSafeAreaInsets: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+
+        # Device permissions (camera QR + video call, mic voice call).
+        NSCameraUsageDescription: "Chatx uses the camera to scan QR codes and for video calls."
+        NSMicrophoneUsageDescription: "Chatx uses the microphone for voice calls."
+
+        # UIKit scene lifecycle (modern iOS requires this; slint's winit
+        # backend supplies SlintWindowSceneDelegate). See Apple TN3187 and
+        # crates.io `i-slint-backend-winit` `ios/scene.rs`. Keep as-is.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Slint
+                UISceneDelegateClassName: SlintWindowSceneDelegate
+
+    # No Swift sources — the whole app is the Rust `chatx` binary, produced by
+    # the script below.
+    sources: []
+
+    # xcodegen 2.46 syntax: `postCompileScripts[].script` (NOT `runScript`).
+    # The `script` runs every build (no caching) and emits the final
+    # executable, which Xcode then signs and places in Chatx.app/Chatx.
+    postCompileScripts:
+      - name: Build Rust binary
+        script: |
+          ./build_for_ios_with_cargo.bash chatx
+        outputFiles:
+          - $TARGET_BUILD_DIR/$EXECUTABLE_PATH
+        basedOnDependencyAnalysis: false
