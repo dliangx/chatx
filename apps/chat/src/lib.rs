@@ -437,50 +437,13 @@ pub fn run_app() {
             state.set_scan_found(false);
             state.set_scan_result(SharedString::new());
             state.set_scan_status(SharedString::from("摄像头已启动，请对准二维码…"));
-
-            #[cfg(any(target_os = "macos", target_os = "ios"))]
-            {
-                CAMERA.with(|slot| {
-                    if slot.borrow().is_none() {
-                        *slot.borrow_mut() = Some(Camera::new());
-                    }
-                    let mut guard = slot.borrow_mut();
-                    let cam = guard.as_mut().expect("camera inited");
-                    if !cam.is_running() {
-                        match cam.start() {
-                            Ok(_) => {
-                                let wsink = w.clone();
-                                cam.set_sink(move |text: String| {
-                                    let wk = wsink.clone();
-                                    let _ = slint::invoke_from_event_loop(move || {
-                                        if let Some(ui2) = wk.upgrade() {
-                                            let st = ui2.global::<AppState>();
-                                            st.set_scan_found(true);
-                                            st.set_scan_result(SharedString::from(text));
-                                        }
-                                    });
-                                });
-                            }
-                            Err(err) => {
-                                state.set_scan_status(SharedString::from(format!(
-                                    "无法启动摄像头: {err}"
-                                )));
-                            }
-                        }
-                    }
-                });
-            }
-            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-            {
-                state.set_scan_status(SharedString::from("当前平台不支持摄像头扫描"));
-            }
+            start_camera_scanner(w.clone(), state);
         });
     }
 
     {
         let w = weak.clone();
         ui.global::<AppState>().on_scanner_stop(move || {
-            #[cfg(any(target_os = "macos", target_os = "ios"))]
             CAMERA.with(|slot| {
                 if let Some(cam) = slot.borrow_mut().as_mut() {
                     cam.stop();
@@ -527,10 +490,10 @@ fn install_bridge_sinks() {
     static FRAME_N: AtomicU64 = AtomicU64::new(0);
     static AUDIO_N: AtomicU64 = AtomicU64::new(0);
 
-    bridge::set_camera_consumer(Box::new(move |bytes, w, h| {
+    bridge::set_camera_consumer(Box::new(move |bytes, w, h, fmt| {
         let n = FRAME_N.fetch_add(1, Ordering::Relaxed);
         if n % 100 == 0 {
-            eprintln!("[bridge] camera #{} {}x{} {}B", n, w, h, bytes.len());
+            eprintln!("[bridge] camera #{} {}x{} {}B fmt={}", n, w, h, bytes.len(), fmt);
         }
     }));
     bridge::set_audio_consumer(Box::new(move |bytes, rate, ch| {
@@ -539,8 +502,8 @@ fn install_bridge_sinks() {
             eprintln!("[bridge] audio #{} {}B @{}Hz/{}ch", n, bytes.len(), rate, ch);
         }
     }));
-    bridge::set_screen_consumer(Box::new(move |bytes, w, h| {
-        eprintln!("[bridge] screen {}x{} {}B", w, h, bytes.len());
+    bridge::set_screen_consumer(Box::new(move |bytes, w, h, fmt| {
+        eprintln!("[bridge] screen {}x{} {}B fmt={}", w, h, bytes.len(), fmt);
     }));
 }
 
@@ -593,6 +556,44 @@ fn clear_sub_history(app: &AppState) {
     nav.global_overlay = GlobalOverlayType::None;
     nav.tabs = slint::ModelRc::new(slint::VecModel::from(tabs));
     app.set_nav_state(nav);
+}
+
+/// Open the camera and wire decoded QR payloads into the scan UI.
+///
+/// `camera::Camera` exposes the same API on every target (Apple AVFoundation,
+/// Windows/Linux nokhwa, Android bridge+JNI), so this helper is platform-
+/// agnostic: start it, install a sink that hops back to the UI thread, and be
+/// done. Any platform whose `start()` reports "unsupported" surfaces the error
+/// in `scan-status`.
+    fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
+    CAMERA.with(|slot| {
+        if slot.borrow().is_none() {
+            *slot.borrow_mut() = Some(Camera::new());
+        }
+        let mut guard = slot.borrow_mut();
+        let cam = guard.as_mut().expect("camera inited");
+        if cam.is_running() {
+            return;
+        }
+        match cam.start() {
+            Ok(_) => {
+                let wsink = weak.clone();
+                cam.set_sink(move |text: String| {
+                    let wk = wsink.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = wk.upgrade() {
+                            let st = ui.global::<AppState>();
+                            st.set_scan_found(true);
+                            st.set_scan_result(SharedString::from(text));
+                        }
+                    });
+                });
+            }
+            Err(err) => {
+                state.set_scan_status(SharedString::from(format!("无法启动摄像头: {err}")));
+            }
+        }
+    });
 }
 
 /// Render a QR code for `text` as an RGBA slint image (black modules on white).
@@ -1803,6 +1804,21 @@ fn begin_screen_share(weak: slint::Weak<MainWindow>) {
             }
         });
     }
+    #[cfg(target_os = "android")]
+    {
+        // Ask the Java shell to launch the MediaProjection consent flow +
+        // VirtualDisplay capture. Frames then arrive via
+        // `NativeBridge.screenFrameIn` → bridge sink → `handle_screen_frame`.
+        eprintln!("[screen] requesting MediaProjection from Java shell");
+        bridge::request_screen_share_start();
+    }
+    #[cfg(target_os = "ios")]
+    {
+        // Ask the iOS shell (RPScreenRecorder) to start the capture. Frames
+        // land via `bridge_screen_frame_in` → `handle_screen_frame`.
+        eprintln!("[screen] requesting RPScreenRecorder from ObjC shim");
+        bridge::request_screen_share_start();
+    }
     show_call_overlay(weak, GlobalOverlayType::ScreenShare);
 }
 
@@ -1815,6 +1831,16 @@ fn end_screen_share(weak: slint::Weak<MainWindow>) {
                 s.stop();
             }
         });
+    }
+    #[cfg(target_os = "android")]
+    {
+        eprintln!("[screen] stopping MediaProjection capture");
+        bridge::request_screen_share_stop();
+    }
+    #[cfg(target_os = "ios")]
+    {
+        eprintln!("[screen] stopping RPScreenRecorder capture");
+        bridge::request_screen_share_stop();
     }
     show_call_overlay(weak, GlobalOverlayType::None);
 }

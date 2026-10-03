@@ -7,6 +7,14 @@ description = "Stable C-ABI bridge between the native capture shell (Swift / Kot
 [lib]
 name = "bridge"
 
+[features]
+default = []
+# Enabled by the iOS build script when it successfully links the ObjC shim
+# (`ChatxScreenCapture.o`) into the final binary. Leave off on hosts without
+# a real iOS SDK (e.g. a bare macOS with only the stub SDK) — the bridge then
+# degrades to a no-op and the Rust code still builds.
+has-ios-shim = []
+
 [dependencies]
 
 # Android JNI wrapper. Target-gated so iOS / desktop never resolve it.

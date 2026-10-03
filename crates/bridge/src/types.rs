@@ -29,6 +29,17 @@ pub enum PixelFormat {
     Yv12 = 6,
     /// 4 bytes per pixel: B, G, R, A.
     Bgra8888 = 7,
+    /// 1 byte per pixel: 8-bit greyscale (Y-only).
+    ///
+    /// For camera QR decoding, the shell extracts the Y plane of a YUV
+    /// frame and sends it as GRAY8 so zbar can consume it directly with
+    /// no colour-space arithmetic on the Rust side.
+    Gray8 = 8,
+    /// 2 bytes per pixel: 16-bit packed RGB (5R-6G-5B), little-endian u16.
+    ///
+    /// Legacy Android `ImageFormat.RGB_565` (Camera1 preview). Kept so old
+    /// builds keep working during the Camera2 migration.
+    Rgb565 = 9,
 }
 
 impl PixelFormat {
@@ -43,6 +54,8 @@ impl PixelFormat {
             5 => PixelFormat::I420,
             6 => PixelFormat::Yv12,
             7 => PixelFormat::Bgra8888,
+            8 => PixelFormat::Gray8,
+            9 => PixelFormat::Rgb565,
             _ => PixelFormat::Unknown,
         }
     }

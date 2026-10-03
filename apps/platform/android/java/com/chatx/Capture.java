@@ -3,34 +3,61 @@ package com.chatx;
 import android.app.Activity;
 import android.content.pm.PackageManager;
 import android.graphics.ImageFormat;
-import android.graphics.PixelFormat;
-import android.hardware.Camera;
-import android.media.AudioFormat;
-import android.media.AudioRecord;
-import android.media.MediaRecorder;
+import android.graphics.Rect;
+import android.graphics.Size;
+import android.hardware.camera2.CameraAccessException;
+import android.hardware.camera2.CameraCaptureSession;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraDevice;
+import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CameraMetadata;
+import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.params.StreamConfigurationMap;
+import android.media.Image;
+import android.media.ImageReader;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Log;
 
-import java.nio.ByteBuffer;
+import java.util.Arrays;
 
 /**
- * Camera + microphone capture loop (M5-A smoke test).
+ * Camera + microphone capture loop (M7).
  *
- * Camera via legacy Camera1 preview callback (gives us packed RGB_565 directly
- * — no YUV conversion needed to prove the Kotlin → JNI → Rust pipeline).
- * Mic via AudioRecord (mono 16 kHz s16le).
+ * Camera via {@code Camera2} + {@link ImageReader} ({@link
+ * ImageFormat#YUV_420_888}) at a resolution closest to 640×480 (prefer the
+ * largest supported size ≥ 640×480). Every available frame is reduced to
+ * its Y plane and pushed through
+ * {@link NativeBridge#cameraFrameIn(byte[], int, int, int)} with
+ * {@code fmt = 8} (Gray8) — zbar on the Rust side consumes that directly
+ * with no colour-space arithmetic.
  *
- * Feeds {@link NativeBridge} JNI entry points which live in `libchatx.so`.
+ * Mic via {@code AudioRecord} (mono 16 kHz s16le) unchanged from prior
+ * versions.
+ *
+ * Feeds {@link NativeBridge} JNI entry points which live in {@code
+ * libchatx.so}.
  */
 public final class Capture {
     private static final String TAG = "chatx.capture";
+    /** Target size for the QR-scan camera. If the device doesn't expose
+     *  this exact size we pick the closest supported one (≥ target). */
+    private static final int TARGET_W = 640;
+    private static final int TARGET_H = 480;
+    /** Bridge PixelFormat.Gray8 (see crates/bridge/src/types.rs). */
+    private static final int FMT_GRAY8 = 8;
 
     private static volatile HandlerThread cameraThread;
     private static volatile Handler cameraHandler;
     private static volatile HandlerThread micThread;
     private static volatile Handler micHandler;
     private static volatile Activity activityRef;
+
+    /** Set in {@link CameraLoop#onOpened}, torn down in {@link
+     *  CameraLoop#onDisconnected}/{@link #stop()}. */
+    private static volatile CameraDevice cameraDevice;
+    private static volatile CameraCaptureSession cameraSession;
+    private static volatile ImageReader imageReader;
 
     public static synchronized void start(Activity activity) {
         if (cameraThread != null) {
@@ -60,6 +87,19 @@ public final class Capture {
 
     public static synchronized void stop() {
         if (cameraThread == null) return;
+
+        // Tear down the camera2 session first so we don't keep pumping
+        // frames into a thread we're about to quit.
+        CameraCaptureSession session = cameraSession;
+        CameraDevice device = cameraDevice;
+        ImageReader reader = imageReader;
+        cameraSession = null;
+        cameraDevice = null;
+        imageReader = null;
+        try { if (session != null) session.close(); } catch (Throwable ignored) {}
+        try { if (device  != null) device.close();  } catch (Throwable ignored) {}
+        try { if (reader  != null) reader.close();  } catch (Throwable ignored) {}
+
         cameraThread.quitSafely(); cameraThread = null; cameraHandler = null;
         micThread.quitSafely();    micThread = null;    micHandler = null;
         activityRef = null;
@@ -72,44 +112,197 @@ public final class Capture {
         return a.checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED;
     }
 
-    // ── Camera1 preview (RGB_565) ─────────────────────────────────────────
+    // ── Camera2 preview (YUV_420_888 → Y plane → GRAY8) ───────────────────
     static final class CameraLoop implements Runnable {
-        private static final int W = 320, H = 240;
+        /** Counts frames pushed to the Rust side, so we can throttle
+         *  logs to ~1 per 30 frames. */
+        private int frameN = 0;
+        private int resolvedW = 0;
+        private int resolvedH = 0;
 
         @Override
         public void run() {
-            Log.i(TAG, "[camera] loop started (Camera1)");
-            Camera cam = null;
+            Log.i(TAG, "[camera] loop started (Camera2)");
+            Activity activity = activityRef;
+            if (activity == null) {
+                Log.e(TAG, "[camera] no activity; aborting");
+                return;
+            }
+            CameraManager cm = (CameraManager) activity.getSystemService(android.hardware.camera2.CameraManager.class);
+            if (cm == null) {
+                Log.e(TAG, "[camera] no CameraManager; aborting");
+                return;
+            }
+
+            // Prefer a back-facing camera; fall back to the first one.
+            String cameraId = null;
             try {
-                int index = 0;
-                int n = Camera.getNumberOfCameras();
-                for (int i = 0; i < n; i++) {
-                    android.hardware.Camera.CameraInfo info = new android.hardware.Camera.CameraInfo();
-                    android.hardware.Camera.getCameraInfo(i, info);
-                    if (info.facing == android.hardware.Camera.CameraInfo.CAMERA_FACING_BACK) {
-                        index = i; break;
+                for (String id : cm.getCameraIds()) {
+                    Integer facing = cm.getCameraCharacteristics(id)
+                        .get(CameraCharacteristics.LENS_FACING);
+                    if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
+                        cameraId = id;
+                        break;
                     }
                 }
-                cam = Camera.open(index);
-                android.hardware.Camera.Parameters p = cam.getParameters();
-                p.setPreviewFormat(ImageFormat.RGB_565);
-                p.setPreviewSize(W, H);
-                cam.setParameters(p);
-                cam.setPreviewCallback(new Camera.PreviewCallback() {
-                    private int n = 0;
-                    @Override
-                    public void onPreviewFrame(byte[] data, android.hardware.Camera c) {
-                        if (data == null || data.length == 0) return;
-                        int r = NativeBridge.cameraFrameIn(data, data.length, W, H, ImageFormat.RGB_565);
-                        if ((n++ % 100) == 0) {
-                            Log.i(TAG, "[camera] frame#" + n + " " + data.length + "B ret=" + r);
-                        }
+                if (cameraId == null) {
+                    String[] ids = cm.getCameraIds();
+                    if (ids.length == 0) {
+                        Log.e(TAG, "[camera] no cameras found");
+                        return;
                     }
-                });
-                cam.startPreview();
-                Log.i(TAG, "[camera] preview started " + W + "x" + H);
+                    cameraId = ids[0];
+                }
             } catch (Throwable t) {
-                Log.e(TAG, "[camera] error: " + t);
+                Log.e(TAG, "[camera] enumerate cameras failed: " + t);
+                return;
+            }
+
+            Size chosen = pickBestSize(cm, cameraId);
+            if (chosen == null) {
+                Log.e(TAG, "[camera] could not resolve an image size");
+                return;
+            }
+            Log.i(TAG, "[camera] opening id=" + cameraId + " @ " + chosen.getWidth() + "x" + chosen.getHeight());
+            this.resolvedW = chosen.getWidth();
+            this.resolvedH = chosen.getHeight();
+
+            final ImageReader reader = ImageReader.newInstance(
+                chosen.getWidth(), chosen.getHeight(), ImageFormat.YUV_420_888, /*maxImages=*/ 2);
+            imageReader = reader;
+            reader.setOnImageAvailableListener(
+                new ImageReader.OnImageAvailableListener() {
+                    @Override public void onImageAvailable(ImageReader r) {
+                        onFrame(r.acquireLatestImage());
+                    }
+                },
+                cameraHandler);
+
+            try {
+                // CAMERA permission has already been granted by Shell.
+                cm.openCamera(cameraId, new DeviceCallback(), cameraHandler);
+            } catch (Throwable t) {
+                Log.e(TAG, "[camera] openCamera failed: " + t);
+            }
+        }
+
+        /** Pick the largest supported YUV_420_888 output size that is at
+         *  least TARGET_W × TARGET_H; fall back to the overall largest if
+         *  nothing meets the target. */
+        private static Size pickBestSize(CameraManager cm, String id) {
+            StreamConfigurationMap map;
+            Size[] sizes;
+            try {
+                map = cm.getCameraCharacteristics(id)
+                    .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            } catch (Throwable t) {
+                Log.e(TAG, "map failed: " + t);
+                return null;
+            }
+            if (map == null) return null;
+            sizes = map.getOutputSizes(ImageFormat.YUV_420_888);
+            if (sizes == null || sizes.length == 0) {
+                // Device doesn't expose YUV_420_888 (very rare). Try the
+                // nearest we can — fall back to a sensible default.
+                return new Size(TARGET_W, TARGET_H);
+            }
+            Size best = null;
+            for (Size s : sizes) {
+                if (s.getWidth() >= TARGET_W && s.getHeight() >= TARGET_H) {
+                    if (best == null || (s.getWidth() * s.getHeight()) > (best.getWidth() * best.getHeight())) {
+                        best = s;
+                    }
+                }
+            }
+            if (best == null) {
+                for (Size s : sizes) {
+                    if (best == null || (s.getWidth() * s.getHeight()) > (best.getWidth() * best.getHeight())) {
+                        best = s;
+                    }
+                }
+            }
+            return best;
+        }
+
+        private final class DeviceCallback extends CameraDevice.StateCallback {
+            @Override
+            public void onOpened(CameraDevice device) {
+                cameraDevice = device;
+                Log.i(TAG, "[camera] opened");
+                startRepeating(device);
+            }
+            @Override
+            public void onDisconnected(CameraDevice device) {
+                Log.i(TAG, "[camera] disconnected");
+                device.close();
+                cameraDevice = null;
+            }
+            @Override
+            public void onError(CameraDevice device, int error) {
+                Log.e(TAG, "[camera] camera error code=" + error);
+                device.close();
+                cameraDevice = null;
+            }
+        }
+
+        private void startRepeating(final CameraDevice device) {
+            try {
+                CaptureRequest.Builder req = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                req.addTarget(imageReader.getSurface());
+                req.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
+                device.createCaptureSession(
+                    Arrays.asList(imageReader.getSurface()),
+                    new CameraCaptureSession.StateCallback() {
+                        @Override
+                        public void onConfigured(final CameraCaptureSession session) {
+                            cameraSession = session;
+                            try {
+                                session.setRepeatingRequest(req.build(), null, cameraHandler);
+                                Log.i(TAG, "[camera] preview started");
+                            } catch (Throwable t) {
+                                Log.e(TAG, "[camera] setRepeatingRequest failed: " + t);
+                            }
+                        }
+                        @Override
+                        public void onConfigureFailed(CameraCaptureSession session) {
+                            Log.e(TAG, "[camera] session.configure failed");
+                        }
+                    },
+                    cameraHandler);
+            } catch (Throwable t) {
+                Log.e(TAG, "[camera] createCaptureSession failed: " + t);
+            }
+        }
+
+        /** Pull the Y plane out of a {@code YUV_420_888} Image, copy it
+         *  into a packed {@code w × h} byte buffer (rowStride-aware), push
+         *  to Rust via {@link NativeBridge#cameraFrameIn}, then close the
+         *  Image. */
+        private void onFrame(Image img) {
+            if (img == null || img.getFormat() != ImageFormat.YUV_420_888) {
+                if (img != null) img.close();
+                return;
+            }
+            try {
+                int w = img.getWidth();
+                int h = img.getHeight();
+                Image.Plane yPlane = img.getPlanes()[0];
+                java.nio.ByteBuffer buf = yPlane.getBuffer();
+                int rowStride = yPlane.getRowStride();
+                byte[] yBuf = new byte[w * h];
+                int pos = 0;
+                for (int row = 0; row < h; row++) {
+                    buf.position(row * rowStride);
+                    buf.get(yBuf, pos, w);
+                    pos += w;
+                }
+                int r = NativeBridge.cameraFrameIn(yBuf, yBuf.length, w, h, FMT_GRAY8);
+                if ((frameN++ % 30) == 0) {
+                    Log.i(TAG, "[camera] frame#" + frameN + " " + yBuf.length + "B " +
+                        w + "x" + h + " fmt=" + FMT_GRAY8 + " ret=" + r);
+                }
+            } finally {
+                img.close();
             }
         }
     }
@@ -121,15 +314,15 @@ public final class Capture {
 
         @Override
         public void run() {
-            Log.i(TAG, "[mic] loop started" + " @ " + RATE + " Hz");
+            Log.i(TAG, "[mic] loop started @ " + RATE + " Hz");
             int minBuf = android.media.AudioRecord.getMinBufferSize(RATE,
-                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                android.media.AudioFormat.CHANNEL_IN_MONO, android.media.AudioFormat.ENCODING_PCM_16BIT);
             if (minBuf <= 0) { Log.e(TAG, "[mic] bad minBuf=" + minBuf); return; }
-            AudioRecord rec = null;
+            android.media.AudioRecord rec = null;
             try {
-                rec = new AudioRecord(MediaRecorder.AudioSource.MIC, RATE,
-                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minBuf * 2);
-                if (rec.getState() != AudioRecord.STATE_INITIALIZED) {
+                rec = new android.media.AudioRecord(android.media.MediaRecorder.AudioSource.MIC, RATE,
+                    android.media.AudioFormat.CHANNEL_IN_MONO, android.media.AudioFormat.ENCODING_PCM_16BIT, minBuf * 2);
+                if (rec.getState() != android.media.AudioRecord.STATE_INITIALIZED) {
                     Log.e(TAG, "[mic] not initialized"); return;
                 }
                 byte[] frame = new byte[FRAME_S * 2];

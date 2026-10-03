@@ -57,7 +57,7 @@ pub unsafe extern "C" fn bridge_camera_frame_in(
         let slice = unsafe { std::slice::from_raw_parts(data, len) };
         owned = slice.to_vec().into_boxed_slice();
     }
-    if !sinks::camera::call(owned, width, height) {
+    if !sinks::camera::call(owned, width, height, fmt as u32) {
         return ERR_NO_CONSUMER;
     }
     ERR_OK
@@ -106,7 +106,7 @@ pub unsafe extern "C" fn bridge_screen_frame_in(
         let slice = unsafe { std::slice::from_raw_parts(data, len) };
         owned = slice.to_vec().into_boxed_slice();
     }
-    if !sinks::screen::call(owned, width, height) {
+    if !sinks::screen::call(owned, width, height, fmt as u32) {
         return ERR_NO_CONSUMER;
     }
     ERR_OK

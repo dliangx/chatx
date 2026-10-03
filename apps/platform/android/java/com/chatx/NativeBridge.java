@@ -21,6 +21,26 @@ public final class NativeBridge {
     public static native int audioPlayPcm(byte[] data, int len, int sampleRate, int channels);
     public static native int permissionChanged(int perm, int granted);
 
+    // ── Screen share ─────────────────────────────────────────────────────
+    //
+    // These are *regular* static methods (not native). Rust calls them as
+    // JNI statics (`call_static_void_method("startScreenShare", "()V")`)
+    // and they funnel into {@link ScreenShare}, which is where the
+    // MediaProjection / VirtualDisplay / ImageReader loop lives.
+    //
+    // The reverse direction (Java → Rust) is {@link #screenFrameIn(byte[], int, int, int, int)} —
+    // which *is* native and implemented in `crates/bridge/src/jni.rs`.
+
+    /** Launch the MediaProjection consent flow (must be on the UI thread). */
+    public static void startScreenShare() {
+        ScreenShare.requestPermission(Shell.activity());
+    }
+
+    /** Stop the capture and release the projection + virtual display. */
+    public static void stopScreenShare() {
+        ScreenShare.stop();
+    }
+
     private NativeBridge() {}
 
     /** Called from `Shell.onActivityCreate`. Auto-starts capture streams. */

@@ -7,40 +7,85 @@
 //!
 //! ## Design
 //!
-//! - **Fixed C-ABI**: all exported fns are `#[no_mangle] extern "C"`, args are
-//!   raw pointers / i32 / usize. No Rust pointers or traits cross the boundary.
+//! - **Fixed C-ABI**: all exported fns are `#[unsafe(no_mangle)] extern "C"`,
+//!   args are raw pointers / i32 / usize. No Rust pointers or traits cross
+//!   the boundary.
 //! - **Pixel formats / sample layouts** are integer constants (see
-//!   [`types::PixelFormat`], [`types::SAMPLE_LAYOUT_S16LE`]).
+//!   [`types::PixelFormat`]).
 //! - **Rust-side consumers**: call [`set_camera_consumer`],
 //!   [`set_audio_consumer`], [`set_screen_consumer`],
-//!   [`set_audio_sink`] on the UI thread during app startup. Callbacks run on
-//!   the thread the native shell used — it is the consumer's responsibility to
-//!   hop (e.g. `slint::invoke_from_event_loop`).
-//! - **Error convention**: every FFI fn returns `i32`. `0` = OK,
-//!   negative values are [`ffi::ERR_*`] codes.
+//!   [`set_audio_sink`] on the UI thread during app startup. Callbacks
+//!   run on the thread the native shell used — it is the consumer's
+//!   responsibility to hop (e.g. `slint::invoke_from_event_loop`).
+//! - **Error convention**: every FFI fn returns `i32`. `0` = OK, negative
+//!   values are [`ffi::ERR_*`] codes.
+//!
+//! ## Pixel format
+//!
+//! The shell decides how to deliver pixels — it sends `RGBA8888`,
+//! `GRAY8`, or one of the packed YUV formats (`NV12`, `NV21`, `I420`,
+//! `YV12`), and the Rust consumer receives `fmt` as a 4th argument so it
+//! can pick a decode path. The `RGBA8888`-only contract from the crate's
+//! v0.1 design is now **advisory** (the shell is encouraged to emit RGBA
+//! when convenient), not **required**.
 
 pub mod types;
 
 #[cfg(target_os = "ios")]
 pub mod ffi;
 
+#[cfg(all(target_os = "ios", feature = "has-ios-shim"))]
+mod shim_impl;
+
 #[cfg(target_os = "android")]
 pub mod jni;
 
 mod sinks;
 
-/// Register the consumer that receives **incoming camera frames** as RGBA8888.
+/// Ask the native shell to (start | stop) an in-app screen capture.
+/// - **Android**: JNI static call into `com.chatx.NativeBridge.{start,stop}ScreenShare()`
+///   (MediaProjection + VirtualDisplay + ImageReader).
+/// - **iOS**: extern "C" call into `chatx_screen_capture_{start,stop}()` from
+///   the ObjC shim (RPScreenRecorder). No-op with a stderr note when the
+///   `has-ios-shim` feature is off (no real iOS SDK on the build host).
+#[cfg(target_os = "android")]
+pub fn request_screen_share_start() {
+    jni::request_screen_share_start();
+}
+#[cfg(target_os = "android")]
+pub fn request_screen_share_stop() {
+    jni::request_screen_share_stop();
+}
+#[cfg(all(target_os = "ios", feature = "has-ios-shim"))]
+pub fn request_screen_share_start() {
+    shim_impl::request_screen_share_start();
+}
+#[cfg(all(target_os = "ios", feature = "has-ios-shim"))]
+pub fn request_screen_share_stop() {
+    shim_impl::request_screen_share_stop();
+}
+#[cfg(all(target_os = "ios", not(feature = "has-ios-shim")))]
+pub fn request_screen_share_start() {
+    eprintln!("[bridge] screen-share start: no iOS shim linked (enable feature `has-ios-shim`)");
+}
+#[cfg(all(target_os = "ios", not(feature = "has-ios-shim")))]
+pub fn request_screen_share_stop() {
+    eprintln!("[bridge] screen-share stop: no iOS shim linked");
+}
+
+/// Register the consumer that receives **incoming camera frames**.
 /// Call this on the UI thread during app startup, before the shell starts
 /// capture. Replace any previously-installed consumer.
 ///
-/// The callback receives the **already-converted** RGBA bytes (the shell does
-/// the pixel-format conversion; this crate never sees NV12/etc.) — the
-/// `PixelData.fmt` field will always be [`types::RGBA8888`] when reached here.
+/// The callback receives the raw bytes the shell sent, plus `w`, `h`, and
+/// `fmt` — a [`types::PixelFormat::as_i32()`] value. The Rust consumer
+/// (`camera::android` etc.) is responsible for interpreting `fmt` and
+/// selecting the right decode path.
 ///
 /// Not thread-restricted, but MUST be installed before the shell calls
 /// `bridge_camera_frame_in`. The callback is invoked on whatever thread the
 /// native capture side used.
-pub fn set_camera_consumer(cb: Box<dyn Fn(&[u8], u32, u32) + Send + 'static>) {
+pub fn set_camera_consumer(cb: Box<dyn Fn(&[u8], u32, u32, u32) + Send + 'static>) {
     sinks::camera::set(cb)
 }
 
@@ -52,9 +97,9 @@ pub fn set_audio_consumer(
     sinks::audio_in::set(cb)
 }
 
-/// Register the consumer that receives **incoming screen-capture frames** as
-/// RGBA8888 (see [`set_camera_consumer`] re: pixel format).
-pub fn set_screen_consumer(cb: Box<dyn Fn(&[u8], u32, u32) + Send + 'static>) {
+/// Register the consumer that receives **incoming screen-capture frames**.
+/// Same `(bytes, w, h, fmt)` shape as [`set_camera_consumer`].
+pub fn set_screen_consumer(cb: Box<dyn Fn(&[u8], u32, u32, u32) + Send + 'static>) {
     sinks::screen::set(cb)
 }
 
@@ -69,7 +114,12 @@ pub fn set_screen_consumer(cb: Box<dyn Fn(&[u8], u32, u32) + Send + 'static>) {
 /// Returns `true` if a consumer was installed and invoked, `false` if no
 /// consumer was present (same meaning as the FFI `ERR_NO_CONSUMER` (-3)).
 pub fn deliver_screen_frame(bytes: Vec<u8>, width: u32, height: u32) -> bool {
-    sinks::screen::call(bytes.into_boxed_slice(), width, height)
+    sinks::screen::call(
+        bytes.into_boxed_slice(),
+        width,
+        height,
+        types::PixelFormat::Rgba8888.as_i32() as u32,
+    )
 }
 
 /// Register the receiver that plays **outgoing speaker/remote audio** (s16le).
@@ -80,12 +130,18 @@ pub fn set_audio_sink(
     sinks::audio_out::set(cb)
 }
 
-/// Convenience: install camera consumer that logs frames to stderr. Useful for
-/// smoke-testing the FFI path before M2/M4 wires the real UI.
+/// Convenience: install camera consumer that logs frames to stderr. Useful
+/// for smoke-testing the FFI path before the UI wires up.
 #[cfg(debug_assertions)]
 pub fn install_debug_camera_consumer() {
-    set_camera_consumer(Box::new(|bytes, w, h| {
-        eprintln!("[bridge.debug] camera {}x{} {}B", w, h, bytes.len());
+    set_camera_consumer(Box::new(|bytes, w, h, fmt| {
+        eprintln!(
+            "[bridge.debug] camera {}x{} {}B fmt={}",
+            w,
+            h,
+            bytes.len(),
+            fmt
+        );
     }));
 }
 
