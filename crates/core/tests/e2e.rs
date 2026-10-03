@@ -209,6 +209,7 @@ async fn member_receives_group_key_and_msg() {
         sealed: Some(chatx_core::account::b64(&bundle)),
         kind: chatx_core::message::MsgKind::GroupKey,
         group_id: Some(GID.into()),
+        audio: None,
     };
 
     let handled = bob_c.apply_inbound(&key_req).await.unwrap().expect("GroupKey should be handled");
@@ -229,6 +230,7 @@ async fn member_receives_group_key_and_msg() {
         )),
         kind: chatx_core::message::MsgKind::GroupMsg,
         group_id: Some(GID.into()),
+        audio: None,
     };
     let m = bob_c.apply_inbound(&req).await.unwrap().expect("GroupMsg should be handled");
     match m {
@@ -260,6 +262,7 @@ async fn member_receives_group_key_and_msg() {
         sealed: Some(chatx_core::account::b64(&bundle2)),
         kind: chatx_core::message::MsgKind::GroupKey,
         group_id: Some(GID.into()),
+        audio: None,
     };
     bob_c.apply_inbound(&key_req2).await.unwrap();
     let now_group = bob_c.get_group(GID).unwrap();
@@ -403,6 +406,97 @@ async fn peer_addr(
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     panic!("client should have at least one ip4 listen addr; got {:?}", c.endpoints())
+}
+
+#[tokio::test(start_paused = false)]
+async fn realtime_audio_bidirectional() {
+    let base = TmpBase::new("audio");
+    let (dir_a, dir_b) = InMemoryDirectory::pair();
+
+    let (alice, _) = Client::bootstrap_in(base.path(), "au-a", "alice", "p", dir_a.clone())
+        .await
+        .expect("bootstrap alice");
+    let (bob, _) = Client::bootstrap_in(base.path(), "au-b", "bob", "p", dir_b.clone())
+        .await
+        .expect("bootstrap bob");
+
+    // Establish connectivity: alice dials bob.
+    let (bob_peer, bob_addr) = peer_addr(&bob).await;
+    alice
+        .running()
+        .cmd_tx
+        .send(chatx_core::swarm::Cmd::Connect { peer: bob_peer, addr: bob_addr })
+        .expect("connect cmd");
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    // Bob dials alice back so the link is symmetric.
+    let (alice_peer, alice_addr) = peer_addr(&alice).await;
+    bob
+        .running()
+        .cmd_tx
+        .send(chatx_core::swarm::Cmd::Connect { peer: alice_peer, addr: alice_addr })
+        .expect("connect cmd");
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    let bob58 = bob.peer_base58();
+    let alice58 = alice.peer_base58();
+
+    // A distinctive s16le pattern: 800 samples mono — encode as a known marker.
+    let marker: Vec<u8> = (0..800u16)
+        .flat_map(|i| (i as u16).to_le_bytes())
+        .collect();
+    let marker_len = marker.len();
+
+    // ── alice → bob ──
+    alice
+        .send_audio(bob_peer, 16_000, 1, marker.clone())
+        .expect("alice sends audio frame to bob");
+
+    let bob_got = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        let b = &bob;
+        loop {
+            use chatx_core::swarm::ChatEvent as E;
+            while let Some(evt) = b.try_next_event().await {
+                if let E::Audio { peer, rate, ch, data } = evt {
+                    if peer.to_base58() == alice58
+                        && data.len() == marker_len
+                        && rate == 16_000
+                        && ch == 1
+                        && data == marker
+                    {
+                        return true;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("bob should receive alice's audio frame over the wire");
+    assert!(bob_got, "bob received alice's frame");
+
+    // ── bob → alice (reverse direction) ──
+    bob
+        .send_audio(alice_peer, 48_000, 2, (0..400u16).flat_map(|i| i.to_le_bytes()).collect())
+        .expect("bob sends audio frame to alice");
+
+    let alice_got = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        let a = &alice;
+        loop {
+            use chatx_core::swarm::ChatEvent as E;
+            while let Some(evt) = a.try_next_event().await {
+                if let E::Audio { peer, .. } = evt {
+                    if peer.to_base58() == bob58 {
+                        return true;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("alice should receive bob's audio frame over the wire");
+    assert!(alice_got, "alice received bob's frame");
 }
 
 #[tokio::test(start_paused = false)]

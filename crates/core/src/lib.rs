@@ -587,6 +587,47 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         Ok(())
     }
 
+    /// Resolve a peer's current endpoint and request a connection. Called once
+    /// when a call starts; cached `PeerId` is used for every subsequent
+    /// [`send_audio`](Self::send_audio) frame.
+    pub fn dial_peer(&self, peer_base58: &str) -> anyhow::Result<PeerId> {
+        let rec = self
+            .dir
+            .resolve_device(peer_base58)
+            .map_err(|e| anyhow::anyhow!("peer {peer_base58} not in directory: {e}"))?;
+        let endpoint = rec
+            .endpoints
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("peer {peer_base58} is offline (no endpoints)"))?;
+        let peer: PeerId =
+            peer_base58.parse().map_err(|e| anyhow::anyhow!("bad peer id: {e}"))?;
+        let addr: Multiaddr =
+            endpoint.parse().map_err(|e| anyhow::anyhow!("bad endpoint: {e}"))?;
+        self.running.cmd_tx.send(Cmd::Connect { peer: peer.clone(), addr })?;
+        Ok(peer)
+    }
+
+    /// Transmit one realtime-audio frame (s16le PCM) to `peer`.
+    ///
+    /// Not persisted anywhere; the far end receives it as a
+    /// [`sw::ChatEvent::Audio`] and forwards it to its speaker sink. Cheap to
+    /// call every capture tick (tens of Hz) — it only enqueues one command on
+    /// the swarm loop.
+    pub fn send_audio(
+        &self,
+        peer: PeerId,
+        rate: u32,
+        ch: u32,
+        data: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let from = self.peer_base58();
+        let e2e = self.e2e_public().to_string();
+        self.running
+            .cmd_tx
+            .send(Cmd::SendAudio { peer, from, e2e, rate, ch, data })?;
+        Ok(())
+    }
+
     pub async fn send_dm(&self, peer_base58: &str, text: &str) -> anyhow::Result<String> {
         let rec = self
             .dir
@@ -645,6 +686,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
     pub async fn apply_inbound(&self, req: &message::ChatRequest) -> anyhow::Result<Option<InboundGroup>> {
         match req.kind {
             message::MsgKind::Dm => Ok(None),
+            message::MsgKind::Audio => Ok(None), // handled by the caller (playback sink)
             message::MsgKind::GroupKey => {
                 let group_id = req
                     .group_id

@@ -10,6 +10,24 @@ pub enum MsgKind {
     Dm,
     GroupKey,
     GroupMsg,
+    /// Realtime audio frame (s16le PCM, base64-transported inside the JSON
+    /// envelope). Not persisted to the chat store — routed straight to the
+    /// speaker-playback sink on the far end.
+    Audio,
+}
+
+/// One realtime-audio frame carried inside a [`ChatRequest::audio`].
+///
+/// - `rate` — sample rate in Hz of `data`
+/// - `ch`   — channel count (1 or 2)
+/// - `data` — base64(s16le PCM); `decoded.len() == samples * 2 * ch`
+///
+/// Carried as base64 so it survives the request/response JSON transport.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioPayload {
+    pub rate: u32,
+    pub ch: u32,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +41,8 @@ pub struct ChatRequest {
     pub kind: MsgKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

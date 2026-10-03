@@ -1,5 +1,5 @@
 use crate::identity::DeviceIdentity;
-use crate::message::{ChatRequest, ChatResponse};
+use crate::message::{AudioPayload, ChatRequest, ChatResponse};
 use anyhow::Result;
 pub use libp2p::gossipsub::IdentTopic;
 use libp2p::futures::StreamExt as _;
@@ -39,6 +39,14 @@ pub enum ChatEvent {
     Text {
         peer: PeerId,
         req: ChatRequest,
+    },
+    /// Inbound realtime-audio frame (decoded s16le PCM + rate/channels).
+    /// Delivered on arrival; not persisted.
+    Audio {
+        peer: PeerId,
+        rate: u32,
+        ch: u32,
+        data: Vec<u8>,
     },
     Acked {
         id: u64,
@@ -80,6 +88,15 @@ pub enum Cmd {
         from: String,
         e2e: String,
         text: String,
+    },
+    SendAudio {
+        peer: PeerId,
+        from: String,
+        e2e: String,
+        rate: u32,
+        ch: u32,
+        /// s16le PCM bytes (base64-encoded on the wire).
+        data: Vec<u8>,
     },
     GroupKeyDirect {
         peer: PeerId,
@@ -190,6 +207,32 @@ async fn swarm_loop(
                         sealed: None,
                         kind: crate::message::MsgKind::Dm,
                         group_id: None,
+                        audio: None,
+                    };
+                    let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
+                }
+                Some(Cmd::SendAudio {
+                    peer,
+                    from,
+                    e2e,
+                    rate,
+                    ch,
+                    data,
+                }) => {
+                    let id: u64 = rand::random();
+                    let req = ChatRequest {
+                        id,
+                        from,
+                        e2e,
+                        text: None,
+                        sealed: None,
+                        kind: crate::message::MsgKind::Audio,
+                        group_id: None,
+                        audio: Some(AudioPayload {
+                            rate,
+                            ch,
+                            data: crate::account::b64(&data),
+                        }),
                     };
                     let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
                 }
@@ -209,6 +252,7 @@ async fn swarm_loop(
                         sealed: Some(sealed),
                         kind: crate::message::MsgKind::GroupKey,
                         group_id: Some(group_id),
+                        audio: None,
                     };
                     let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
                 }
@@ -261,10 +305,23 @@ async fn swarm_loop(
                                 };
                                 let _ =
                                     swarm.behaviour_mut().chat.send_response(channel, resp);
-                                let _ = ev.send(ChatEvent::Text {
-                                    peer,
-                                    req: request,
-                                });
+                                if request.kind == crate::message::MsgKind::Audio {
+                                    if let Some(ap) = request.audio {
+                                        if let Some(data) = crate::account::from_b64(&ap.data) {
+                                            let _ = ev.send(ChatEvent::Audio {
+                                                peer,
+                                                rate: ap.rate,
+                                                ch: ap.ch,
+                                                data,
+                                            });
+                                        }
+                                    }
+                                } else {
+                                    let _ = ev.send(ChatEvent::Text {
+                                        peer,
+                                        req: request,
+                                    });
+                                }
                             }
                             RrMessage::Response { response, .. } => {
                                 let _ = ev.send(ChatEvent::Acked {
