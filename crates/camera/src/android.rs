@@ -1,5 +1,5 @@
 //! Android camera capture — consumes frames from the Java shell via the
-//! stable `bridge` C-ABI (JNI) and QR-decodes each frame with zbar.
+//! stable `bridge` C-ABI (JNI) and QR-decodes each frame with `rqrr`.
 //!
 //! The Java side (Camera2 + `ImageReader`) is started by the Activity host
 //! on `onCreate` and never stops — it is the persistent capture surface for

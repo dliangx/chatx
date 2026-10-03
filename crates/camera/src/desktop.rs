@@ -5,7 +5,7 @@
 //!   dedicated thread and delivers every raw frame to our `|Buffer|` callback.
 //! - We ask for **YUYV** at 640×480 — universally available on Media
 //!   Foundation and V4L2 webcams, and the `Y` planes of YUYV are exactly the
-//!   greyscale data zbar's `Y800` input format expects, so per-frame cost is
+//!   greyscale data the QR decoder expects, so per-frame cost is
 //!   one `Vec` + a stride loop (no colour-space library pulled in).
 //! - A single global [`SINK`] slot (same pattern Apple uses in `macos.rs`)
 //!   receives decoded payloads; the app installs its UI hop there.
@@ -42,7 +42,7 @@ fn handle_frame(buf: Buffer) {
 }
 
 /// YUYV = `Y0 U Y1 V` (2 bytes per pixel). Return only the Y planes — the
-/// zbar input format we scan against.
+/// greyscale format the QR decoder consumes.
 fn yuyv_to_gray(data: &[u8], w: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity((w as usize) * (data.len() / 2));
     let mut i = 0usize;

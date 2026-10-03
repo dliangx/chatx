@@ -32,8 +32,8 @@ pub enum PixelFormat {
     /// 1 byte per pixel: 8-bit greyscale (Y-only).
     ///
     /// For camera QR decoding, the shell extracts the Y plane of a YUV
-    /// frame and sends it as GRAY8 so zbar can consume it directly with
-    /// no colour-space arithmetic on the Rust side.
+    /// frame and sends it as GRAY8 so the QR decoder can consume it directly
+    /// with no colour-space arithmetic on the Rust side.
     Gray8 = 8,
     /// 2 bytes per pixel: 16-bit packed RGB (5R-6G-5B), little-endian u16.
     ///

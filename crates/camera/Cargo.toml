@@ -20,27 +20,24 @@ objc2-core-media = { version = "0.3.2" }
 objc2-av-foundation = { version = "0.3.2" }
 dispatch2 = { version = "0.3", features = ["objc2"] }
 
-# Windows + Linux: nokhwa for capture, zbar for QR decoding.
+# Windows + Linux: nokhwa for capture, rqrr (pure Rust) for QR decoding.
 #   `input-native`    — picks the platform backend (Media Foundation / V4L2)
 #   `output-threaded` — callback-style Camera (our `callback` per frame)
-#   `decoding` (default) — pulls `image` so any source format is convertible.
-[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 # default-features=false keeps the `image` codec stack (mozjpeg/avif/…) out,
 # so cross-compiling needs no C toolchain for those. We read raw YUYV/GRAY
 # directly, so no decoding feature is required.
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 nokhwa = { version = "0.10.11", default-features = false, features = [
     "input-native",
     "output-threaded",
 ] }
-zbar = "0.1"
+# default-features=false turns off the `img` feature (which would pull in the
+# `image` crate). We feed raw greyscale frames via `prepare_from_greyscale`.
+rqrr = { version = "0.11", default-features = false }
 
 # Android: capture already runs in the Java shell (Camera1) and reaches us
-# through the `bridge` JNI consumer; we only depend on zbar to decode the
-# frames it delivers.
-#
-# NOTE: zbar links `libzbar` at build time. On Android the NDK must provide
-# libzbar.so (bundle it in jniLibs). Windows/Linux expect `zbar` on the
-# linker search path.
+# through the `bridge` JNI consumer; we only depend on rqrr to decode the
+# frames it delivers. Pure Rust, so no native library or NDK package is needed.
 [target.'cfg(target_os = "android")'.dependencies]
-zbar = "0.1"
+rqrr = { version = "0.11", default-features = false }
 bridge = { path = "../bridge" }

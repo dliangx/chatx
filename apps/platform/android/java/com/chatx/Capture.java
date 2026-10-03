@@ -29,8 +29,8 @@ import java.util.Arrays;
  * largest supported size ≥ 640×480). Every available frame is reduced to
  * its Y plane and pushed through
  * {@link NativeBridge#cameraFrameIn(byte[], int, int, int)} with
- * {@code fmt = 8} (Gray8) — zbar on the Rust side consumes that directly
- * with no colour-space arithmetic.
+  * {@code fmt = 8} (Gray8) — the QR decoder on the Rust side consumes that
+  * directly with no colour-space arithmetic.
  *
  * Mic via {@code AudioRecord} (mono 16 kHz s16le) unchanged from prior
  * versions.
