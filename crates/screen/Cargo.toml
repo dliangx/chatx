@@ -1,0 +1,16 @@
+[package]
+name = "screen"
+version = "0.1.0"
+edition = "2024"
+description = "Desktop screen-capture streaming (xcap). Mobile shells capture natively and deliver via the bridge FFI."
+
+[lib]
+name = "screen"
+
+# xcap 0.9 targets macOS (ScreenCaptureKit / CGDisplay),
+# Windows (Graphics Capture), Linux (Pipewire / wayland / X11). It is NOT
+# compiled for iOS / Android — those platforms capture in the native shell
+# (ReplayKit / MediaProjection) and deliver via the bridge C-ABI. So we gate
+# the dependency to the desktop targets only.
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+xcap = "0.9"
