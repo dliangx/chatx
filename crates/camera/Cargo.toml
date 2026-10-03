@@ -5,7 +5,8 @@ edition = "2024"
 
 [dependencies]
 
-[target.'cfg(target_os = "macos")'.dependencies]
+# macOS + iOS share AVFoundation; the same objc2 bindings work on both.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2" }
 objc2-core-foundation = { version = "0.3.2" }
