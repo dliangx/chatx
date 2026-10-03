@@ -1,0 +1,9 @@
+# Android cross-compile + linking config for chatx.
+#
+# Slint's Android backend requires API >= 26, and several transitive crates
+# (if-watch -> getifaddrs/freeifaddrs) need bionic symbols that only exist
+# from API 24+. Use the API-26 NDK clang as the ELF linker so it resolves
+# against the correct bionic, and is not the macOS host `cc` (whose ld64
+# rejects Rust's --version-script / -Bstatic / -z flags).
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android26-clang"
