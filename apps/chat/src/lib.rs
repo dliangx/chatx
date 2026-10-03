@@ -12,9 +12,13 @@ use render::Renderer;
 
 pub mod data;
 use data::ArcBackend;
+pub mod call;
 
-#[cfg(target_os = "macos")]
+// `camera::Camera` exists on every target (Apple: AVFoundation impl, others:
+// no-op fallback whose `start()` reports "unsupported"), so import it
+// unconditionally. The *usage* below is still gated to Apple.
 use camera::Camera;
+use screen::Screen;
 
 slint::include_modules!();
 
@@ -29,6 +33,7 @@ thread_local! {
     static GROUP_PICKED: RefCell<Vec<i32>> = RefCell::new(Vec::new());
     static PUMP_STARTED: std::cell::Cell<bool> = std::cell::Cell::new(false);
     static CAMERA: RefCell<Option<Camera>> = RefCell::new(None);
+    static SCREEN: RefCell<Option<Screen>> = RefCell::new(None);
 }
 
 /// Shared renderer, initialized lazily (font parsing is expensive) and shared
@@ -87,7 +92,16 @@ fn clear_passphrase(_user_id: &str) {
     let _ = std::fs::remove_file(autologin_path());
 }
 
-pub fn main() {
+/// Application entry shared by every platform.
+///
+/// - Desktop: called from `main.rs` (`fn main`).
+/// - iOS: the platform `main` (Rust binary) calls this.
+/// - Android: `android_main` (see below) calls this once Slint's android
+///   backend has initialised the activity.
+///
+/// Sets up the window, wires every Slint callback into the tokio-based
+/// business logic, and blocks in `ui.run()` (the Slint event loop).
+pub fn run_app() {
     let ui = MainWindow::new().expect("window init failed");
     let state = ui.global::<AppState>();
     let weak = ui.as_weak();
@@ -354,7 +368,27 @@ pub fn main() {
     {
         let weak = weak.clone();
         ui.global::<ProfileState>().on_start_screen_share(move || {
-            show_call_overlay(weak.clone(), GlobalOverlayType::ScreenShare);
+            begin_screen_share(weak.clone());
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<AppState>().on_stop_screen_share(move || {
+            end_screen_share(weak.clone());
+        });
+    }
+
+    // ---- Realtime voice call (M7) ----
+    {
+        let weak = weak.clone();
+        ui.global::<CallState>().on_start_call(move |key| {
+            begin_voice_call(weak.clone(), key);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<CallState>().on_end_call(move || {
+            end_voice_call(weak.clone());
         });
     }
 
@@ -404,7 +438,7 @@ pub fn main() {
             state.set_scan_result(SharedString::new());
             state.set_scan_status(SharedString::from("摄像头已启动，请对准二维码…"));
 
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             {
                 CAMERA.with(|slot| {
                     if slot.borrow().is_none() {
@@ -436,7 +470,7 @@ pub fn main() {
                     }
                 });
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
             {
                 state.set_scan_status(SharedString::from("当前平台不支持摄像头扫描"));
             }
@@ -446,7 +480,7 @@ pub fn main() {
     {
         let w = weak.clone();
         ui.global::<AppState>().on_scanner_stop(move || {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             CAMERA.with(|slot| {
                 if let Some(cam) = slot.borrow_mut().as_mut() {
                     cam.stop();
@@ -466,6 +500,48 @@ pub fn main() {
     }
 
     ui.run().expect("window run failed");
+}
+
+/// Android entry point (see slint::android module docs). The `android-activity`
+/// crate provides the `android_main` C entry symbol; this function is the
+/// Rust-side callback invoked by Slint once the native activity is attached.
+/// We initialise the Slint android backend and then drive the shared
+/// `run_app()` which blocks in the Slint event loop — exactly like desktop.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub fn android_main(app: slint::android::AndroidApp) {
+    slint::android::init(app).unwrap();
+    // Install the capture sinks that the Kotlin shell calls into (see
+    // `crates/bridge/src/jni.rs`). Frame callbacks arrive on the capture
+    // thread; we hop to the Slint event loop before touching the UI.
+    install_bridge_sinks();
+    run_app();
+}
+
+/// Install the Rust-side consumers for the bridge JNI entry points. Until the
+/// webrtc layer (M7) lands, the sinks log frames to stderr so we can verify
+/// the full Kotlin → JNI → Rust pipeline on a device.
+#[cfg(target_os = "android")]
+fn install_bridge_sinks() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static FRAME_N: AtomicU64 = AtomicU64::new(0);
+    static AUDIO_N: AtomicU64 = AtomicU64::new(0);
+
+    bridge::set_camera_consumer(Box::new(move |bytes, w, h| {
+        let n = FRAME_N.fetch_add(1, Ordering::Relaxed);
+        if n % 100 == 0 {
+            eprintln!("[bridge] camera #{} {}x{} {}B", n, w, h, bytes.len());
+        }
+    }));
+    bridge::set_audio_consumer(Box::new(move |bytes, rate, ch| {
+        let n = AUDIO_N.fetch_add(1, Ordering::Relaxed);
+        if n % 100 == 0 {
+            eprintln!("[bridge] audio #{} {}B @{}Hz/{}ch", n, bytes.len(), rate, ch);
+        }
+    }));
+    bridge::set_screen_consumer(Box::new(move |bytes, w, h| {
+        eprintln!("[bridge] screen {}x{} {}B", w, h, bytes.len());
+    }));
 }
 
 fn push_sub_history(app: &AppState, entry: SubPageEntry) {
@@ -620,8 +696,8 @@ fn apply_result(
 }
 
 /// Spawn a long-lived task that receives inbound events (DM, group key
-/// distribution, group messages) and refreshes the affected conversations in
-/// the UI. Started once per login.
+/// distribution, group messages, and realtime audio) and refreshes the
+/// affected conversations in the UI. Started once per login.
 fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
     if PUMP_STARTED.get() {
         return;
@@ -638,6 +714,15 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
             let Some(evt) = client.next_event().await else {
                 break;
             };
+            // ── Realtime audio: route directly to the speaker queue. ──────
+            if let chatx_core::swarm::ChatEvent::Audio { data, rate, ch, .. } = &evt {
+                let data = data.clone();
+                let (r2, c2) = (*rate, *ch);
+                let _ = slint::invoke_from_event_loop(move || {
+                    call::play_incoming(data, r2, c2);
+                });
+                continue;
+            }
             let touched = client.process_event(evt).await;
             if let Some(touched) = touched {
                 refresh_inbound_chat(weak.clone(), touched).await;
@@ -1585,6 +1670,153 @@ fn show_call_overlay(weak: slint::Weak<MainWindow>, overlay: GlobalOverlayType) 
             state.set_nav_state(nav);
         }
     });
+}
+
+/// Push call-state into the global `CallState` (UI thread).
+fn publish_call_state(
+    weak: slint::Weak<MainWindow>,
+    peer_base58: Option<String>,
+    peer_name: Option<String>,
+    active: bool,
+) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            let cs = ui.global::<CallState>();
+            cs.set_active(active);
+            if let Some(p) = peer_base58 {
+                cs.set_peer_base58(SharedString::from(p));
+            }
+            if let Some(n) = peer_name {
+                cs.set_peer_name(SharedString::from(n));
+            }
+        }
+    });
+}
+
+/// Start a realtime voice call to the contact with the given `key`.
+/// Resolves the peer, opens the call (mic + speaker via cpal), then shows the
+/// in-call overlay. The inbound audio pump (started in `apply_result`) routes
+/// any far-end frames into the speaker queue.
+///
+/// Must run on the UI thread — the Slint event loop owns `call::CALL` (a
+/// thread_local) and cpal's streams.
+fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
+    let client = CLIENT.with(|s| s.borrow().clone());
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let (Some(client), Some(backend)) = (client, backend) else {
+        publish_call_state(weak, None, None, false);
+        return;
+    };
+    let client = Arc::new(client);
+
+    let (peer_base58, peer_name) = {
+        let g = backend.blocking_read();
+        // `peer_id_for` returns the contact's base-58 peer id (what we use as
+        // the directory username to resolve).
+        let Some(pid) = g.peer_id_for(key).map(|s| s.to_string()) else {
+            return;
+        };
+        let name = g
+            .contacts
+            .iter()
+            .find(|r| r.key == key)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| pid.clone());
+        (pid, name)
+    };
+
+    // Resolve so we can confirm they're registered; `dial_peer` (inside
+    // `start_call`) needs the directory entry to exist.
+    if let Err(e) = client.resolve_user(&peer_base58) {
+        eprintln!("[chat] begin_voice_call: resolve {peer_base58}: {e}");
+        let weak2 = weak.clone();
+        let name = peer_name.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak2.upgrade() {
+                ui.set_auth_message(SharedString::from(format!("对端离线: {name}")));
+            }
+        });
+        return;
+    }
+
+    match call::start_call(Arc::clone(&client), &peer_base58) {
+        Ok(()) => {
+            publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
+            show_call_overlay(weak, GlobalOverlayType::AudioCall);
+        }
+        Err(e) => {
+            publish_call_error(weak, format!("通话开始失败: {e}"));
+        }
+    }
+}
+
+fn publish_call_error(weak: slint::Weak<MainWindow>, msg: String) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_auth_message(SharedString::from(msg));
+        }
+    });
+}
+
+/// Hang up the active call (if any) and clear the in-call overlay.
+///
+/// Runs on the UI thread (same reasoning as `begin_voice_call`).
+fn end_voice_call(weak: slint::Weak<MainWindow>) {
+    let had_active = call::is_active();
+    call::stop_call();
+    if had_active {
+        publish_call_state(weak.clone(), None, None, false);
+        show_call_overlay(weak, GlobalOverlayType::None);
+    }
+}
+
+/// Log a captured screen frame (accounting + a heartbeat print). Real screen
+/// *transfer* to a peer needs a video codec (M7b) and is intentionally not in
+/// scope here — this is the capture-side funnel.
+fn handle_screen_frame(_bytes: Vec<u8>, w: u32, h: u32) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    if n % 30 == 0 {
+        eprintln!("[screen] frame #{} {}x{}", n, w, h);
+    }
+}
+
+/// Begin a screen share: on desktop this starts the local [`screen`] capture
+/// crate and routes its frames into the unified handler; on iOS / Android the
+/// capture itself is done by the native shell (ReplayKit / MediaProjection)
+/// which already funnels into the bridge sink. Either way the overlay comes up.
+fn begin_screen_share(weak: slint::Weak<MainWindow>) {
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        SCREEN.with(|slot| {
+            if slot.borrow().is_none() {
+                *slot.borrow_mut() = Some(Screen::new());
+            }
+            let mut guard = slot.borrow_mut();
+            let scr = guard.as_mut().expect("screen inited");
+            if !scr.is_running() {
+                scr.set_sink(handle_screen_frame);
+                if let Err(err) = scr.start() {
+                    eprintln!("[screen] start failed: {err}");
+                }
+            }
+        });
+    }
+    show_call_overlay(weak, GlobalOverlayType::ScreenShare);
+}
+
+/// Stop the active screen share and clear the overlay.
+fn end_screen_share(weak: slint::Weak<MainWindow>) {
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        SCREEN.with(|slot| {
+            if let Some(s) = slot.borrow_mut().as_mut() {
+                s.stop();
+            }
+        });
+    }
+    show_call_overlay(weak, GlobalOverlayType::None);
 }
 
 /// Convert a unix timestamp (ms or s) to `YYYY-MM-DD`.

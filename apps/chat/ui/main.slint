@@ -30,6 +30,8 @@ import { ImageViewer } from "global/image.slint";
 import { QrCodeView } from "global/qrcode.slint";
 import { VideoView } from "global/video.slint";
 import { ScreenShareView } from "global/screen.slint";
+import { AudioCallView, CallState } from "global/audio_call.slint";
+export { CallState } from "global/audio_call.slint";
 import { ErrorView } from "global/error.slint";
 import { AddMenuView } from "global/add.slint";
 
@@ -219,6 +221,7 @@ export component MainWindow inherits Window {
 
     if AppState.nav-state.global-overlay == GlobalOverlayType.ImageViewer: ImageViewer { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.QrScanner: ScanView { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.AudioCall: AudioCallView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.VideoCall: VideoView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.ScreenShare: ScreenShareView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.QrCode: QrCodeView { }

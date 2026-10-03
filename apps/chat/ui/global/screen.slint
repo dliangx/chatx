@@ -1,13 +1,54 @@
 import { GlobalOverlayType, AppState } from "../components/app_state.slint";
+
 export component ScreenShareView inherits Rectangle {
-    in property <bool> isMuted;
-    in property <bool> isSpeakerOn;
     width: 100%;
     height: 100%;
-    background: #00000088;
-    TouchArea {
-        width: 100%;
-        height: 100%;
-        clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; }
+    background: #0b0e14;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 14px;
+        padding-top: 72px;
+        padding-bottom: 72px;
+
+        Text {
+            text: "屏幕共享";
+            font-size: 26px;
+            color: #f0f3f7;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: "正在共享桌面（此窗口为占位展示）";
+            font-size: 13px;
+            color: #8b95a3;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: AppState.peer-id;
+            font-size: 11px;
+            color: #556070;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+            max-width: 240px;
+        }
+
+        Rectangle {
+            width: 88px;
+            height: 46px;
+            border-radius: 23px;
+            background: #ff4545;
+            Text {
+                text: "结束共享";
+                color: #ffffff;
+                font-size: 15px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+            TouchArea {
+                clicked => { AppState.stop-screen-share(); }
+            }
+        }
     }
 }

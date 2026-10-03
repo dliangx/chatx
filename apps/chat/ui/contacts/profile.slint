@@ -4,6 +4,7 @@ import { Theme } from "../theme.slint";
 import { AppState } from "../components/app_state.slint";
 import { Header } from "../components/header.slint";
 import { ProfileItem, SettingItem } from "../components/item.slint";
+import { CallState } from "../global/audio_call.slint";
 
 export global ProfileState {
     in-out property <int> key: -1;
@@ -197,8 +198,8 @@ export component ContactProfileView inherits Rectangle {
                         width: 33%;
                         id: 2;
                         icon: Glyph.video;
-                        title: "Video Call";
-                        clicked => { ProfileState.start-video-call(); }
+                        title: "语音通话";
+                        clicked => { CallState.start-call(root.user-id); }
                     }
 
                     SettingItem {

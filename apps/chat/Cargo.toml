@@ -6,8 +6,8 @@ edition = "2024"
 [dependencies]
 render = {path = "../../crates/render"}
 slint = {workspace = true}
-arboard = "3"
 chatx-core = { path = "../../crates/core" }
+libp2p = { workspace = true }
 sqlite = { path = "../../crates/sqlite" }
 sqlx = { workspace = true }
 tokio = { workspace = true }
@@ -15,10 +15,26 @@ anyhow = { workspace = true }
 serde_json = { workspace = true }
 qrcode = { workspace = true }
 camera = { path = "../../crates/camera" }
+screen = { path = "../../crates/screen" }
+bridge = { path = "../../crates/bridge" }
+audio = { path = "../../crates/audio" }
 pinyin = "0.11"
 
 [build-dependencies]
 slint-build = {workspace = true}
+
+# iOS renders via the Skia backend (winit backend forces Skia on Apple
+# non-macOS targets; declared explicitly to be unambiguous).
+[target.'cfg(target_os = "ios")'.dependencies.slint]
+workspace = true
+features = ["renderer-skia"]
+
+# Android backend (android-activity based; provides the `slint::android`
+# entry-point + a native Activity host). Target-gated so it never affects
+# iOS / desktop resolution.
+[target.'cfg(target_os = "android")'.dependencies.slint]
+workspace = true
+features = ["backend-android-activity-06"]
 
 [lib]
 name = "chatx"

@@ -6,6 +6,7 @@ members = [
     "crates/*",
     "signaling",
     "crates/camera",
+    "crates/screen",
     "crates/core",
     "crates/render",
     "apps/bot",

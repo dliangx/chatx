@@ -1,3 +1,3 @@
 fn main() {
-    chatx::main();
+    chatx::run_app();
 }
