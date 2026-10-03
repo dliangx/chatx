@@ -63,6 +63,14 @@ macro_rules! pixel_slot {
                 }));
             }
 
+            /// Invoke the installed consumer, if any. Returns `true` when a
+            /// consumer was present and ran, `false` otherwise.
+            ///
+            /// Cross-target: on mobile this is driven by `jni.rs`/`ffi.rs`;
+            /// on desktop most slots are installed but only `deliver_screen_*`
+            /// routes through `sinks::screen::call`, leaving the rest unreferenced —
+            /// hence the `allow(dead_code)`.
+            #[allow(dead_code)]
             pub fn call(bytes: Box<[u8]>, a: u32, b: u32, fmt: u32) -> bool {
                 slot().call((bytes, a, b, fmt))
             }
@@ -90,6 +98,7 @@ macro_rules! audio_slot {
                 }));
             }
 
+            #[allow(dead_code)]
             pub fn call(bytes: Box<[u8]>, a: u32, b: u32) -> bool {
                 slot().call((bytes, a, b))
             }
