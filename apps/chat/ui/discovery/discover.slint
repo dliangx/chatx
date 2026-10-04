@@ -13,7 +13,7 @@ export component DiscoverView inherits Rectangle {
     background: Theme.bg;
 
     out property <length> gap: 8px;
-    out property <int> n-cols: (AppState.is-mobile) ? 2 : 1;
+    out property <int> n-cols:  2;
     out property <length> col-w: (root.width - (root.n-cols + 1) * root.gap) / root.n-cols;
     out property <length> card-h: root.col-w * 4 / 3 + 90px;
     out property <int> n-rows: (root.cards.length > 0)

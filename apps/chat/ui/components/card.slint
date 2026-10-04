@@ -12,94 +12,92 @@ export component CardView inherits Rectangle {
     callback like-toggled();
 
     out property <length> cover-h: root.width * 4 / 3;
-    out property <length> content-h: root.cover-h + 90px;
+    out property <length> content-h: root.cover-h + 56px;
 
     height: root.content-h;
-    border-radius: 16px;
+
     clip: true;
 
-    Rectangle {
-        x: 0px;
-        y: 0px;
-        width: root.width;
-        height: root.cover-h;
-        background: #f2f2f5;
-    }
+    VerticalLayout {
+        spacing: 8px;
+        Rectangle {
 
-    Image {
-        x: 0px;
-        y: 0px;
-        width: root.width;
-        height: root.cover-h;
-        source: root.image;
-        image-fit: cover;
-    }
+            width: root.width;
+            height: root.cover-h;
+            border-radius: 8px;
+            background: #f2f2f5;
+            Image {
+                width: root.width;
+                height: root.cover-h;
+                source: root.image;
+                image-fit: cover;
+            }
 
-    Text {
-        x: 12px;
-        y: root.cover-h + 14px;
-        width: root.width - 24px;
-        height: 40px;
-        text: root.title;
-        font-size: 15px;
-        font-weight: 700;
-        color: Theme.fg;
-        wrap: word-wrap;
-        overflow: elide;
-    }
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { root.clicked(root.id); }
+            }
+        }
 
-    Rectangle {
-        x: 12px;
-        y: root.cover-h + 58px;
-        width: 16px;
-        height: 16px;
-        border-radius: 8px;
-        background: #a0aec0;
-    }
+        Text {
 
-    Text {
-        x: 34px;
-        y: root.cover-h + 58px;
-        width: 160px;
-        height: 16px;
-        text: root.user;
-        font-size: 12px;
-        vertical-alignment: center;
-        overflow: elide;
-        color: Theme.fg-muted;
-    }
+            width: root.width;
+            height: 24px;
+            text: root.title;
+            font-size: 12px;
+            font-weight: 500;
+            color: Theme.fg;
+            wrap: word-wrap;
+            overflow: clip;
+        }
 
-    Icon {
-        x: root.width - 32px;
-        y: root.cover-h + 56px;
-        size: 18px;
-        glyph: Glyph.heart;
-        tint: root.is-liked ? #ff2442 : #d9d9de;
-    }
+        Rectangle {
+            width: root.width;
+            height: 16px;
 
-    Text {
-        x: root.width - 110px;
-        y: root.cover-h + 58px;
-        width: 70px;
-        height: 16px;
-        text: root.likes;
-        font-size: 12px;
-        horizontal-alignment: right;
-        vertical-alignment: center;
-        color: root.is-liked ? #ff2442 : Theme.fg-muted;
-    }
+            Rectangle {
+                x: 0px;
+                width: 16px;
+                height: 16px;
+                border-radius: 8px;
+                background: #a0aec0;
+            }
 
-    TouchArea {
-        width: 100%;
-        height: 100%;
-        clicked => { root.clicked(root.id); }
-    }
+            Text {
+                x: 20px;
+                width: root.width - 40px;
+                height: 16px;
+                text: root.user;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+                color: Theme.fg-muted;
+            }
 
-    TouchArea {
-        x: root.width - 110px;
-        y: root.cover-h + 52px;
-        width: 100px;
-        height: 24px;
-        clicked => { root.like-toggled(); }
+            Text {
+                x: root.width - 60px;
+                width: 40px;
+                height: 16px;
+                text: root.likes;
+                font-size: 12px;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                color: root.is-liked ? #ff2442 : Theme.fg-muted;
+            }
+
+            Icon {
+                x: root.width - 18px;
+                y: (parent.height - 18px) / 2;
+                size: 18px;
+                glyph: Glyph.heart;
+                tint: root.is-liked ? #ff2442 : #d9d9de;
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => { root.like-toggled(); }
+                }
+            }
+        }
     }
 }
