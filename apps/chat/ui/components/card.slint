@@ -12,7 +12,7 @@ export component CardView inherits Rectangle {
     callback like-toggled();
 
     out property <length> cover-h: root.width * 4 / 3;
-    out property <length> content-h: root.cover-h + 56px;
+    out property <length> content-h: root.cover-h + 60px;
 
     height: root.content-h;
 
@@ -43,9 +43,9 @@ export component CardView inherits Rectangle {
         Text {
 
             width: root.width;
-            height: 24px;
+            height: 28px;
             text: root.title;
-            font-size: 12px;
+            font-size: 14px;
             font-weight: 500;
             color: Theme.fg;
             wrap: word-wrap;
