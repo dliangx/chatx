@@ -21,8 +21,13 @@ use nokhwa::utils::{
 };
 
 type QrSinkFn = Box<dyn Fn(String) + Send + 'static>;
+type FrameSinkFn = Box<dyn Fn(&[u8], u32, u32, u32) + Send + 'static>;
 
 static SINK: OnceLock<Mutex<QrSinkFn>> = OnceLock::new();
+/// Installed by `Camera::set_frame_sink`. Receives raw YUYV frames before
+/// they pass through the QR pipeline (i.e. the full-resolution buffer,
+/// not the greyscaled subset).
+static FRAME_SINK: OnceLock<Mutex<Option<FrameSinkFn>>> = OnceLock::new();
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
 fn notify(payload: String) {
@@ -33,11 +38,33 @@ fn notify(payload: String) {
     }
 }
 
+fn notify_frame(bytes: &[u8], w: u32, h: u32, fmt: u32) {
+    if let Some(slot) = FRAME_SINK.get() {
+        if let Ok(g) = slot.lock() {
+            if let Some(cb) = g.as_ref() {
+                cb(bytes, w, h, fmt);
+            }
+        }
+    }
+}
+
 fn handle_frame(buf: Buffer) {
     let res = buf.resolution();
     let w = res.width();
     let h = res.height();
-    let gray = yuyv_to_gray(buf.buffer(), w);
+    let raw = buf.buffer().to_vec();
+    // YUYV is interleaved (Y0 U Y1 V). The preview sink receives the raw
+    // bytes so the consumer can decode whatever it likes; for the QR
+    // pipeline below we already know the format — pull the Y planes and
+    // push a greyscale `w` × `h` buffer to the `FRAME_SINK` for convenience.
+    let gray = yuyv_to_gray(&raw, w);
+    if let Some(slot) = FRAME_SINK.get() {
+        if let Ok(g) = slot.lock() {
+            if let Some(cb) = g.as_ref() {
+                cb(&gray, w, h, 8); // PixelFormat::Gray8
+            }
+        }
+    }
     scan::scan_gray(&gray, w, h, &|text| notify(text));
 }
 
@@ -83,6 +110,20 @@ impl Camera {
             }
         } else {
             let _ = SINK.set(Mutex::new(Box::new(sink)));
+        }
+    }
+
+    /// Install the preview-frame sink. Called from the nokhwa callback
+    /// thread with the greyscale Y-plane view of each YUYV frame (i.e.
+    /// `fmt = 8` (Gray8), `w` × `h` bytes). No-op with a warning if the
+    /// camera is not running.
+    pub fn set_frame_sink<F: Fn(&[u8], u32, u32, u32) + Send + 'static>(&self, sink: F) {
+        if let Some(slot) = FRAME_SINK.get() {
+            if let Ok(mut g) = slot.lock() {
+                *g = Some(Box::new(sink));
+            }
+        } else {
+            let _ = FRAME_SINK.set(Mutex::new(Some(Box::new(sink))));
         }
     }
 

@@ -1,13 +1,14 @@
 //! Camera capture + native QR-code recognition.
 //!
 //! One public [`Camera`] type with the same surface on every target —
-//! `new`, `set_sink`, `is_running`, `start`, `stop` — so the app drives it
-//! identically no matter where it runs.
+//! `new`, `set_sink`, `set_frame_sink`, `is_running`, `start`, `stop` — so
+//! the app drives it identically no matter where it runs.
 //!
 //! - **macOS / iOS**: AVFoundation (`AVCaptureMetadataOutput`) + Apple's
-//!   built-in QR decoder (no external library). See `apple.rs` → `macos.rs`.
-//!   iOS additionally exposes [`authorization_status`] to query the camera
-//!   grant state without prompting.
+//!   built-in QR decoder, driven by a Swift shim (`shim/shim.swift`)
+//!   compiled by `build.rs` and linked into the final binary. See
+//!   `appleshim.rs`. iOS additionally exposes [`authorization_status`] to
+//!   query the camera grant state without prompting (see `ios.rs`).
 //! - **Windows / Linux**: [`nokhwa`](https://docs.rs/nokhwa) opens the camera
 //!   and streams frames; each frame is greyscaled and handed to `rqrr` for
 //!   QR decode. See `desktop.rs`.
@@ -24,12 +25,16 @@
 pub mod scan;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-mod apple;
+#[path = "appleshim.rs"]
+mod apple_core;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-pub use apple::Camera;
+pub use apple_core::Camera;
 
 #[cfg(target_os = "ios")]
-pub use apple::{authorization_status, CameraAuth};
+#[path = "ios.rs"]
+mod apple_ios;
+#[cfg(target_os = "ios")]
+pub use apple_ios::{authorization_status, CameraAuth};
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod desktop;

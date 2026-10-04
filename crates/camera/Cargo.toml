@@ -6,19 +6,14 @@ description = "Cross-platform camera capture + native QR-code recognition."
 
 [lib]
 name = "camera"
+path = "src/lib.rs"
 
-[dependencies]
+# Apple (macOS + iOS): the AVFoundation shim is Swift; `build.rs` compiles
+# `shim/shim.swift` into an object file and force-links it into the final
+# `chatx` binary. No external Rust deps on the Apple path.
 
-# Apple (macOS + iOS): shared AVFoundation-based capture + native QR decoder.
-# The same objc2 bindings work on both targets; no separate deps needed.
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
-objc2 = "0.6.4"
-objc2-foundation = { version = "0.3.2" }
-objc2-core-foundation = { version = "0.3.2" }
-objc2-core-video = { version = "0.3.2" }
-objc2-core-media = { version = "0.3.2" }
-objc2-av-foundation = { version = "0.3.2" }
-dispatch2 = { version = "0.3", features = ["objc2"] }
+[build-dependencies]
+# (none — `build.rs` shells out to `swiftc` / `clang` directly)
 
 # Windows + Linux: nokhwa for capture, rqrr (pure Rust) for QR decoding.
 #   `input-native`    — picks the platform backend (Media Foundation / V4L2)

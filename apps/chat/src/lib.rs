@@ -105,7 +105,7 @@ pub fn run_app() {
     let weak = ui.as_weak();
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
-    // state.set_is_mobile(true);
+    state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
@@ -428,6 +428,7 @@ pub fn run_app() {
     {
         let w = weak.clone();
         ui.global::<AppState>().on_scanner_start(move || {
+            eprintln!("[scan] on_scanner_start → opening camera");
             let Some(ui) = w.upgrade() else {
                 return;
             };
@@ -449,6 +450,8 @@ pub fn run_app() {
             });
             if let Some(ui) = w.upgrade() {
                 ui.global::<AppState>().set_scan_status(SharedString::new());
+                let st = ui.global::<AppState>();
+                st.set_scan_preview(slint::Image::default());
             }
         });
     }
@@ -544,14 +547,15 @@ fn clear_sub_history(app: &AppState) {
     app.set_nav_state(nav);
 }
 
-/// Open the camera and wire decoded QR payloads into the scan UI.
+/// Open the camera and wire decoded QR payloads + raw preview frames into
+/// the scan UI.
 ///
 /// `camera::Camera` exposes the same API on every target (Apple AVFoundation,
 /// Windows/Linux nokhwa, Android bridge+JNI), so this helper is platform-
 /// agnostic: start it, install a sink that hops back to the UI thread, and be
 /// done. Any platform whose `start()` reports "unsupported" surfaces the error
 /// in `scan-status`.
-    fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
+fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
     CAMERA.with(|slot| {
         if slot.borrow().is_none() {
             *slot.borrow_mut() = Some(Camera::new());
@@ -559,11 +563,15 @@ fn clear_sub_history(app: &AppState) {
         let mut guard = slot.borrow_mut();
         let cam = guard.as_mut().expect("camera inited");
         if cam.is_running() {
+            eprintln!("[scan] camera already running, skipping start");
             return;
         }
+        eprintln!("[scan] calling cam.start() …");
         match cam.start() {
             Ok(_) => {
+                eprintln!("[scan] cam.start() OK — installing QR sink + preview sink");
                 let wsink = weak.clone();
+                let wsink2 = weak.clone();
                 cam.set_sink(move |text: String| {
                     let wk = wsink.clone();
                     let _ = slint::invoke_from_event_loop(move || {
@@ -574,12 +582,102 @@ fn clear_sub_history(app: &AppState) {
                         }
                     });
                 });
+
+                // Preview sink: hops to the Slint event-loop thread to publish
+                // the latest frame into `AppState.scan-preview`. To keep the
+                // UI smooth even on slow cameras we coalesce: a frame that
+                // arrives within 30 ms of the previous one is dropped (we
+                // want to keep *at most* ~30 fps of previews).
+                let latest_seen = std::sync::atomic::AtomicU64::new(0);
+                let frame_n = std::sync::atomic::AtomicU64::new(0);
+                cam.set_frame_sink(move |bytes, w, h, fmt| {
+                    const GATE_MS: u64 = 30; // ~30 fps ceiling
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    // Throttle: skip unless enough time has passed since we
+                    // last published a preview. The CAS claims the slot so
+                    // concurrent frame threads don't all punch through.
+                    loop {
+                        let last = latest_seen.load(std::sync::atomic::Ordering::Relaxed);
+                        if now.saturating_sub(last) < GATE_MS {
+                            return;
+                        }
+                        match latest_seen.compare_exchange_weak(
+                            last,
+                            now,
+                            std::sync::atomic::Ordering::Relaxed,
+                            std::sync::atomic::Ordering::Relaxed,
+                        ) {
+                            Ok(_) => break,
+                            Err(_) => continue,
+                        }
+                    }
+                    let n = frame_n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if n < 3 {
+                        eprintln!("[scan.preview] app sink #{n}: {w}x{h} fmt={fmt} bytes={}", bytes.len());
+                    }
+
+                    // Take ownership of the bytes so the event loop closure is
+                    // `Send`-safe across threads.
+                    let data = bytes.to_vec();
+                    let wk = wsink2.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(ui) = wk.upgrade() else { return; };
+                        let st = ui.global::<AppState>();
+                        st.set_scan_preview(make_preview_image(&data, w, h, fmt));
+                    });
+                });
             }
             Err(err) => {
                 state.set_scan_status(SharedString::from(format!("无法启动摄像头: {err}")));
             }
         }
     });
+}
+
+/// Build a slint `Image` from a raw preview frame. `fmt` follows
+/// `bridge::PixelFormat`: 1 = RGBA8888 (4 bytes/px, already in slint's
+/// preferred order), 8 = Gray8 (1 byte/px, Y-only). Unknown formats yield
+/// a black placeholder so a bad shell doesn't take down the scanner.
+fn make_preview_image(data: &[u8], w: u32, h: u32, fmt: u32) -> slint::Image {
+    if w == 0 || h == 0 {
+        return slint::Image::default();
+    }
+    let n = (w as usize) * (h as usize);
+    let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(w, h);
+    let dst = buf.make_mut_bytes();
+    match fmt {
+        1 => {
+            // Already RGBA.
+            copy_rgba(data, dst, n);
+        }
+        8 => {
+            // Expand Y → R=G=B.
+            let mut di = 0usize;
+            for &y in data.iter().take(n) {
+                if di + 4 > dst.len() { break; }
+                dst[di] = y;
+                dst[di + 1] = y;
+                dst[di + 2] = y;
+                dst[di + 3] = 255;
+                di += 4;
+            }
+        }
+        _ => {
+            // Unknown → leave the zero-initialised buffer (black).
+        }
+    }
+    slint::Image::from_rgba8(buf)
+}
+
+/// RGBA copy helper: takes `n` pixels from `src` and writes them to `dst`.
+/// Both are packed `n * 4` byte buffers.
+fn copy_rgba(src: &[u8], dst: &mut [u8], n: usize) {
+    let want = n * 4;
+    let len = want.min(src.len()).min(dst.len());
+    dst[..len].copy_from_slice(&src[..len]);
 }
 
 /// Render a QR code for `text` as an RGBA slint image (black modules on white).

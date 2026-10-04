@@ -19,8 +19,13 @@ use crate::scan;
 use bridge::types::PixelFormat;
 
 type QrSinkFn = Box<dyn Fn(String) + Send + 'static>;
+type FrameSinkFn = Box<dyn Fn(&[u8], u32, u32, u32) + Send + 'static>;
 
 static SINK: OnceLock<Mutex<QrSinkFn>> = OnceLock::new();
+/// Installed by `Camera::set_frame_sink`. Called from the bridge consumer
+/// with every Y-plane (GRAY8) camera frame, in addition to the QR decoder
+/// pipeline which runs first. `None` when no preview was requested.
+static FRAME_SINK: OnceLock<Mutex<Option<FrameSinkFn>>> = OnceLock::new();
 
 fn notify(payload: String) {
     if let Some(slot) = SINK.get() {
@@ -30,10 +35,26 @@ fn notify(payload: String) {
     }
 }
 
+fn notify_frame(bytes: &[u8], w: u32, h: u32, fmt: u32) {
+    if let Some(slot) = FRAME_SINK.get() {
+        if let Ok(g) = slot.lock() {
+            if let Some(cb) = g.as_ref() {
+                cb(bytes, w, h, fmt);
+            }
+        }
+    }
+}
+
 /// Callback installed into the bridge. Runs on the JNI caller thread.
 fn on_bridge_frame(bytes: &[u8], w: u32, h: u32, fmt: u32) {
     match PixelFormat::from_i32(fmt as i32) {
-        PixelFormat::Gray8 => scan::scan_gray(bytes, w, h, &|text| notify(text)),
+        PixelFormat::Gray8 => {
+            // QR decode runs first — the preview sink sees the same bytes
+            // (so no extra copy), and the order lets QR win the CPU if the
+            // preview consumer is slow.
+            scan::scan_gray(bytes, w, h, &|text| notify(text));
+            notify_frame(bytes, w, h, PixelFormat::Gray8.as_i32() as u32);
+        }
         // Legacy Camera1 (RGB_565) path. Kept so old builds keep working
         // during the Camera2 migration.
         PixelFormat::Rgb565 => {
@@ -41,6 +62,7 @@ fn on_bridge_frame(bytes: &[u8], w: u32, h: u32, fmt: u32) {
                 return;
             };
             scan::scan_gray(&gray, w, h, &|text| notify(text));
+            notify_frame(&gray, w, h, PixelFormat::Gray8.as_i32() as u32);
         }
         // All other formats (NV12, I420, RGBA8888...) not yet supported in
         // this build. We could add a Y-plane extractor per format here, but
@@ -99,6 +121,20 @@ impl Camera {
             }
         } else {
             let _ = SINK.set(Mutex::new(Box::new(sink)));
+        }
+    }
+
+    /// Install the preview-frame sink. Called with the same raw bytes that
+    /// the QR decoder consumes (GRAY8 for YUV_420_888 shells, RGB565 for
+    /// legacy shells). No-op when the camera is stopped — the bridge
+    /// consumer is already detached by `stop()`.
+    pub fn set_frame_sink<F: Fn(&[u8], u32, u32, u32) + Send + 'static>(&self, sink: F) {
+        if let Some(slot) = FRAME_SINK.get() {
+            if let Ok(mut g) = slot.lock() {
+                *g = Some(Box::new(sink));
+            }
+        } else {
+            let _ = FRAME_SINK.set(Mutex::new(Some(Box::new(sink))));
         }
     }
 

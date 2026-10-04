@@ -22,6 +22,17 @@ export component ScanView inherits Rectangle {
         }
     }
 
+    // Live camera preview. The black `background` behind it is the "no
+    // camera / no preview frame yet" state.
+    Image {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        source: AppState.scan-preview;
+        image-fit: cover;
+    }
+
     in-out property <length> scan-line-pos: 6px;
 
     Timer {

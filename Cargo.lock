@@ -995,14 +995,7 @@ name = "camera"
 version = "0.1.0"
 dependencies = [
  "bridge",
- "dispatch2",
  "nokhwa",
- "objc2 0.6.4",
- "objc2-av-foundation",
- "objc2-core-foundation",
- "objc2-core-media",
- "objc2-core-video",
- "objc2-foundation 0.3.2",
  "rqrr",
 ]
 

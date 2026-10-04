@@ -19,6 +19,12 @@ impl Camera {
         let _ = sink;
     }
 
+    /// Install the preview-frame sink. No-op on this platform (no camera
+    /// hardware to deliver from).
+    pub fn set_frame_sink<F: Fn(&[u8], u32, u32, u32) + Send + 'static>(&self, sink: F) {
+        let _ = sink;
+    }
+
     pub fn start(&mut self) -> Result<(), String> {
         Err("当前平台不支持摄像头扫描".to_string())
     }
