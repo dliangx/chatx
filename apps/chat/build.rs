@@ -1,4 +1,21 @@
 fn main() {
+    // Windows: embed icon + version info at compile time (no rcedit needed).
+    #[cfg(windows)]
+    {
+        let icon = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("app-icon.ico");
+        let mut res = winres::WindowsResource::new();
+        res.set_icon(icon.to_str().unwrap());
+        res.set("ProductName", "Chatx");
+        res.set("FileDescription", "Chatx Desktop");
+        res.set("LegalCopyright", "Chatx");
+        res.compile().expect("failed to compile Windows resources");
+    }
+
     slint_build::compile("ui/main.slint").unwrap();
 
     // iOS screen-share shim: when the Xcode build script compiles

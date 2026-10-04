@@ -22,6 +22,8 @@ pinyin = "0.11"
 
 [build-dependencies]
 slint-build = {workspace = true}
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
 
 # iOS renders via the Skia backend (winit backend forces Skia on Apple
 # non-macOS targets; declared explicitly to be unambiguous).

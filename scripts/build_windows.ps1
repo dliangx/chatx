@@ -1,31 +1,27 @@
 # build_windows.ps1 — Chatx Windows desktop build & packaging (native PowerShell).
 #
 # Runs on a Windows host under Windows PowerShell 5.1+ or PowerShell 7.
-#   * x86_64-pc-windows-gnu  (default) — needs MinGW-w64 (gcc) on PATH
-#   * x86_64-pc-windows-msvc          — needs Visual Studio C++ Build Tools
+# Target: x86_64-pc-windows-msvc (auto-detects VS C++ Build Tools via vswhere)
 #
 # Produces:  build\windows\chatx-x64-<mode>-windows.zip
-#            containing  chatx.exe + chatx.bat (double-click launcher)
+#            containing  chatx.exe (GUI app with embedded icon, double-click to launch)
 #
 # Usage:
-#   .\scripts\build_windows.ps1                    # Release (default), windows-gnu
-#   .\scripts\build_windows.ps1 -Debug             # Debug build (fast iteration)
-#   .\scripts\build_windows.ps1 -Msvc              # MSVC toolchain instead of MinGW
+#   .\scripts\build_windows.ps1                    # Release (default)
+#   .\scripts\build_windows.ps1 -Dev               # Debug build (fast iteration)
 #   .\scripts\build_windows.ps1 -Clean             # wipe the target dir first
 #
 # Pre-reqs:
-#   rust, rustup, and one C toolchain:
-#     - MinGW-w64 gcc on PATH      (scoop install mingw / choco install mingw)
-#     - or VS C++ Build Tools       (for -Msvc, with link.exe reachable)
-#     Windows 10+ ships Compress-Archive, so no extra zip tool is needed.
+#   rust, rustup, and VS C++ Build Tools (auto-detected via vswhere)
+#   Windows 10+ ships Compress-Archive, so no extra zip tool is needed.
+#   Icon is embedded at compile time via winres (app-icon.ico).
 
 [CmdletBinding()]
 param(
     [switch]$Release,
-    [switch]$Debug,
-    [switch]$Msvc,
+    [switch]$Dev,
     [switch]$Clean,
-    [string]$Target = ""
+    [string]$Target = "x86_64-pc-windows-msvc"
 )
 
 Set-StrictMode -Version Latest
@@ -35,11 +31,7 @@ $ErrorActionPreference = "Stop"
 $Root   = Split-Path -Parent $PSScriptRoot
 $OutDir = Join-Path $Root "build\windows"
 
-if ($Target -eq "") {
-    if ($Msvc) { $Target = "x86_64-pc-windows-msvc" }
-    else       { $Target = "x86_64-pc-windows-gnu" }
-}
-$Mode = if ($Debug) { "debug" } else { "release" }
+$Mode = if ($Dev) { "debug" } else { "release" }
 if ($Mode -eq "release") { $Release = $true } else { $Release = $false }
 
 function Say($m) { Write-Host "==> $m" -ForegroundColor Cyan }
@@ -63,43 +55,51 @@ if ($installed -notcontains $Target) {
     if ($LASTEXITCODE -ne 0) { Err "rustup target add failed for $Target" }
 }
 
-# ── C toolchain check ──────────────────────────────────────────────────────────
-if ($Target -like "*msvc") {
-    if (CmdOnPath "link") {
-        Ok "MSVC linker found on PATH (link.exe)"
-    }
-    else {
-        Err @"
-MSVC target selected but 'link.exe' is not on PATH.
-  Options:
-    1) Re-run from a "Developer PowerShell for VS" (or open VS and run).
-    2) Install "C++ build tools" from Visual Studio Installer.
-    3) Or drop -Msvc and use MinGW instead:   .\scripts\build_windows.ps1
-"@
-    }
+# ── C toolchain check (MSVC) ───────────────────────────────────────────────────
+if (CmdOnPath "link") {
+    Ok "MSVC linker found on PATH (link.exe)"
 }
 else {
-    # MinGW (gnu) path: need gcc.exe. Prefer x86_64-w64-mingw32-gcc if present,
-    # else require plain gcc.exe (the 64-bit one) on PATH.
-    if (CmdOnPath "x86_64-w64-mingw32-gcc") {
-        $env:CC  = "x86_64-w64-mingw32-gcc"
-        $env:AR  = "x86_64-w64-mingw32-ar"
-        $env:CXX = "x86_64-w64-mingw32-g++"
-        Ok "using MinGW: $env:CC  $env:CXX"
+    # Auto-detect VS via vswhere and import vcvars64 environment.
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path $vswhere)) {
+        Err @"
+'link.exe' is not on PATH and vswhere.exe was not found.
+  Install "C++ build tools" from Visual Studio Installer.
+"@
     }
-    elseif (CmdOnPath "gcc.exe") {
-        Ok "using host gcc.exe on PATH"
+    $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if (-not $vsPath) {
+        Err @"
+No Visual Studio instance with C++ Build Tools (VC.Tools.x86.x64) found.
+  Install "C++ build tools" from Visual Studio Installer.
+"@
+    }
+    $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+    if (-not (Test-Path $vcvars)) {
+        Err "vcvars64.bat not found at: $vcvars"
+    }
+    Say "importing MSVC environment from: $vcvars"
+
+    # Run vcvars64.bat in a child cmd, capture the resulting env, import into PowerShell.
+    $cmdOut = cmd /c "call `"$vcvars`" && set" 2>$null
+    foreach ($line in $cmdOut) {
+        if ($line -match "^([^=]+)=(.*)$") {
+            $envName  = $Matches[1]
+            $envValue = $Matches[2]
+            if ($envName -eq "PATH") {
+                $env:PATH = $envValue + ";" + $env:PATH
+            }
+            else {
+                Set-Item -Path "env:$envName" -Value $envValue
+            }
+        }
+    }
+    if (CmdOnPath "link") {
+        Ok "MSVC environment imported (link.exe now on PATH)"
     }
     else {
-        Err @"
-No MinGW-w64 C compiler found on PATH.  Install one then re-run:
-
-    scoop install mingw            (scoop)
-    choco install mingw            (choco)
-    winget install msys2           (msys2, then  'pacman -S mingw-w64-x86_64-gcc')
-
-and make sure  gcc.exe / g++.exe / ar.exe  are on PATH.
-"@
+        Err "Failed to import MSVC environment — link.exe still not found after vcvars64."
     }
 }
 
@@ -126,31 +126,21 @@ if (-not (Test-Path $Bin)) { Err "binary not found: $Bin" }
 Ok "built:  $Bin  ($([math]::Round((Get-Item $Bin).Length / 1MB,1)) MB)"
 
 # ── package ────────────────────────────────────────────────────────────────────
+# Kill any running chatx.exe so we can overwrite the packaged copy.
+Get-Process chatx -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 500
+
 Say "packaging -> $OutDir"
-if (Test-Path $OutDir) { Remove-Item -Recurse -Force $OutDir }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
-Copy-Item $Bin (Join-Path $OutDir "chatx.exe")
-
-# Double-click launcher.
-$bat = @(
-    '@echo off',
-    'title Chatx',
-    'cd /d "%~dp0"',
-    'chatx.exe %*',
-    'pause'
-)
-Set-Content -Path (Join-Path $OutDir "chatx.bat") -Value $bat -Encoding ASCII
+# Overwrite in place (avoids "directory in use" errors when the folder is open in Explorer).
+Copy-Item $Bin (Join-Path $OutDir "chatx.exe") -Force
 
 $Zip = Join-Path $OutDir ("chatx-x64-{0}-windows.zip" -f $Mode)
-$items = @(
-    (Join-Path $OutDir "chatx.exe"),
-    (Join-Path $OutDir "chatx.bat")
-)
-Compress-Archive -Path $items -DestinationPath $Zip -Force
+Compress-Archive -Path (Join-Path $OutDir "chatx.exe") -DestinationPath $Zip -Force
 Ok "zip:  $Zip  ($([math]::Round((Get-Item $Zip).Length / 1KB,0)) KB)"
 
 Write-Host ""
 Write-Host "──── done ────"
 Write-Host ""
-Write-Host ("OK.  Extract the zip, run  chatx.exe   (or double-click chatx.bat).") -ForegroundColor Green
+Write-Host "OK.  Extract the zip, double-click  chatx.exe  to launch." -ForegroundColor Green
