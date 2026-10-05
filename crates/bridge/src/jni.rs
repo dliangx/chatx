@@ -22,9 +22,12 @@
 //!   - `screenFrameIn` — MediaProjection `ImageReader` dispatch thread
 //!   - `audioPlayPcm`  — playback thread
 //!
-//! Rust → Java (added for screen-share control):
+//! Rust → Java (added for screen-share + mic control):
 //!   - `request_screen_share_start()` / `request_screen_share_stop()` call
 //!     `NativeBridge.startScreenShare` / `stopScreenShare` as static voids.
+//!   - `request_mic_start()` / `request_mic_stop()` call
+//!     `NativeBridge.startMicCapture` / `stopMicCapture` as static voids (the
+//!     mic only runs while a call is active, saving battery when idle).
 
 use crate::sinks;
 use std::sync::OnceLock;
@@ -91,6 +94,21 @@ pub fn request_screen_share_start() {
 /// projection / virtual display.
 pub fn request_screen_share_stop() {
     _ = call_native_bridge_void("stopScreenShare");
+}
+
+/// Ask the Java shell to start the mic capture loop (`Capture.MicLoop`,
+/// AudioRecord 16 kHz mono). Safe to call from any Rust thread; the loop is
+/// spawned on its own `HandlerThread` on the Java side. No-op if the JVM is
+/// not yet attached, if the shell is idle, or if the mic is already running
+/// (idempotent). Pair with [`request_mic_stop`].
+pub fn request_mic_start() {
+    call_native_bridge_void("startMicCapture");
+}
+
+/// Ask the Java shell to stop the mic capture loop and release its
+/// `AudioRecord`. No-op if not running.
+pub fn request_mic_stop() {
+    _ = call_native_bridge_void("stopMicCapture");
 }
 
 #[unsafe(no_mangle)]

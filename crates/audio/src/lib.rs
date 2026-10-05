@@ -17,7 +17,7 @@
 //!
 //! ## Threads
 //!
-//! Callbacks run on the OS audio thread (Core Audio on iOS/macOS, Oboe on
+//! Callbacks run on the OS audio thread (Core Audio on iOS/macOS, AAudio on
 //! Android, WASAPI on Windows). Keep them cheap — hop to the app thread for
 //! anything non-trivial.
 
@@ -74,6 +74,30 @@ impl Audio {
 
     pub fn in_rate(&self) -> u32 {
         self.in_rate.get()
+    }
+
+    /// Access the speaker output queue from any thread. The audio render
+    /// callback (running on cpal's audio thread) consumes from this queue, so
+    /// producers may be on any thread — just extend the `VecDeque` with
+    /// s16le bytes.
+    ///
+    /// Useful for WebRTC / network sinks that run on their own runtime
+    /// threads and cannot borrow `Audio` (which is not `Sync` because of its
+    /// `RefCell`-held cpal streams).
+    pub fn output_queue(&self) -> &Arc<Mutex<VecDeque<u8>>> {
+        &self.out_queue
+    }
+
+    /// Append bytes to the speaker queue from any thread, bounded the same
+    /// way as [`queue_output`](Self::queue_output). This is the
+    /// thread-safe entry point for remote-media sinks.
+    pub fn push_output_shared(&self, s16le: Vec<u8>) {
+        let mut q = self.out_queue.lock().unwrap();
+        q.extend(s16le);
+        const CAP: usize = 5 * 48_000 * 2 * 2;
+        while q.len() > CAP {
+            q.pop_front();
+        }
     }
     pub fn in_channels(&self) -> u32 {
         self.in_ch.get()
@@ -240,6 +264,80 @@ pub fn clear_input_sink() {
         .unwrap() = None;
 }
 
+/// Resample s16le PCM from `(in_rate, in_ch)` to `(out_rate, out_ch)`.
+///
+/// The remote WebRTC audio track is fixed at 8 kHz mono (PCMU), but the local
+/// speaker stream is negotiated at the device default (typically 48 kHz
+/// stereo). Pushing the raw 8 kHz mono bytes straight into the speaker queue
+/// makes the render callback misinterpret the layout (wrong sample rate →
+/// pitch shift, stereo vs mono → channel corruption). This normalises the
+/// payload to exactly what [`Audio::start_output`] will consume.
+///
+/// Strategy (voice-first, cheap): downmix the input to mono, linearly
+/// resample the sample rate, then expand to the output channel count.
+/// Linear interpolation is fine for telephone-band audio and keeps the render
+/// callback's producer side O(n) with no allocation-heavy filtering.
+///
+/// No-op (returns a copy) when the layout already matches.
+pub fn resample_s16le(
+    input: &[u8],
+    in_rate: u32,
+    in_ch: u32,
+    out_rate: u32,
+    out_ch: u32,
+) -> Vec<u8> {
+    let n_in = (input.len() / (2 * in_ch.max(1) as usize)).max(0);
+    if n_in == 0 {
+        return Vec::new();
+    }
+    if in_rate == out_rate && in_ch == out_ch {
+        return input.to_vec();
+    }
+
+    // 1) Downmix to mono (average over input channels).
+    let mono: Vec<f32> = (0..n_in)
+        .map(|i| {
+            let mut acc = 0f32;
+            for c in 0..in_ch as usize {
+                let off = (i * in_ch as usize + c) * 2;
+                let v = i16::from_le_bytes([input[off], input[off + 1]]) as f32;
+                acc += v;
+            }
+            acc / in_ch as f32
+        })
+        .collect();
+
+    let in_n = mono.len();
+    let out_n = (in_n as u64 * out_rate as u64 / in_rate.max(1) as u64) as usize;
+    if out_n == 0 {
+        return Vec::new();
+    }
+    let ratio = in_n as f64 / out_n as f64;
+
+    // 2) Linear-interpolate resample to out_rate. `mono` holds values in the
+    //    i16 range (±32768), so interpolate in that range and round back.
+    let resampled: Vec<i16> = (0..out_n)
+        .map(|j| {
+            let pos = j as f64 * ratio;
+            let i0 = pos as usize;
+            let frac = pos - i0 as f64;
+            let a = mono[i0.min(in_n - 1)] as f64;
+            let b = mono[(i0 + 1).min(in_n - 1)] as f64;
+            let v = a * (1.0 - frac) + b * frac;
+            (v.round().clamp(-32768.0, 32767.0)) as i16
+        })
+        .collect();
+
+    // 3) Expand to out_ch.
+    let mut out = Vec::with_capacity(out_n * out_ch as usize * 2);
+    for s in resampled {
+        for _ in 0..out_ch {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+    }
+    out
+}
+
 /// Convert an `&[f32]` (linear [-1.0, 1.0]) slice to s16le PCM bytes.
 pub fn pack_f32_to_s16le(samples: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(samples.len() * 2);
@@ -249,4 +347,37 @@ pub fn pack_f32_to_s16le(samples: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&b);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resample_identity_is_copy() {
+        let in_ = [0, 1, 2, 3, 4u8];
+        let out = resample_s16le(&in_, 8000, 1, 8000, 1);
+        assert_eq!(out, in_);
+    }
+
+    #[test]
+    fn resample_rate_and_channels_length() {
+        // 1 s of 8 kHz mono = 8000 samples = 16000 B. Out: 48 kHz stereo.
+        let in_: Vec<u8> = (0..16000u32).map(|i| (i & 0xffff) as u8).collect();
+        let out = resample_s16le(&in_, 8000, 1, 48000, 2);
+        let expect = 48000 * 2 * 2; // 48000 frames * 2 ch * 2 B = 192000
+        assert_eq!(out.len(), expect);
+    }
+
+    #[test]
+    fn resample_dc_level_preserved() {
+        // A +16k mono DC tone at 8 kHz should map (roughly) to +16k at any rate.
+        let n = 8000usize;
+        let in_: Vec<u8> = (0..n)
+            .flat_map(|_| 16000i16.to_le_bytes())
+            .collect();
+        let out = resample_s16le(&in_, 8000, 1, 48000, 2);
+        let v = i16::from_le_bytes([out[0], out[1]]);
+        assert!((v - 16000).abs() < 64, "got {v}");
+    }
 }

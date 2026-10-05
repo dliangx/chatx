@@ -7,6 +7,7 @@
 //! Callers push raw frames (s16le PCM / RGBA8) from the `audio` / `camera` /
 //! `screen` sink callbacks.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -72,6 +73,7 @@ fn as_track(t: &TrackArc) -> Arc<dyn TrackLocal + Send + Sync> {
 /// Outbound G.711 PCMU audio. Push s16le PCM with [`AudSource::push`].
 pub struct AudSource {
     track: TrackArc,
+    muted: Arc<AtomicBool>,
 }
 
 impl AudSource {
@@ -82,14 +84,21 @@ impl AudSource {
                 "chatx-aud".into(),
                 "chatx-aud".into(),
             )),
+            muted: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Push one s16le PCM block. `rate` is in Hz (callers push at the
     /// negotiated device rate — we don't resample). Safe to call from the
     /// cpal audio thread (it spawns on tokio or spins a brief runtime).
+    ///
+    /// When [`AudSource::mute`](Self::mute) is `true`, the frame is dropped
+    /// (no RTP packet is emitted). The remote peer hears silence.
     pub fn push(&self, s16le: &[u8], rate: u32) {
         if s16le.is_empty() || rate == 0 {
+            return;
+        }
+        if self.muted.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
         let data = mulaw_encode(s16le);
@@ -122,6 +131,7 @@ impl AudSource {
     }
 
     pub fn mute(&self, on: bool) {
+        self.muted.store(on, std::sync::atomic::Ordering::Relaxed);
         tracing::trace!(?on, "aud muted");
     }
 }

@@ -56,6 +56,26 @@ pub fn request_screen_share_start() {
 pub fn request_screen_share_stop() {
     jni::request_screen_share_stop();
 }
+
+/// Ask the Android shell to (start | stop) the mic capture loop.
+///
+/// The mic is **opt-in**: it only runs while a call is active. The Rust side
+/// holds the `CALL_AUD` slot (see
+/// `apps/chat::call_dispatcher::set_aud_source`) so incoming `audioPcmIn`
+/// frames land in the active call's `AudSource`. Starting / stopping the
+/// shell's `AudioRecord` from the call's own lifecycle avoids holding the
+/// microphone open (and draining battery) on every idle second.
+///
+/// No-op on non-Android targets (cpal is the mic there — see
+/// `apps/chat::call::bootstrap_media`).
+#[cfg(target_os = "android")]
+pub fn request_mic_start() {
+    jni::request_mic_start();
+}
+#[cfg(target_os = "android")]
+pub fn request_mic_stop() {
+    jni::request_mic_stop();
+}
 #[cfg(all(target_os = "ios", feature = "has-ios-shim"))]
 pub fn request_screen_share_start() {
     shim_impl::request_screen_share_start();
