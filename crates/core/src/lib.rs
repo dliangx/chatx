@@ -628,6 +628,22 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         Ok(())
     }
 
+    /// Send one WebRTC signaling frame (opaque JSON payload) to `peer`.
+    ///
+    /// `payload` is a `media::SignalFrame` serialized to JSON (this crate does
+    /// not parse it). The far end emits [`sw::ChatEvent::Webrtc`].
+    pub fn send_webrtc_signal(&self, peer: PeerId, payload: &str) -> anyhow::Result<()> {
+        let from = self.peer_base58();
+        let e2e = self.e2e_public().to_string();
+        self.running.cmd_tx.send(Cmd::SendWebrtc {
+            peer,
+            from,
+            e2e,
+            payload: payload.to_string(),
+        })?;
+        Ok(())
+    }
+
     pub async fn send_dm(&self, peer_base58: &str, text: &str) -> anyhow::Result<String> {
         let rec = self
             .dir
@@ -687,6 +703,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
         match req.kind {
             message::MsgKind::Dm => Ok(None),
             message::MsgKind::Audio => Ok(None), // handled by the caller (playback sink)
+            message::MsgKind::Webrtc => Ok(None), // handled by the caller (media transport)
             message::MsgKind::GroupKey => {
                 let group_id = req
                     .group_id

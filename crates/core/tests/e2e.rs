@@ -210,6 +210,7 @@ async fn member_receives_group_key_and_msg() {
         kind: chatx_core::message::MsgKind::GroupKey,
         group_id: Some(GID.into()),
         audio: None,
+        signal: None,
     };
 
     let handled = bob_c.apply_inbound(&key_req).await.unwrap().expect("GroupKey should be handled");
@@ -231,6 +232,7 @@ async fn member_receives_group_key_and_msg() {
         kind: chatx_core::message::MsgKind::GroupMsg,
         group_id: Some(GID.into()),
         audio: None,
+        signal: None,
     };
     let m = bob_c.apply_inbound(&req).await.unwrap().expect("GroupMsg should be handled");
     match m {
@@ -263,6 +265,7 @@ async fn member_receives_group_key_and_msg() {
         kind: chatx_core::message::MsgKind::GroupKey,
         group_id: Some(GID.into()),
         audio: None,
+        signal: None,
     };
     bob_c.apply_inbound(&key_req2).await.unwrap();
     let now_group = bob_c.get_group(GID).unwrap();

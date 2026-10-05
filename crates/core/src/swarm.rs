@@ -48,6 +48,12 @@ pub enum ChatEvent {
         ch: u32,
         data: Vec<u8>,
     },
+    /// Inbound WebRTC signaling frame. `json` is the opaque payload — the app
+    /// crate parses it (it's a `media::SignalFrame` JSON string).
+    Webrtc {
+        peer: PeerId,
+        json: String,
+    },
     Acked {
         id: u64,
         e2e: String,
@@ -97,6 +103,14 @@ pub enum Cmd {
         ch: u32,
         /// s16le PCM bytes (base64-encoded on the wire).
         data: Vec<u8>,
+    },
+    /// WebRTC signaling frame (opaque JSON).
+    SendWebrtc {
+        peer: PeerId,
+        from: String,
+        e2e: String,
+        /// JSON-encoded `media::SignalFrame`.
+        payload: String,
     },
     GroupKeyDirect {
         peer: PeerId,
@@ -208,6 +222,7 @@ async fn swarm_loop(
                         kind: crate::message::MsgKind::Dm,
                         group_id: None,
                         audio: None,
+                        signal: None,
                     };
                     let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
                 }
@@ -233,6 +248,27 @@ async fn swarm_loop(
                             ch,
                             data: crate::account::b64(&data),
                         }),
+                        signal: None,
+                    };
+                    let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
+                }
+                Some(Cmd::SendWebrtc {
+                    peer,
+                    from,
+                    e2e,
+                    payload,
+                }) => {
+                    let id: u64 = rand::random();
+                    let req = ChatRequest {
+                        id,
+                        from,
+                        e2e,
+                        text: None,
+                        sealed: None,
+                        kind: crate::message::MsgKind::Webrtc,
+                        group_id: None,
+                        audio: None,
+                        signal: Some(payload),
                     };
                     let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
                 }
@@ -253,6 +289,7 @@ async fn swarm_loop(
                         kind: crate::message::MsgKind::GroupKey,
                         group_id: Some(group_id),
                         audio: None,
+                        signal: None,
                     };
                     let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
                 }
@@ -305,7 +342,11 @@ async fn swarm_loop(
                                 };
                                 let _ =
                                     swarm.behaviour_mut().chat.send_response(channel, resp);
-                                if request.kind == crate::message::MsgKind::Audio {
+                                if request.kind == crate::message::MsgKind::Webrtc {
+                                    if let Some(json) = request.signal {
+                                        let _ = ev.send(ChatEvent::Webrtc { peer, json });
+                                    }
+                                } else if request.kind == crate::message::MsgKind::Audio {
                                     if let Some(ap) = request.audio {
                                         if let Some(data) = crate::account::from_b64(&ap.data) {
                                             let _ = ev.send(ChatEvent::Audio {

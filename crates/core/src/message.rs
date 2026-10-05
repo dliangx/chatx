@@ -14,6 +14,9 @@ pub enum MsgKind {
     /// envelope). Not persisted to the chat store — routed straight to the
     /// speaker-playback sink on the far end.
     Audio,
+    /// WebRTC signaling frame (SDP offer/answer + ICE trickle) carried as an
+    /// opaque JSON string. Not persisted.
+    Webrtc,
 }
 
 /// One realtime-audio frame carried inside a [`ChatRequest::audio`].
@@ -43,6 +46,10 @@ pub struct ChatRequest {
     pub group_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<AudioPayload>,
+    /// Opaque WebRTC signaling payload (a `media::SignalFrame` serialized to
+    /// JSON). Kept as a `String` so this crate does not depend on `media`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
