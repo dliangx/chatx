@@ -5,7 +5,7 @@
 # `chatx` binary target. Native to macOS, so it runs here out of the box.
 #
 # Usage:
-#   ./scripts/build_osx.sh                 # Release build (default) → build/macos/Chatx.app
+#   ./scripts/build_osx.sh                 # Release build (default) → target/macos/Chatx.app
 #   ./scripts/build_osx.sh --debug         # Debug build (fast iteration)
 #   ./scripts/build_osx.sh --dmg          # Also bundle into Chatx.dmg
 #   ./scripts/build_osx.sh --sign "Developer ID Application: <Name> (TEAM)"
@@ -41,7 +41,7 @@ while [ $# -gt 0 ]; do
 done
 
 MODE="${RELEASE:-debug}"
-OUT_DIR="$ROOT/build/macos"
+OUT_DIR="$ROOT/target/macos"
 APP="$OUT_DIR/Chatx.app"
 
 echo "──────── chatx macOS build ($MODE) ────────"
