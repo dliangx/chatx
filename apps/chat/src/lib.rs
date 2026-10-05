@@ -13,6 +13,7 @@ use render::Renderer;
 pub mod data;
 use data::ArcBackend;
 pub mod call;
+pub mod call_dispatcher;
 
 // `camera::Camera` exists on every target (Apple: AVFoundation impl, others:
 // no-op fallback whose `start()` reports "unsupported"), so import it
@@ -103,6 +104,7 @@ pub fn run_app() {
     let ui = MainWindow::new().expect("window init failed");
     let state = ui.global::<AppState>();
     let weak = ui.as_weak();
+    call::set_weak_window(weak.clone());
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
     // state.set_is_mobile(true);
@@ -359,14 +361,14 @@ pub fn run_app() {
     }
     {
         let weak = weak.clone();
-        ui.global::<ProfileState>().on_start_video_call(move || {
-            show_call_overlay(weak.clone(), GlobalOverlayType::VideoCall);
+        ui.global::<ProfileState>().on_start_video_call(move |key| {
+            begin_video_call(weak.clone(), key);
         });
     }
     {
         let weak = weak.clone();
-        ui.global::<ProfileState>().on_start_screen_share(move || {
-            begin_screen_share(weak.clone());
+        ui.global::<ProfileState>().on_start_screen_share(move |key| {
+            begin_screen_share(weak.clone(), key);
         });
     }
     {
@@ -387,6 +389,20 @@ pub fn run_app() {
         let weak = weak.clone();
         ui.global::<CallState>().on_end_call(move || {
             end_voice_call(weak.clone());
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<CallState>().on_toggle_mute(move || {
+            match weak.upgrade() {
+                Some(ui) => {
+                    let st = ui.global::<CallState>();
+                    let new = !st.get_muted();
+                    st.set_muted(new);
+                    call::mute_mic(new);
+                }
+                None => {}
+            }
         });
     }
 
@@ -448,6 +464,7 @@ pub fn run_app() {
                     cam.stop();
                 }
             });
+            call_dispatcher::clear_qr_hook();
             if let Some(ui) = w.upgrade() {
                 ui.global::<AppState>().set_scan_status(SharedString::new());
                 let st = ui.global::<AppState>();
@@ -476,23 +493,29 @@ pub fn android_main(app: slint::android::AndroidApp) {
 #[allow(dead_code)]
 fn install_bridge_sinks() {
     use std::sync::atomic::{AtomicU64, Ordering};
-    static FRAME_N: AtomicU64 = AtomicU64::new(0);
     static AUDIO_N: AtomicU64 = AtomicU64::new(0);
 
-    bridge::set_camera_consumer(Box::new(move |bytes, w, h, fmt| {
-        let n = FRAME_N.fetch_add(1, Ordering::Relaxed);
-        if n % 100 == 0 {
-            eprintln!("[bridge] camera #{} {}x{} {}B fmt={}", n, w, h, bytes.len(), fmt);
-        }
-    }));
+    // Mobile mic → webrtc. `bridge::set_audio_consumer` is the **inbound mic
+    // PCM** hook (`bridge_audio_pcm_in` from AVAudioEngine tap / AudioRecord),
+    // i.e. local-mic → peer. Route straight into the dispatcher, which pushes
+    // it into the active call's `AudSource` (no-op while no call).
     bridge::set_audio_consumer(Box::new(move |bytes, rate, ch| {
         let n = AUDIO_N.fetch_add(1, Ordering::Relaxed);
         if n % 100 == 0 {
-            eprintln!("[bridge] audio #{} {}B @{}Hz/{}ch", n, bytes.len(), rate, ch);
+            eprintln!("[bridge] mic #{n} {}B @{}Hz/{}ch", bytes.len(), rate, ch);
         }
+        call_dispatcher::on_audio_frame(bytes, rate);
     }));
+    // Mobile screen frames (ReplayKit/MediaProjection) — the dispatcher
+    // converts any `fmt` to RGBA8888 before pushing.
     bridge::set_screen_consumer(Box::new(move |bytes, w, h, fmt| {
-        on_screen_frame(bytes, w, h, fmt);
+        call_dispatcher::on_screen_frame(bytes.to_vec(), w, h, fmt);
+    }));
+    // Mobile camera frames (JNI/ObjC shim) — routed through the dispatcher's
+    // camera-frame sink so an active call's `VidSource` + local preview +
+    // QR scanner all see them.
+    bridge::set_camera_consumer(Box::new(move |bytes, w, h, fmt| {
+        call_dispatcher::on_camera_frame(bytes, w, h, fmt);
     }));
 }
 
@@ -588,9 +611,14 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
                 // UI smooth even on slow cameras we coalesce: a frame that
                 // arrives within 30 ms of the previous one is dropped (we
                 // want to keep *at most* ~30 fps of previews).
+                //
+                // In parallel with the active call (if any), the same frame
+                // is forwarded into the call's `VidSource` by
+                // `call_dispatcher::install_qr_frame_hook`. Register our
+                // preview sink as the "QR hook".
                 let latest_seen = std::sync::atomic::AtomicU64::new(0);
                 let frame_n = std::sync::atomic::AtomicU64::new(0);
-                cam.set_frame_sink(move |bytes, w, h, fmt| {
+                call_dispatcher::install_qr_hook(move |bytes, w, h, fmt| {
                     const GATE_MS: u64 = 30; // ~30 fps ceiling
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -629,6 +657,8 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
                         st.set_scan_preview(make_preview_image(&data, w, h, fmt));
                     });
                 });
+                // Install the dispatcher's camera sink (single, global).
+                cam.set_frame_sink(call_dispatcher::on_camera_frame);
             }
             Err(err) => {
                 state.set_scan_status(SharedString::from(format!("无法启动摄像头: {err}")));
@@ -792,22 +822,29 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
     let rt = runtime();
     rt.spawn(async move {
         loop {
-            let client = match CLIENT.with(|s| s.borrow().clone()) {
+            let client: std::sync::Arc<chatx_core::Client<chatx_core::signal::HttpDirectory>> = match CLIENT.with(|s| s.borrow().clone()) {
                 Some(c) => c,
                 None => break,
             };
             let Some(evt) = client.next_event().await else {
                 break;
             };
-            // ── Realtime audio: route directly to the speaker queue. ──────
-            if let chatx_core::swarm::ChatEvent::Audio { data, rate, ch, .. } = &evt {
-                let data = data.clone();
-                let (r2, c2) = (*rate, *ch);
+            // ── Inbound WebRTC signaling: answer Offer or apply Answer/ICE
+            // on the active call. `handle_signal_offer` blocks the UI
+            // thread while it does the offer/answer handshake; acceptable
+            // (rare and brief). ────────────────────────────────────────────
+            if let chatx_core::swarm::ChatEvent::Webrtc { peer, json, .. } = &evt {
+                let client_arc = client.clone();
+                let peer = *peer;
+                let json = json.clone();
                 let _ = slint::invoke_from_event_loop(move || {
-                    call::play_incoming(data, r2, c2);
+                    call::handle_signal_offer(client_arc, peer, &json);
                 });
                 continue;
             }
+            // Note: `ChatEvent::Audio` is intentionally not handled — the
+            // `PeerCall` remote sink (installed by `call::wire_remote_sinks`)
+            // already routes inbound peer audio into the cpal speaker queue.
             let touched = client.process_event(evt).await;
             if let Some(touched) = touched {
                 refresh_inbound_chat(weak.clone(), touched).await;
@@ -1837,7 +1874,11 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
         return;
     }
 
-    match call::start_call(Arc::clone(&client), &peer_base58) {
+    match call::start_call(
+        Arc::clone(&client),
+        &peer_base58,
+        call::CallOptions { include_cam: false, include_scr: false },
+    ) {
         Ok(()) => {
             publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
             show_call_overlay(weak, GlobalOverlayType::AudioCall);
@@ -1846,6 +1887,61 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
             publish_call_error(weak, format!("通话开始失败: {e}"));
         }
     }
+}
+
+/// Start a video call (local camera + mic) to the contact with the given `key`.
+/// Must run on the UI thread.
+fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
+    let client = CLIENT.with(|s| s.borrow().clone());
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let (Some(client), Some(backend)) = (client, backend) else {
+        publish_call_state(weak, None, None, false);
+        return;
+    };
+    let client = Arc::new(client);
+
+    let (peer_base58, peer_name) = {
+        let g = backend.blocking_read();
+        let Some(pid) = g.peer_id_for(key).map(|s| s.to_string()) else {
+            return;
+        };
+        let name = g.contacts.iter().find(|r| r.key == key).map(|r| r.name.clone()).unwrap_or_else(|| pid.clone());
+        (pid, name)
+    };
+
+    // Camera is a platform-wide singleton; ensure it is running before the
+    // call starts (the dispatcher's `on_camera_frame` slot is the sink; the
+    // active call's camera `VidSource` will be registered by `bootstrap_media`
+    // below, so frames flow into it).
+    CAMERA.with(|slot| {
+        if slot.borrow().is_none() {
+            *slot.borrow_mut() = Some(camera::Camera::new());
+        }
+        let mut guard = slot.borrow_mut();
+        let cam = guard.as_mut().expect("camera inited");
+        if !cam.is_running() {
+            // Frame sink routes to both the active call's VidSource (via the
+            // dispatcher slot) and the QR-preview hook. The QR hook is
+            // independent of the call state (it lives in
+            // `call_dispatcher::QR_HOOK`), so the preview keeps working
+            // during a call.
+            cam.set_frame_sink(call_dispatcher::on_camera_frame);
+            if let Err(e) = cam.start() {
+                eprintln!("[video.call] cam.start: {e}");
+            }
+        }
+    });
+
+    if let Err(e) = call::start_call(
+        Arc::clone(&client),
+        &peer_base58,
+        call::CallOptions { include_cam: true, include_scr: false },
+    ) {
+        publish_call_error(weak, format!("视频通话开始失败: {e}"));
+        return;
+    }
+    publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
+    show_call_overlay(weak, GlobalOverlayType::VideoCall);
 }
 
 fn publish_call_error(weak: slint::Weak<MainWindow>, msg: String) {
@@ -1868,32 +1964,34 @@ fn end_voice_call(weak: slint::Weak<MainWindow>) {
     }
 }
 
-/// Shared screen-frame funnel. One handler covers both paths:
-/// - desktop `Screen::set_sink` (RGBA8888, no fmt) wraps its `(Vec<u8>,w,h)`
-///   sink with a tiny closure that forwards into this.
-/// - iOS / Android arrive via `bridge::set_screen_consumer` with the native
-///   `fmt` (1 = RGBA8888 for MediaProjection, 7 = BGRA8888 for RPScreenRecorder).
-fn on_screen_frame(_bytes: &[u8], w: u32, h: u32, fmt: u32) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static N: AtomicU64 = AtomicU64::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    if n % 30 == 0 {
-        eprintln!("[screen] frame #{} {}x{} fmt={}", n, w, h, fmt);
-    }
-}
-
 /// Desktop-only wrapper: adapt the `Screen` sink's owned `Vec<u8>` to the
-/// shared handler (which takes `&[u8]`).
+/// dispatcher. `screen::Screen` already delivers RGBA8888.
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn screen_sink_adapter(bytes: Vec<u8>, w: u32, h: u32) {
-    on_screen_frame(&bytes, w, h, /*RGBA8888*/ 1);
+    call_dispatcher::on_screen_frame_rgba(bytes, w, h);
 }
 
-/// Begin a screen share: on desktop this starts the local [`screen`] capture
-/// crate and routes its frames into the unified handler; on iOS / Android the
-/// capture itself is done by the native shell (ReplayKit / MediaProjection)
-/// which already funnels into the bridge sink. Either way the overlay comes up.
-fn begin_screen_share(weak: slint::Weak<MainWindow>) {
+/// Begin a screen share with the contact at `key`. Starts the peer's
+/// `PeerCall` with `include_scr: true` (local screen frames flow through the
+/// dispatcher to the call's `VidSource`) and also ensures the platform
+/// screen capture (xcap / MediaProjection / RPScreenRecorder) is running.
+fn begin_screen_share(weak: slint::Weak<MainWindow>, key: i32) {
+    let client = CLIENT.with(|s| s.borrow().clone());
+    let backend = BACKEND.with(|s| s.borrow().clone());
+    let (Some(client), Some(backend)) = (client, backend) else {
+        return;
+    };
+    let client = Arc::new(client);
+    let (peer_base58, peer_name) = {
+        let g = backend.blocking_read();
+        let Some(pid) = g.peer_id_for(key).map(|s| s.to_string()) else {
+            return;
+        };
+        let name = g.contacts.iter().find(|r| r.key == key).map(|r| r.name.clone()).unwrap_or_else(|| pid.clone());
+        (pid, name)
+    };
+
+    // Desktop: ensure the screen capture is running.
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
         SCREEN.with(|slot| {
@@ -1912,19 +2010,24 @@ fn begin_screen_share(weak: slint::Weak<MainWindow>) {
     }
     #[cfg(target_os = "android")]
     {
-        // Ask the Java shell to launch the MediaProjection consent flow +
-        // VirtualDisplay capture. Frames then arrive via
-        // `NativeBridge.screenFrameIn` → bridge sink → `handle_screen_frame`.
         eprintln!("[screen] requesting MediaProjection from Java shell");
         bridge::request_screen_share_start();
     }
     #[cfg(target_os = "ios")]
     {
-        // Ask the iOS shell (RPScreenRecorder) to start the capture. Frames
-        // land via `bridge_screen_frame_in` → `handle_screen_frame`.
         eprintln!("[screen] requesting RPScreenRecorder from ObjC shim");
         bridge::request_screen_share_start();
     }
+
+    if let Err(e) = call::start_call(
+        Arc::clone(&client),
+        &peer_base58,
+        call::CallOptions { include_cam: false, include_scr: true },
+    ) {
+        publish_call_error(weak, format!("屏幕共享开始失败: {e}"));
+        return;
+    }
+    publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
     show_call_overlay(weak, GlobalOverlayType::ScreenShare);
 }
 

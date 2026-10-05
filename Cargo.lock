@@ -1204,6 +1204,7 @@ dependencies = [
  "camera",
  "chatx-core",
  "libp2p",
+ "media",
  "pinyin",
  "qrcode",
  "render",
@@ -1214,6 +1215,8 @@ dependencies = [
  "sqlite",
  "sqlx",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "winres",
 ]
 

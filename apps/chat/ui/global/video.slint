@@ -1,13 +1,95 @@
 import { GlobalOverlayType, AppState } from "../components/app_state.slint";
+import { CallState } from "audio_call.slint";
+
+/// Video-call overlay: peer video full-screen + local camera preview (PIP)
+/// bottom-right, plus mute and end buttons.
 export component VideoView inherits Rectangle {
-    in property <bool> isMuted;
-    in property <bool> isSpeakerOn;
     width: 100%;
     height: 100%;
-    background: #00000088;
-    TouchArea {
+    background: #0b0e14;
+
+    // Peer camera (full screen).
+    Image {
+        source: CallState.remote-camera;
         width: 100%;
         height: 100%;
-        clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; }
+    }
+
+    // Peer name at top.
+    Text {
+        text: CallState.peer-name;
+        color: #f0f3f7;
+        font-size: 18px;
+        horizontal-alignment: center;
+        x: 0px;
+        y: 24px;
+        width: 100%;
+    }
+
+    // Local camera preview (PIP, bottom-right). Mirrored = "me".
+    if CallState.has-local-camera: Rectangle {
+        x: parent.width - 152px;
+        y: parent.height - 150px;
+        width: 140px;
+        height: 88px;
+        border-radius: 8px;
+        background: #1e2530;
+        clip: true;
+        Image {
+            source: CallState.local-camera;
+            width: 100%;
+            height: 100%;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    // Bottom control bar: mute + end.
+    Rectangle {
+        width: 100%;
+        height: 100px;
+        HorizontalLayout {
+            y: 10px;
+            alignment: center;
+            spacing: 40px;
+            // Mute button.
+            Rectangle {
+                width: 56px;
+                height: 56px;
+                border-radius: 28px;
+                background: CallState.muted ? #ff4545 : #2a3340;
+                TouchArea {
+                    clicked => { CallState.toggle-mute(); }
+                }
+                Text {
+                    text: CallState.muted ? "已静音" : "语音";
+                    color: #ffffff;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: 100%;
+                    height: 100%;
+                }
+            }
+            // End button.
+            Rectangle {
+                width: 68px;
+                height: 68px;
+                border-radius: 34px;
+                background: #ff4545;
+                TouchArea {
+                    clicked => { CallState.end-call(); }
+                }
+                Text {
+                    text: "挂断";
+                    color: #ffffff;
+                    font-size: 15px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: 100%;
+                    height: 100%;
+                }
+            }
+        }
     }
 }

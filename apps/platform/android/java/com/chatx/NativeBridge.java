@@ -41,6 +41,27 @@ public final class NativeBridge {
         ScreenShare.stop();
     }
 
+    // ── Mic control ────────────────────────────────────────────────────────
+    //
+    // The mic capture loop is opt-in (only runs while a WebRTC call is
+    // active). These static voids are invoked by the Rust
+    // `bridge::jni` via `call_static_method` so the Rust side can tell the
+    // shell to (de)start the {@link Capture.MicLoop}. See the comment
+    // above the {@code audioPcmIn} declaration for the threading contract.
+
+    /** Start the {@link Capture.MicLoop} (AudioRecord 16 kHz mono). No-op if
+     *  already running or if RECORD_AUDIO is not granted. Safe to call from
+     *  the Slint UI thread (we spawn a HandlerThread for the loop itself). */
+    public static void startMicCapture() {
+        Capture.startMic();
+    }
+
+    /** Stop the {@link Capture.MicLoop} and release the {@code AudioRecord}.
+     *  No-op if not running. */
+    public static void stopMicCapture() {
+        Capture.stopMic();
+    }
+
     private NativeBridge() {}
 
     /** Called from `Shell.onActivityCreate`. Auto-starts capture streams. */

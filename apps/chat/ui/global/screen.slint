@@ -1,37 +1,32 @@
 import { GlobalOverlayType, AppState } from "../components/app_state.slint";
+import { CallState } from "audio_call.slint";
 
+/// Screen-share call overlay: shows the peer's screen full-size, with the
+/// caller name and an "end share" button.
 export component ScreenShareView inherits Rectangle {
     width: 100%;
     height: 100%;
     background: #0b0e14;
 
+    // Far-end screen (full screen).
+    Image {
+        source: CallState.remote-screen;
+        width: 100%;
+        height: 100%;
+    }
+
+    // Centered vertical layout: caller label + "end" button.
     VerticalLayout {
         alignment: center;
         spacing: 14px;
-        padding-top: 72px;
-        padding-bottom: 72px;
-
+        padding-top: 200px;
+        padding-bottom: 200px;
         Text {
-            text: "屏幕共享";
-            font-size: 26px;
+            text: "屏幕共享 — " + CallState.peer-name;
+            font-size: 18px;
             color: #f0f3f7;
             horizontal-alignment: center;
         }
-        Text {
-            text: "正在共享桌面（此窗口为占位展示）";
-            font-size: 13px;
-            color: #8b95a3;
-            horizontal-alignment: center;
-        }
-        Text {
-            text: AppState.peer-id;
-            font-size: 11px;
-            color: #556070;
-            horizontal-alignment: center;
-            wrap: word-wrap;
-            max-width: 240px;
-        }
-
         Rectangle {
             width: 88px;
             height: 46px;
@@ -47,7 +42,7 @@ export component ScreenShareView inherits Rectangle {
                 height: 100%;
             }
             TouchArea {
-                clicked => { AppState.stop-screen-share(); }
+                clicked => { CallState.end-call(); }
             }
         }
     }

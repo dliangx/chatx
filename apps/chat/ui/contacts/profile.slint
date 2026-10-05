@@ -22,8 +22,8 @@ export global ProfileState {
 
     callback request-load(int);
     callback open-conversation(int);
-    callback start-video-call();
-    callback start-screen-share();
+    callback start-video-call(int);
+    callback start-screen-share(int);
 }
 
 export component ContactProfileView inherits Rectangle {
@@ -199,7 +199,7 @@ export component ContactProfileView inherits Rectangle {
                         id: 2;
                         icon: Glyph.video;
                         title: "Video Call";
-                        clicked => { CallState.start-call(root.user-id); }
+                        clicked => { ProfileState.start-video-call(root.user-id); }
                     }
 
                     SettingItem {
@@ -208,7 +208,7 @@ export component ContactProfileView inherits Rectangle {
                         id: 3;
                         icon: Glyph.meeting;
                         title: "Screen Share";
-                        clicked => { ProfileState.start-screen-share(); }
+                        clicked => { ProfileState.start-screen-share(root.user-id); }
                     }
                 }
             }

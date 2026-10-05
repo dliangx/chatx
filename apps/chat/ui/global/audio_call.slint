@@ -1,13 +1,25 @@
-/// Single source of truth for the audio call. One active call per device.
+/// Single source of truth for the active call (audio / video / screen).
+/// One active call per device.
 export global CallState {
     in property <string> peer-base58: "";
     in property <string> peer-name: "";
     in property <string> status: "正在呼叫…";
     in property <bool> active: false;
+    in property <bool> muted: false;
+    /// Latest decoded peer camera frame (H.264 → RGBA8888), or empty.
+    in property <image> remote-camera;
+    /// Latest decoded peer screen frame (H.264 → RGBA8888), or empty.
+    in property <image> remote-screen;
+    /// Local camera preview (RGBA8888, mirror of "me"), or empty.
+    in property <image> local-camera;
+    /// Whether we have a local camera to preview (gates the PIP).
+    in property <bool> has-local-camera: false;
     /// Start a call to the given contact key (the same `ContactRow.id`).
     callback start-call(int);
     /// Hang up the active call.
     callback end-call();
+    /// Toggle local mic mute.
+    callback toggle-mute();
 }
 
 export component AudioCallView inherits Rectangle {

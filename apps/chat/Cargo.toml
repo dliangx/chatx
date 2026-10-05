@@ -18,6 +18,9 @@ camera = { path = "../../crates/camera" }
 screen = { path = "../../crates/screen" }
 bridge = { path = "../../crates/bridge" }
 audio = { path = "../../crates/audio" }
+media = { path = "../../crates/media" }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 pinyin = "0.11"
 
 [build-dependencies]

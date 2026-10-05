@@ -30,10 +30,16 @@ import java.util.Arrays;
  * its Y plane and pushed through
  * {@link NativeBridge#cameraFrameIn(byte[], int, int, int)} with
   * {@code fmt = 8} (Gray8) — the QR decoder on the Rust side consumes that
-  * directly with no colour-space arithmetic.
+  * directly with no colour-space arithmetic. The camera runs for the
+ * lifetime of the app (QR scanner + call preview share it).
  *
- * Mic via {@code AudioRecord} (mono 16 kHz s16le) unchanged from prior
- * versions.
+ * Mic via {@code AudioRecord} (mono 16 kHz s16le) is **opt-in**: it only
+ * runs while a WebRTC call is active. The Rust side calls
+ * {@link #startMic()} / {@link #stopMic()} on call start / stop (via
+ * {@link NativeBridge#startMicCapture()} / {@link NativeBridge#stopMicCapture()}
+ * and the JNI pair in {@code crates/bridge/src/jni.rs}). Starting it
+ * up-front would hold the microphone open and waste battery on every
+ * background second of a call-free session.
  *
  * Feeds {@link NativeBridge} JNI entry points which live in {@code
  * libchatx.so}.
@@ -70,23 +76,70 @@ public final class Capture {
                 new String[]{android.Manifest.permission.CAMERA, android.Manifest.permission.RECORD_AUDIO}, /*req=*/ 1);
         }
 
+        // Camera only. The mic is started / stopped on demand by
+        // {@link #startMic()} / {@link #stopMic()} — see {@link
+        // NativeBridge#startMicCapture()} / {@link NativeBridge#stopMicCapture()}
+        // (invoked by the Rust side when a call begins / ends). Keeping the
+        // mic idle when no call is active saves battery.
         HandlerThread ct = new HandlerThread("chatx.camera", 5);
         ct.start();
         Handler ch = new Handler(ct.getLooper());
         cameraThread = ct; cameraHandler = ch;
         ch.post(new CameraLoop());
 
+        Log.i(TAG, "capture dispatched (camera only; mic is opt-in)");
+    }
+
+    /** Start the mic capture loop. Idempotent. Safe to call any number of
+     *  times; the loop runs until {@link #stopMic()} or {@link #stop()}.
+     *  Requires {@code activityRef} to be set (i.e. {@link #start} ran first).
+     *  Requires {@code RECORD_AUDIO} to be granted by the time the caller
+     *  invokes this — Shell requests it up front in {@code onCreate}. */
+    public static synchronized void startMic() {
+        if (micThread != null) {
+            Log.i(TAG, "[mic] already running; ignoring");
+            return;
+        }
+        Activity a = activityRef;
+        if (a == null) {
+            Log.e(TAG, "[mic] startMic: no activity (call start() first)");
+            return;
+        }
+        if (!hasPerm(android.Manifest.permission.RECORD_AUDIO)) {
+            Log.e(TAG, "[mic] startMic: RECORD_AUDIO not granted");
+            a.requestPermissions(
+                new String[]{android.Manifest.permission.RECORD_AUDIO}, /*req=*/ 2);
+            // The request is asynchronous — retry once it returns. For the
+            // smoke stage of M7 we assume the permission was already granted
+            // in onCreate; if not, mic simply doesn't stream. A proper
+            // retry path is tracked separately.
+            return;
+        }
+
         HandlerThread mt = new HandlerThread("chatx.mic", 4);
         mt.start();
         Handler mh = new Handler(mt.getLooper());
         micThread = mt; micHandler = mh;
         mh.post(new MicLoop());
+        Log.i(TAG, "[mic] started (on demand)");
+    }
 
-        Log.i(TAG, "capture dispatched (camera + mic)");
+    /** Stop the mic capture loop. Idempotent. Leaves the mic in a
+     *  "released" state so {@link #startMic()} can be called again. */
+    public static synchronized void stopMic() {
+        HandlerThread mt = micThread;
+        if (mt == null) {
+            Log.i(TAG, "[mic] stopMic: not running; ignoring");
+            return;
+        }
+        mt.quitSafely();
+        micThread = null;
+        micHandler = null;
+        Log.i(TAG, "[mic] stopped (on demand)");
     }
 
     public static synchronized void stop() {
-        if (cameraThread == null) return;
+        if (cameraThread == null && micThread == null) return;
 
         // Tear down the camera2 session first so we don't keep pumping
         // frames into a thread we're about to quit.
@@ -100,8 +153,12 @@ public final class Capture {
         try { if (device  != null) device.close();  } catch (Throwable ignored) {}
         try { if (reader  != null) reader.close();  } catch (Throwable ignored) {}
 
-        cameraThread.quitSafely(); cameraThread = null; cameraHandler = null;
-        micThread.quitSafely();    micThread = null;    micHandler = null;
+        if (cameraThread != null) {
+            cameraThread.quitSafely(); cameraThread = null; cameraHandler = null;
+        }
+        if (micThread != null) {
+            micThread.quitSafely();    micThread = null;    micHandler = null;
+        }
         activityRef = null;
         Log.i(TAG, "capture stopped");
     }
