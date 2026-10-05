@@ -98,6 +98,11 @@ fi
 # fails because those have no ObjC runtime. Instead we export CHATX_IOS_SHIM
 # so `apps/chat/build.rs` emits `cargo:rustc-link-arg=<shim.o>` for the
 # chatx bin — the object is added only to the final `chatx` executable link.
+# Always export CHATX_IOS_SHIM (empty string when we have no shim), so the
+# var is *visible-but-empty* in the env of every cargo invocation. chatx's
+# build.rs registers it as an invalidation trigger whether set or empty, so
+# the present <-> absent transition (HAS_SHIM 1<->0) always re-runs it and
+# the link args come off / on correctly.
 export CHATX_IOS_SHIM="${SHIM_O:-}"
 
 REBUILD=0

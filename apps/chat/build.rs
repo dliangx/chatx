@@ -25,16 +25,13 @@ fn main() {
     // `bridge` crate's references to `chatx_screen_capture_{start,stop}`
     // resolve, and the `.o`'s reference to `bridge_screen_frame_in` resolves
     // back into `bridge` (both live in the same final binary).
-    //
-    // We emit `cargo:rustc-link-arg` (NOT `RUSTFLAGS=-C link-args`) so the
-    // object is added ONLY to the final chatx link — not to every dependency
-    // dylib (which would fail because those don't link the ObjC runtime).
+
+    println!("cargo:rerun-if-env-changed=CHATX_IOS_SHIM");
     if let Ok(shim) = std::env::var("CHATX_IOS_SHIM") {
         if shim.is_empty() {
             return;
         }
         println!("cargo:rustc-link-arg={shim}");
-        println!("cargo:rerun-if-env-changed=CHATX_IOS_SHIM");
         println!("cargo:rerun-if-changed={shim}");
 
         // The shim is ObjC++/ObjC and pulls in system frameworks. A bare `.o`
