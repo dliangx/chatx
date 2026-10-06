@@ -177,3 +177,5 @@ echo
 echo "OK. App bundle at:"
 find "$DEVELOPER/Build/Products" -name "Chatx.app" -maxdepth 5 2>/dev/null || \
   echo "  (no product found — check the xcodebuild log above for errors)"
+echo "--debug ios app--"
+echo "xcrun simctl install booted $DEVELOPER/Build/Products/$CONFIG-iphonesimulator/Chatx.app"
