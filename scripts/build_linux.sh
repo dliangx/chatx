@@ -32,7 +32,7 @@ cd "$ROOT"
 RELEASE="release"
 MUSL=0
 CLEAN=0
-OUT_DIR="$ROOT/build/linux"
+OUT_DIR="$ROOT/target/linux"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -225,12 +225,12 @@ if [ "$MUSL" -eq 0 ]; then
   NOTE: glibc build links against shared system libraries. On the target machine:
     Debian/Ubuntu:
       apt install libxcb1 libx11-6 libxrandr2 libxkbcommon0 \\
-                  libwayland-client0 libpixman-1-2 libfontconfig1
+                  libwayland-client0 libpixman-1-2 libfontconfig1 libegl-dev libgbm-dev
     Fedora:
-      dnf install xcb libX11 libXrandr libxkbcommon wayland libpixman-1 fontconfig
+      dnf install xcb libX11 libXrandr libxkbcommon wayland libpixman-1 fontconfig libegl libgbm
     Arch:
-      pacman -S libxcb libx11 libxrandr libxkbcommon wayland libpipewire
-    (pipewire/pulseaudio optional — only needed for audio)
+      pacman -S libxcb libx11 libxrandr libxkbcommon wayland libpipewire 
+    (pipewire/pulseaudio optional — only needed for audio)  
 EOF
 else
   echo "  NOTE: musl build is closer to statically linked; most distros need no extra libs."
