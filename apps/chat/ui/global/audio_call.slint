@@ -4,6 +4,7 @@ export global CallState {
     in property <string> peer-base58: "";
     in property <string> peer-name: "";
     in property <string> status: "正在呼叫…";
+    in property <string> error-message: "";
     in property <bool> active: false;
     in property <bool> muted: false;
     /// Latest decoded peer camera frame (H.264 → RGBA8888), or empty.
@@ -23,8 +24,7 @@ export global CallState {
 }
 
 export component AudioCallView inherits Rectangle {
-    width: 100%;
-    height: 100%;
+
     background: #0b0e14;
 
     VerticalLayout {
@@ -96,13 +96,14 @@ export component AudioCallView inherits Rectangle {
                 width: 100%;
                 height: 100%;
             }
+
             TouchArea {
                 clicked => { CallState.end-call(); }
             }
         }
 
         Text {
-            text: "点击红色按钮结束通话";
+            text: CallState.error-message;
             font-size: 11px;
             color: #6b7280;
             horizontal-alignment: center;

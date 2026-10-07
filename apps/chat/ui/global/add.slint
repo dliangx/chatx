@@ -126,7 +126,7 @@ export component AddMenuView inherits Rectangle {
             if  AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2:
             MenuRow {
                 icon: Glyph.video;
-                label: "视频会议";
+                label: "音/视频会议";
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddGroup, 1); }
             }
             if  AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2:
@@ -138,7 +138,7 @@ export component AddMenuView inherits Rectangle {
             if  AppState.add-menu-type == 1:
             MenuRow {
                 icon: Glyph.video;
-                label: "视频会议";
+                label: "音/视频通话";
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.VideoCall; }
             }
             if  AppState.add-menu-type == 1:

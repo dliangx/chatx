@@ -10,7 +10,7 @@ export component ErrorView inherits Rectangle {
     in property <bool> success: AppState.error-is-success;
 
     Timer {
-        interval: 3000ms;
+        interval: 2000ms;
         running: true;
         triggered => {
             self.running = false;

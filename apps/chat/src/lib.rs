@@ -359,6 +359,12 @@ pub fn run_app() {
             open_conversation_with_contact(weak.clone(), key);
         });
     }
+       {
+        let weak = weak.clone();
+        ui.global::<ProfileState>().on_start_audio_call(move |key| {
+            begin_voice_call(weak.clone(), key);
+        });
+    }
     {
         let weak = weak.clone();
         ui.global::<ProfileState>().on_start_video_call(move |key| {
@@ -1867,9 +1873,7 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
         let weak2 = weak.clone();
         let name = peer_name.clone();
         let _ = slint::invoke_from_event_loop(move || {
-            if let Some(ui) = weak2.upgrade() {
-                ui.set_auth_message(SharedString::from(format!("对端离线: {name}")));
-            }
+            show_app_error(weak2, format!("对端离线: {name}").to_string());
         });
         return;
     }
@@ -1947,7 +1951,8 @@ fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
 fn publish_call_error(weak: slint::Weak<MainWindow>, msg: String) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
-            ui.set_auth_message(SharedString::from(msg));
+            let state = ui.global::<CallState>();
+            state.set_error_message(SharedString::from(msg));
         }
     });
 }
@@ -2189,7 +2194,7 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
     let client = CLIENT.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
     let (Some(client), Some(backend)) = (client, backend) else {
-        publish_profile_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
+        show_app_error(weak, format!("尚未登录或后端未就绪"));
         return;
     };
     let username = {
@@ -2197,11 +2202,12 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
         g.peer_id_for(key).map(|s| s.to_string())
     };
     let Some(username) = username else {
-        publish_profile_status(weak, key, SharedString::from("联系人已失效"));
+        show_app_error(weak, format!("联系人已失效"));
         return;
     };
-    let Some(ur) = client.resolve_user(&username).ok() else {
-        publish_profile_status(weak, key, SharedString::from("该用户未注册，无法发起会话"));
+    let Some(ur)= client.resolve_user(&username).ok() else {
+        eprintln!("[chat] open_conversation_with_contact: resolve {username}: failed");
+        show_app_error(weak, format!("该用户未注册，无法发起会话"));
         return;
     };
     let me_peer = client.peer_base58();
