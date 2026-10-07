@@ -1730,6 +1730,18 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
         return;
     };
 
+    let me = backend.blocking_read().me.clone();
+
+    // Self-add guard: the directory key resolves to the user's own id.
+    if !me.is_empty() && username.eq_ignore_ascii_case(&me) {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<AppState>().set_add_status(SharedString::from("不能添加自己"));
+            }
+        });
+        return;
+    }
+
     // Already a contact? Short-circuit before hitting sqlite.
     if backend.blocking_read().has_contact(&username, &username) {
         let _ = slint::invoke_from_event_loop(move || {
@@ -1739,7 +1751,6 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
         });
         return;
     }
-    let me = backend.blocking_read().me.clone();
 
     let rt = runtime();
     rt.spawn(async move {
@@ -1764,6 +1775,12 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
 async fn do_add(pool: &sqlx::SqlitePool, me: &str, username: &str, backend: &ArcBackend) -> anyhow::Result<()> {
     let me_id = sqlite::users::ensure_identity(pool, me).await?;
     let their_id = sqlite::users::ensure_identity(pool, username).await?;
+    // Backstop: refuse self-association even if the username spelling differed
+    // enough to slip past the string-level guard above (e.g. leading whitespace
+    // or a case-insensitive username collision).
+    if their_id == me_id {
+        anyhow::bail!("不能添加自己");
+    }
     sqlite::social::add(pool, me_id, their_id).await?;
     let (name, image) = {
         if let Ok(Some(u)) = sqlite::users::get(pool, their_id).await {
