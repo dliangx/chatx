@@ -30,8 +30,6 @@ thread_local! {
     static CLIENT: RefCell<Option<Arc<Client<Directory>>>> = RefCell::new(None);
     static POOL: RefCell<Option<Arc<sqlx::SqlitePool>>> = RefCell::new(None);
     static BACKEND: RefCell<Option<ArcBackend>> = RefCell::new(None);
-    static CHAT_LOADED: RefCell<std::collections::HashSet<i32>> = RefCell::new(std::collections::HashSet::new());
-    static GROUP_PICKED: RefCell<Vec<i32>> = RefCell::new(Vec::new());
     static PUMP_STARTED: std::cell::Cell<bool> = std::cell::Cell::new(false);
     static CAMERA: RefCell<Option<Camera>> = RefCell::new(None);
     static SCREEN: RefCell<Option<Screen>> = RefCell::new(None);
@@ -255,6 +253,7 @@ pub fn run_app() {
         CLIENT.with(|s| *s.borrow_mut() = None);
         POOL.with(|s| *s.borrow_mut() = None);
         BACKEND.with(|s| *s.borrow_mut() = None);
+        PUMP_STARTED.set(false);
         if let Some(ui) = w.upgrade() {
             let st = ui.global::<AppState>();
             let uid = st.get_user_id().to_string();
@@ -304,25 +303,44 @@ pub fn run_app() {
     }
 
     {
+        use slint::Model;
+        let w = weak.clone();
         ui.global::<AppState>().on_pick_group_member(move |key| {
-            GROUP_PICKED.with(|s| {
-                if !s.borrow().contains(&key) {
-                    s.borrow_mut().push(key);
+            if let Some(ui) = w.upgrade() {
+                let st = ui.global::<AppState>();
+                let m = st.get_group_picked();
+                let mut picked: Vec<i32> = (0..m.row_count()).filter_map(|i| m.row_data(i)).collect();
+                if !picked.contains(&key) {
+                    picked.push(key);
+                    st.set_group_picked(slint::ModelRc::new(slint::VecModel::from(picked)));
                 }
-            });
+            }
         });
     }
     {
+        use slint::Model;
+        let w = weak.clone();
         ui.global::<AppState>().on_unpick_group_member(move |key| {
-            GROUP_PICKED.with(|s| s.borrow_mut().retain(|k| *k != key));
+            if let Some(ui) = w.upgrade() {
+                let st = ui.global::<AppState>();
+                let m = st.get_group_picked();
+                let mut picked: Vec<i32> = (0..m.row_count()).filter_map(|i| m.row_data(i)).collect();
+                picked.retain(|k| *k != key);
+                st.set_group_picked(slint::ModelRc::new(slint::VecModel::from(picked)));
+            }
         });
     }
     {
+        use slint::Model;
         let w = weak.clone();
         ui.global::<AppState>().on_create_group(move || {
-            let picked = GROUP_PICKED.with(|s| s.borrow().clone());
-            if create_group_flow(w.clone(), picked) {
-                GROUP_PICKED.with(|s| s.borrow_mut().clear());
+            if let Some(ui) = w.upgrade() {
+                let st = ui.global::<AppState>();
+                let m = st.get_group_picked();
+                let picked: Vec<i32> = (0..m.row_count()).filter_map(|i| m.row_data(i)).collect();
+                if create_group_flow(w.clone(), picked) {
+                    st.set_group_picked(slint::ModelRc::new(slint::VecModel::from(Vec::<i32>::new())));
+                }
             }
         });
     }
@@ -374,6 +392,7 @@ pub fn run_app() {
     {
         let weak = weak.clone();
         ui.global::<ProfileState>().on_open_conversation(move |key| {
+            eprintln!("[chat] on_open_conversation: got key={key}");
             open_conversation_with_contact(weak.clone(), key);
         });
     }
@@ -929,8 +948,14 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
             .cmp(&rank(data::contact_letter(&b.name)))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
 
-    let chats: Vec<ConversationRow> = snapshot
-        .chats
+    // Conversation list order: newest-activity first. `backend.chats` is in
+    // insertion (append) order, so a freshly opened/created 1:1 would land at
+    // the bottom; sort by `time_ms` (then key for stability, larger key ==
+    // more recently created as tiebreaker) so the latest chat is always at
+    // the top of the list.
+    let mut chats_sorted = snapshot.chats.clone();
+    chats_sorted.sort_by(|a, b| b.time_ms.cmp(&a.time_ms).then(b.key.cmp(&a.key)));
+    let chats: Vec<ConversationRow> = chats_sorted
         .iter()
         .map(|r| ConversationRow {
             chat_id: r.key,
@@ -1022,22 +1047,25 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
     state.set_data_status(SharedString::new());
 }
 
-/// Refresh just the conversation list (and the contact list, but with cached
-/// avatars). Used when opening/creating a 1:1 chat so we don't re-load the
-/// discover / my_collect / my_share models that are irrelevant here. The heavy,
-/// repeated `load_from_path` work in `publish_to_views` is routed through
-/// `load_image_cached` so it is cheap on repeat calls.
+/// Refresh just the conversation list. We deliberately do NOT rebuild the
+/// contact list / avatars here: opening / creating a DM never changes the
+/// contact set, and re-decoding every contact's image on the UI thread
+/// (even with `load_image_cached`) was the single biggest stall in this
+/// path for large contact books. `publish_to_views` (initial load, group
+/// creation, add-friend) still refreshes everything.
 fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
+    let t0 = std::time::Instant::now();
+    eprintln!("[chat] publish_chat_rows: enter");
     let snapshot = backend.blocking_read().clone();
+    eprintln!("[chat] publish_chat_rows: +{}ms snapshot chats={}",
+        t0.elapsed().as_millis(),
+        snapshot.chats.len());
 
-    let rank = |c: char| if c == '#' { '[' } else { c };
-    let mut contacts_sorted = snapshot.contacts.clone();
-    contacts_sorted.sort_by(|a, b| rank(data::contact_letter(&a.name))
-        .cmp(&rank(data::contact_letter(&b.name)))
-        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
-
-    let chats: Vec<ConversationRow> = snapshot
-        .chats
+    // Same ordering as `publish_to_views`: newest-activity first, so a newly
+    // opened/created DM shows at the top of the list.
+    let mut chats_sorted = snapshot.chats.clone();
+    chats_sorted.sort_by(|a, b| b.time_ms.cmp(&a.time_ms).then(b.key.cmp(&a.key)));
+    let chats: Vec<ConversationRow> = chats_sorted
         .iter()
         .map(|r| ConversationRow {
             chat_id: r.key,
@@ -1048,38 +1076,8 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
-
-    let contact_letters: Vec<char> = contacts_sorted
-        .iter()
-        .map(|r| data::contact_letter(&r.name))
-        .collect();
-
-    let contacts: Vec<ContactRow> = contacts_sorted
-        .iter()
-        .map(|r| ContactRow {
-            id: r.key,
-            image: load_image_cached(&r.image),
-            peer_id: SharedString::from(r.peer_id.clone()),
-            name: SharedString::from(r.name.clone()),
-        })
-        .collect();
-
-    let mut letter_entries: Vec<(char, i32)> = Vec::new();
-    for (i, &ltr) in contact_letters.iter().enumerate() {
-        if letter_entries.last().map(|(c, _)| *c).map_or(true, |c| c != ltr) {
-            letter_entries.push((ltr, i as i32));
-        }
-    }
-    let letters_model: Vec<LetterEntry> = letter_entries
-        .into_iter()
-        .map(|(ltr, target)| LetterEntry {
-            letter: SharedString::from(ltr.to_string()),
-            target,
-        })
-        .collect();
-
-    state.set_contacts(slint::ModelRc::new(slint::VecModel::from(contacts)));
-    state.set_contact_letters(slint::ModelRc::new(slint::VecModel::from(letters_model)));
+    eprintln!("[chat] publish_chat_rows: +{}ms done (chats={})",
+        t0.elapsed().as_millis(), snapshot.chats.len());
 }
 
 /// Bundled fonts (SIL OFL / Apache-2.0), embedded at compile time.
@@ -1208,8 +1206,11 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
         // Render on a background thread: font parsing is the slow part and must
         // not block the UI; we only ship raw bytes across to the UI thread.
         ensure_renderer();
+        // Order for display: newest first, regardless of the order the store
+        // returns rows in. Sort by message time (then id) so the latest
+        // message always renders at the top of the list.
         let mut rows = rows;
-        rows.reverse();
+        rows.sort_by(|a, b| b.t.cmp(&a.t).then(b.id.cmp(&a.id)));
         let rendered: Vec<RenderedMsg> = {
             let mut r = RENDERER.get().unwrap().lock().unwrap();
             rows.iter().map(|m| {
@@ -1300,13 +1301,19 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     if let Some(ui) = weak.upgrade() {
         ui.global::<ChatSession>().set_send_status(SharedString::from("发送中…"));
     }
-    let candidates: Vec<String> = {
+    // Candidates for the DM are whatever ids the local chat_id field carries
+    // (normally `<me_b58>|<peer_b58>` or `<me_b58>|<username>`). We do NOT
+    // round-trip to the directory service to pre-check the peer; the delivery
+    // path (`send_dm`) will reach the peer directory as needed and surface a
+    // useful error if the peer is offline or unknown.
+    let me_peers: Vec<String> = {
         let mut v: Vec<String> = Vec::new();
         if let Some(p) = client.other_peer_of(&chat_id) {
             v.push(p);
         }
+        let me = client.peer_base58();
         for part in chat_id.split('|') {
-            if !part.is_empty() && part != client.peer_base58() && !v.iter().any(|x| x == part) {
+            if !part.is_empty() && part != me && !v.iter().any(|x| x == part) {
                 v.push(part.to_string());
             }
         }
@@ -1317,15 +1324,16 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     };
     let rt = runtime();
     let weak2 = weak.clone();
+    let my_peer = client.peer_base58();
     rt.spawn(async move {
         let mut last_err = String::new();
         let mut sent = false;
-        'outer: for cand in &candidates {
-            let ur = match client.resolve_user(cand) {
-                Ok(ur) if ur.device.peer_id != client.peer_base58() => ur,
-                _ => continue,
-            };
-            match client.send_dm(&ur.device.peer_id, &body).await {
+        'outer: for cand in &me_peers {
+            // Skip self (defensive; extraction above already excludes it).
+            if cand == &my_peer {
+                continue;
+            }
+            match client.send_dm(cand, &body).await {
                 Ok(_) => {
                     sent = true;
                     break 'outer;
@@ -1961,18 +1969,11 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
         (pid, name)
     };
 
-    // Resolve so we can confirm they're registered; `dial_peer` (inside
-    // `start_call`) needs the directory entry to exist.
-    if let Err(e) = client.resolve_user(&peer_base58) {
-        eprintln!("[chat] begin_voice_call: resolve {peer_base58}: {e}");
-        let weak2 = weak.clone();
-        let name = peer_name.clone();
-        let _ = slint::invoke_from_event_loop(move || {
-            show_app_error(weak2, format!("对端离线: {name}").to_string());
-        });
-        return;
-    }
-
+    // No server round-trip for a presence check: the contact's peer id is
+    // already in our store (fixed at add-time, see `begin_video_call` /
+    // `begin_screen_share`, which dial directly with it). `dial_peer` inside
+    // `start_call` will surface a "peer is offline / not found" error on its
+    // own, which we report through `publish_call_error` below.
     match call::start_call(
         Arc::clone(&client),
         &peer_base58,
@@ -2285,43 +2286,88 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
 /// Open (or create) a 1:1 conversation row with the picked contact and
 /// navigate to it.
 fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
+    let t0 = std::time::Instant::now();
+    eprintln!("[chat] open_conversation_with_contact: enter key={key}");
     let client = CLIENT.with(|s| s.borrow().clone());
+    eprintln!("[chat] open_conversation: +{}ms grabbed CLIENT", t0.elapsed().as_millis());
     let backend = BACKEND.with(|s| s.borrow().clone());
+    eprintln!("[chat] open_conversation: +{}ms grabbed BACKEND", t0.elapsed().as_millis());
     let (Some(client), Some(backend)) = (client, backend) else {
         show_app_error(weak, format!("尚未登录或后端未就绪"));
         return;
     };
-    let username = {
+    // Build the DM id and title from the local contact row — the peer id is
+    // fixed at add-time (see `append_contact`) and is the same value
+    // `send_chat_message` and `dial_peer` use, so no directory lookup is needed
+    // here. If the backend has no row for this key (contact deleted / stale),
+    // we surface that rather than silently hitting the network.
+    let row_clone = {
         let g = backend.blocking_read();
-        g.peer_id_for(key).map(|s| s.to_string())
+        let row = g.contacts.iter().find(|r| r.key == key).cloned();
+        drop(g);
+        row
     };
-    let Some(username) = username else {
+    eprintln!("[chat] open_conversation: +{}ms backend row_clone ok={}", t0.elapsed().as_millis(), row_clone.is_some());
+    let Some(c) = row_clone else {
         show_app_error(weak, format!("联系人已失效"));
         return;
     };
-    let Some(ur)= client.resolve_user(&username).ok() else {
-        eprintln!("[chat] open_conversation_with_contact: resolve {username}: failed");
-        show_app_error(weak, format!("该用户未注册，无法发起会话"));
+    if c.peer_id.is_empty() {
+        show_app_error(weak, format!("联系人缺少 peer id，无法发起会话"));
         return;
-    };
+    }
+    let peer_id = c.peer_id;
+    let title = c.name;
+    eprintln!("[chat] open_conversation: +{}ms peer_id={peer_id}", t0.elapsed().as_millis());
     let me_peer = client.peer_base58();
-    let chat_id = dm_chat_id(&me_peer, &ur.device.peer_id);
-    let title = ur.user.user_id.clone();
-    let new_key = match backend.blocking_read().chats.iter().find(|c| c.chat_id == chat_id).map(|c| c.key) {
+    eprintln!("[chat] open_conversation: +{}ms self peer={me_peer}", t0.elapsed().as_millis());
+    let chat_id = dm_chat_id(&me_peer, &peer_id);
+    eprintln!("[chat] open_conversation: +{}ms chat_id={chat_id}", t0.elapsed().as_millis());
+    eprintln!("[chat] open_conversation: +{}ms THREAD {:?} about to acquire READ lock (2nd time, after row_clone)",
+        t0.elapsed().as_millis(), std::thread::current().id());
+    let existing_key = backend.blocking_read().chats.iter().find(|c| c.chat_id == chat_id).map(|c| c.key);
+    eprintln!("[chat] open_conversation: +{}ms THREAD {:?} READ lock released, existing={:?}",
+        t0.elapsed().as_millis(), std::thread::current().id(), existing_key);
+    let new_key = match existing_key {
         Some(k) => k,
         None => {
+            eprintln!("[chat] open_conversation: +{}ms THREAD {:?} about to acquire WRITE lock (append_chat)",
+                t0.elapsed().as_millis(), std::thread::current().id());
             let mut g = backend.blocking_write();
-            g.append_chat(chat_id, title, false)
+            let k = g.append_chat(chat_id, title, false);
+            drop(g);
+            eprintln!("[chat] open_conversation: +{}ms THREAD {:?} WRITE lock released, appended new chat key={k}",
+                t0.elapsed().as_millis(), std::thread::current().id());
+            k
         }
     };
+    eprintln!("[chat] open_conversation: +{}ms new_key={new_key}, about to invoke_from_event_loop", t0.elapsed().as_millis());
     let _ = slint::invoke_from_event_loop(move || {
-        if let Some(ui) = weak.upgrade() {
-            let state = ui.global::<AppState>();
-            publish_chat_rows(&state, backend.clone());
-            load_chat_messages(ui.as_weak(), new_key);
-            push_sub_history(&state, SubPageEntry { page: SubPageType::ChatRoom, payload: new_key })
+        eprintln!("[chat] open_conversation: +{}ms eventloop cb enter", t0.elapsed().as_millis());
+        let Some(ui) = weak.upgrade() else {
+            eprintln!("[chat] open_conversation: +{}ms weak upgrade failed", t0.elapsed().as_millis());
+            return;
+        };
+        eprintln!("[chat] open_conversation: eventloop cb calling publish_chat_rows");
+        let state = ui.global::<AppState>();
+        publish_chat_rows(&state, backend.clone());
+        eprintln!("[chat] open_conversation: eventloop cb publish_chat_rows done, calling load_chat_messages");
+        load_chat_messages(ui.as_weak(), new_key);
+        eprintln!("[chat] open_conversation: eventloop cb load_chat_messages spawned, calling push_sub_history");
+        // Ensure we're on the Chat tab (first tab) so the pushed ChatRoom
+        // subpage lands under the visible tab, regardless of which tab the
+        // user was on when they opened the conversation from a profile.
+        {
+            let mut nav = state.get_nav_state();
+            if nav.active_tab != 0 {
+                nav.active_tab = 0;
+                state.set_nav_state(nav);
+            }
         }
+        push_sub_history(&state, SubPageEntry { page: SubPageType::ChatRoom, payload: new_key });
+        eprintln!("[chat] open_conversation: +{}ms eventloop cb done", t0.elapsed().as_millis());
     });
+    eprintln!("[chat] open_conversation: +{}ms invoke_from_event_loop queued (not yet run)", t0.elapsed().as_millis());
 }
 
 // ---------------------------------------------------------------------------
