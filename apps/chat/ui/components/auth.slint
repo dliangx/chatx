@@ -1,4 +1,5 @@
 import { Theme } from "../theme.slint";
+import { AppState } from "./app_state.slint";
 
 component AuthInput inherits Rectangle {
     in-out property <string> text;
@@ -80,9 +81,6 @@ export component AuthView inherits Rectangle {
     in-out property <bool> is-register: false;
     in-out property <string> uid: "";
     in-out property <string> pass: "";
-
-    callback login(string, string);
-    callback register(string, string);
 
     width: 100%;
     height: 100%;
@@ -186,7 +184,7 @@ export component AuthView inherits Rectangle {
                 root.auth-error = "请输入口令";
                 return;
             }
-            root.register(root.uid, root.pass);
+            AppState.register(root.uid, root.pass);
             return;
         }
         if (root.uid == "") {
@@ -197,6 +195,6 @@ export component AuthView inherits Rectangle {
             root.auth-error = "请输入口令";
             return;
         }
-        root.login(root.uid, root.pass);
+        AppState.login(root.uid, root.pass);
     }
 }

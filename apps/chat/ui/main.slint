@@ -57,8 +57,6 @@ export component MainWindow inherits Window {
         message: root.auth-message;
         busy: root.auth-busy;
         uid <=> AppState.user-id;
-        login(uid, pass) => { AppState.login(uid, pass); }
-        register(uid, pass) => { AppState.register(uid, pass); }
     }
 
     if root.logged-in && AppState.is-mobile:
