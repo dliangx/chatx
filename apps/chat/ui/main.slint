@@ -38,8 +38,6 @@ import { AddMenuView } from "global/add.slint";
 export component MainWindow inherits Window {
 
     in property <bool> logged-in: false;
-    in property <bool> auth-busy: false;
-    in property <string> auth-message: "";
 
     function select_tab(i: int) {
         AppState.nav-state.active-tab = i;
@@ -54,8 +52,6 @@ export component MainWindow inherits Window {
 
     if !root.logged-in:
     AuthView {
-        message: root.auth-message;
-        busy: root.auth-busy;
         uid <=> AppState.user-id;
     }
 

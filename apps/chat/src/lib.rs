@@ -112,7 +112,7 @@ pub fn run_app() {
         .map(|ks| ks.user_id)
         .ok();
     if let Some(uid) = existing_uid {
-        ui.set_auth_message(SharedString::from("please logging in "));
+        ui.global::<AppState>().set_auth_message(SharedString::from("please logging in "));
         state.set_user_id(SharedString::from(uid.clone()));
 
         if let Some(pass) = load_passphrase(&uid) {
@@ -185,8 +185,9 @@ pub fn run_app() {
             let dir = default_server();
             let weak = weak.clone();
             if let Some(ui) = weak.upgrade() {
-                ui.set_auth_busy(true);
-                ui.set_auth_message(SharedString::from("logging in …"));
+                let st = ui.global::<AppState>();
+                st.set_auth_busy(true);
+                st.set_auth_message(SharedString::from("logging in …"));
             }
             let rt = runtime();
             rt.spawn(async move {
@@ -196,7 +197,7 @@ pub fn run_app() {
                 }
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
-                        ui.set_auth_busy(false);
+                        ui.global::<AppState>().set_auth_busy(false);
                     }
                     apply_result(weak, uid, res);
                 });
@@ -213,8 +214,9 @@ pub fn run_app() {
             let dir = default_server();
             let weak = weak.clone();
             if let Some(ui) = weak.upgrade() {
-                ui.set_auth_busy(true);
-                ui.set_auth_message(SharedString::from("register …"));
+                let st = ui.global::<AppState>();
+                st.set_auth_busy(true);
+                st.set_auth_message(SharedString::from("register …"));
             }
             let rt = runtime();
             rt.spawn(async move {
@@ -224,7 +226,7 @@ pub fn run_app() {
                 }
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
-                        ui.set_auth_busy(false);
+                        ui.global::<AppState>().set_auth_busy(false);
                     }
                     apply_result(weak, uid, res);
                 });
@@ -802,7 +804,7 @@ fn apply_result(
         }
         Err(err) => {
             if let Some(ui) = weak.upgrade() {
-                ui.set_auth_message(SharedString::from(err.to_string()));
+                ui.global::<AppState>().set_auth_message(SharedString::from(err.to_string()));
                 ui.set_logged_in(false);
             }
             return;
@@ -810,7 +812,7 @@ fn apply_result(
     }
 
     if let Some(ui) = weak.upgrade() {
-        ui.set_auth_message(SharedString::from(format!("logged in:{user_id}")));
+        ui.global::<AppState>().set_auth_message(SharedString::from(format!("logged in:{user_id}")));
         ui.global::<AppState>().set_user_id(SharedString::from(user_id));
         ui.set_logged_in(true);
     }

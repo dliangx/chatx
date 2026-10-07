@@ -104,6 +104,8 @@ export global AppState {
     callback login(string, string);
     callback register(string, string);
     callback logout();
+    in-out property <bool> auth-busy: false;
+    in-out property <string> auth-message: "";
     in-out property <bool> is-mobile: true;
     in-out property <bool> search-active: false;
     in-out property <string> user-id: "";

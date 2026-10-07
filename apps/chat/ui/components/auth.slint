@@ -74,8 +74,6 @@ component BrandButton inherits Rectangle {
 }
 
 export component AuthView inherits Rectangle {
-    in property <string> message;
-    in property <bool> busy;
     in-out property <string> auth-error: "";
 
     in-out property <bool> is-register: false;
@@ -130,7 +128,7 @@ export component AuthView inherits Rectangle {
         }
 
         Text {
-            text: root.auth-error != "" ? root.auth-error : root.message;
+            text: root.auth-error != "" ? root.auth-error : AppState.auth-message;
             color: Theme.brand;
             font-size: 14px;
             width: 100%;
@@ -142,8 +140,8 @@ export component AuthView inherits Rectangle {
             alignment: center;
             BrandButton {
                 width: min(parent.width, 420px);
-                text: root.busy ? "处理中…" : (root.is-register ? "注册" : "登录");
-                enabled: !root.busy;
+            text: AppState.auth-busy ? "处理中…" : (root.is-register ? "注册" : "登录");
+            enabled: !AppState.auth-busy;
                 clicked => { root.submit(); }
             }
         }
