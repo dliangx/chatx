@@ -178,7 +178,7 @@ pub fn run_app() {
 
     {
         let weak = weak.clone();
-        ui.on_login(move |user_id, pass| {
+        ui.global::<AppState>().on_login(move |user_id, pass| {
             let uid = user_id.to_string();
             let pass = pass.to_string();
             let profile = profile();
@@ -206,7 +206,7 @@ pub fn run_app() {
 
     {
         let weak = weak.clone();
-        ui.on_register(move |user_id, pass| {
+        ui.global::<AppState>().on_register(move |user_id, pass| {
             let uid = user_id.to_string();
             let pass = pass.to_string();
             let profile = profile();

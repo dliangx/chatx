@@ -101,6 +101,8 @@ export global AppState {
     callback push-sub(SubPageType, int);
     callback pop-sub();
     callback clear();
+    callback login(string, string);
+    callback register(string, string);
     callback logout();
     in-out property <bool> is-mobile: true;
     in-out property <bool> search-active: false;

@@ -41,12 +41,6 @@ export component MainWindow inherits Window {
     in property <bool> auth-busy: false;
     in property <string> auth-message: "";
 
-    callback login(string, string);
-    callback register(string, string);
-
-    callback pop-sub-page(int);
-    callback push-sub-page(int, SubPageType, int);
-
     function select_tab(i: int) {
         AppState.nav-state.active-tab = i;
     }
@@ -63,8 +57,8 @@ export component MainWindow inherits Window {
         message: root.auth-message;
         busy: root.auth-busy;
         uid <=> AppState.user-id;
-        login(uid, pass) => { root.login(uid, pass); }
-        register(uid, pass) => { root.register(uid, pass); }
+        login(uid, pass) => { AppState.login(uid, pass); }
+        register(uid, pass) => { AppState.register(uid, pass); }
     }
 
     if root.logged-in && AppState.is-mobile:
