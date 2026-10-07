@@ -48,6 +48,22 @@ static PROFILE_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 
 /// Monotonic id for post-detail loads (each request gets a fresh id).
 static POST_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+thread_local! {
+    static IMAGE_CACHE: std::cell::RefCell<std::collections::HashMap<String, SlintImage>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn load_image_cached(path: &str) -> SlintImage {
+    let key = path.to_string();
+    let cached = IMAGE_CACHE.with(|c| c.borrow().get(&key).cloned());
+    if let Some(img) = cached {
+        return img;
+    }
+    let img = SlintImage::load_from_path(std::path::Path::new(&key)).unwrap_or_default();
+    IMAGE_CACHE.with(|c| c.borrow_mut().insert(key, img.clone()));
+    img
+}
 /// Id of the most-recent post-detail load; stale ones are dropped before publishing.
 static POST_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -939,7 +955,7 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
         .iter()
         .map(|r| ContactRow {
             id: r.key,
-            image: slint::Image::load_from_path(std::path::Path::new(&r.image)).unwrap_or_default(),
+            image: load_image_cached(&r.image),
             peer_id: SharedString::from(r.peer_id.clone()),
             name: SharedString::from(r.name.clone()),
         })
@@ -1004,6 +1020,66 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
     state.set_my_share(slint::ModelRc::new(slint::VecModel::from(my_share)));
 
     state.set_data_status(SharedString::new());
+}
+
+/// Refresh just the conversation list (and the contact list, but with cached
+/// avatars). Used when opening/creating a 1:1 chat so we don't re-load the
+/// discover / my_collect / my_share models that are irrelevant here. The heavy,
+/// repeated `load_from_path` work in `publish_to_views` is routed through
+/// `load_image_cached` so it is cheap on repeat calls.
+fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
+    let snapshot = backend.blocking_read().clone();
+
+    let rank = |c: char| if c == '#' { '[' } else { c };
+    let mut contacts_sorted = snapshot.contacts.clone();
+    contacts_sorted.sort_by(|a, b| rank(data::contact_letter(&a.name))
+        .cmp(&rank(data::contact_letter(&b.name)))
+        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+
+    let chats: Vec<ConversationRow> = snapshot
+        .chats
+        .iter()
+        .map(|r| ConversationRow {
+            chat_id: r.key,
+            title: SharedString::from(r.title.clone()),
+            preview: SharedString::from(r.preview.clone()),
+            is_group: r.is_group,
+            time_label: SharedString::from(fmt_time(r.time_ms)),
+        })
+        .collect();
+    state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
+
+    let contact_letters: Vec<char> = contacts_sorted
+        .iter()
+        .map(|r| data::contact_letter(&r.name))
+        .collect();
+
+    let contacts: Vec<ContactRow> = contacts_sorted
+        .iter()
+        .map(|r| ContactRow {
+            id: r.key,
+            image: load_image_cached(&r.image),
+            peer_id: SharedString::from(r.peer_id.clone()),
+            name: SharedString::from(r.name.clone()),
+        })
+        .collect();
+
+    let mut letter_entries: Vec<(char, i32)> = Vec::new();
+    for (i, &ltr) in contact_letters.iter().enumerate() {
+        if letter_entries.last().map(|(c, _)| *c).map_or(true, |c| c != ltr) {
+            letter_entries.push((ltr, i as i32));
+        }
+    }
+    let letters_model: Vec<LetterEntry> = letter_entries
+        .into_iter()
+        .map(|(ltr, target)| LetterEntry {
+            letter: SharedString::from(ltr.to_string()),
+            target,
+        })
+        .collect();
+
+    state.set_contacts(slint::ModelRc::new(slint::VecModel::from(contacts)));
+    state.set_contact_letters(slint::ModelRc::new(slint::VecModel::from(letters_model)));
 }
 
 /// Bundled fonts (SIL OFL / Apache-2.0), embedded at compile time.
@@ -2185,8 +2261,7 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak2.upgrade() else { return };
             let ps = ui.global::<ProfileState>();
-            let avatar = slint::Image::load_from_path(std::path::Path::new(&avatar_path))
-                .unwrap_or_default();
+            let avatar = load_image_cached(&avatar_path);
             let (has_moment, mt, mtime, ml) = match moment {
                 Some((text, ts, likes)) => (true, text, ts, likes),
                 None => (false, String::new(), 0, 0),
@@ -2242,7 +2317,7 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             let state = ui.global::<AppState>();
-            publish_to_views(&state, backend.clone());
+            publish_chat_rows(&state, backend.clone());
             load_chat_messages(ui.as_weak(), new_key);
             push_sub_history(&state, SubPageEntry { page: SubPageType::ChatRoom, payload: new_key })
         }

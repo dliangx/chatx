@@ -34,10 +34,21 @@ export component ContactProfileView inherits Rectangle {
 
     out property <bool> is-mine: ProfileState.key == root.user-id;
 
-    Timer {
-        interval: 40ms;
-        running: root.visible && !root.is-mine;
-        triggered => {
+    in-out property <bool> load-requested: false;
+
+    // One-shot load: request-load each time the page becomes visible, but only
+    // ever once per contact id. Repeated loads (the previous 40ms Timer firing
+    // forever while the backend was still warming up) flooded the event loop
+    // with sync backend reads + invoke_from_event_loop hops and froze the UI.
+    // One-shot load: as soon as the view becomes visible, ask for the profile
+    // data exactly once. The previous implementation used a 40ms Timer running
+    // for the entire lifetime of the view while `is-mine` was false; that meant
+    // `load_profile_data` was re-entering the UI thread with sync backend reads
+    // and `invoke_from_event_loop` forever, which is what froze the app when
+    // the backend hadn't reported back yet.
+    changed visible => {
+        if root.visible && !root.is-mine && !root.load-requested {
+            root.load-requested = true;
             ProfileState.request-load(root.user-id);
         }
     }
