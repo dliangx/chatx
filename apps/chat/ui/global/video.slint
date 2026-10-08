@@ -1,5 +1,5 @@
 import { GlobalOverlayType, AppState } from "../components/app_state.slint";
-import { CallState } from "audio_call.slint";
+import { CallState } from "call.slint";
 
 /// Video-call overlay: peer video full-screen + local camera preview (PIP)
 /// bottom-right, plus mute and end buttons.
@@ -61,6 +61,7 @@ export component VideoView inherits Rectangle {
                 TouchArea {
                     clicked => { CallState.toggle-mute(); }
                 }
+
                 Text {
                     text: CallState.muted ? "已静音" : "语音";
                     color: #ffffff;
@@ -80,6 +81,7 @@ export component VideoView inherits Rectangle {
                 TouchArea {
                     clicked => { CallState.end-call(); }
                 }
+
                 Text {
                     text: "挂断";
                     color: #ffffff;
