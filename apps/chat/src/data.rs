@@ -256,11 +256,11 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
         let user_id = f.user_id;
         b.contact_key_to_id.insert(key, user_id);
         let image = f.avatar_path.clone().unwrap_or_default();
-        // Directory `users` table is keyed by the login username (see core
-        // heartbeat `user_id: account.user_id()`), so store the username here —
-        // it is the key `resolve_user` needs. Fall back to the int id only if
-        // the username is missing.
-        let peer_id = f.username.clone().unwrap_or_else(|| user_id.to_string());
+        // Directory `devices.peer_id` is the libp2p PeerId in base58 — the
+        // canonical key for `dm_chat_id` and call signalling. If the friend
+        // has no device yet, leave it empty so `open_conversation_with_contact`
+        // fails loudly instead of silently building a mixed-domain chat id.
+        let peer_id = f.device_peer_id.clone().unwrap_or_default();
         b.contacts.push(ContactRow {
             key,
             user_id,

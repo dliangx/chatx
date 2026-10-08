@@ -131,12 +131,17 @@ pub async fn history_with_sender(
 }
 
 /// A friend row with the friend's profile + whether each side follows the other.
+///
+/// `device_peer_id` is the friend's libp2p PeerId (base58) taken from their
+/// most-recently-seen device. Used as the canonical peer key for DMs and call
+/// signalling; `username` is a display label only.
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
 pub struct FriendEntry {
     pub user_id: i64,
     pub username: Option<String>,
     pub nickname: Option<String>,
     pub avatar_path: Option<String>,
+    pub device_peer_id: Option<String>,
     pub since: i64,
     pub i_follow_them: bool,
     pub they_follow_me: bool,
@@ -147,19 +152,25 @@ pub async fn friends_with_profile(pool: &Pool, me: i64, limit: u32) -> anyhow::R
         "SELECT
             f.user_id,
             u.username, u.nickname, u.avatar_path,
+            (
+              SELECT d.peer_id FROM devices d
+               WHERE d.user_id = f.user_id
+               ORDER BY COALESCE(d.last_seen, -1) DESC, d.device_id ASC
+               LIMIT 1
+            ) AS device_peer_id,
             f.created_at AS since,
             EXISTS(SELECT 1 FROM follows fl WHERE fl.follower_id = ?1 AND fl.following_id = f.user_id) AS i_follow_them,
             EXISTS(SELECT 1 FROM follows fl WHERE fl.follower_id = f.user_id AND fl.following_id = ?2) AS they_follow_me
-         FROM (
+          FROM (
             SELECT user_high AS user_id, created_at
               FROM friendships WHERE user_low = ?3
             UNION ALL
             SELECT user_low AS user_id, created_at
               FROM friendships WHERE user_high = ?4
-         ) f
-         LEFT JOIN users u ON u.id = f.user_id
-         ORDER BY COALESCE(u.nickname, u.username)
-         LIMIT ?5",
+          ) f
+          LEFT JOIN users u ON u.id = f.user_id
+          ORDER BY COALESCE(u.nickname, u.username)
+          LIMIT ?5",
     )
     .bind(me)
     .bind(me)
