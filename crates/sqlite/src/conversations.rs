@@ -93,6 +93,22 @@ pub async fn ensure_dm(pool: &Pool, chat_id: &str) -> anyhow::Result<i64> {
     Ok(id)
 }
 
+/// Stamp `last_message_time` with `ts` only when the conversation has no real
+/// message time yet (i.e. it was created via `ensure_dm` without any message).
+/// This gives a freshly opened DM a sensible "created" time for ordering and
+/// the chat-list time label without clobbering a genuine last-message time.
+pub async fn ensure_time(pool: &Pool, id: i64, ts: i64) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE conversations SET last_message_time = ?2
+         WHERE id = ?1 AND last_message_time IS NULL",
+    )
+    .bind(id)
+    .bind(ts)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Record the DM peer's identity (libp2p PeerId / username) if not already set.
 pub async fn set_peer_id(pool: &Pool, id: i64, peer_id: &str) -> anyhow::Result<()> {
     sqlx::query("UPDATE conversations SET peer_id = COALESCE(peer_id, ?2) WHERE id = ?1")

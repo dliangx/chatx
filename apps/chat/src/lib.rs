@@ -615,12 +615,6 @@ fn clear_sub_history(app: &AppState) {
 
 /// Open the camera and wire decoded QR payloads + raw preview frames into
 /// the scan UI.
-///
-/// `camera::Camera` exposes the same API on every target (Apple AVFoundation,
-/// Windows/Linux nokhwa, Android bridge+JNI), so this helper is platform-
-/// agnostic: start it, install a sink that hops back to the UI thread, and be
-/// done. Any platform whose `start()` reports "unsupported" surfaces the error
-/// in `scan-status`.
 fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
     CAMERA.with(|slot| {
         if slot.borrow().is_none() {
@@ -649,16 +643,6 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
                     });
                 });
 
-                // Preview sink: hops to the Slint event-loop thread to publish
-                // the latest frame into `AppState.scan-preview`. To keep the
-                // UI smooth even on slow cameras we coalesce: a frame that
-                // arrives within 30 ms of the previous one is dropped (we
-                // want to keep *at most* ~30 fps of previews).
-                //
-                // In parallel with the active call (if any), the same frame
-                // is forwarded into the call's `VidSource` by
-                // `call_dispatcher::install_qr_frame_hook`. Register our
-                // preview sink as the "QR hook".
                 let latest_seen = std::sync::atomic::AtomicU64::new(0);
                 let frame_n = std::sync::atomic::AtomicU64::new(0);
                 call_dispatcher::install_qr_hook(move |bytes, w, h, fmt| {
@@ -667,9 +651,6 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    // Throttle: skip unless enough time has passed since we
-                    // last published a preview. The CAS claims the slot so
-                    // concurrent frame threads don't all punch through.
                     loop {
                         let last = latest_seen.load(std::sync::atomic::Ordering::Relaxed);
                         if now.saturating_sub(last) < GATE_MS {
@@ -689,9 +670,6 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
                     if n < 3 {
                         eprintln!("[scan.preview] app sink #{n}: {w}x{h} fmt={fmt} bytes={}", bytes.len());
                     }
-
-                    // Take ownership of the bytes so the event loop closure is
-                    // `Send`-safe across threads.
                     let data = bytes.to_vec();
                     let wk = wsink2.clone();
                     let _ = slint::invoke_from_event_loop(move || {
@@ -710,10 +688,6 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
     });
 }
 
-/// Build a slint `Image` from a raw preview frame. `fmt` follows
-/// `bridge::PixelFormat`: 1 = RGBA8888 (4 bytes/px, already in slint's
-/// preferred order), 8 = Gray8 (1 byte/px, Y-only). Unknown formats yield
-/// a black placeholder so a bad shell doesn't take down the scanner.
 fn make_preview_image(data: &[u8], w: u32, h: u32, fmt: u32) -> slint::Image {
     if w == 0 || h == 0 {
         return slint::Image::default();
@@ -745,15 +719,12 @@ fn make_preview_image(data: &[u8], w: u32, h: u32, fmt: u32) -> slint::Image {
     slint::Image::from_rgba8(buf)
 }
 
-/// RGBA copy helper: takes `n` pixels from `src` and writes them to `dst`.
-/// Both are packed `n * 4` byte buffers.
 fn copy_rgba(src: &[u8], dst: &mut [u8], n: usize) {
     let want = n * 4;
     let len = want.min(src.len()).min(dst.len());
     dst[..len].copy_from_slice(&src[..len]);
 }
 
-/// Render a QR code for `text` as an RGBA slint image (black modules on white).
 fn qr_image(text: &str) -> slint::Image {
     use qrcode::{Color, QrCode};
     let code = match QrCode::new(text.as_bytes()) {
@@ -853,9 +824,6 @@ fn apply_result(
     }
 }
 
-/// Spawn a long-lived task that receives inbound events (DM, group key
-/// distribution, group messages, and realtime audio) and refreshes the
-/// affected conversations in the UI. Started once per login.
 fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
     if PUMP_STARTED.get() {
         return;
@@ -896,8 +864,6 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
     });
 }
 
-/// After an inbound message touched a conversation, patch its chat-list row and
-/// reload the message list if that conversation is the one currently shown.
 async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
     let pool = POOL.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
@@ -938,9 +904,6 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
 fn publish_to_views(state: &AppState, backend: ArcBackend) {
     let mut snapshot = backend.blocking_read().clone();
 
-    // WeChat-style order: A..Z by pinyin initial, '#' catch-all last,
-    // alphabetical within a section. Computed here so every publish path
-    // (initial load, appended friend) keeps the right-side index in order.
     let rank = |c: char| if c == '#' { '[' } else { c };
     snapshot
         .contacts
@@ -948,11 +911,6 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
             .cmp(&rank(data::contact_letter(&b.name)))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
 
-    // Conversation list order: newest-activity first. `backend.chats` is in
-    // insertion (append) order, so a freshly opened/created 1:1 would land at
-    // the bottom; sort by `time_ms` (then key for stability, larger key ==
-    // more recently created as tiebreaker) so the latest chat is always at
-    // the top of the list.
     let mut chats_sorted = snapshot.chats.clone();
     chats_sorted.sort_by(|a, b| b.time_ms.cmp(&a.time_ms).then(b.key.cmp(&a.key)));
     let chats: Vec<ConversationRow> = chats_sorted
@@ -967,8 +925,6 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
 
-    // Letter of each contact (pinyin initial) — the backend already sorted the
-    // list by this, so consecutive same-letter entries form a WeChat-style section.
     let contact_letters: Vec<char> = snapshot
         .contacts
         .iter()
@@ -986,8 +942,6 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
         })
         .collect();
 
-    // A–Z index bar entries: one per distinct letter, in list order (A..Z, '#'
-    // last), targeting the index of the first contact of that letter.
     let mut letter_entries: Vec<(char, i32)> = Vec::new();
     for (i, &ltr) in contact_letters.iter().enumerate() {
         if letter_entries.last().map(|(c, _)| *c).map_or(true, |c| c != ltr) {
@@ -1047,12 +1001,6 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
     state.set_data_status(SharedString::new());
 }
 
-/// Refresh just the conversation list. We deliberately do NOT rebuild the
-/// contact list / avatars here: opening / creating a DM never changes the
-/// contact set, and re-decoding every contact's image on the UI thread
-/// (even with `load_image_cached`) was the single biggest stall in this
-/// path for large contact books. `publish_to_views` (initial load, group
-/// creation, add-friend) still refreshes everything.
 fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
     let t0 = std::time::Instant::now();
     eprintln!("[chat] publish_chat_rows: enter");
@@ -1061,8 +1009,79 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
         t0.elapsed().as_millis(),
         snapshot.chats.len());
 
-    // Same ordering as `publish_to_views`: newest-activity first, so a newly
-    // opened/created DM shows at the top of the list.
+    {
+        let pool = POOL.with(|s| s.borrow().clone());
+        let me_peer = CLIENT.with(|s| s.borrow().as_ref().map(|c| c.peer_base58()));
+        // friend peer id -> real users.id, so the reload join shows the name.
+        let mut friend_by_peer: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for c in &snapshot.contacts {
+            if !c.peer_id.is_empty() {
+                friend_by_peer.insert(c.peer_id.clone(), c.user_id);
+            }
+        }
+        let dms: Vec<(String, i64)> = snapshot
+            .chats
+            .iter()
+            .filter(|c| !c.is_group)
+            .map(|c| (c.chat_id.clone(), c.time_ms))
+            .collect();
+        if let (Some(pool), Some(me_peer)) = (pool, me_peer) {
+            if !dms.is_empty() {
+                let rt = runtime();
+                rt.spawn(async move {
+                    for (chat_id, time_ms) in dms {
+                        let Some(pb) = chat_id
+                            .split('|')
+                            .find(|p| !p.is_empty() && *p != me_peer)
+                            .map(|s| s.to_string())
+                        else {
+                            continue;
+                        };
+                        let conv_id = match sqlite::conversations::ensure_dm(&pool, &chat_id).await {
+                            Ok(id) => id,
+                            Err(e) => {
+                                eprintln!("[chat] ensure_dm({chat_id}) failed: {e}");
+                                continue;
+                            }
+                        };
+                        match friend_by_peer.get(&pb).copied() {
+                            Some(fuid) => {
+                                let exists = sqlite::devices::get_by_peer(&pool, &pb)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .is_some();
+                                if !exists {
+                                    let did = sqlite::new_id();
+                                    let _ = sqlite::devices::upsert(
+                                        &pool,
+                                        did,
+                                        &sqlite::devices::DevicePatch {
+                                            user_id: Some(fuid),
+                                            peer_id: Some(pb.clone()),
+                                            public_key: Some(String::new()),
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .await;
+                                }
+                            }
+                            None => {
+                                let _ = sqlite::devices::ensure_user_by_peer(&pool, &pb).await;
+                            }
+                        }
+                        let _ = sqlite::conversations::set_peer_id(&pool, conv_id, &pb).await;
+                        // Give a just-opened DM a time for ordering/label; only
+                        // fills it if no real message time has been recorded yet.
+                        if time_ms > 0 {
+                            let _ = sqlite::conversations::ensure_time(&pool, conv_id, time_ms).await;
+                        }
+                    }
+                });
+            }
+        }
+    }
+
     let mut chats_sorted = snapshot.chats.clone();
     chats_sorted.sort_by(|a, b| b.time_ms.cmp(&a.time_ms).then(b.key.cmp(&a.key)));
     let chats: Vec<ConversationRow> = chats_sorted
@@ -1123,8 +1142,6 @@ struct RenderedMsg {
     text: String,
 }
 
-/// Render one message into raw RGBA bytes (background thread; avoids building
-/// the non-`Send` slint image off the UI thread).
 fn render_msg(
     r: &mut Renderer,
     id: u64,
@@ -1217,8 +1234,6 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 let is_self = m.sender == me_peer || m.sender == me;
                 let time = time_label(m.t as i64);
                 let sender = if is_self { "我" } else { &title };
-                // Key the texture cache by rendered content (not the row id), so
-                // editing a message in the DB invalidates the stale bubble.
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 std::hash::Hash::hash(&m.text, &mut h);
                 std::hash::Hash::hash(sender, &mut h);
@@ -1301,11 +1316,6 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     if let Some(ui) = weak.upgrade() {
         ui.global::<ChatSession>().set_send_status(SharedString::from("发送中…"));
     }
-    // Candidates for the DM are whatever ids the local chat_id field carries
-    // (normally `<me_b58>|<peer_b58>` or `<me_b58>|<username>`). We do NOT
-    // round-trip to the directory service to pre-check the peer; the delivery
-    // path (`send_dm`) will reach the peer directory as needed and surface a
-    // useful error if the peer is offline or unknown.
     let me_peers: Vec<String> = {
         let mut v: Vec<String> = Vec::new();
         if let Some(p) = client.other_peer_of(&chat_id) {
@@ -1447,8 +1457,6 @@ fn layout_my_notes(
     let mut rows: Vec<NoteRow> = Vec::with_capacity(notes.len());
     let mut content_h = 0i32;
 
-    // Effective units: 1.0 for CJK / full-width chars, 0.6 for Latin / digits
-    // (average Latin glyph ≈ 0.6em). Divide by units_per_line to get lines.
     let units_per_line = inner_w as f64 / FONT_SIZE as f64;
 
     for n in notes {
@@ -1493,10 +1501,6 @@ fn layout_my_notes(
     (rows, content_h)
 }
 
-/// Publish the backend's notes into the Slint `my_notes` view model, laying
-/// them out as a masonry grid. Uses the last known card-area width from
-/// `AppState.my-notes-w` (pushed by MyNoteView on resize); falls back to the
-/// main window width if that hasn't been set yet.
 fn publish_my_notes(state: &AppState, backend: &ArcBackend) {
     let notes = backend.blocking_read().notes.clone();
     let w = state.get_my_notes_w().max(1);
@@ -1505,8 +1509,6 @@ fn publish_my_notes(state: &AppState, backend: &ArcBackend) {
     state.set_my_notes_content_h(content_h);
 }
 
-/// MyNoteView reports its actual card-area width (on first render and on
-/// resize) → re-layout the cards at that width.
 fn relayout_notes(weak: slint::Weak<MainWindow>, w: i32) {
     let backend = BACKEND.with(|s| s.borrow().clone());
     let Some(backend) = backend else { return; };
@@ -1517,9 +1519,6 @@ fn relayout_notes(weak: slint::Weak<MainWindow>, w: i32) {
     }
 }
 
-/// Load a user's notes from SQLite into the backend, then publish to the UI.
-/// DB work runs on the tokio runtime; the backend mutation + publish happen on
-/// the event-loop thread (where blocking is allowed).
 fn refresh_my_notes(weak: slint::Weak<MainWindow>) {
     let pool = POOL.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
@@ -1625,9 +1624,6 @@ fn delete_my_note(weak: slint::Weak<MainWindow>, key: i32) {
     });
 }
 
-/// Resolve the picked contact keys to directory members, create the group in
-/// core, announce + distribute the group key, then surface a conversation row
-/// and open it. All core calls here use the shared `&self` interface.
 fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
     eprintln!("[create_group_flow] picked={picked:?}");
     let client = CLIENT.with(|s| s.borrow().clone());
@@ -1709,8 +1705,6 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
     }
 }
 
-/// Search for a user on the server (by username) or locally (by scanned Peer
-/// ID), then surface the profile in the AddContactView.
 fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
     let q: String = q_raw.chars().filter(|c| !c.is_whitespace()).collect();
     if q.is_empty() {
@@ -1900,9 +1894,6 @@ fn show_app_notice(weak: slint::Weak<MainWindow>, msg: String, success: bool) {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Contact profile page: data load + actions
-// ---------------------------------------------------------------------------
 
 /// Switch to a global call overlay (audio / video / screen share).
 fn show_call_overlay(weak: slint::Weak<MainWindow>, overlay: GlobalOverlayType) {
@@ -1937,11 +1928,6 @@ fn publish_call_state(
     });
 }
 
-/// Start a realtime voice call to the contact with the given `key`.
-/// Resolves the peer, opens the call (mic + speaker via cpal), then shows the
-/// in-call overlay. The inbound audio pump (started in `apply_result`) routes
-/// any far-end frames into the speaker queue.
-///
 /// Must run on the UI thread — the Slint event loop owns `call::CALL` (a
 /// thread_local) and cpal's streams.
 fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
@@ -1969,11 +1955,6 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
         (pid, name)
     };
 
-    // No server round-trip for a presence check: the contact's peer id is
-    // already in our store (fixed at add-time, see `begin_video_call` /
-    // `begin_screen_share`, which dial directly with it). `dial_peer` inside
-    // `start_call` will surface a "peer is offline / not found" error on its
-    // own, which we report through `publish_call_error` below.
     match call::start_call(
         Arc::clone(&client),
         &peer_base58,
@@ -1989,8 +1970,6 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
     }
 }
 
-/// Start a video call (local camera + mic) to the contact with the given `key`.
-/// Must run on the UI thread.
 fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
     let client = CLIENT.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
@@ -2009,10 +1988,6 @@ fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
         (pid, name)
     };
 
-    // Camera is a platform-wide singleton; ensure it is running before the
-    // call starts (the dispatcher's `on_camera_frame` slot is the sink; the
-    // active call's camera `VidSource` will be registered by `bootstrap_media`
-    // below, so frames flow into it).
     CAMERA.with(|slot| {
         if slot.borrow().is_none() {
             *slot.borrow_mut() = Some(camera::Camera::new());
@@ -2020,11 +1995,6 @@ fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
         let mut guard = slot.borrow_mut();
         let cam = guard.as_mut().expect("camera inited");
         if !cam.is_running() {
-            // Frame sink routes to both the active call's VidSource (via the
-            // dispatcher slot) and the QR-preview hook. The QR hook is
-            // independent of the call state (it lives in
-            // `call_dispatcher::QR_HOOK`), so the preview keeps working
-            // during a call.
             cam.set_frame_sink(call_dispatcher::on_camera_frame);
             if let Err(e) = cam.start() {
                 eprintln!("[video.call] cam.start: {e}");
@@ -2053,9 +2023,6 @@ fn publish_call_error(weak: slint::Weak<MainWindow>, msg: String) {
     });
 }
 
-/// Hang up the active call (if any) and clear the in-call overlay.
-///
-/// Runs on the UI thread (same reasoning as `begin_voice_call`).
 fn end_voice_call(weak: slint::Weak<MainWindow>) {
     let had_active = call::is_active();
     call::stop_call();
@@ -2065,17 +2032,11 @@ fn end_voice_call(weak: slint::Weak<MainWindow>) {
     }
 }
 
-/// Desktop-only wrapper: adapt the `Screen` sink's owned `Vec<u8>` to the
-/// dispatcher. `screen::Screen` already delivers RGBA8888.
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn screen_sink_adapter(bytes: Vec<u8>, w: u32, h: u32) {
     call_dispatcher::on_screen_frame_rgba(bytes, w, h);
 }
 
-/// Begin a screen share with the contact at `key`. Starts the peer's
-/// `PeerCall` with `include_scr: true` (local screen frames flow through the
-/// dispatcher to the call's `VidSource`) and also ensures the platform
-/// screen capture (xcap / MediaProjection / RPScreenRecorder) is running.
 fn begin_screen_share(weak: slint::Weak<MainWindow>, key: i32) {
     let client = CLIENT.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
@@ -2296,11 +2257,6 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
         show_app_error(weak, format!("尚未登录或后端未就绪"));
         return;
     };
-    // Build the DM id and title from the local contact row — the peer id is
-    // fixed at add-time (see `append_contact`) and is the same value
-    // `send_chat_message` and `dial_peer` use, so no directory lookup is needed
-    // here. If the backend has no row for this key (contact deleted / stale),
-    // we surface that rather than silently hitting the network.
     let row_clone = {
         let g = backend.blocking_read();
         let row = g.contacts.iter().find(|r| r.key == key).cloned();
@@ -2370,10 +2326,6 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
     eprintln!("[chat] open_conversation: +{}ms invoke_from_event_loop queued (not yet run)", t0.elapsed().as_millis());
 }
 
-// ---------------------------------------------------------------------------
-// Discover post detail page: load / like / comment
-// ---------------------------------------------------------------------------
-
 /// Publish a status-only update for a post-detail key (data fields untouched).
 fn publish_detail_status(weak: slint::Weak<MainWindow>, key: i32, msg: SharedString) {
     let _ = slint::invoke_from_event_loop(move || {
@@ -2389,15 +2341,11 @@ fn detail_key_post(backend: &ArcBackend, key: i32) -> Option<i64> {
     backend.blocking_read().post_id_for(key)
 }
 
-/// Parse the `social_posts.media_urls` column into a list of URLs/paths.
-/// Accepts either a JSON array (`["a.jpg","b.jpg"]`) or a single raw path/URL
-/// (no brackets, no commas). Returns an empty vec on any failure.
 fn parse_media_urls(s: &str) -> Vec<String> {
     let t = s.trim();
     if t.is_empty() {
         return Vec::new();
     }
-    // Try JSON array first; fall back to treating as a single path.
     if let Ok(v) = serde_json::from_str::<Vec<String>>(t) {
         let v: Vec<String> = v.into_iter().filter(|x| !x.trim().is_empty()).collect();
         if !v.is_empty() {
@@ -2411,9 +2359,6 @@ fn parse_media_urls(s: &str) -> Vec<String> {
     Vec::new()
 }
 
-/// Load a post's detail (post, like state, likers, comments) from SQLite and
-/// publish it into the PostDetailState global. A monotonic sequence guard drops
-/// out-of-order async results so a stale load can't clobber the newest one.
 fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.with(|s| s.borrow().clone());
     let pool = POOL.with(|s| s.borrow().clone());
