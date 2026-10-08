@@ -41,7 +41,7 @@ pub enum InboundGroup {
     },
 }
 
-impl<D: DirectoryClient + ?Sized> Client<D> {
+impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
     pub async fn from_parts(
         account: Account,
@@ -296,6 +296,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
 
 
     pub fn heartbeat(&self) {
+        let ep = self.endpoints_with_egress();
         let user_rec = UserRecord {
             user_id: self.account.user_id().to_string(),
             e2e_public: self.account.e2e_public().to_string(),
@@ -306,11 +307,41 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
 
         let touched = self
             .dir
-            .touch_presence(self.device.peer_base58(), &self.endpoints());
+            .touch_presence(self.device.peer_base58(), &ep);
         if !touched {
             self.fallback_register();
         }
     }
+
+    /// Start a background keepalive loop that re-touches the directory roughly
+    /// every 15s (well under the server-side 30s presence TTL), so the device
+    /// stays "online" in the directory and the caller never has to re-invoke
+    /// it manually.
+    pub fn start_presence_loop(self: &Arc<Self>) {
+        static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if STARTED.set(()).is_err() {
+            return;
+        }
+        let client = self.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(15));
+                client.heartbeat();
+            }
+        });
+    }
+
+    fn endpoints_with_egress(&self) -> Vec<String> {
+        let mut v = self.endpoints();
+        if let Some(ip) = current_egress_ip() {
+            if let Some(pos) = v.iter().position(|a| a.contains(&ip)) {
+                v.swap_remove(pos);
+            }
+            v.insert(0, format!("/ip4/{ip}/tcp/0"));
+        }
+        v
+    }
+
 
     fn fallback_register(&self) {
         let is_approved = self
@@ -332,7 +363,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             device_pk: self.device.public_base64(),
             e2e_public: self.account.e2e_public().to_string(),
             label: label.into(),
-            endpoints: self.endpoints(),
+            endpoints: self.endpoints_with_egress(),
             status,
             proposer: String::new(),
             approved_by: String::new(),
@@ -379,7 +410,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             device_pk: self.device.public_base64(),
             e2e_public: self.account.e2e_public().to_string(),
             label: "primary".into(),
-            endpoints: self.endpoints(),
+            endpoints: self.endpoints_with_egress(),
             status: DeviceStatus::Approved,
             proposer: String::new(),
             approved_by: att.approver.clone(),
@@ -433,7 +464,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             device_pk: self.device.public_base64(),
             e2e_public: self.account.e2e_public().to_string(),
             label: label.into(),
-            endpoints: self.endpoints(),
+            endpoints: self.endpoints_with_egress(),
             status,
             proposer: String::new(),
             approved_by,
@@ -521,13 +552,17 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
     }
 
     pub fn endpoints(&self) -> Vec<String> {
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         self.running
             .listen_addrs
             .lock()
             .unwrap()
             .iter()
             .map(|a| a.to_string())
-            .collect()
+            .for_each(|a| {
+                seen.insert(a);
+            });
+        seen.into_iter().collect()
     }
 
 
@@ -1057,4 +1092,17 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             .unwrap_or(false)
     }
 
+}
+
+/// Probe the host's current egress IPv4 address (e.g. `192.168.1.42`).
+///
+/// Uses a UDP socket `connect` to public DNS — this only selects the
+/// kernel's egress interface for *future* packets; no datagram is actually
+/// sent and the call returns immediately. If the host is offline or has no
+/// IPv4 route, returns `None` so the caller keeps whatever it already had.
+fn current_egress_ip() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // 8.8.8.8:53 — the address never matters; only the chosen local socket.
+    sock.connect("8.8.8.8:53").ok()?;
+    sock.local_addr().ok()?.ip().to_string().into()
 }

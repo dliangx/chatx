@@ -773,6 +773,10 @@ fn apply_result(
             let peer = client.peer_base58().to_string();
             let client = Arc::new(client);
             client.heartbeat();
+            // Re-touch the directory every 15s so the device stays "online"
+            // (server TTL is 30s) and our egress IP is re-published whenever
+            // the local interface changes (WiFi ↔ ethernet, VPN, …).
+            client.start_presence_loop();
             CLIENT.with(|s| *s.borrow_mut() = Some(client));
 
             start_inbound_pump(weak.clone());
