@@ -7,7 +7,7 @@ export component ProfileItem inherits Rectangle {
     in property <string> name;
     in property <string> nickname;
     in property <string> peer-id;
-    callback show-qr();
+    callback show-qr(string);
     HorizontalLayout {
         x: 0px;
         y: 0px;
@@ -69,7 +69,7 @@ export component ProfileItem inherits Rectangle {
                     TouchArea {
                         width: 24px;
                         height: 24px;
-                        clicked => { root.show-qr(); }
+                        clicked => { root.show-qr(root.peer-id); }
                     }
                 }
             }

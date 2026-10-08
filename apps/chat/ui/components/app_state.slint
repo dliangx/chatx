@@ -118,6 +118,7 @@ export global AppState {
     callback search-users(string);
     callback add-contact(string);
     in property <image> qr-image;
+    in property <string> qr-target-id: "";
     in property <string> lang: "cn";
     in property <string> font;
     in property <int> font-size: 16;
@@ -142,7 +143,7 @@ export global AppState {
     callback toggle-like(int);
     callback delete-note(int);
     callback notes-layout(int);
-    callback show-qr-code();
+    callback show-qr-code(string);
     callback close-qr-code();
     callback start-screen-share();
     callback stop-screen-share();

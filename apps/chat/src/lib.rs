@@ -347,9 +347,13 @@ pub fn run_app() {
 
     {
         let w = weak.clone();
-        ui.global::<AppState>().on_show_qr_code(move || {
+        ui.global::<AppState>().on_show_qr_code(move |peer: SharedString| {
+            let peer = peer.to_string();
+            eprintln!("[qr] on_show_qr_code: target={peer}");
             if let Some(ui) = w.upgrade() {
                 let st = ui.global::<AppState>();
+                st.set_qr_target_id(SharedString::from(peer.clone()));
+                st.set_qr_image(qr_image(&peer));
                 let mut nav = st.get_nav_state();
                 nav.global_overlay = GlobalOverlayType::QrCode;
                 st.set_nav_state(nav);

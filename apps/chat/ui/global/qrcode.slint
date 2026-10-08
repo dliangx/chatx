@@ -38,7 +38,7 @@ export component QrCodeView inherits Rectangle {
 
             Text {
                 width: 100%;
-                text: AppState.peer-id;
+                text: AppState.qr-target-id != "" ? AppState.qr-target-id : AppState.peer-id;
                 font-size: 11px;
                 color: Theme.fg-muted;
                 horizontal-alignment: center;

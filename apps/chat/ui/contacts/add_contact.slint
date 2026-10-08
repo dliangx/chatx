@@ -25,7 +25,7 @@ component ResultRow inherits Rectangle {
         name: root.name;
         nickname: root.is_local ? "通过扫码添加" : root.username;
         peer-id: root.peer_id;
-        show-qr => { AppState.show-qr-code(); }
+        show-qr(peer) => { AppState.show-qr-code(peer); }
     }
 
     Rectangle {

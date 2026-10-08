@@ -66,7 +66,7 @@ export component ContactProfileView inherits Rectangle {
             name: ProfileState.name;
             nickname: ProfileState.username;
             peer-id: ProfileState.peer-id;
-            show-qr => { AppState.show-qr-code(); }
+            show-qr(peer) => { AppState.show-qr-code(peer); }
         }
 
         ScrollView {
