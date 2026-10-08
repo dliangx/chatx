@@ -14,11 +14,14 @@ use chatx_core::message::now_ms;
 use chatx_core::signal::{ONLINE_TTL_MS, UserResolve};
 use serde::{Deserialize, Serialize};
 
+mod db;
+
 #[derive(Clone)]
 struct App {
     users: Arc<Mutex<HashMap<String, UserRecord>>>,
     devices: Arc<Mutex<HashMap<String, DeviceRecord>>>,
     groups: Arc<Mutex<HashMap<String, GroupPublic>>>,
+    db: Arc<db::Sdb>,
 }
 
 #[derive(Deserialize)]
@@ -75,7 +78,7 @@ fn best_device(
 
 
 async fn upsert_user(
-    State(App { users, .. }): State<App>,
+    State(App { users, db, .. }): State<App>,
     Path(user_id): Path<String>,
     body: String,
 ) -> ApiResult {
@@ -85,7 +88,11 @@ async fn upsert_user(
     };
     rec.user_id = user_id.clone();
     rec.seen = now_ms();
-    users.lock().unwrap().insert(user_id, rec);
+    if let Err(e) = db::upsert_user(db.as_ref(), &rec).await {
+        tracing::warn!(%e, "persisting user failed");
+        return Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
+    }
+    users.lock().unwrap().insert(rec.user_id.clone(), rec);
     Ok(ok_json(&"ok"))
 }
 
@@ -182,7 +189,7 @@ async fn list_users(
 
 
 async fn upsert_device(
-    State(App { devices, .. }): State<App>,
+    State(App { devices, db, .. }): State<App>,
     Path(peer_id): Path<String>,
     body: String,
 ) -> ApiResult {
@@ -198,7 +205,11 @@ async fn upsert_device(
     rec.peer_id = peer_id.clone();
     rec.seen = now_ms();
     tracing::info!(peer_id = %rec.peer_id, user = %rec.user_id, status = ?rec.status, "device upsert");
-    devices.lock().unwrap().insert(peer_id, rec);
+    if let Err(e) = db::upsert_device(db.as_ref(), &rec).await {
+        tracing::warn!(%e, "persisting device failed");
+        return Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
+    }
+    devices.lock().unwrap().insert(rec.peer_id.clone(), rec);
     Ok(ok_json(&"ok"))
 }
 
@@ -224,13 +235,17 @@ async fn resolve_device(
 }
 
 async fn delete_device(
-    State(App { devices, .. }): State<App>,
+    State(App { devices, db, .. }): State<App>,
     Path(peer_id): Path<String>,
 ) -> ApiResult {
-    if devices.lock().unwrap().remove(&peer_id).is_some() {
-        Ok(StatusCode::NO_CONTENT.into_response())
-    } else {
-        Err(bad(StatusCode::NOT_FOUND, "not found"))
+    let removed = devices.lock().unwrap().remove(&peer_id).is_some();
+    match db::delete_device(db.as_ref(), &peer_id).await {
+        Ok(_) if removed => Ok(StatusCode::NO_CONTENT.into_response()),
+        Ok(_) => Err(bad(StatusCode::NOT_FOUND, "not found")),
+        Err(e) => {
+            tracing::warn!(%e, "deleting device failed");
+            Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"))
+        }
     }
 }
 
@@ -274,7 +289,7 @@ async fn health() -> ApiResult {
 
 
 async fn upsert_group(
-    State(App { groups, .. }): State<App>,
+    State(App { groups, db, .. }): State<App>,
     Path(group_id): Path<String>,
     body: String,
 ) -> ApiResult {
@@ -283,7 +298,11 @@ async fn upsert_group(
         Err(e) => return Err(bad(StatusCode::BAD_REQUEST, format!("bad GroupPublic: {e}"))),
     };
     g.group_id = group_id.clone();
-    groups.lock().unwrap().insert(group_id.clone(), g);
+    if let Err(e) = db::upsert_group(db.as_ref(), &g).await {
+        tracing::warn!(%e, "persisting group failed");
+        return Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
+    }
+    groups.lock().unwrap().insert(g.group_id.clone(), g);
     Ok(ok_json(&"ok"))
 }
 
@@ -319,10 +338,25 @@ async fn main() {
         .parse()
         .expect("P2PCHAT_SIGNAL_ADDR must be a socket address");
 
+    let db_path = std::env::var("P2PCHAT_SIGNAL_DB")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("signal.db"));
+    let db = Arc::new(db::open(&db_path).await.expect("open sqlite db"));
+    tracing::info!(path = %db_path.display(), "signaling db ready");
+
+    let (users, devices, groups) = db::load_all(db.as_ref()).await.expect("load directory");
+    tracing::info!(
+        users = %users.len(),
+        devices = %devices.len(),
+        groups = %groups.len(),
+        "directory restored"
+    );
+
     let app = App {
-        users: Arc::new(Mutex::new(HashMap::new())),
-        devices: Arc::new(Mutex::new(HashMap::new())),
-        groups: Arc::new(Mutex::new(HashMap::new())),
+        users: Arc::new(Mutex::new(users)),
+        devices: Arc::new(Mutex::new(devices)),
+        groups: Arc::new(Mutex::new(groups)),
+        db,
     };
 
     let router = Router::new()
