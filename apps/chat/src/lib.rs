@@ -1943,10 +1943,13 @@ fn publish_call_state(
 /// Must run on the UI thread — the Slint event loop owns `call::CALL` (a
 /// thread_local) and cpal's streams.
 fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
+    eprintln!("[audio.call] begin_voice_call: enter key={key}");
     let client = CLIENT.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
     let (Some(client), Some(backend)) = (client, backend) else {
-        publish_call_state(weak, None, None, false);
+        eprintln!("[audio.call] begin_voice_call: CLIENT or BACKEND not ready — abort");
+        publish_call_state(weak.clone(), None, None, false);
+        show_app_error(weak, String::from("尚未登录或后端未就绪，无法发起通话"));
         return;
     };
     let client = Arc::new(client);
@@ -1956,6 +1959,8 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
         // `peer_id_for` returns the contact's base-58 peer id (what we use as
         // the directory username to resolve).
         let Some(pid) = g.peer_id_for(key).map(|s| s.to_string()) else {
+            eprintln!("[audio.call] begin_voice_call: no peer_id for key={key} — abort");
+            show_app_error(weak, format!("联系人已失效（key={key}），无法发起通话"));
             return;
         };
         let name = g
@@ -1964,20 +1969,26 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
             .find(|r| r.key == key)
             .map(|r| r.name.clone())
             .unwrap_or_else(|| pid.clone());
+        eprintln!(
+            "[audio.call] begin_voice_call: resolving peer_base58={pid} name={name}"
+        );
         (pid, name)
     };
 
+    eprintln!("[audio.call] begin_voice_call: about to call::start_call");
     match call::start_call(
         Arc::clone(&client),
         &peer_base58,
         call::CallOptions { include_cam: false, include_scr: false },
     ) {
         Ok(()) => {
+            eprintln!("[audio.call] begin_voice_call: start_call OK — showing AudioCall overlay");
             publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
             show_call_overlay(weak, GlobalOverlayType::AudioCall);
         }
         Err(e) => {
-            publish_call_error(weak, format!("通话开始失败: {e}"));
+            eprintln!("[audio.call] begin_voice_call: start_call FAILED: {e}");
+            show_app_error(weak, format!("通话开始失败: {e}"));
         }
     }
 }
