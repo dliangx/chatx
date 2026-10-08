@@ -66,8 +66,6 @@ pub struct NoteRowData {
 /// Writes mutate this first, then fire-and-forget persistence to SQLite.
 #[derive(Debug, Clone, Default)]
 pub struct DataBackend {
-    pub me: String,
-    pub my_nickname: String,
     pub chats: Vec<ChatRow>,
     pub contacts: Vec<ContactRow>,
     pub discover: Vec<DiscoverRow>,
@@ -208,8 +206,8 @@ impl DataBackend {
 
 pub type ArcBackend = Arc<RwLock<DataBackend>>;
 
-pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<DataBackend> {
-    let mut b = DataBackend { me: me.to_string(), ..Default::default() };
+pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, String)> {
+    let mut b = DataBackend::default();
 
     // Resolve the string account id onto an integer user row id.
     let me_id = sqlite::users::ensure_identity(pool, me).await?;
@@ -217,7 +215,6 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<DataBackend> {
         .await?
         .and_then(|u| u.nickname)
         .unwrap_or_default();
-    b.my_nickname = my_nickname;
 
     // ---- chat list ----
     let items = sqlite::joins::chat_list(pool, me, 200).await?;
@@ -326,12 +323,12 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<DataBackend> {
             liked: p.i_liked,
         });
     }
-    Ok(b)
+    Ok((b, my_nickname))
 }
 
-pub async fn refresh_chat_row(pool: &SqlitePool, b: &mut DataBackend, chat_id: &str) -> anyhow::Result<bool> {
+pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, chat_id: &str) -> anyhow::Result<bool> {
     // Use full chat_list to find the matching entry (cheap for a local sqlite on a single user).
-    let items = sqlite::joins::chat_list(pool, &b.me, 200).await?;
+    let items = sqlite::joins::chat_list(pool, me, 200).await?;
     let Some(src) = items.iter().find(|c| c.name.as_deref() == Some(chat_id)) else {
         // New conversation (e.g. first message from an unknown peer): append.
         let key = b.bump();
@@ -407,7 +404,7 @@ mod tests {
 
     #[test]
     fn toggle_like_math() {
-        let mut b = DataBackend { me: "me".into(), ..Default::default() };
+        let mut b = DataBackend::default();
         let key = 42;
         b.post_to_key.insert(1, key);
         b.key_to_post.insert(key, 1);
@@ -456,7 +453,7 @@ mod tests {
         let post = sqlite::social_feed::create_post(&pool, 2, Some("hello"), None, 0).await.unwrap();
         sqlite::social_feed::like(&pool, post.id, 1).await.unwrap();
 
-        let b = load(&pool, me).await.unwrap();
+        let (b, _nickname) = load(&pool, me).await.unwrap();
         assert_eq!(b.contacts.len(), 1);
         assert!(b.contacts[0].name.contains("One"));
         assert_eq!(b.discover.len(), 1);

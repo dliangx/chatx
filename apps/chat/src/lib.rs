@@ -781,9 +781,8 @@ fn apply_result(
                 let me = user_id.clone();
                 rt.spawn(async move {
                     match data::load(&pool, &me).await {
-                        Ok(backend) => {
+                        Ok((backend, nickname)) => {
                             let backend = Arc::new(tokio::sync::RwLock::new(backend));
-                            let nickname = backend.read().await.my_nickname.clone();
                             let peer = peer.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 BACKEND.with(|s| *s.borrow_mut() = Some(backend.clone()));
@@ -870,9 +869,13 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
     let (Some(pool), Some(backend)) = (pool, backend) else {
         return;
     };
+    let me = weak.clone().upgrade().and_then(|ui| Some(ui.global::<AppState>().get_user_id().to_string())).unwrap_or_default();
+    if me.is_empty() {
+        return;
+    }
     {
         let mut b: data::DataBackend = backend.read().await.clone();
-        let _ = data::refresh_chat_row(&pool, &mut b, &chat_id).await;
+        let _ = data::refresh_chat_row(&pool, &me, &mut b, &chat_id).await;
         *backend.write().await = b;
     }
     let is_open_key = {
@@ -1406,11 +1409,14 @@ fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
     let (Some(backend), Some(pool)) = (backend, pool) else {
         return;
     };
-    let (post_id, want_liked, me) = {
+    let (post_id, want_liked) = {
         let mut g = backend.blocking_write();
         let (liked, _likes) = g.toggle_like(key);
-        (g.post_id_for(key), liked, g.me.clone())
+        (g.post_id_for(key), liked)
     };
+    let me = weak.clone().upgrade()
+        .map(|ui| ui.global::<AppState>().get_user_id().to_string())
+        .unwrap_or_default();
     // memory -> UI
     if let Some(ui) = weak.upgrade() {
         publish_to_views(&ui.global::<AppState>(), backend.clone());
@@ -1523,7 +1529,9 @@ fn refresh_my_notes(weak: slint::Weak<MainWindow>) {
     let pool = POOL.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
     let Some(backend) = backend else { return; };
-    let me = backend.blocking_read().me.clone();
+    let me = weak.clone().upgrade()
+        .map(|ui| ui.global::<AppState>().get_user_id().to_string())
+        .unwrap_or_default();
     if me.is_empty() {
         return;
     }
@@ -1559,7 +1567,9 @@ fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
     let pool = POOL.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
     let (Some(pool), Some(backend)) = (pool, backend) else { return; };
-    let me = backend.blocking_read().me.clone();
+    let me = weak.clone().upgrade()
+        .map(|ui| ui.global::<AppState>().get_user_id().to_string())
+        .unwrap_or_default();
     if me.is_empty() || content.trim().is_empty() {
         return;
     }
@@ -1810,7 +1820,9 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
         return;
     };
 
-    let me = backend.blocking_read().me.clone();
+    let me = weak.clone().upgrade()
+        .map(|ui| ui.global::<AppState>().get_user_id().to_string())
+        .unwrap_or_default();
 
     // Self-add guard: the directory key resolves to the user's own id.
     if !me.is_empty() && username.eq_ignore_ascii_case(&me) {
@@ -2371,16 +2383,16 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
         return;
     };
 
-    let (author, me) = {
+    let me = weak.clone().upgrade()
+        .map(|ui| ui.global::<AppState>().get_user_id().to_string())
+        .unwrap_or_default();
+    let author = {
         let g = backend.blocking_read();
-        (
-            g.discover
-                .iter()
-                .find(|r| r.key == key)
-                .map(|r| r.author.clone())
-                .unwrap_or_default(),
-            g.me.clone(),
-        )
+        g.discover
+            .iter()
+            .find(|r| r.key == key)
+            .map(|r| r.author.clone())
+            .unwrap_or_default()
     };
 
     let seq = POST_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2510,7 +2522,9 @@ fn toggle_detail_like(weak: slint::Weak<MainWindow>, key: i32) {
     }
     if let Some(post_id) = post_id {
         let rt = runtime();
-        let me = backend.blocking_read().me.clone();
+        let me = weak.clone().upgrade()
+            .map(|ui| ui.global::<AppState>().get_user_id().to_string())
+            .unwrap_or_default();
         rt.spawn(async move {
             let _ = data::persist_like_toggle(&pool, &me, post_id, want_liked).await;
         });
@@ -2530,11 +2544,14 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         publish_detail_status(weak, key, SharedString::from("帖子已失效"));
         return;
     };
-    let (my_name, me) = {
-        let g = backend.blocking_read();
-        let n = g.my_nickname.clone();
-        let me = g.me.clone();
-        (if n.is_empty() { me.clone() } else { n }, me)
+    let me = weak.clone().upgrade()
+        .map(|ui| ui.global::<AppState>().get_user_id().to_string())
+        .unwrap_or_default();
+    let my_name = {
+        let n = weak.clone().upgrade()
+            .map(|ui| ui.global::<AppState>().get_nickname().to_string())
+            .unwrap_or_default();
+        if n.is_empty() { me.clone() } else { n }
     };
     let rt = runtime();
     rt.spawn(async move {
