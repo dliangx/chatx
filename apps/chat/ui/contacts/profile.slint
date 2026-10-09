@@ -8,7 +8,7 @@ import { ProfileItem, SettingItem } from "../components/item.slint";
 export global ProfileState {
     in-out property <int> key: -1;
     in property <image> avatar;
-    in property <string> name;
+    in property <string> nickname;
     in property <string> username;
     in property <string> peer-id;
     in property <string> bio;
@@ -63,8 +63,8 @@ export component ContactProfileView inherits Rectangle {
             y: 49px;
             width: 100%;
             image: ProfileState.avatar;
-            name: ProfileState.name;
-            nickname: ProfileState.username;
+            name: ProfileState.username;
+            nickname: ProfileState.nickname;
             peer-id: ProfileState.peer-id;
             show-qr(peer) => { AppState.show-qr-code(peer); }
         }

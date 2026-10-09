@@ -222,7 +222,6 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
         let key = b.bump();
         // Chat key: the string chat id (stored in `name` for core-created rows).
         let chat_key = c.name.clone().unwrap_or_else(|| c.id.to_string());
-        // Title: group -> its name; DM -> saved name, else the joined peer nickname, else the id.
         let title = if c.type_ == 1 {
             c.name.clone().unwrap_or_else(|| c.id.to_string())
         } else {
@@ -249,9 +248,8 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
     let friends = sqlite::joins::friends_with_profile(pool, me_id, 500).await?;
     for f in friends {
         let key = b.bump();
-        let name = f.nickname
+        let name = f.username
             .clone()
-            .or_else(|| f.username.clone())
             .unwrap_or_else(|| f.user_id.to_string());
         let user_id = f.user_id;
         b.contact_key_to_id.insert(key, user_id);
@@ -455,7 +453,7 @@ mod tests {
 
         let (b, _nickname) = load(&pool, me).await.unwrap();
         assert_eq!(b.contacts.len(), 1);
-        assert!(b.contacts[0].name.contains("One"));
+        assert_eq!(b.contacts[0].name, "2"); // username is empty -> falls back to user_id
         assert_eq!(b.discover.len(), 1);
         assert!(b.discover[0].liked);
         assert_eq!(b.discover[0].likes, 1);

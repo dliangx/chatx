@@ -1741,11 +1741,11 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
             if let Ok(ur) = client.resolve_user(&q) {
                 let uname = ur.user.user_id.clone();
                 if let Ok(Some(user)) = sqlite::users::get_by_username(&pool, &uname).await {
-                    let name = user.nickname.clone().unwrap_or_else(|| user.username.clone().unwrap_or_default());
+                    let nickname = user.nickname.clone().unwrap_or_else(|| user.username.clone().unwrap_or_default());
                     let peer = sqlite::devices::get_by_peer(&pool, &my_peer).await.ok().flatten().map(|d| d.peer_id).unwrap_or(my_peer.clone());
                     let row = SearchUser {
-                        name: SharedString::from(name),
-                        username: SharedString::from(uname),
+                        name: SharedString::from(uname),
+                        username: SharedString::from(nickname),
                         peer_id: SharedString::from(peer),
                     };
                     let _ = slint::invoke_from_event_loop(move || {
@@ -1761,10 +1761,10 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
             if let Ok(dev) = client.dir().resolve_device(&q) {
                 let uname = dev.user_id.clone();
                 if let Ok(Some(user)) = sqlite::users::get_by_username(&pool, &uname).await {
-                    let name = user.nickname.clone().unwrap_or_else(|| user.username.clone().unwrap_or_default());
+                    let nickname = user.nickname.clone().unwrap_or_else(|| user.username.clone().unwrap_or_default());
                     let row = SearchUser {
-                        name: SharedString::from(name),
-                        username: SharedString::from(uname),
+                        name: SharedString::from(uname),
+                        username: SharedString::from(nickname),
                         peer_id: SharedString::from(q.clone()),
                     };
                     let _ = slint::invoke_from_event_loop(move || {
@@ -1776,22 +1776,7 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
                     return;
                 }
             }
-            // (3) Fallback: local db only.
-            if let Ok(Some(user)) = sqlite::users::get_by_username(&pool, &q2).await {
-                let name = user.nickname.clone().unwrap_or_else(|| user.username.clone().unwrap_or_default());
-                let row = SearchUser {
-                    name: SharedString::from(name),
-                    username: SharedString::from(q2.clone()),
-                    peer_id: SharedString::new(),
-                };
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.global::<AppState>().set_search_results(slint::ModelRc::new(slint::VecModel::from(vec![row])));
-                        ui.global::<AppState>().set_add_status(SharedString::new());
-                    }
-                });
-                return;
-            }
+            
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<AppState>().set_add_status(SharedString::from(format!("找不到用户: {q2}")));
@@ -1884,8 +1869,8 @@ async fn do_add(pool: &sqlx::SqlitePool, me: &str, username: &str, backend: &Arc
     sqlite::social::add(pool, me_id, their_id).await?;
     let (name, image) = {
         if let Ok(Some(u)) = sqlite::users::get(pool, their_id).await {
-            (u.nickname.clone().unwrap_or_else(|| u.username.clone().unwrap_or_default()),
-             u.avatar_path.clone().unwrap_or_default())
+             (u.username.clone().unwrap_or_else(|| u.nickname.clone().unwrap_or_default()),
+              u.avatar_path.clone().unwrap_or_default())
         } else {
             (username.to_string(), String::new())
         }
@@ -2225,7 +2210,7 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
                 return;
             }
         };
-        let (avatar_path, name, username, bio, created_at, moment) = {
+        let (avatar_path, nickname, username, bio, created_at, moment) = {
             let m = sqlite::joins::author_feed(&pool, user_id, 1, 0)
                 .await
                 .ok()
@@ -2261,7 +2246,7 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
             };
             ps.set_key(my_key);
             ps.set_avatar(avatar);
-            ps.set_name(SharedString::from(name));
+            ps.set_nickname(SharedString::from(nickname));
             ps.set_username(SharedString::from(username));
             ps.set_peer_id(SharedString::from(peer_id));
             ps.set_bio(SharedString::from(bio));
