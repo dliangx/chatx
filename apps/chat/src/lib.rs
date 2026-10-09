@@ -1729,23 +1729,22 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
         return;
     }
 
-    let pool = POOL.with(|s| s.borrow().clone());
     let client = CLIENT.with(|s| s.borrow().clone());
-    match (pool, client) {
-        (Some(pool), Some(client)) => {
-            let my_peer = client.peer_base58();
-        let rt = runtime();
-        let q2 = q.clone();
-        rt.spawn(async move {
-            // (1) Try to resolve as a username against the directory.
-            if let Ok(ur) = client.resolve_user(&q) {
-                let uname = ur.user.user_id.clone();
-                if let Ok(Some(user)) = sqlite::users::get_by_username(&pool, &uname).await {
-                    let nickname = user.nickname.clone().unwrap_or_else(|| user.username.clone().unwrap_or_default());
-                    let peer = sqlite::devices::get_by_peer(&pool, &my_peer).await.ok().flatten().map(|d| d.peer_id).unwrap_or(my_peer.clone());
+    match client {
+        Some(client) => {
+            let rt = runtime();
+            let q2 = q.clone();
+            rt.spawn(async move {
+                // (1) Try to resolve as a username against the server directory.
+                if let Ok(ur) = client.resolve_user(&q) {
+                    eprintln!("[search] server resolve_user: user_id={}, e2e_public={}, sign_pk={}, | peer_id={}, label={}, endpoints={:?}",
+                        ur.user.user_id, ur.user.e2e_public, ur.user.sign_pk,
+                        ur.device.peer_id, ur.device.label, ur.device.endpoints);
+                    let uname = ur.user.user_id;
+                    let peer = ur.device.peer_id;
                     let row = SearchUser {
-                        name: SharedString::from(uname),
-                        username: SharedString::from(nickname),
+                        name: SharedString::from(uname.clone()),
+                        username: SharedString::from(uname),
                         peer_id: SharedString::from(peer),
                     };
                     let _ = slint::invoke_from_event_loop(move || {
@@ -1756,16 +1755,16 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
                     });
                     return;
                 }
-            }
-            // (2) Try to resolve as a Peer ID (scan) against the directory.
-            if let Ok(dev) = client.dir().resolve_device(&q) {
-                let uname = dev.user_id.clone();
-                if let Ok(Some(user)) = sqlite::users::get_by_username(&pool, &uname).await {
-                    let nickname = user.nickname.clone().unwrap_or_else(|| user.username.clone().unwrap_or_default());
+                // (2) Try to resolve as a Peer ID (scan) against the server directory.
+                if let Ok(dev) = client.dir().resolve_device(&q) {
+                    eprintln!("[search] server resolve_device: user_id={}, peer_id={}, label={}, endpoints={:?}, status={:?}",
+                        dev.user_id, dev.peer_id, dev.label, dev.endpoints, dev.status);
+                    let uname = dev.user_id;
+                    let peer = dev.peer_id;
                     let row = SearchUser {
-                        name: SharedString::from(uname),
-                        username: SharedString::from(nickname),
-                        peer_id: SharedString::from(q.clone()),
+                        name: SharedString::from(uname.clone()),
+                        username: SharedString::from(uname),
+                        peer_id: SharedString::from(peer),
                     };
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
@@ -1775,14 +1774,13 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
                     });
                     return;
                 }
-            }
-            
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = weak.upgrade() {
-                    ui.global::<AppState>().set_add_status(SharedString::from(format!("找不到用户: {q2}")));
-                }
+
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.global::<AppState>().set_add_status(SharedString::from(format!("找不到用户: {q2}")));
+                    }
+                });
             });
-        });
         }
         _ => {
             let _ = slint::invoke_from_event_loop(move || {
