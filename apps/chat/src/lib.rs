@@ -1802,7 +1802,8 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
 
     let backend = BACKEND.with(|s| s.borrow().clone());
     let pool = POOL.with(|s| s.borrow().clone());
-    let (Some(backend), Some(pool)) = (backend.clone(), pool) else {
+    let client = CLIENT.with(|s| s.borrow().clone());
+    let (Some(backend), Some(pool), Some(client)) = (backend.clone(), pool, client) else {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.global::<AppState>().set_add_status(SharedString::from("尚未登录或后端未就绪"));
@@ -1837,7 +1838,7 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
 
     let rt = runtime();
     rt.spawn(async move {
-        if let Err(e) = do_add(&pool, &me, &username, &backend).await {
+        if let Err(e) = do_add(&pool, &me, &username, &client, &backend).await {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<AppState>().set_add_status(SharedString::from(format!("添加失败: {e}")));
@@ -1855,7 +1856,13 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
     });
 }
 
-async fn do_add(pool: &sqlx::SqlitePool, me: &str, username: &str, backend: &ArcBackend) -> anyhow::Result<()> {
+async fn do_add(
+    pool: &sqlx::SqlitePool,
+    me: &str,
+    username: &str,
+    client: &Client<Directory>,
+    backend: &ArcBackend,
+) -> anyhow::Result<()> {
     let me_id = sqlite::users::ensure_identity(pool, me).await?;
     let their_id = sqlite::users::ensure_identity(pool, username).await?;
     // Backstop: refuse self-association even if the username spelling differed
@@ -1865,16 +1872,39 @@ async fn do_add(pool: &sqlx::SqlitePool, me: &str, username: &str, backend: &Arc
         anyhow::bail!("不能添加自己");
     }
     sqlite::social::add(pool, me_id, their_id).await?;
+
+    // Resolve the friend's peer id from the server (directory) so we can store
+    // a proper record in the local `devices` table for this contact. Best-effort:
+    // if the directory lookup fails we still add the contact with the username.
+    let their_peer = client
+        .resolve_user(username)
+        .ok()
+        .map(|r| r.device.peer_id);
+
+    if let Some(peer) = &their_peer {
+        let _ = sqlite::devices::upsert(
+            pool,
+            sqlite::new_id(),
+            &sqlite::devices::DevicePatch {
+                user_id: Some(their_id),
+                peer_id: Some(peer.clone()),
+                public_key: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
     let (name, image) = {
         if let Ok(Some(u)) = sqlite::users::get(pool, their_id).await {
              (u.username.clone().unwrap_or_else(|| u.nickname.clone().unwrap_or_default()),
-              u.avatar_path.clone().unwrap_or_default())
+             u.avatar_path.clone().unwrap_or_default())
         } else {
             (username.to_string(), String::new())
         }
     };
-    let mut g = backend.blocking_write();
-    g.append_contact(their_id, username.to_string(), name, image);
+    let mut g = backend.write().await;
+    g.append_contact(their_id, their_peer.unwrap_or_else(|| username.to_string()), name, image);
     Ok(())
 }
 

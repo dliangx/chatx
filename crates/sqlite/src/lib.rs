@@ -93,6 +93,7 @@ pub async fn open(path: &std::path::Path) -> anyhow::Result<Pool> {
         let mut conn = pool.acquire().await?;
         sqlx::query("PRAGMA journal_mode = WAL").execute(&mut *conn).await?;
         sqlx::query("PRAGMA synchronous = NORMAL").execute(&mut *conn).await?;
+        sqlx::query("PRAGMA busy_timeout = 5000").execute(&mut *conn).await?;
         sqlx::query("PRAGMA foreign_keys = ON").execute(&mut *conn).await?;
     }
     apply_migrations(&pool).await?;
