@@ -53,6 +53,15 @@ export component MeView inherits Rectangle {
 
             SettingItem {
                 width: 100%;
+                id: 5;
+                icon: Glyph.setting;
+                title: "我的设备";
+                selected: root.selected-key == 5;
+                clicked => { root.selected-key = 5; AppState.push-sub(SubPageType.MyDevices, 0); }
+            }
+
+            SettingItem {
+                width: 100%;
                 id: 4;
                 icon: Glyph.setting;
                 title: "设置";

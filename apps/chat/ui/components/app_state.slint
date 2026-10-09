@@ -21,6 +21,7 @@ export enum SubPageType {
     MyNote,
     MyCollect,
     MyShare,
+    MyDevices,
     LanguagePicker,
 }
 
@@ -96,6 +97,14 @@ export struct SearchUser {
     peer_id: string,
 }
 
+export struct MyDevice {
+    peer_id: string,
+    label: string,
+    online: bool,
+    approved: bool,
+    self_device: bool,
+}
+
 export global AppState {
     in-out property <NavigationState> nav-state: { active-tab:0, tabs: [], global-overlay: GlobalOverlayType.None };
     callback push-sub(SubPageType, int);
@@ -123,6 +132,16 @@ export global AppState {
     in property <string> font;
     in property <int> font-size: 16;
     in property <string> theme: "light";
+
+    // Device approval
+    in property <bool> device-approved: true;
+    in property <[MyDevice]> my-devices: [];
+    callback refresh-devices();
+    callback approve-device(string);
+    callback revoke-device(string);
+
+    // Top notification banner (server-publishable). Empty string hides the banner.
+    in property <string> notice-text: "";
 
     in property <[ConversationRow]> chats: [];
     in property <[ContactRow]> contacts: [];

@@ -8,7 +8,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
-use chatx_core::account::{DeviceRecord, DeviceStatus, UserRecord};
+use chatx_core::account::{AttestationAction, DeviceRecord, DeviceStatus, UserRecord};
 use chatx_core::group::GroupPublic;
 use chatx_core::message::now_ms;
 use chatx_core::signal::{ONLINE_TTL_MS, UserResolve};
@@ -188,6 +188,125 @@ async fn list_users(
 }
 
 
+/// True if `approver` is an APPROVED device of the same account (`user_id`),
+/// distinct from the target device. An account can only approve/attest via
+/// one of its already-trusted devices.
+fn approver_is_trusted(
+    devices: &HashMap<String, DeviceRecord>,
+    user_id: &str,
+    approver: &str,
+    self_peer: &str,
+) -> bool {
+    let Some(a) = devices.get(approver) else {
+        return false;
+    };
+    a.status == DeviceStatus::Approved
+        && a.user_id == user_id
+        && approver != self_peer
+}
+
+/// Server-side authorization check for a device status transition.
+///
+/// The client is expected to sign an [`chatx_core::account::Attestation`]
+/// with its account key. The *previous* status is read from the in-memory
+/// directory, so the server does not trust arbitrary upserts.
+///
+/// - New device (no prior record): only `Pending`, or `Approved` via a valid
+///   **self-attestation** (i.e. the first device of a fresh account).
+/// - Status unchanged: allowed (heartbeat / endpoints refresh).
+/// - `Pending -> Approved`: requires a valid signed attestation whose
+///   `approver` is a distinct, already-approved device of the same account.
+/// - `Approved / Revoked -> Revoked`: same requirements.
+/// - Any other transition is rejected.
+fn validate_device_update(
+    devices: &HashMap<String, DeviceRecord>,
+    existing: Option<&DeviceRecord>,
+    incoming: &DeviceRecord,
+) -> Result<(), String> {
+    let Some(prev) = existing else {
+        match incoming.status {
+            DeviceStatus::Pending => return Ok(()),
+            DeviceStatus::Approved => {
+                let Some(att) = incoming.attestation.as_ref() else {
+                    return Err("new APPROVED device requires an attestation".into());
+                };
+                if att.action != AttestationAction::Approve {
+                    return Err("root attestation must be an approval".into());
+                }
+                if att.device != incoming.peer_id {
+                    return Err("root attestation device mismatch".into());
+                }
+                if att.approver != incoming.peer_id {
+                    return Err("root device must self-approve (approver == device)".into());
+                }
+                if !att.is_valid() {
+                    return Err("root attestation signature is invalid".into());
+                }
+                return Ok(());
+            }
+            DeviceStatus::Revoked => return Err("cannot revoke an unregistered device".into()),
+        }
+    };
+
+    if incoming.user_id != prev.user_id {
+        return Err("account mismatch: device belongs to a different user".into());
+    }
+
+    if incoming.status == prev.status {
+        return Ok(());
+    }
+
+    let is_upgrade_or_revoke = matches!(
+        (incoming.status, prev.status),
+        (DeviceStatus::Approved, DeviceStatus::Pending)
+            | (DeviceStatus::Revoked, DeviceStatus::Approved)
+            | (DeviceStatus::Revoked, DeviceStatus::Revoked)
+    );
+
+    if is_upgrade_or_revoke {
+        let Some(att) = incoming.attestation.as_ref() else {
+            return Err(format!(
+                "status change to {:?} requires an attestation",
+                incoming.status
+            ));
+        };
+        if !att.is_valid() {
+            return Err("attestation signature is invalid".into());
+        }
+        if att.device != incoming.peer_id {
+            return Err("attestation is for a different device".into());
+        }
+        if att.user_id != incoming.user_id {
+            return Err("attestation user mismatch".into());
+        }
+        let expected = match incoming.status {
+            DeviceStatus::Approved => AttestationAction::Approve,
+            _ => AttestationAction::Revoke,
+        };
+        if att.action != expected {
+            return Err(format!(
+                "attestation action mismatch: got {:?}, expected {:?} (status {:?})",
+                att.action,
+                expected,
+                incoming.status
+            ));
+        }
+        if !approver_is_trusted(devices, &incoming.user_id, &att.approver, &incoming.peer_id) {
+            return Err("approver is not an approved device of this account".into());
+        }
+        return Ok(());
+    }
+
+    if incoming.status == DeviceStatus::Pending && prev.status == DeviceStatus::Approved {
+        return Err("cannot demote an APPROVED device to Pending".into());
+    }
+    if incoming.status == DeviceStatus::Pending && prev.status == DeviceStatus::Revoked {
+        return Err("cannot move a REVOKED device to Pending".into());
+    }
+
+    Ok(())
+}
+
 async fn upsert_device(
     State(App { devices, db, .. }): State<App>,
     Path(peer_id): Path<String>,
@@ -205,6 +324,19 @@ async fn upsert_device(
     rec.peer_id = peer_id.clone();
     rec.seen = now_ms();
     tracing::info!(peer_id = %rec.peer_id, user = %rec.user_id, status = ?rec.status, "device upsert");
+
+    // Snapshot the current directory under the lock, then validate the
+    // transition without holding the guard (the approver check reads the map).
+    let (snapshot, existing) = {
+        let g = devices.lock().unwrap().clone();
+        let ex = g.get(&rec.peer_id).cloned();
+        (g, ex)
+    };
+    if let Err(e) = validate_device_update(&snapshot, existing.as_ref(), &rec) {
+        tracing::warn!(peer_id = %rec.peer_id, status = ?rec.status, %e, "device upsert rejected");
+        return Err(bad(StatusCode::FORBIDDEN, e));
+    }
+
     if let Err(e) = db::upsert_device(db.as_ref(), &rec).await {
         tracing::warn!(%e, "persisting device failed");
         return Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"));

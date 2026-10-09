@@ -33,6 +33,15 @@ thread_local! {
     static PUMP_STARTED: std::cell::Cell<bool> = std::cell::Cell::new(false);
     static CAMERA: RefCell<Option<Camera>> = RefCell::new(None);
     static SCREEN: RefCell<Option<Screen>> = RefCell::new(None);
+    /// `true` iff the current device was logged in as an APPROVED device.
+    /// Recomputed on login/apply_result and after approving this device.
+    static DEVICE_APPROVED: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+/// True if the current device is approved (allow user actions); false while it
+/// is pending approval by another authenticated device of the same account.
+fn device_is_approved() -> bool {
+    DEVICE_APPROVED.with(|c| c.get())
 }
 
 /// Shared renderer, initialized lazily (font parsing is expensive) and shared
@@ -121,7 +130,7 @@ pub fn run_app() {
     call::set_weak_window(weak.clone());
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
-    // state.set_is_mobile(true);
+    state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
@@ -254,6 +263,7 @@ pub fn run_app() {
         POOL.with(|s| *s.borrow_mut() = None);
         BACKEND.with(|s| *s.borrow_mut() = None);
         PUMP_STARTED.set(false);
+        DEVICE_APPROVED.with(|c| c.set(false));
         if let Some(ui) = w.upgrade() {
             let st = ui.global::<AppState>();
             let uid = st.get_user_id().to_string();
@@ -267,6 +277,9 @@ pub fn run_app() {
             st.set_discover(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
             st.set_my_collect(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
             st.set_my_share(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
+            st.set_my_devices(slint::ModelRc::new(slint::VecModel::from(Vec::<MyDevice>::new())));
+            st.set_device_approved(true);
+            st.set_notice_text(SharedString::new());
             st.set_data_status(SharedString::new());
             let cs = ui.global::<ChatSession>();
             cs.set_messages(slint::ModelRc::new(slint::VecModel::from(Vec::<MessageData>::new())));
@@ -383,6 +396,26 @@ pub fn run_app() {
         let w = weak.clone();
         ui.global::<AppState>().on_add_contact(move |username| {
             add_contact(w.clone(), username.to_string());
+        });
+    }
+
+    // ---- Device approval ----
+    {
+        let w = weak.clone();
+        ui.global::<AppState>().on_refresh_devices(move || {
+            refresh_devices(w.clone());
+        });
+    }
+    {
+        let w = weak.clone();
+        ui.global::<AppState>().on_approve_device(move |peer| {
+            approve_device(w.clone(), peer.to_string());
+        });
+    }
+    {
+        let w = weak.clone();
+        ui.global::<AppState>().on_revoke_device(move |peer| {
+            revoke_device(w.clone(), peer.to_string());
         });
     }
 
@@ -777,6 +810,13 @@ fn apply_result(
             // (server TTL is 30s) and our egress IP is re-published whenever
             // the local interface changes (WiFi ↔ ethernet, VPN, …).
             client.start_presence_loop();
+            let approved = client
+                .status()
+                .ok()
+                .map(|s| s == chatx_core::account::DeviceStatus::Approved)
+                .unwrap_or(false);
+            eprintln!("[login] device status approved={approved}");
+            DEVICE_APPROVED.with(|c| c.set(approved));
             CLIENT.with(|s| *s.borrow_mut() = Some(client));
 
             start_inbound_pump(weak.clone());
@@ -828,6 +868,7 @@ fn apply_result(
         ui.global::<AppState>().set_auth_message(SharedString::from(format!("logged in:{user_id}")));
         ui.global::<AppState>().set_user_id(SharedString::from(user_id));
         ui.set_logged_in(true);
+        refresh_devices(ui.as_weak());
     }
 }
 
@@ -1280,6 +1321,9 @@ fn time_label(ms: i64) -> String {
 
 /// Sent callback from ChatView: resolve peer, send via P2P, then re-render the chat.
 fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
+    if !require_approved(weak.clone()) {
+        return;
+    }
     let client = CLIENT.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
     let (Some(client), Some(backend)) = (client, backend) else {
@@ -1643,6 +1687,9 @@ fn delete_my_note(weak: slint::Weak<MainWindow>, key: i32) {
 }
 
 fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
+    if !require_approved(weak.clone()) {
+        return false;
+    }
     eprintln!("[create_group_flow] picked={picked:?}");
     let client = CLIENT.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
@@ -1736,10 +1783,14 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
             let q2 = q.clone();
             rt.spawn(async move {
                 // (1) Try to resolve as a username against the server directory.
-                if let Ok(ur) = client.resolve_user(&q) {
-                    eprintln!("[search] server resolve_user: user_id={}, e2e_public={}, sign_pk={}, | peer_id={}, label={}, endpoints={:?}",
+                let ur = client.resolve_user(&q);
+                match &ur {
+                    Ok(ur) => eprintln!("[search] resolve_user OK: user_id={} e2e_public={} sign_pk={} | peer_id={} label={} endpoints={:?}",
                         ur.user.user_id, ur.user.e2e_public, ur.user.sign_pk,
-                        ur.device.peer_id, ur.device.label, ur.device.endpoints);
+                        ur.device.peer_id, ur.device.label, ur.device.endpoints),
+                    Err(e) => eprintln!("[search] resolve_user ERR: {e}"),
+                }
+                if let Ok(ur) = ur {
                     let uname = ur.user.user_id;
                     let peer = ur.device.peer_id;
                     let row = SearchUser {
@@ -1747,6 +1798,7 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
                         username: SharedString::from(uname),
                         peer_id: SharedString::from(peer),
                     };
+                    eprintln!("[search] -> result name={} username={} peer_id={}", row.name, row.username, row.peer_id);
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
                             ui.global::<AppState>().set_search_results(slint::ModelRc::new(slint::VecModel::from(vec![row])));
@@ -1756,9 +1808,13 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
                     return;
                 }
                 // (2) Try to resolve as a Peer ID (scan) against the server directory.
-                if let Ok(dev) = client.dir().resolve_device(&q) {
-                    eprintln!("[search] server resolve_device: user_id={}, peer_id={}, label={}, endpoints={:?}, status={:?}",
-                        dev.user_id, dev.peer_id, dev.label, dev.endpoints, dev.status);
+                let dev = client.dir().resolve_device(&q);
+                match &dev {
+                    Ok(dev) => eprintln!("[search] resolve_device OK: user_id={} peer_id={} label={} endpoints={:?} status={:?}",
+                        dev.user_id, dev.peer_id, dev.label, dev.endpoints, dev.status),
+                    Err(e) => eprintln!("[search] resolve_device ERR: {e}"),
+                }
+                if let Ok(dev) = dev {
                     let uname = dev.user_id;
                     let peer = dev.peer_id;
                     let row = SearchUser {
@@ -1766,6 +1822,7 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
                         username: SharedString::from(uname),
                         peer_id: SharedString::from(peer),
                     };
+                    eprintln!("[search] -> result name={} username={} peer_id={}", row.name, row.username, row.peer_id);
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
                             ui.global::<AppState>().set_search_results(slint::ModelRc::new(slint::VecModel::from(vec![row])));
@@ -1775,6 +1832,7 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
                     return;
                 }
 
+                eprintln!("[search] NOT FOUND: {q2}");
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.global::<AppState>().set_add_status(SharedString::from(format!("找不到用户: {q2}")));
@@ -1908,6 +1966,114 @@ async fn do_add(
     Ok(())
 }
 
+/// Build the list of this account's devices (with online/pending flags) so the
+/// approval UI can render it. Called on the UI thread; reads directory (sync).
+fn refresh_devices(weak: slint::Weak<MainWindow>) {
+    let client = CLIENT.with(|s| s.borrow().clone());
+    let Some(client) = client else {
+        return;
+    };
+    let me_peer = client.peer_base58();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let list: Vec<MyDevice> = client
+        .my_devices()
+        .into_iter()
+        .map(|d| MyDevice {
+            peer_id: SharedString::from(d.peer_id.clone()),
+            label: SharedString::from(if d.label.is_empty() { d.peer_id.clone() } else { d.label }),
+            online: now - d.seen as i64 <= chatx_core::signal::ONLINE_TTL_MS as i64,
+            approved: d.status == chatx_core::account::DeviceStatus::Approved,
+            self_device: d.peer_id == me_peer,
+        })
+        .collect();
+
+    // Recompute whether *this* device is approved (it may have just been
+    // approved from another device, or revoked).
+    let approved = list
+        .iter()
+        .find(|d| d.peer_id.to_string() == me_peer)
+        .map(|d| d.approved)
+        .unwrap_or(false);
+    DEVICE_APPROVED.with(|c| c.set(approved));
+
+    // Drive the top banner text from the approval state. Kept as a distinct
+    // property so a future server-published notice can override it.
+    let notice = if approved {
+        String::new()
+    } else {
+        "设备待审批 · 请让已批准设备批准后才能收发消息".to_string()
+    };
+
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            let st = ui.global::<AppState>();
+            st.set_my_devices(slint::ModelRc::new(slint::VecModel::from(list)));
+            st.set_device_approved(approved);
+            st.set_notice_text(SharedString::from(notice));
+        }
+    });
+}
+
+/// Approve a pending device of this account. Requires a valid signed
+/// attestation by an approved sibling; the server rejects invalid ones.
+fn approve_device(weak: slint::Weak<MainWindow>, peer: String) {
+    let client = CLIENT.with(|s| s.borrow().clone());
+    let Some(client) = client else {
+        return;
+    };
+    if !device_is_approved() {
+        require_approved(weak.clone());
+        return;
+    }
+    match client.approve_device(&peer) {
+        Ok(_) => {
+            eprintln!("[approve] device {peer} approved");
+            refresh_devices(weak.clone());
+            show_app_notice(weak, "已批准该设备".to_string(), true);
+        }
+        Err(e) => {
+            eprintln!("[approve] device {peer} failed: {e}");
+            show_app_error(weak, format!("批准失败：{e}"));
+        }
+    }
+}
+
+/// Revoke an approved or already-revoked device of this account.
+fn revoke_device(weak: slint::Weak<MainWindow>, peer: String) {
+    let client = CLIENT.with(|s| s.borrow().clone());
+    let Some(client) = client else {
+        return;
+    };
+    if !device_is_approved() {
+        require_approved(weak.clone());
+        return;
+    }
+    match client.revoke_device(&peer) {
+        Ok(_) => {
+            eprintln!("[revoke] device {peer} revoked");
+            refresh_devices(weak.clone());
+            show_app_notice(weak, "已撤销该设备".to_string(), true);
+        }
+        Err(e) => {
+            eprintln!("[revoke] device {peer} failed: {e}");
+            show_app_error(weak, format!("撤销失败：{e}"));
+        }
+    }
+}
+
+/// Gate an outbound/privileged action on device approval. Returns `true` to
+/// proceed; on a pending device it shows a notice and returns `false`.
+fn require_approved(weak: slint::Weak<MainWindow>) -> bool {
+    if device_is_approved() {
+        return true;
+    }
+    show_app_error(weak, "当前设备待审批，请先在已登录设备上批准该设备".to_string());
+    false
+}
+
 /// Show a transient global error dialog (transparent backdrop, message + 知道了).
 fn show_app_error(weak: slint::Weak<MainWindow>, msg: String) {
     show_app_notice(weak, msg, false);
@@ -1964,6 +2130,9 @@ fn publish_call_state(
 /// Must run on the UI thread — the Slint event loop owns `call::CALL` (a
 /// thread_local) and cpal's streams.
 fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
+    if !require_approved(weak.clone()) {
+        return;
+    }
     eprintln!("[audio.call] begin_voice_call: enter key={key}");
     let client = CLIENT.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
@@ -2015,6 +2184,9 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
 }
 
 fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
+    if !require_approved(weak.clone()) {
+        return;
+    }
     let client = CLIENT.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
     let (Some(client), Some(backend)) = (client, backend) else {
@@ -2082,6 +2254,9 @@ fn screen_sink_adapter(bytes: Vec<u8>, w: u32, h: u32) {
 }
 
 fn begin_screen_share(weak: slint::Weak<MainWindow>, key: i32) {
+    if !require_approved(weak.clone()) {
+        return;
+    }
     let client = CLIENT.with(|s| s.borrow().clone());
     let backend = BACKEND.with(|s| s.borrow().clone());
     let (Some(client), Some(backend)) = (client, backend) else {

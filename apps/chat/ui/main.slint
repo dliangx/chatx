@@ -38,6 +38,7 @@ import { AddMenuView } from "global/add.slint";
 export component MainWindow inherits Window {
 
     in property <bool> logged-in: false;
+    in-out property <bool> pop-state: true;
 
     function select_tab(i: int) {
         AppState.nav-state.active-tab = i;
@@ -54,9 +55,10 @@ export component MainWindow inherits Window {
     AuthView {
         uid <=> AppState.user-id;
     }
-
     if root.logged-in && AppState.is-mobile:
     Rectangle {
+        x: 0px;
+        y: 0px;
         width: 100%;
         height: 100%;
         clip: true;
@@ -135,78 +137,84 @@ export component MainWindow inherits Window {
     }
 
     if root.logged-in && !AppState.is-mobile:
-    HorizontalLayout {
+        Rectangle {
+        x: 0px;
+        y: 0px;
         width: 100%;
         height: 100%;
-        spacing: 0px;
-        LeftNavBar {
-            width: 58px;
+        clip: true;
+        HorizontalLayout {
+            width: 100%;
             height: 100%;
-            active-tab: AppState.nav-state.active-tab;
-            tab-clicked(i) => { root.select_tab(i); }
-        }
-
-        Rectangle {
-            width: 280px;
-            height: 100%;
-            background: #e4e1e1;
-            clip: true;
-
-            ChatListView {
-                visible: AppState.nav-state.active-tab == 0;
-                width: 100%;
+            spacing: 0px;
+            LeftNavBar {
+                width: 58px;
                 height: 100%;
-                rows: AppState.chats;
-                status: AppState.data-status;
+                active-tab: AppState.nav-state.active-tab;
+                tab-clicked(i) => { root.select_tab(i); }
             }
 
-            ContactListView {
-                visible: AppState.nav-state.active-tab == 1;
-                width: 100%;
+            Rectangle {
+                width: 280px;
                 height: 100%;
-                rows: AppState.contacts;
-                letters: AppState.contact-letters;
+                background: #e4e1e1;
+                clip: true;
+
+                ChatListView {
+                    visible: AppState.nav-state.active-tab == 0;
+                    width: 100%;
+                    height: 100%;
+                    rows: AppState.chats;
+                    status: AppState.data-status;
+                }
+
+                ContactListView {
+                    visible: AppState.nav-state.active-tab == 1;
+                    width: 100%;
+                    height: 100%;
+                    rows: AppState.contacts;
+                    letters: AppState.contact-letters;
+                }
+
+                DiscoverView {
+                    visible: AppState.nav-state.active-tab == 2;
+                    width: 100%;
+                    height: 100%;
+                    cards: AppState.discover;
+                    like-toggled(id) => { AppState.toggle-like(id); }
+                }
+
+                MeView {
+                    visible: AppState.nav-state.active-tab == 3;
+                    width: 100%;
+                    height: 100%;
+                }
             }
 
-            DiscoverView {
-                visible: AppState.nav-state.active-tab == 2;
-                width: 100%;
+            Rectangle {
+                width: 1px;
                 height: 100%;
-                cards: AppState.discover;
-                like-toggled(id) => { AppState.toggle-like(id); }
+                background: #ececec;
             }
 
-            MeView {
-                visible: AppState.nav-state.active-tab == 3;
-                width: 100%;
+            Rectangle {
+                background: #e4e1e1;
+                clip: true;
+                width: root.width - 280px - 58px;
                 height: 100%;
-            }
-        }
 
-        Rectangle {
-            width: 1px;
-            height: 100%;
-            background: #ececec;
-        }
-
-        Rectangle {
-            background: #e4e1e1;
-            clip: true;
-            width: root.width - 280px - 58px;
-            height: 100%;
-
-            if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 0:
+                if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 0:
             SubPageView {
-                width: 100%;
-                height: 100%;
-                page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                    width: 100%;
+                    height: 100%;
+                    page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
                     AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top].page;
-                payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                    payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
                     AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top].payload;
+                }
             }
         }
     }
-
     if AppState.nav-state.global-overlay == GlobalOverlayType.ImageViewer: ImageViewer { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.QrScanner: ScanView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.AudioCall: AudioCallView { }
@@ -215,4 +223,55 @@ export component MainWindow inherits Window {
     if AppState.nav-state.global-overlay == GlobalOverlayType.QrCode: QrCodeView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu: AddMenuView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.Error: ErrorView { }
+
+    // Pending-device banner: this device must be approved before sending.
+    if root.logged-in && !AppState.device-approved && pop-state:
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 34px;
+        background: #fff3cd;
+
+        Text {
+            x: 12px;
+            y: 0px;
+            width: parent.width - 60px;
+            height: parent.height;
+            text: "设备待审批 · 请让已批准设备批准后才能收发消息";
+            font-size: 12px;
+            color: #8a6d3b;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            x: parent.width - 52px;
+            y: 6px;
+            width: 40px;
+            height: 22px;
+            border-radius: 11px;
+            background: #8a6d3b;
+
+            Text {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                text: "去批准";
+                font-size: 11px;
+                color: white;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => {
+                    root.pop-state = false;
+                    AppState.push-sub(SubPageType.MyDevices, 0);
+                }
+            }
+        }
+    }
 }

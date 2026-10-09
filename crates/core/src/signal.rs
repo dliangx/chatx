@@ -126,6 +126,7 @@ impl DirectoryClient for InMemoryDirectory {
 
     fn resolve_user_and_device(&self, user_id: &str) -> anyhow::Result<UserResolve> {
         let user = self.resolve_user(user_id)?;
+        eprintln!("resolve_user_and_device: user={:?}", user);
         let dt = self.devices.lock().unwrap();
         let now = crate::message::now_ms();
         let mut best: Option<&DeviceRecord> = None;

@@ -1,0 +1,199 @@
+import { Header } from "../components/header.slint";
+import { Icon, Glyph } from "../components/icon.slint";
+import { Theme } from "../theme.slint";
+import { SubPageType, AppState, MyDevice } from "../components/app_state.slint";
+
+component ActionButton inherits Rectangle {
+    in property <string> text;
+    in property <color> bg;
+    in property <string> peer_id;
+    in property <bool> is_approve;
+    height: 24px;
+    width: 52px;
+    border-radius: 12px;
+    background: root.bg;
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.text;
+        font-size: 12px;
+        color: white;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => {
+            if root.is_approve {
+                AppState.approve-device(root.peer_id);
+            } else {
+                AppState.revoke-device(root.peer_id);
+            }
+        }
+    }
+}
+
+component DeviceRow inherits Rectangle {
+    in property <MyDevice> d;
+    width: 100%;
+    height: 76px;
+    background: Theme.bg;
+
+    Rectangle {
+        x: 16px;
+        y: 14px;
+        width: 48px;
+        height: 48px;
+        border-radius: 8px;
+        background: #e4e4e4;
+
+        // online dot
+        Rectangle {
+            x: 34px;
+            y: 34px;
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            border-width: 2px;
+            border-color: white;
+            background: root.d.online ? #22c55e : #9ca3af;
+        }
+    }
+
+    VerticalLayout {
+        x: 76px;
+        y: 8px;
+        width: parent.width - 76px - 130px;
+        height: 60px;
+        spacing: 2px;
+
+        Text {
+            width: 100%;
+            height: 20px;
+            text: root.d.label + (root.d.self_device ? " (本机)" : "");
+            font-size: 15px;
+            font-weight: 800;
+            color: Theme.fg;
+            overflow: elide;
+        }
+
+        Text {
+            width: 100%;
+            height: 18px;
+            text: root.d.peer_id;
+            font-size: 12px;
+            color: Theme.fg-muted;
+            overflow: elide;
+        }
+
+        Text {
+            width: 100%;
+            height: 18px;
+            text: (root.d.approved ? "已批准" : "待审批") + " · " + (root.d.online ? "在线" : "离线");
+            font-size: 12px;
+            color: (!root.d.approved) ? #d97706 : Theme.fg-muted;
+        }
+    }
+
+    Rectangle {
+        x: 0px;
+        y: 75px;
+        width: parent.width;
+        height: 1px;
+        background: #ececec;
+    }
+
+    if !root.d.approved && !root.d.self_device:
+    ActionButton {
+        x: parent.width - 60px;
+        y: 26px;
+        text: "批准";
+        bg: Theme.brand;
+        peer_id: root.d.peer_id;
+        is_approve: true;
+    }
+
+    if root.d.approved && !root.d.self_device:
+    ActionButton {
+        x: parent.width - 60px;
+        y: 26px;
+        text: "撤销";
+        bg: #ef4444;
+        peer_id: root.d.peer_id;
+        is_approve: false;
+    }
+}
+
+export component MyDevicesView inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: #f5f5f5;
+
+    Timer {
+        interval: 5000ms;
+        running: true;
+        triggered => { AppState.refresh-devices(); }
+    }
+
+    Header {
+        name: "我的设备";
+    }
+
+    Text {
+        x: 16px;
+        y: 56px;
+        width: parent.width - 32px;
+        text: "账号下的所有设备。新的设备需要你（在任一已批准设备上）批准后才能使用。";
+        font-size: 12px;
+        color: Theme.fg-muted;
+    }
+
+    Rectangle {
+        x: 0px;
+        y: 96px;
+        width: parent.width;
+        background: Theme.bg;
+
+        Text {
+            x: 16px;
+            y: 8px;
+            width: parent.width - 32px;
+            height: 28px;
+            text: "设备";
+            font-size: 12px;
+            font-weight: 700;
+            color: Theme.fg-muted;
+            vertical-alignment: center;
+        }
+    }
+
+    Flickable {
+        x: 0px;
+        y: 124px;
+        width: parent.width;
+        height: parent.height - 124px - (AppState.is-mobile ? 58px : 0px);
+        interactive: true;
+        content-height: AppState.my-devices.length * 76px;
+
+        Text {
+            visible: AppState.my-devices.length == 0;
+            x: 16px;
+            y: 0px;
+            width: parent.width - 32px;
+            text: "（无设备记录）";
+            font-size: 13px;
+            color: Theme.fg-muted;
+        }
+
+        for d[i] in AppState.my-devices: DeviceRow {
+            x: 0px;
+            y: 76px * i;
+            width: parent.width;
+            height: 76px;
+            d: d;
+        }
+    }
+}

@@ -13,6 +13,7 @@ import { AddMomentView } from "discovery/moment.slint";
 import { AddNoteView } from "discovery/note.slint";
 import { MyNoteView } from "me/my_note.slint";
 import { MyShareView } from "me/my_share.slint";
+import { MyDevicesView } from "me/my_devices.slint";
 
 export component SubPageView inherits Rectangle {
     in property <SubPageType> page;
@@ -87,6 +88,7 @@ export component SubPageView inherits Rectangle {
         cards: AppState.my_share;
         like-toggled(id) => { AppState.toggle-like(id); }
     }
+    if root.page == SubPageType.MyDevices: MyDevicesView { }
     if root.page == SubPageType.AddContact: AddContactView { }
     if root.page == SubPageType.AddMoment: AddMomentView { }
     if root.page == SubPageType.AddNote: AddNoteView { }
