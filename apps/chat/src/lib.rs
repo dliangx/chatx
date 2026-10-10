@@ -52,6 +52,12 @@ fn device_is_approved() -> bool {
 /// across worker threads via a mutex so it is only built once.
 static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> = std::sync::OnceLock::new();
 
+/// Per-conversation "distance-from-bottom" of the last scroll position the
+/// user viewed, in logical px (0 = fully at the newest message). Restored when
+/// the chat view (re)enters so the user picks up where they left off.
+static CHAT_SCROLL_POS: std::sync::LazyLock<std::sync::RwLock<std::collections::HashMap<i32, f32>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+
 /// Monotonic id for profile loads (each request gets a fresh id).
 static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Id of the most-recent profile load; stale ones are dropped before publishing.
@@ -498,6 +504,28 @@ pub fn run_app() {
                 return;
             }
             send_chat_message(weak.clone(), key, b);
+        });
+    }
+
+    {
+        ui.global::<ChatSession>().on_update_scroll(move |key, dist| {
+            CHAT_SCROLL_POS.write().unwrap().insert(key, dist);
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        ui.global::<ChatSession>().on_scroll_request(move |key| {
+            // A freshly-mounted view (e.g. re-entering the chat after a tab
+            // switch) asks Rust to restore its remembered position from
+            // memory. Re-bumping the token makes the view re-apply
+            // `scroll-dist` even if the user had scrolled up before leaving.
+            let dist = CHAT_SCROLL_POS.read().unwrap().get(&key).copied().unwrap_or(0.0);
+            if let Some(ui) = weak.upgrade() {
+                let cs = ui.global::<ChatSession>();
+                cs.set_scroll_dist(dist);
+                cs.set_scroll_token(cs.get_scroll_token() + 1);
+            }
         });
     }
 
@@ -1324,6 +1352,9 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 render_msg(&mut r, std::hash::Hasher::finish(&h), sender, &m.text, is_self, &time, 380, 2.0)
             }).collect()
         };
+        let dist: f32 = {
+            CHAT_SCROLL_POS.read().unwrap().get(&chat_key).copied().unwrap_or(0.0)
+        };
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = ui_weak2.upgrade() {
                 let cs = ui.global::<ChatSession>();
@@ -1333,6 +1364,10 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                     .collect();
                 cs.set_messages(slint::ModelRc::new(slint::VecModel::from(messages)));
                 cs.set_send_status(SharedString::new());
+                // Restore (or bottom-align for a fresh chat) the scroll position.
+                // Bumping the token lets the view re-apply `scroll-dist` on entry.
+                cs.set_scroll_dist(dist);
+                cs.set_scroll_token(cs.get_scroll_token() + 1);
             }
         });
     });
@@ -1382,6 +1417,8 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                             ui.global::<ChatSession>().set_send_status(SharedString::new());
                         }
                     });
+                    // Sending a message should land us on the newest one.
+                    CHAT_SCROLL_POS.write().unwrap().insert(key, 0.0);
                     load_chat_messages(weak2, key);
                 }
                 Err(e) => {
