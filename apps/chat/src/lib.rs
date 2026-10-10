@@ -138,7 +138,7 @@ pub fn run_app() {
     call::set_weak_window(weak.clone());
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
-    state.set_is_mobile(true);
+    // state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
@@ -1393,7 +1393,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             rows.iter().map(|m| {
                 let is_self = m.sender == me_peer || m.sender == me;
                 let time = time_label(m.t as i64);
-                let sender = if is_self { "我".to_string() } else { title.clone() };
+                let sender = if is_self { "".to_string() } else { title.clone() };
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 std::hash::Hash::hash(&m.text, &mut h);
                 std::hash::Hash::hash(&sender, &mut h);

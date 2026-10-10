@@ -94,7 +94,7 @@ pub fn compute_frame(
         let total_w = body_w + tail_len + avatar_col;
         (body_x, avatar_x, total_w)
     } else {
-        let body_x = avatar_col;
+        let body_x = avatar_col + 8.0;
         let avatar_x = 0.0;
         let total_w = avatar_col + body_w + tail_len;
         (body_x, avatar_x, total_w)
