@@ -25,11 +25,15 @@ slint::include_modules!();
 
 type Directory = HttpDirectory;
 
+// Shared, cross-thread data globals.
+// Must NOT be thread_local! because they are read from tokio worker threads
+// (inside `rt.spawn(async move { … })` blocks), not just from the UI thread.
+static CLIENT: std::sync::Mutex<Option<Arc<Client<Directory>>>> = std::sync::Mutex::new(None);
+static POOL: std::sync::Mutex<Option<Arc<sqlx::SqlitePool>>> = std::sync::Mutex::new(None);
+static BACKEND: std::sync::Mutex<Option<ArcBackend>> = std::sync::Mutex::new(None);
+
 thread_local! {
     static RUNTIME: RefCell<Option<Arc<tokio::runtime::Runtime>>> = RefCell::new(None);
-    static CLIENT: RefCell<Option<Arc<Client<Directory>>>> = RefCell::new(None);
-    static POOL: RefCell<Option<Arc<sqlx::SqlitePool>>> = RefCell::new(None);
-    static BACKEND: RefCell<Option<ArcBackend>> = RefCell::new(None);
     static PUMP_STARTED: std::cell::Cell<bool> = std::cell::Cell::new(false);
     static CAMERA: RefCell<Option<Camera>> = RefCell::new(None);
     static SCREEN: RefCell<Option<Screen>> = RefCell::new(None);
@@ -130,7 +134,7 @@ pub fn run_app() {
     call::set_weak_window(weak.clone());
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
-    state.set_is_mobile(true);
+    // state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
@@ -259,9 +263,9 @@ pub fn run_app() {
 
     let w = weak.clone();
     ui.global::<AppState>().on_logout(move || {
-        CLIENT.with(|s| *s.borrow_mut() = None);
-        POOL.with(|s| *s.borrow_mut() = None);
-        BACKEND.with(|s| *s.borrow_mut() = None);
+        *CLIENT.lock().unwrap() = None;
+        *POOL.lock().unwrap() = None;
+        *BACKEND.lock().unwrap() = None;
         PUMP_STARTED.set(false);
         DEVICE_APPROVED.with(|c| c.set(false));
         if let Some(ui) = w.upgrade() {
@@ -817,13 +821,13 @@ fn apply_result(
                 .unwrap_or(false);
             eprintln!("[login] device status approved={approved}");
             DEVICE_APPROVED.with(|c| c.set(approved));
-            CLIENT.with(|s| *s.borrow_mut() = Some(client));
+            *CLIENT.lock().unwrap() = Some(client);
 
             start_inbound_pump(weak.clone());
 
             if let Some(pool) = pool {
                 let pool = Arc::new(pool);
-                POOL.with(|s| *s.borrow_mut() = Some(pool.clone()));
+                *POOL.lock().unwrap() = Some(pool.clone());
                 let rt = runtime();
                 let weak = weak.clone();
                 let me = user_id.clone();
@@ -833,7 +837,7 @@ fn apply_result(
                             let backend = Arc::new(tokio::sync::RwLock::new(backend));
                             let peer = peer.clone();
                             let _ = slint::invoke_from_event_loop(move || {
-                                BACKEND.with(|s| *s.borrow_mut() = Some(backend.clone()));
+                                *BACKEND.lock().unwrap() = Some(backend.clone());
                                 if let Some(ui) = weak.upgrade() {
                                     let state = ui.global::<AppState>();
                                     state.set_peer_id(SharedString::from(peer.clone()));
@@ -881,7 +885,7 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
     let rt = runtime();
     rt.spawn(async move {
         loop {
-            let client: std::sync::Arc<chatx_core::Client<chatx_core::signal::HttpDirectory>> = match CLIENT.with(|s| s.borrow().clone()) {
+            let client: std::sync::Arc<chatx_core::Client<chatx_core::signal::HttpDirectory>> = match CLIENT.lock().unwrap().clone() {
                 Some(c) => c,
                 None => break,
             };
@@ -912,9 +916,16 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
     });
 }
 
+/// Inbound message refresh: update the DB row + chat list preview, and if the
+/// conversation is currently open, re-render its messages.
+///
+/// This is invoked from the tokio worker task of the inbound pump loop, so we
+/// cannot call `backend.blocking_read()` (which is used by `publish_to_views`)
+/// on this thread. The UI-facing work is dispatched to the event-loop thread
+/// where it is legal.
 async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
-    let pool = POOL.with(|s| s.borrow().clone());
-    let backend = BACKEND.with(|s| s.borrow().clone());
+    let pool = POOL.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
     let (Some(pool), Some(backend)) = (pool, backend) else {
         return;
     };
@@ -930,26 +941,31 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
     let is_open_key = {
         backend.read().await.chats.iter().find(|r| r.chat_id == chat_id).map(|r| r.key)
     };
-    if let Some(ui) = weak.upgrade() {
-        let state = ui.global::<AppState>();
-        publish_to_views(&state, backend.clone());
-        if let Some(key) = is_open_key {
-            use slint::Model;
-            let nav = state.get_nav_state();
-            let tabs = nav.tabs.clone();
-            if let Some(tab) = tabs.row_data(nav.active_tab as usize) {
-                let top = tab.sub_top;
-                if top >= 0 {
-                    let hist = tab.sub_history.clone();
-                    if let Some(entry) = hist.row_data(top as usize) {
-                        if entry.page == SubPageType::ChatRoom && entry.payload == key {
-                            load_chat_messages(ui.as_weak(), key);
+    let weak2 = weak.clone();
+    let backend2 = backend.clone();
+    let key = is_open_key;
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak2.upgrade() {
+            let state = ui.global::<AppState>();
+            publish_to_views(&state, backend2.clone());
+            if let Some(k) = key {
+                use slint::Model;
+                let nav = state.get_nav_state();
+                let tabs = nav.tabs.clone();
+                if let Some(tab) = tabs.row_data(nav.active_tab as usize) {
+                    let top = tab.sub_top;
+                    if top >= 0 {
+                        let hist = tab.sub_history.clone();
+                        if let Some(entry) = hist.row_data(top as usize) {
+                            if entry.page == SubPageType::ChatRoom && entry.payload == k {
+                                load_chat_messages(ui.as_weak(), k);
+                            }
                         }
                     }
                 }
             }
         }
-    }
+    });
 }
 
 /// Push the in-memory backend rows into the slint view models (memory -> UI).
@@ -1062,8 +1078,8 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
         snapshot.chats.len());
 
     {
-        let pool = POOL.with(|s| s.borrow().clone());
-        let me_peer = CLIENT.with(|s| s.borrow().as_ref().map(|c| c.peer_base58()));
+        let pool = POOL.lock().unwrap().clone();
+        let me_peer = CLIENT.lock().unwrap().as_ref().map(|c| c.peer_base58());
         // friend peer id -> real users.id, so the reload join shows the name.
         let mut friend_by_peer: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for c in &snapshot.contacts {
@@ -1239,17 +1255,31 @@ fn to_message_data(m: RenderedMsg, scale: f32) -> MessageData {
 
 /// Load a conversation's messages from SQLite into the ChatSession global (memory -> UI).
 fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
-    let client: Option<Arc<Client<HttpDirectory>>> = CLIENT.with(|s| s.borrow().clone());
-    let pool = POOL.with(|s| s.borrow().clone());
-    let backend = BACKEND.with(|s| s.borrow().clone());
+    // We must run on a thread OUTSIDE the tokio runtime: below we call
+    // `backend.blocking_read()` on a `tokio::sync::RwLock`, which panics if the
+    // current thread is a runtime worker. When called from an async handler
+    // (e.g. the send path) we're on a worker — re-dispatch to the UI event-loop
+    // thread, which is safe and also keeps UI state mutation on the main thread.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let weak = ui_weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            load_chat_messages(weak, chat_key);
+        });
+        return;
+    }
+    let client: Option<Arc<Client<HttpDirectory>>> = CLIENT.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
     let (Some(client), Some(pool), Some(backend)) = (client, pool, backend) else {
         return;
     };
-    let chat_id = {
+    let chat_id: Option<String> = {
         let g = backend.blocking_read();
         g.chat_id_for(chat_key).map(|s| s.to_string())
     };
-    let Some(chat_id) = chat_id else { return };
+    let Some(chat_id) = chat_id else {
+        return;
+    };
     let _ = pool;
     let me_peer = client.peer_base58().to_string();
     let me = client.user_id().to_string();
@@ -1324,8 +1354,8 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     if !require_approved(weak.clone()) {
         return;
     }
-    let client = CLIENT.with(|s| s.borrow().clone());
-    let backend = BACKEND.with(|s| s.borrow().clone());
+    let client = CLIENT.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
     let (Some(client), Some(backend)) = (client, backend) else {
         return;
     };
@@ -1456,8 +1486,8 @@ fn fmt_time(ms: i64) -> String {
 
 /// Toggle a discovery like: memory first, then async persist to SQLite.
 fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
-    let backend = BACKEND.with(|s| s.borrow().clone());
-    let pool = POOL.with(|s| s.borrow().clone());
+    let backend = BACKEND.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
     let (Some(backend), Some(pool)) = (backend, pool) else {
         return;
     };
@@ -1568,7 +1598,7 @@ fn publish_my_notes(state: &AppState, backend: &ArcBackend) {
 }
 
 fn relayout_notes(weak: slint::Weak<MainWindow>, w: i32) {
-    let backend = BACKEND.with(|s| s.borrow().clone());
+    let backend = BACKEND.lock().unwrap().clone();
     let Some(backend) = backend else { return; };
     if let Some(ui) = weak.upgrade() {
         let state = ui.global::<AppState>();
@@ -1578,8 +1608,8 @@ fn relayout_notes(weak: slint::Weak<MainWindow>, w: i32) {
 }
 
 fn refresh_my_notes(weak: slint::Weak<MainWindow>) {
-    let pool = POOL.with(|s| s.borrow().clone());
-    let backend = BACKEND.with(|s| s.borrow().clone());
+    let pool = POOL.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
     let Some(backend) = backend else { return; };
     let me = weak.clone().upgrade()
         .map(|ui| ui.global::<AppState>().get_user_id().to_string())
@@ -1616,8 +1646,8 @@ fn refresh_my_notes(weak: slint::Weak<MainWindow>) {
 
 /// Persist a freshly-written note to SQLite, add it to the backend, publish.
 fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
-    let pool = POOL.with(|s| s.borrow().clone());
-    let backend = BACKEND.with(|s| s.borrow().clone());
+    let pool = POOL.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
     let (Some(pool), Some(backend)) = (pool, backend) else { return; };
     let me = weak.clone().upgrade()
         .map(|ui| ui.global::<AppState>().get_user_id().to_string())
@@ -1666,8 +1696,8 @@ fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
 
 /// Delete a note by its stable UI key: remove from backend + SQLite, publish.
 fn delete_my_note(weak: slint::Weak<MainWindow>, key: i32) {
-    let pool = POOL.with(|s| s.borrow().clone());
-    let backend = BACKEND.with(|s| s.borrow().clone());
+    let pool = POOL.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
     let (Some(pool), Some(backend)) = (pool, backend) else { return; };
     let note_id = { backend.blocking_read().note_id_for(key) };
     let Some(note_id) = note_id else { return; };
@@ -1691,8 +1721,8 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
         return false;
     }
     eprintln!("[create_group_flow] picked={picked:?}");
-    let client = CLIENT.with(|s| s.borrow().clone());
-    let backend = BACKEND.with(|s| s.borrow().clone());
+    let client = CLIENT.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
     let (Some(client), Some(backend)) = (client, backend) else {
         eprintln!("[create_group_flow] missing client/backend");
         return false;
@@ -1776,7 +1806,7 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
         return;
     }
 
-    let client = CLIENT.with(|s| s.borrow().clone());
+    let client = CLIENT.lock().unwrap().clone();
     match client {
         Some(client) => {
             let rt = runtime();
@@ -1858,9 +1888,9 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
         return;
     }
 
-    let backend = BACKEND.with(|s| s.borrow().clone());
-    let pool = POOL.with(|s| s.borrow().clone());
-    let client = CLIENT.with(|s| s.borrow().clone());
+    let backend = BACKEND.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
+    let client = CLIENT.lock().unwrap().clone();
     let (Some(backend), Some(pool), Some(client)) = (backend.clone(), pool, client) else {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
@@ -1969,7 +1999,7 @@ async fn do_add(
 /// Build the list of this account's devices (with online/pending flags) so the
 /// approval UI can render it. Called on the UI thread; reads directory (sync).
 fn refresh_devices(weak: slint::Weak<MainWindow>) {
-    let client = CLIENT.with(|s| s.borrow().clone());
+    let client = CLIENT.lock().unwrap().clone();
     let Some(client) = client else {
         return;
     };
@@ -2020,7 +2050,7 @@ fn refresh_devices(weak: slint::Weak<MainWindow>) {
 /// Approve a pending device of this account. Requires a valid signed
 /// attestation by an approved sibling; the server rejects invalid ones.
 fn approve_device(weak: slint::Weak<MainWindow>, peer: String) {
-    let client = CLIENT.with(|s| s.borrow().clone());
+    let client = CLIENT.lock().unwrap().clone();
     let Some(client) = client else {
         return;
     };
@@ -2043,7 +2073,7 @@ fn approve_device(weak: slint::Weak<MainWindow>, peer: String) {
 
 /// Revoke an approved or already-revoked device of this account.
 fn revoke_device(weak: slint::Weak<MainWindow>, peer: String) {
-    let client = CLIENT.with(|s| s.borrow().clone());
+    let client = CLIENT.lock().unwrap().clone();
     let Some(client) = client else {
         return;
     };
@@ -2134,8 +2164,8 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
         return;
     }
     eprintln!("[audio.call] begin_voice_call: enter key={key}");
-    let client = CLIENT.with(|s| s.borrow().clone());
-    let backend = BACKEND.with(|s| s.borrow().clone());
+    let client = CLIENT.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
     let (Some(client), Some(backend)) = (client, backend) else {
         eprintln!("[audio.call] begin_voice_call: CLIENT or BACKEND not ready — abort");
         publish_call_state(weak.clone(), None, None, false);
@@ -2187,8 +2217,8 @@ fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
     if !require_approved(weak.clone()) {
         return;
     }
-    let client = CLIENT.with(|s| s.borrow().clone());
-    let backend = BACKEND.with(|s| s.borrow().clone());
+    let client = CLIENT.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
     let (Some(client), Some(backend)) = (client, backend) else {
         publish_call_state(weak, None, None, false);
         return;
@@ -2257,8 +2287,8 @@ fn begin_screen_share(weak: slint::Weak<MainWindow>, key: i32) {
     if !require_approved(weak.clone()) {
         return;
     }
-    let client = CLIENT.with(|s| s.borrow().clone());
-    let backend = BACKEND.with(|s| s.borrow().clone());
+    let client = CLIENT.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
     let (Some(client), Some(backend)) = (client, backend) else {
         return;
     };
@@ -2373,8 +2403,8 @@ fn publish_profile_status(weak: slint::Weak<MainWindow>, key: i32, msg: SharedSt
 }
 
 fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
-    let backend = BACKEND.with(|s| s.borrow().clone());
-    let pool = POOL.with(|s| s.borrow().clone());
+    let backend = BACKEND.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
     let (Some(backend), Some(pool)) = (backend, pool) else {
         publish_profile_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
         return;
@@ -2468,9 +2498,9 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
 fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
     let t0 = std::time::Instant::now();
     eprintln!("[chat] open_conversation_with_contact: enter key={key}");
-    let client = CLIENT.with(|s| s.borrow().clone());
+    let client = CLIENT.lock().unwrap().clone();
     eprintln!("[chat] open_conversation: +{}ms grabbed CLIENT", t0.elapsed().as_millis());
-    let backend = BACKEND.with(|s| s.borrow().clone());
+    let backend = BACKEND.lock().unwrap().clone();
     eprintln!("[chat] open_conversation: +{}ms grabbed BACKEND", t0.elapsed().as_millis());
     let (Some(client), Some(backend)) = (client, backend) else {
         show_app_error(weak, format!("尚未登录或后端未就绪"));
@@ -2579,8 +2609,8 @@ fn parse_media_urls(s: &str) -> Vec<String> {
 }
 
 fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
-    let backend = BACKEND.with(|s| s.borrow().clone());
-    let pool = POOL.with(|s| s.borrow().clone());
+    let backend = BACKEND.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
     let (Some(backend), Some(pool)) = (backend, pool) else {
         publish_detail_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
         return;
@@ -2708,8 +2738,8 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
 /// Toggle a like on the post shown in the detail view: memory first (so the
 /// count/heart update immediately), then async persist to SQLite.
 fn toggle_detail_like(weak: slint::Weak<MainWindow>, key: i32) {
-    let backend = BACKEND.with(|s| s.borrow().clone());
-    let pool = POOL.with(|s| s.borrow().clone());
+    let backend = BACKEND.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
     let (Some(backend), Some(pool)) = (backend, pool) else {
         publish_detail_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
         return;
@@ -2741,8 +2771,8 @@ fn toggle_detail_like(weak: slint::Weak<MainWindow>, key: i32) {
 /// Add a comment to the post shown in the detail view: persist to SQLite,
 /// prepend it to the comment list, and bump the comment count.
 fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
-    let backend = BACKEND.with(|s| s.borrow().clone());
-    let pool = POOL.with(|s| s.borrow().clone());
+    let backend = BACKEND.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
     let (Some(backend), Some(pool)) = (backend, pool) else {
         publish_detail_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
         return;
