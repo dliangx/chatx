@@ -11,6 +11,7 @@ use crate::theme::Theme;
 const GAP: f32 = 14.0;
 const TAIL_W: f32 = 10.0;
 const TAIL_H: f32 = 18.0;
+const TAIL_SCALE: f32 = 1.2;
 
 pub struct Frame {
     pub theme: Theme,
@@ -86,15 +87,16 @@ pub fn compute_frame(
 
 
 
+    let tail_len = TAIL_W * TAIL_SCALE; // outward arrow length (physical px)
     let (body_x, avatar_x, total_w) = if is_self {
         let body_x = 0.0;
-        let avatar_x = body_w + TAIL_W + if show_avatar { GAP } else { 0.0 };
-        let total_w = body_w + TAIL_W + avatar_col;
+        let avatar_x = body_w + tail_len + if show_avatar { GAP } else { 0.0 };
+        let total_w = body_w + tail_len + avatar_col;
         (body_x, avatar_x, total_w)
     } else {
         let body_x = avatar_col;
         let avatar_x = 0.0;
-        let total_w = avatar_col + body_w;
+        let total_w = avatar_col + body_w + tail_len;
         (body_x, avatar_x, total_w)
     };
 
@@ -173,7 +175,7 @@ pub fn render_bubble_with_selection(
     let body_color = if frame.is_self { frame.theme.bubble_self } else { frame.theme.bubble_other };
     canvas.round_rect(body_x, body_y, body_w, body_h, Corners::all(frame.theme.radius), body_color);
     if frame.show_tail {
-        draw_tail(&mut canvas, body_x, body_y, body_w, body_h, TAIL_W, frame.is_self, body_color);
+        draw_tail(&mut canvas, body_x, body_y, body_w, body_h, TAIL_W, frame.is_self, body_color, scale);
     }
 
 
@@ -243,42 +245,92 @@ fn draw_tail(
     tail_w: f32,
     is_self: bool,
     color: Rgba,
+    scale: f32,
 ) {
+    let s = scale.max(1.0);
+    let Hb = (TAIL_H * 0.5) * TAIL_SCALE * s; // base half-height (1.2x original)
+    let L = tail_w * TAIL_SCALE * s; // apex length outward (1.2x original)
+    let r = 4.0 * s; // rounded nose radius
 
+    let hyp = (L * L + Hb * Hb).sqrt();
+    let nose_cx = L - r * hyp / Hb; // circle centre (x)
+    let tx = L - r * L * L / (Hb * hyp); // tangent point x (both edges)
+    let ty = r * L / hyp; // tangent point y (+/-)
 
-    let y1 = body_y + body_h - 16.0;
-    let y0 = y1 - TAIL_H;
-    if is_self {
-        let x = body_x + body_w;
-        fill_triangle(canvas, (x, y0), (x, y1), (x + tail_w, (y0 + y1) / 2.0), color);
-    } else {
-        let x = body_x;
-        fill_triangle(canvas, (x, y0), (x, y1), (x - tail_w, (y0 + y1) / 2.0), color);
-    }
-}
+    let a = (0.0f32, -Hb);
+    let b = (0.0f32, Hb);
+    let c = (tx, ty);
+    let dpt = (tx, -ty);
 
-fn fill_triangle(canvas: &mut Canvas, a: (f32, f32), b: (f32, f32), c: (f32, f32), color: Rgba) {
-    let min_x = a.0.min(b.0).min(c.0).floor() as i32;
-    let max_x = a.0.max(b.0).max(c.0).ceil() as i32;
-    let min_y = a.1.min(b.1).min(c.1).floor() as i32;
-    let max_y = a.1.max(b.1).max(c.1).ceil() as i32;
-    for py in min_y..=max_y {
-        for px in min_x..=max_x {
-            let p = (px as f32 + 0.5, py as f32 + 0.5);
-            if point_in_triangle(p, a, b, c) {
-                canvas.blit_mask(px, py, &[255], 1, 1, color);
+    // Keep the base fully within the body, near the bottom like the original.
+    let mut mid = body_y + body_h - Hb - 6.0 * s;
+    mid = mid.min(body_y + body_h - Hb);
+    mid = mid.max(body_y + Hb);
+
+    // Push the base inside the body for a 1px overlap (removes the seam).
+    let overlap = r.max(2.0 * s);
+    let edge_x = if is_self { body_x + body_w } else { body_x };
+    let base_x = if is_self { edge_x - overlap } else { edge_x + overlap };
+    let dir: f32 = if is_self { 1.0 } else { -1.0 };
+
+    // Canvas mapping of a local point (lx, ly): outward is +dir.
+    let x_min = (base_x + dir * 0.0).min(base_x + dir * L);
+    let x_max = (base_x + dir * 0.0).max(base_x + dir * L);
+    let y_min = mid - Hb;
+    let y_max = mid + Hb;
+    let pad = r.ceil().max(2.0);
+    let x0 = (x_min - pad).floor() as i32;
+    let y0 = (y_min - pad).floor() as i32;
+    let bw = ((x_max + pad - x0 as f32).ceil().max(1.0)) as i32;
+    let bh = ((y_max + pad - y0 as f32).ceil().max(1.0)) as i32;
+
+    const SS: usize = 4;
+    let inv_area = 255.0f32 / (SS * SS) as f32;
+    let mut cov = vec![0u8; (bw * bh) as usize];
+    let mut i = 0usize;
+    for py in 0..bh {
+        for px in 0..bw {
+            let ox = x0 as f32 + px as f32;
+            let oy = y0 as f32 + py as f32;
+            let mut hits = 0f32;
+            for sy in 0..SS {
+                let cyy = oy + ((sy + 1) as f32 / SS as f32);
+                for sx in 0..SS {
+                    let cxx = ox + ((sx + 1) as f32 / SS as f32);
+                    let lx = (cxx - base_x) / dir;
+                    let ly = cyy - mid;
+                    let ddx = lx - nose_cx;
+                    let in_nose = ddx * ddx + ly * ly <= r * r;
+                    let in_quad = convex_inside(lx, ly, a, b, c, dpt);
+                    if in_nose || in_quad {
+                        hits += 1.0;
+                    }
+                }
             }
+            cov[i] = (hits * inv_area) as u8;
+            i += 1;
         }
     }
+    canvas.blit_mask(x0, y0, &cov, bw as u32, bh as u32, color);
 }
 
-fn point_in_triangle(p: (f32, f32), a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> bool {
-    let s1 = cross(b, c, p);
-    let s2 = cross(c, a, p);
-    let s3 = cross(a, b, p);
-    (s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0) || (s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0)
+fn convex_inside(
+    px: f32,
+    py: f32,
+    a: (f32, f32),
+    b: (f32, f32),
+    c: (f32, f32),
+    d: (f32, f32),
+) -> bool {
+    let sign = |p: (f32, f32), q: (f32, f32)| {
+        (px - p.0) * (q.1 - p.1) - (py - p.1) * (q.0 - p.0)
+    };
+    let s1 = sign(a, b);
+    let s2 = sign(b, c);
+    let s3 = sign(c, d);
+    let s4 = sign(d, a);
+    (s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0 && s4 >= 0.0)
+        || (s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0 && s4 <= 0.0)
 }
 
-fn cross(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> f32 {
-    (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)
-}
+

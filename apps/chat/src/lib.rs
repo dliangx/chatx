@@ -8,6 +8,7 @@ use chatx_core::signal::{DirectoryClient, HttpDirectory};
 use chatx_core::store::dm_chat_id;
 use render::bubble::parse::parse_text;
 use render::bubble::{Bubble, GroupPos, Side};
+use render::canvas::Image;
 use render::Renderer;
 
 pub mod data;
@@ -127,10 +128,7 @@ fn clear_passphrase(_user_id: &str) {
 }
 
 pub fn run_app() {
-    // Mobile only: install the bridge consumers. iOS and Android both use
-    // the same bridge crate (jni.rs on Android, ffi.rs on iOS); desktop
-    // uses the native `screen` and `camera` crates directly and has no
-    // bridge at all, so this cfg is a no-op there.
+
     #[cfg(any(target_os = "android", target_os = "ios"))]
     install_bridge_sinks();
 
@@ -140,7 +138,7 @@ pub fn run_app() {
     call::set_weak_window(weak.clone());
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
-    // state.set_is_mobile(true);
+    state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
@@ -516,10 +514,7 @@ pub fn run_app() {
     {
         let weak = weak.clone();
         ui.global::<ChatSession>().on_scroll_request(move |key| {
-            // A freshly-mounted view (e.g. re-entering the chat after a tab
-            // switch) asks Rust to restore its remembered position from
-            // memory. Re-bumping the token makes the view re-apply
-            // `scroll-dist` even if the user had scrolled up before leaving.
+
             let dist = CHAT_SCROLL_POS.read().unwrap().get(&key).copied().unwrap_or(0.0);
             if let Some(ui) = weak.upgrade() {
                 let cs = ui.global::<ChatSession>();
@@ -944,13 +939,6 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
     });
 }
 
-/// Inbound message refresh: update the DB row + chat list preview, and if the
-/// conversation is currently open, re-render its messages.
-///
-/// This is invoked from the tokio worker task of the inbound pump loop, so we
-/// cannot call `backend.blocking_read()` (which is used by `publish_to_views`)
-/// on this thread. The UI-facing work is dispatched to the event-loop thread
-/// where it is legal.
 async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
     let pool = POOL.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
@@ -1228,6 +1216,55 @@ fn ensure_renderer() {
     let _ = RENDERER.get_or_init(|| std::sync::Mutex::new(renderer()));
 }
 
+fn make_avatar(seed: &str, size: u32) -> Image {
+    // Stable 32-bit hash of the seed so a given peer always gets the same
+    // colour across loads/sessions.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in seed.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    let hue = (h % 360) as f32 / 360.0;
+    // Convert hue to an RGB pair of top (lighter) and bottom (darker) stops.
+    let hsl_to_rgb = |h: f32, s: f32, l: f32| -> (u8, u8, u8) {
+        let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+        let hp = h * 6.0;
+        let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+        let (r, g, b) = match hp as u32 {
+            0 => (c, x, 0.0),
+            1 => (x, c, 0.0),
+            2 => (0.0, c, x),
+            3 => (0.0, x, c),
+            4 => (x, 0.0, c),
+            _ => (c, 0.0, 0.0),
+        };
+        let m = l - c / 2.0;
+        (
+            ((r + m) * 255.0) as u8,
+            ((g + m) * 255.0) as u8,
+            ((b + m) * 255.0) as u8,
+        )
+    };
+    let top = hsl_to_rgb(hue, 0.55, 0.62);
+    let bottom = hsl_to_rgb(hue, 0.75, 0.35);
+    let n = size.max(1) as usize;
+    let mut rgba = vec![0u8; n * n * 4];
+    for y in 0..n {
+        let t = if n > 1 { y as f32 / (n - 1) as f32 } else { 0.0 };
+        let rr = (top.0 as f32 + (bottom.0 as f32 - top.0 as f32) * t) as u8;
+        let gg = (top.1 as f32 + (bottom.1 as f32 - top.1 as f32) * t) as u8;
+        let bb = (top.2 as f32 + (bottom.2 as f32 - top.2 as f32) * t) as u8;
+        for x in 0..n {
+            let i = (y * n + x) * 4;
+            rgba[i] = rr;
+            rgba[i + 1] = gg;
+            rgba[i + 2] = bb;
+            rgba[i + 3] = 255;
+        }
+    }
+    Image { rgba, w: n as u32, h: n as u32 }
+}
+
 /// Intermediate render result produced on a background thread.
 /// The slint image type is not `Send`, so we pass raw bytes across threads.
 struct RenderedMsg {
@@ -1238,37 +1275,42 @@ struct RenderedMsg {
     text: String,
 }
 
+struct DemoMsg {
+    sender: String,
+    side: Side,
+    time: String,
+    text: String,
+    avatar: Option<Image>,
+}
+
 fn render_msg(
     r: &mut Renderer,
     id: u64,
-    sender: &str,
-    text: &str,
-    is_self: bool,
-    time: &str,
+    msg: &DemoMsg,
     available_w: u32,
     scale: f32,
 ) -> RenderedMsg {
-    let segs = parse_text(text);
+    let segs = parse_text(&msg.text);
     let bubble = Bubble {
         segments: &segs,
-        sender,
-        time,
-        side: if is_self { Side::SelfSide } else { Side::Other },
+        sender: msg.sender.as_str(),
+        time: msg.time.as_str(),
+        side: msg.side,
         group: GroupPos::Single,
-        avatar: None,
+        avatar: msg.avatar.as_ref(),
     };
     let out = r.render(id, &bubble, available_w, scale).clone();
     RenderedMsg {
         rgba: out.to_straight_rgba(),
         width: out.width,
         height: out.height,
-        is_self,
-        text: text.to_string(),
+        is_self: msg.side == Side::SelfSide,
+        text: msg.text.clone(),
     }
 }
 
 /// Build a slint [MessageData] from raw bytes on the UI thread.
-fn to_message_data(m: RenderedMsg, scale: f32) -> MessageData {
+fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> MessageData {
     let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(m.width, m.height);
     buf.make_mut_bytes().copy_from_slice(&m.rgba);
     MessageData {
@@ -1278,16 +1320,13 @@ fn to_message_data(m: RenderedMsg, scale: f32) -> MessageData {
         is_self: m.is_self,
         text: SharedString::from(m.text),
         selected: false,
+        top,
     }
 }
 
 /// Load a conversation's messages from SQLite into the ChatSession global (memory -> UI).
 fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
-    // We must run on a thread OUTSIDE the tokio runtime: below we call
-    // `backend.blocking_read()` on a `tokio::sync::RwLock`, which panics if the
-    // current thread is a runtime worker. When called from an async handler
-    // (e.g. the send path) we're on a worker — re-dispatch to the UI event-loop
-    // thread, which is safe and also keeps UI state mutation on the main thread.
+
     if tokio::runtime::Handle::try_current().is_ok() {
         let weak = ui_weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -1317,6 +1356,20 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     };
     let rt = runtime();
     let ui_weak2 = ui_weak.clone();
+
+    let (available_w, scale) = if let Some(ui) = ui_weak2.upgrade() {
+        let state = ui.global::<AppState>();
+        let window_w = state.get_xp().max(320.0);
+        let pane_w = if state.get_is_mobile() {
+            window_w
+        } else {
+            (window_w - 338.0).max(320.0)
+        };
+        let dpr = ui.window().scale_factor().max(1.0);
+        (pane_w as u32, dpr)
+    } else {
+        (390, 2.0)
+    };
     rt.spawn(async move {
         let rows = match client.store().load(&chat_id, 200, 0).await {
             Ok(rows) => rows,
@@ -1330,12 +1383,9 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 return;
             }
         };
-        // Render on a background thread: font parsing is the slow part and must
-        // not block the UI; we only ship raw bytes across to the UI thread.
+
         ensure_renderer();
-        // Order for display: newest first, regardless of the order the store
-        // returns rows in. Sort by message time (then id) so the latest
-        // message always renders at the top of the list.
+
         let mut rows = rows;
         rows.sort_by(|a, b| b.t.cmp(&a.t).then(b.id.cmp(&a.id)));
         let rendered: Vec<RenderedMsg> = {
@@ -1343,32 +1393,60 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             rows.iter().map(|m| {
                 let is_self = m.sender == me_peer || m.sender == me;
                 let time = time_label(m.t as i64);
-                let sender = if is_self { "我" } else { &title };
+                let sender = if is_self { "我".to_string() } else { title.clone() };
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 std::hash::Hash::hash(&m.text, &mut h);
-                std::hash::Hash::hash(sender, &mut h);
+                std::hash::Hash::hash(&sender, &mut h);
                 std::hash::Hash::hash(&is_self, &mut h);
                 std::hash::Hash::hash(&time, &mut h);
-                render_msg(&mut r, std::hash::Hasher::finish(&h), sender, &m.text, is_self, &time, 380, 2.0)
+
+                let avatar = Some(make_avatar(&m.sender, 80));
+                let msg = DemoMsg {
+                    sender,
+                    side: if is_self { Side::SelfSide } else { Side::Other },
+                    time,
+                    text: m.text.clone(),
+                    avatar,
+                };
+                render_msg(&mut r, std::hash::Hasher::finish(&h), &msg, available_w, scale)
             }).collect()
         };
         let dist: f32 = {
             CHAT_SCROLL_POS.read().unwrap().get(&chat_key).copied().unwrap_or(0.0)
         };
         let _ = slint::invoke_from_event_loop(move || {
-            if let Some(ui) = ui_weak2.upgrade() {
-                let cs = ui.global::<ChatSession>();
-                let messages: Vec<MessageData> = rendered
-                    .into_iter()
-                    .map(|m| to_message_data(m, 2.0))
-                    .collect();
-                cs.set_messages(slint::ModelRc::new(slint::VecModel::from(messages)));
-                cs.set_send_status(SharedString::new());
-                // Restore (or bottom-align for a fresh chat) the scroll position.
-                // Bumping the token lets the view re-apply `scroll-dist` on entry.
-                cs.set_scroll_dist(dist);
-                cs.set_scroll_token(cs.get_scroll_token() + 1);
-            }
+            let ui = match ui_weak2.upgrade() {
+                Some(ui) => ui,
+                None => return,
+            };
+            let cs = ui.global::<ChatSession>();
+
+            const PAD: f32 = 12.0;
+            const GAP: f32 = 12.0;
+            let n = rendered.len();
+            let heights: Vec<f32> = rendered.iter().map(|m| m.height as f32 / scale).collect();
+            let sum_all: f32 = heights.iter().sum();
+            let messages: Vec<MessageData> = rendered
+                .into_iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    // Rows above row i are the older messages (index > i).
+                    let older_sum: f32 = heights.iter().skip(i + 1).sum();
+                    let rows_above = (n.saturating_sub(1).saturating_sub(i)) as f32;
+                    let top = PAD + rows_above * GAP + older_sum;
+                    to_message_data(m, scale, top)
+                })
+                .collect();
+            let content_h = if n == 0 {
+                0.0
+            } else {
+                (n - 1) as f32 * GAP + sum_all + 2.0 * PAD
+            };
+            cs.set_scroll_dist(dist);
+            cs.set_scroll_token(cs.get_scroll_token() + 1);
+            cs.set_content_h(content_h);
+            cs.set_messages(slint::ModelRc::new(slint::VecModel::from(messages)));
+            cs.set_send_status(SharedString::new());
         });
     });
 }
@@ -1549,12 +1627,6 @@ fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
     }
 }
 
-/// Compute masonry positions for the note cards at the given logical container
-/// width. Cards flow bottom-up into the currently-shortest column, so column
-/// heights differ — the classic "waterfall" look.
-///
-/// Returns (rows, content_height). `rows` already carry their absolute
-/// x / y / width / height so the Slint layer only has to paint them.
 fn layout_my_notes(
     notes: &[data::NoteRowData],
     container_w: i32,
@@ -1917,8 +1989,6 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
     }
 }
 
-/// Mark `username` as a friend in the local DB (and refresh the in-memory
-/// contact list so the UI updates).
 fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
     let username: String = username_raw.chars().filter(|c| !c.is_whitespace()).collect();
     if username.is_empty() {
@@ -1998,9 +2068,6 @@ async fn do_add(
     }
     sqlite::social::add(pool, me_id, their_id).await?;
 
-    // Resolve the friend's peer id from the server (directory) so we can store
-    // a proper record in the local `devices` table for this contact. Best-effort:
-    // if the directory lookup fails we still add the contact with the username.
     let their_peer = client
         .resolve_user(username)
         .ok()
@@ -2057,8 +2124,6 @@ fn refresh_devices(weak: slint::Weak<MainWindow>) {
         })
         .collect();
 
-    // Recompute whether *this* device is approved (it may have just been
-    // approved from another device, or revoked).
     let approved = list
         .iter()
         .find(|d| d.peer_id.to_string() == me_peer)
@@ -2066,8 +2131,6 @@ fn refresh_devices(weak: slint::Weak<MainWindow>) {
         .unwrap_or(false);
     DEVICE_APPROVED.with(|c| c.set(approved));
 
-    // Drive the top banner text from the approval state. Kept as a distinct
-    // property so a future server-published notice can override it.
     let notice = if approved {
         String::new()
     } else {

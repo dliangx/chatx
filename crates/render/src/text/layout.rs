@@ -109,6 +109,37 @@ fn line_metrics(manager: &FontManager, style: &TextStyle, rtl: bool) -> (f32, f3
     (height, baseline)
 }
 
+
+fn force_split(
+    manager: &FontManager,
+    chars: &[CharInfo],
+    a: usize,
+    b: usize,
+    style: &TextStyle,
+    max_width: f32,
+) -> Vec<usize> {
+    if a >= b || measure(manager, chars, a, b, style) <= max_width {
+        return Vec::new();
+    }
+    let mut idx = 0usize;
+    while idx < chars.len() && chars[idx].byte < a {
+        idx += 1;
+    }
+    let mut splits = Vec::new();
+    let mut line_start_idx = idx;
+    let mut i = idx + 1;
+    while i < chars.len() && chars[i].byte < b {
+        let cand = chars[i].byte;
+        let w = measure(manager, chars, chars[line_start_idx].byte, cand, style);
+        if w > max_width && cand > chars[line_start_idx].byte {
+            splits.push(cand);
+            line_start_idx = i;
+        }
+        i += 1;
+    }
+    splits
+}
+
 fn line_ranges(
     manager: &FontManager,
     para: &str,
@@ -144,7 +175,22 @@ fn line_ranges(
     if line_start < para.len() {
         lines.push((line_start, para.len()));
     }
-    lines
+
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(lines.len());
+    for (a, b) in lines {
+        let splits = force_split(manager, chars, a, b, style, max_width);
+        let mut prev = a;
+        for &s in &splits {
+            if s > prev && s < b {
+                out.push((prev, s));
+                prev = s;
+            }
+        }
+        if prev < b {
+            out.push((prev, b));
+        }
+    }
+    out
 }
 
 fn measure(

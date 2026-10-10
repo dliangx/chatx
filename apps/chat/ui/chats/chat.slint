@@ -12,22 +12,18 @@ export struct MessageData {
     is_self: bool,
     text: string,
     selected: bool,
+    top: length,
 }
 
 export global ChatSession {
     in property <bool> connect-status: false;
     in property <[MessageData]> messages: [];
     in property <string> send-status: "";
-    // Distance (in logical px) of the desired scroll position measured up from
-    // the newest message (0 = fully at the bottom). Bumped via `scroll-token`
-    // to force the view to (re)apply `scroll-dist` (entry / after send).
     in property <length> scroll-dist: 0px;
     in property <int> scroll-token: 0;
+    in property <length> content-h: 0px;
     callback message-sent(int, string);
-    // Report the user's current scroll position: (chat-key, dist-from-bottom).
     callback update-scroll(int, length);
-    // Called by a freshly-mounted view so Rust can load `scroll-dist` for
-    // this `key` and bump `scroll-token` (e.g. on tab-switch re-entry).
     callback scroll-request(int);
 }
 
@@ -94,9 +90,6 @@ export component ChatView inherits Rectangle {
     in-out property <length> last-reported: -1px;
     in-out property <int> my-token: 0;
 
-    // One-shot: ask Rust to refresh `scroll-dist` for this chat from memory and
-    // bump `scroll-token`. Fire on mount so a re-entered (re-created) view picks
-    // up the user's remembered position instead of defaulting to the bottom.
     Timer {
         interval: 16ms;
         running: !root.requested;
@@ -111,21 +104,15 @@ export component ChatView inherits Rectangle {
         y: 48px;
         width: parent.width;
         height: parent.height - root._bottom - 48px;
-        content-height: 12px + ChatSession.messages.length * root.msg-row-h;
+        content-height: ChatSession.content-h;
         interactive: ChatSession.messages.length > 0;
 
-        // Apply the requested scroll position whenever `scroll-token` bumps
-        // from Rust (on entry or after a message is sent). Runs for a single
-        // fire and only when the viewport has real bounds and content.
         Timer {
             interval: 16ms;
             running: root.my-token != ChatSession.scroll-token
                 && fk.height > 0 && ChatSession.messages.length > 0;
             triggered => {
                 root.my-token = ChatSession.scroll-token;
-                // dist-from-bottom == 0 means "at the newest message" (the list
-                // bottom). Flickable reaches the bottom with content-y ==
-                // (height - content-height), i.e. a negative value.
                 let max = fk.content-height - fk.height;
                 fk.content-y = (max > 0px) ? (ChatSession.scroll-dist - max) : 0px;
                 root.last-reported = ChatSession.scroll-dist;
@@ -134,16 +121,12 @@ export component ChatView inherits Rectangle {
             }
         }
 
-        // Re-allow user scrolling shortly after a programmatic restore so the
-        // restore write isn't immediately overwritten by an in-flight gesture.
         Timer {
             interval: 16ms;
             running: root.scroll-guard;
             triggered => { root.scroll-guard = false; }
         }
 
-        // Poll the scroll position and report it to Rust (distance from the
-        // newest message) so it can be persisted and restored on next entry.
         Timer {
             interval: 16ms;
             running: root.scrolled && !root.scroll-guard
@@ -159,13 +142,13 @@ export component ChatView inherits Rectangle {
 
         for msg[i] in ChatSession.messages: Rectangle {
             x: 0px;
-            y: 12px + (ChatSession.messages.length - 1 - i) * root.msg-row-h;
+            y: msg.top;
             width: parent.width;
-            height: root.msg-row-h;
+            height: msg.height;
 
             TouchArea {
                 x: msg.is-self ? parent.width - msg.width - 6px : 6px;
-                y: 4px;
+                y: 0px;
                 width: msg.width;
                 height: msg.height;
                 pointer-event(e) => {
@@ -185,7 +168,7 @@ export component ChatView inherits Rectangle {
             if msg.selected: Button {
                 text: "复制";
                 x: msg.is-self ? parent.width - msg.width - 6px - 64px : 6px + msg.width + 8px;
-                y: 4px;
+                y: 0px;
                 width: 56px;
                 height: 28px;
                 clicked => { root.copy-text(msg.text); }
