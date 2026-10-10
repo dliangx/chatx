@@ -248,24 +248,24 @@ fn draw_tail(
     scale: f32,
 ) {
     let s = scale.max(1.0);
-    let Hb = (TAIL_H * 0.5) * TAIL_SCALE * s; // base half-height (1.2x original)
-    let L = tail_w * TAIL_SCALE * s; // apex length outward (1.2x original)
+    let hb = (TAIL_H * 0.5) * TAIL_SCALE * s; // base half-height (1.2x original)
+    let l = tail_w * TAIL_SCALE * s; // apex length outward (1.2x original)
     let r = 4.0 * s; // rounded nose radius
 
-    let hyp = (L * L + Hb * Hb).sqrt();
-    let nose_cx = L - r * hyp / Hb; // circle centre (x)
-    let tx = L - r * L * L / (Hb * hyp); // tangent point x (both edges)
-    let ty = r * L / hyp; // tangent point y (+/-)
+    let hyp = (l * l + hb * hb).sqrt();
+    let nose_cx = l - r * hyp / hb; // circle centre (x)
+    let tx = l - r * l * l / (hb * hyp); // tangent point x (both edges)
+    let ty = r * l / hyp; // tangent point y (+/-)
 
-    let a = (0.0f32, -Hb);
-    let b = (0.0f32, Hb);
+    let a = (0.0f32, -hb);
+    let b = (0.0f32, hb);
     let c = (tx, ty);
     let dpt = (tx, -ty);
 
     // Keep the base fully within the body, near the bottom like the original.
-    let mut mid = body_y + body_h - Hb - 6.0 * s;
-    mid = mid.min(body_y + body_h - Hb);
-    mid = mid.max(body_y + Hb);
+    let mut mid = body_y + body_h - hb - 6.0 * s;
+    mid = mid.min(body_y + body_h - hb);
+    mid = mid.max(body_y + hb);
 
     // Push the base inside the body for a 1px overlap (removes the seam).
     let overlap = r.max(2.0 * s);
@@ -274,10 +274,10 @@ fn draw_tail(
     let dir: f32 = if is_self { 1.0 } else { -1.0 };
 
     // Canvas mapping of a local point (lx, ly): outward is +dir.
-    let x_min = (base_x + dir * 0.0).min(base_x + dir * L);
-    let x_max = (base_x + dir * 0.0).max(base_x + dir * L);
-    let y_min = mid - Hb;
-    let y_max = mid + Hb;
+    let x_min = (base_x + dir * 0.0).min(base_x + dir * l);
+    let x_max = (base_x + dir * 0.0).max(base_x + dir * l);
+    let y_min = mid - hb;
+    let y_max = mid + hb;
     let pad = r.ceil().max(2.0);
     let x0 = (x_min - pad).floor() as i32;
     let y0 = (y_min - pad).floor() as i32;
