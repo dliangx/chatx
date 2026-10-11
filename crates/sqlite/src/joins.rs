@@ -70,7 +70,8 @@ pub async fn chat_list(pool: &Pool, me: &str, limit: u32) -> anyhow::Result<Vec<
 pub struct MessageWithSender {
     pub id: i64,
     pub conversation_id: i64,
-    pub sender_id: i64,
+    pub sender_user_id: Option<i64>,
+    pub sender_peer_id: Option<String>,
     pub msg_type: i64,
     pub text_content: Option<String>,
     pub media_path: Option<String>,
@@ -95,7 +96,8 @@ pub struct MessageWithSender {
 }
 
 /// Message history for a conversation with sender profile resolved from
-/// `users` (DM) or `group_members` (group). Ordered newest-first for paging.
+/// `users` (when the sender is a known user) or `group_members` (group).
+/// Ordered newest-first for paging.
 pub async fn history_with_sender(
     pool: &Pool,
     conversation_id: i64,
@@ -104,7 +106,7 @@ pub async fn history_with_sender(
 ) -> anyhow::Result<Vec<MessageWithSender>> {
     let rows = sqlx::query_as::<_, MessageWithSender>(
         "SELECT
-            m.id, m.conversation_id, m.sender_id, m.msg_type, m.text_content,
+            m.id, m.conversation_id, m.sender_user_id, m.sender_peer_id, m.msg_type, m.text_content,
             m.media_path, m.media_size, m.media_duration, m.thumbnail_path,
             m.timestamp, m.status, m.reply_to, m.is_encrypted, m.sync_seq, m.mentions,
             u.nickname    AS sender_nickname,
@@ -113,14 +115,14 @@ pub async fn history_with_sender(
             gm.nickname   AS group_nickname,
             r.text_content AS reply_to_preview,
             ru.nickname   AS reply_to_sender
-         FROM messages m
-         LEFT JOIN users u ON u.id = m.sender_id
-         LEFT JOIN group_members gm ON gm.group_id = m.conversation_id AND gm.peer_id = m.sender_id
-         LEFT JOIN messages r ON r.id = m.reply_to
-         LEFT JOIN users ru ON ru.id = r.sender_id
-         WHERE m.conversation_id = ?1
-         ORDER BY m.timestamp DESC
-         LIMIT ?2 OFFSET ?3",
+          FROM messages m
+          LEFT JOIN users u ON u.id = m.sender_user_id
+          LEFT JOIN group_members gm ON gm.group_id = m.conversation_id AND gm.peer_id = m.sender_peer_id
+          LEFT JOIN messages r ON r.id = m.reply_to
+          LEFT JOIN users ru ON ru.id = r.sender_user_id
+          WHERE m.conversation_id = ?1
+          ORDER BY m.timestamp DESC
+          LIMIT ?2 OFFSET ?3",
     )
     .bind(conversation_id)
     .bind(limit as i64)
@@ -480,7 +482,8 @@ mod tests {
             &pool,
             &NewMessage {
                 conversation_id: 100,
-                sender_id: 1,
+                sender_user_id: Some(1),
+                sender_peer_id: Some("peer-1".into()),
                 msg_type: messages::MSG_TYPE_TEXT,
                 text_content: Some("in reply".into()),
                 reply_to: Some(first),
@@ -496,7 +499,7 @@ mod tests {
         assert_eq!(history[0].reply_to, Some(first));
         assert_eq!(history[0].reply_to_preview.as_deref(), Some("first"));
 
-        let alice_row = history.iter().find(|m| m.sender_id == 10).unwrap();
+        let alice_row = history.iter().find(|m| m.sender_user_id == Some(10)).unwrap();
         assert_eq!(alice_row.sender_nickname.as_deref(), Some("Alice"));
     }
 

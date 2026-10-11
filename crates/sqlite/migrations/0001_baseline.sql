@@ -107,7 +107,8 @@ CREATE INDEX IF NOT EXISTS idx_conversations_time ON conversations(last_message_
 CREATE TABLE IF NOT EXISTS messages (
     id                  INTEGER PRIMARY KEY,    -- message ID (app-generated)
     conversation_id     INTEGER NOT NULL,       -- owning conversation
-    sender_id           INTEGER NOT NULL,       -- sender user ID
+    sender_user_id      INTEGER,                -- sender user ID (NULL if peer not yet a known user)
+    sender_peer_id      TEXT,                   -- sender libp2p PeerId (base58); canonical wire identity
     msg_type            INTEGER NOT NULL,       -- 0=text, 1=image, 2=voice, 3=video, 4=file, 5=system
     text_content        TEXT,                   -- text content (text messages only)
     media_path          TEXT,                   -- relative path of the media file
@@ -125,6 +126,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_conv_time ON messages(conversation_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_sync ON messages(conversation_id, sync_seq);
+CREATE INDEX IF NOT EXISTS idx_messages_sender_peer ON messages(sender_peer_id);
 
 -- ============================================================
 -- 4. Groups

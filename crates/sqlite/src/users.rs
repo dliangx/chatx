@@ -1,4 +1,4 @@
-use crate::{new_id, now_ms, Pool};
+use crate::{now_ms, Pool};
 use sqlx::FromRow;
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
@@ -107,23 +107,6 @@ pub async fn count(pool: &Pool) -> anyhow::Result<u32> {
         .fetch_one(pool)
         .await?;
     Ok(n as u32)
-}
-
-/// Find-or-create a user by its text identity (username). Used by the legacy
-/// message shim to map a string sender onto an integer user id.
-pub async fn ensure_identity(pool: &Pool, username: &str) -> anyhow::Result<i64> {
-    if let Some(u) = get_by_username(pool, username).await? {
-        return Ok(u.id);
-    }
-    let id = new_id();
-    let now = now_ms();
-    sqlx::query("INSERT INTO users (id, username, created_at) VALUES (?1, ?2, ?3)")
-        .bind(id)
-        .bind(username)
-        .bind(now)
-        .execute(pool)
-        .await?;
-    Ok(id)
 }
 
 /// Reverse lookup: integer user id -> text identity (username).

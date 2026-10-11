@@ -1130,29 +1130,12 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
                         };
                         match friend_by_peer.get(&pb).copied() {
                             Some(fuid) => {
-                                let exists = sqlite::devices::get_by_peer(&pool, &pb)
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                    .is_some();
-                                if !exists {
-                                    let did = sqlite::new_id();
-                                    let _ = sqlite::devices::upsert(
-                                        &pool,
-                                        did,
-                                        &sqlite::devices::DevicePatch {
-                                            user_id: Some(fuid),
-                                            peer_id: Some(pb.clone()),
-                                            public_key: Some(String::new()),
-                                            ..Default::default()
-                                        },
-                                    )
-                                    .await;
-                                }
+                                // Bind this friend's device (idempotent): lets
+                                // the chat list / DM history resolve the peer
+                                // to their real user row.
+                                let _ = sqlite::devices::bind_device(&pool, fuid, &pb).await;
                             }
-                            None => {
-                                let _ = sqlite::devices::ensure_user_by_peer(&pool, &pb).await;
-                            }
+                            None => {}
                         }
                         let _ = sqlite::conversations::set_peer_id(&pool, conv_id, &pb).await;
                         // Give a just-opened DM a time for ordering/label; only
@@ -1729,7 +1712,12 @@ fn refresh_my_notes(weak: slint::Weak<MainWindow>) {
     let Some(pool) = pool else { return; };
     let rt = runtime();
     rt.spawn(async move {
-        let me_id = sqlite::users::ensure_identity(&pool, &me).await.unwrap_or(0);
+        let me_id = sqlite::users::get_by_username(&pool, &me)
+            .await
+            .ok()
+            .flatten()
+            .map(|u| u.id)
+            .unwrap_or(0);
         let stored = sqlite::notes::list_notes(&pool, me_id).await.unwrap_or_default();
         let _ = slint::invoke_from_event_loop(move || {
             {
@@ -1766,9 +1754,9 @@ fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
     }
     let rt = runtime();
     rt.spawn(async move {
-        let me_id = match sqlite::users::ensure_identity(&pool, &me).await {
-            Ok(id) => id,
-            Err(_) => {
+        let me_id = match sqlite::users::get_by_username(&pool, &me).await {
+            Ok(Some(u)) => u.id,
+            Ok(None) | Err(_) => {
                 show_app_error(weak.clone(), String::from("笔记保存失败"));
                 return;
             }
@@ -2058,43 +2046,44 @@ async fn do_add(
     client: &Client<Directory>,
     backend: &ArcBackend,
 ) -> anyhow::Result<()> {
-    let me_id = sqlite::users::ensure_identity(pool, me).await?;
-    let their_id = sqlite::users::ensure_identity(pool, username).await?;
-    // Backstop: refuse self-association even if the username spelling differed
-    // enough to slip past the string-level guard above (e.g. leading whitespace
-    // or a case-insensitive username collision).
+    let me_id = sqlite::users::get_by_username(pool, me)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no user row for {me}; run login to create one"))?
+        .id;
+    // Only explicit add intent creates a row for the friend. A friend's
+    // nickname defaults to their username (nickname is "what I show for
+    // them"), unlike my own row which keeps nickname empty.
+    let their_id = match sqlite::users::get_by_username(pool, username).await? {
+        Some(u) => u.id,
+        None => sqlite::users::upsert(
+            pool,
+            sqlite::new_id(),
+            &sqlite::users::UserPatch {
+                username: Some(username.to_string()),
+                nickname: Some(username.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?
+        .id,
+    };
     if their_id == me_id {
         anyhow::bail!("不能添加自己");
     }
     sqlite::social::add(pool, me_id, their_id).await?;
 
+    // Bind the friend's libp2p device (from the server directory) to their
+    // user id so incoming DMs resolve to them instead of a raw peer id.
     let their_peer = client
         .resolve_user(username)
         .ok()
         .map(|r| r.device.peer_id);
 
     if let Some(peer) = &their_peer {
-        let _ = sqlite::devices::upsert(
-            pool,
-            sqlite::new_id(),
-            &sqlite::devices::DevicePatch {
-                user_id: Some(their_id),
-                peer_id: Some(peer.clone()),
-                public_key: Some(String::new()),
-                ..Default::default()
-            },
-        )
-        .await;
+        let _ = sqlite::devices::bind_device(pool, their_id, peer).await;
     }
 
-    let (name, image) = {
-        if let Ok(Some(u)) = sqlite::users::get(pool, their_id).await {
-             (u.username.clone().unwrap_or_else(|| u.nickname.clone().unwrap_or_default()),
-             u.avatar_path.clone().unwrap_or_default())
-        } else {
-            (username.to_string(), String::new())
-        }
-    };
+    let (name, image) = (username.to_string(), String::new());
     let mut g = backend.write().await;
     g.append_contact(their_id, their_peer.unwrap_or_else(|| username.to_string()), name, image);
     Ok(())
@@ -2748,7 +2737,12 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
             }
         };
 
-        let me_id = sqlite::users::ensure_identity(&pool, &me).await.unwrap_or(0);
+        let me_id = sqlite::users::get_by_username(&pool, &me)
+            .await
+            .ok()
+            .flatten()
+            .map(|u| u.id)
+            .unwrap_or(0);
         let i_liked = sqlite::social_feed::has_liked(&pool, post_id, me_id).await.unwrap_or(false);
         // Resolve each liker to a display name for the "who liked" line.
         let mut likers: Vec<String> = Vec::new();
@@ -2892,8 +2886,12 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     };
     let rt = runtime();
     rt.spawn(async move {
-        let me_id = match sqlite::users::ensure_identity(&pool, &me).await {
-            Ok(id) => id,
+        let me_id = match sqlite::users::get_by_username(&pool, &me).await {
+            Ok(Some(u)) => u.id,
+            Ok(None) => {
+                publish_detail_status(weak.clone(), key, SharedString::from("评论失败"));
+                return;
+            }
             Err(e) => {
                 publish_detail_status(weak.clone(), key, SharedString::from(format!("评论失败: {e}")));
                 return;

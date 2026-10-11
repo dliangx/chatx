@@ -65,10 +65,23 @@ mod tests {
         let n2 = create_note(&pool, 1, "world").await.unwrap();
         create_note(&pool, 2, "other user").await.unwrap();
 
+        // new_id() is random, so two notes created in the same millisecond
+        // may tie on `created_at` and fall through to the (non-deterministic)
+        // `id DESC` tiebreak. Make this test stable by giving n2 a strictly
+        // later timestamp.
+        {
+            let mut c = pool.acquire().await.unwrap();
+            sqlx::query("UPDATE notes SET created_at = ?2, updated_at = ?2 WHERE id = ?1")
+                .bind(n2.id)
+                .bind(n2.created_at + 1000)
+                .execute(&mut *c)
+                .await
+                .unwrap();
+        }
+
         let mine = list_notes(&pool, 1).await.unwrap();
         assert_eq!(mine.len(), 2);
-        // newest first
-        assert_eq!(mine[0].id, n2.id);
+        assert_eq!(mine[0].id, n2.id, "n2 was explicitly stamped later, so must sort first");
 
         assert!(get_note(&pool, n1.id).await.unwrap().is_some());
         assert!(delete_note(&pool, n1.id).await.unwrap());

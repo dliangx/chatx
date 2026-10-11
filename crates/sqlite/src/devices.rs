@@ -69,14 +69,26 @@ pub async fn get_by_peer(pool: &Pool, peer_id: &str) -> anyhow::Result<Option<De
     Ok(row)
 }
 
-/// Resolve a libp2p PeerId to a user id, creating a user + device record on
-/// first sight. Used by the message shim to map a string sender onto an int id.
-pub async fn ensure_user_by_peer(pool: &Pool, peer_id: &str) -> anyhow::Result<i64> {
-    if let Some(d) = get_by_peer(pool, peer_id).await? {
-        return Ok(d.user_id);
-    }
-    let user_id = crate::users::ensure_identity(pool, peer_id).await?;
-    let device_id = crate::new_id();
+/// Resolve a libp2p PeerId to a known user id by looking up the `devices`
+/// table. Returns `Ok(None)` when no device row exists for that peer — the
+/// caller decides how to render the message (typically with a NULL user id).
+///
+/// This function is **read-only**: it never creates a `users` row. Historically
+/// it called `users::ensure_identity(peer_id)`, which ghost-created user rows
+/// keyed by the base58 PeerId (the bug fixed in migration 3).
+pub async fn ensure_user_by_peer(pool: &Pool, peer_id: &str) -> anyhow::Result<Option<i64>> {
+    let d = get_by_peer(pool, peer_id).await?;
+    Ok(d.map(|d| d.user_id))
+}
+
+/// Bind a libp2p `devices` row for `peer_id`, owned by `user_id`. Idempotent:
+/// reuses an existing device row for the same peer. Shared by the login path
+/// (own device) and the add-contact path (a friend's device).
+pub async fn bind_device(pool: &Pool, user_id: i64, peer_id: &str) -> anyhow::Result<i64> {
+    let device_id = match get_by_peer(pool, peer_id).await? {
+        Some(d) => d.device_id,
+        None => crate::new_id(),
+    };
     upsert(
         pool,
         device_id,
@@ -88,7 +100,37 @@ pub async fn ensure_user_by_peer(pool: &Pool, peer_id: &str) -> anyhow::Result<i
         },
     )
     .await?;
-    Ok(user_id)
+    Ok(device_id)
+}
+
+/// Bind an account's `users` row to a libp2p `devices` row so that incoming
+/// messages from that device can be resolved to a real `users.id` (with the
+/// account's real username) instead of leaving the sender as a raw peer id.
+///
+/// Call on every login: creates the `users` row on first login (username =
+/// the account's user_id string, e.g. "alice") and binds this peer to it.
+/// Own-user rows intentionally get **no** nickname — nickname is "what I show
+/// for *them*", so it stays empty for myself. Repeat logins are idempotent.
+pub async fn bind_user_device(
+    pool: &Pool,
+    username: &str,
+    peer_id: &str,
+) -> anyhow::Result<(i64, i64)> {
+    let user_id = match crate::users::get_by_username(pool, username).await? {
+        Some(u) => u.id,
+        None => crate::users::upsert(
+            pool,
+            crate::new_id(),
+            &crate::users::UserPatch {
+                username: Some(username.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?
+        .id,
+    };
+    let device_id = bind_device(pool, user_id, peer_id).await?;
+    Ok((user_id, device_id))
 }
 
 pub async fn list_by_user(pool: &Pool, user_id: i64) -> anyhow::Result<Vec<Device>> {

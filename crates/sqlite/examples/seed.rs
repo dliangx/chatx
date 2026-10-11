@@ -14,7 +14,7 @@ use sqlite::messages::{self, NewMessage};
 use sqlite::social;
 use sqlite::social_feed;
 use sqlite::users::{self, UserPatch};
-use sqlite::Pool;
+use sqlite::{new_id, now_ms, Pool};
 
 const CONTACT_COUNT: i64 = 52;
 const CONTACT_BASE: i64 = 101;
@@ -85,7 +85,21 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn seed(pool: &Pool, me: &str) -> anyhow::Result<()> {
-    let me_id = users::ensure_identity(pool, me).await?;
+    // Seed is an *explicit* add intent: create the "me" row (with username,
+    // nickname, bio) if it doesn't exist yet.
+    let me_id = if let Some(u) = users::get_by_username(pool, me).await? {
+        u.id
+    } else {
+        let id = new_id();
+        let now = now_ms();
+        sqlite::sqlx::query("INSERT INTO users (id, username, created_at) VALUES (?1, ?2, ?3)")
+            .bind(id)
+            .bind(me)
+            .bind(now)
+            .execute(pool)
+            .await?;
+        id
+    };
     users::upsert(
         pool,
         me_id,
@@ -183,7 +197,8 @@ async fn seed(pool: &Pool, me: &str) -> anyhow::Result<()> {
                 pool,
                 &NewMessage {
                     conversation_id: group_id,
-                    sender_id: sender,
+                    sender_user_id: Some(sender),
+                    sender_peer_id: Some(format!("12D3KooW{sender}")),
                     msg_type: messages::MSG_TYPE_TEXT,
                     text_content: Some(text.into()),
                     timestamp: Some(now - (g as i64) * 120_000 - (k as i64) * 60_000),
@@ -248,7 +263,8 @@ async fn seed_dm(
             pool,
             &NewMessage {
                 conversation_id: conv_id,
-                sender_id: sender,
+                sender_user_id: Some(sender),
+                sender_peer_id: Some(peer_id.to_string()),
                 msg_type: messages::MSG_TYPE_TEXT,
                 text_content: Some(text.into()),
                 timestamp: Some(base_ts + (k as i64) * 60_000),

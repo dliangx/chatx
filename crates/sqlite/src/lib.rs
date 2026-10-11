@@ -30,21 +30,12 @@ pub struct MsgRow {
     pub mine: bool,
 }
 
-pub struct Migration {
-    pub version: u32,
-    pub sql: &'static str,
+/// Auto-collected by `build.rs` from `migrations/*.sql` (lexicographic order).
+/// Drop a new `NNNN_name.sql` into that directory — no code change required.
+mod migrations_generated {
+    include!(concat!(env!("OUT_DIR"), "/migrations_generated.rs"));
 }
-
-const MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 1,
-        sql: include_str!("../migrations/0001_baseline.sql"),
-    },
-    Migration {
-        version: 2,
-        sql: include_str!("../migrations/0002_notes.sql"),
-    },
-];
+use migrations_generated::MIGRATIONS;
 
 pub async fn apply_migrations(pool: &Pool) -> anyhow::Result<Vec<u32>> {
     sqlx::query(
@@ -64,18 +55,18 @@ pub async fn apply_migrations(pool: &Pool) -> anyhow::Result<Vec<u32>> {
     };
 
     let mut ran = Vec::new();
-    for m in MIGRATIONS {
-        if applied.contains(&(m.version as i64)) {
+    for (version, sql) in MIGRATIONS {
+        if applied.contains(&(*version as i64)) {
             continue;
         }
-        sqlx::raw_sql(m.sql).execute(pool).await?;
+        sqlx::raw_sql(sql).execute(pool).await?;
         sqlx::query(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, datetime('now'))",
         )
-        .bind(m.version as i64)
+        .bind(*version as i64)
         .execute(pool)
         .await?;
-        ran.push(m.version);
+        ran.push(*version);
     }
     Ok(ran)
 }

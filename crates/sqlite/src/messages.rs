@@ -21,7 +21,8 @@ pub const STATUS_FAILED: i64 = 4;
 pub struct Message {
     pub id: i64,
     pub conversation_id: i64,
-    pub sender_id: i64,
+    pub sender_user_id: Option<i64>,
+    pub sender_peer_id: Option<String>,
     pub msg_type: i64,
     pub text_content: Option<String>,
     pub media_path: Option<String>,
@@ -40,7 +41,8 @@ pub struct Message {
 pub struct NewMessage {
     pub id: Option<i64>,
     pub conversation_id: i64,
-    pub sender_id: i64,
+    pub sender_user_id: Option<i64>,
+    pub sender_peer_id: Option<String>,
     pub msg_type: i64,
     pub text_content: Option<String>,
     pub media_path: Option<String>,
@@ -58,10 +60,11 @@ pub struct NewMessage {
 }
 
 impl NewMessage {
-    pub fn text(conversation_id: i64, sender: i64, text: impl Into<String>) -> Self {
+    /// Constructor for messages where the sender is a known local user id.
+    pub fn text(conversation_id: i64, sender_user_id: i64, text: impl Into<String>) -> Self {
         Self {
             conversation_id,
-            sender_id: sender,
+            sender_user_id: Some(sender_user_id),
             msg_type: MSG_TYPE_TEXT,
             text_content: Some(text.into()),
             ..Default::default()
@@ -109,13 +112,14 @@ pub async fn insert(pool: &Pool, m: &NewMessage) -> anyhow::Result<i64> {
 
         sqlx::query(
             "INSERT INTO messages
-                (id, conversation_id, sender_id, msg_type, text_content, media_path, media_size,
-                 media_duration, thumbnail_path, timestamp, status, reply_to, is_encrypted, sync_seq, mentions)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                (id, conversation_id, sender_user_id, sender_peer_id, msg_type, text_content, media_path, media_size,
+                  media_duration, thumbnail_path, timestamp, status, reply_to, is_encrypted, sync_seq, mentions)
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )
         .bind(id)
         .bind(m.conversation_id)
-        .bind(m.sender_id)
+        .bind(m.sender_user_id)
+        .bind(&m.sender_peer_id)
         .bind(m.msg_type)
         .bind(&m.text_content)
         .bind(&m.media_path)
@@ -138,11 +142,16 @@ pub async fn insert(pool: &Pool, m: &NewMessage) -> anyhow::Result<i64> {
 /// Legacy shim over [`insert`] preserving the old `MsgRow` fields,
 /// used by `chatx-core` for its outgoing/inbound text messages.
 ///
-/// The string `chat_id`/`sender` are mapped onto integer `conversations.id` /
-/// `users.id` via `conversations::ensure_dm` / `users::ensure_identity`.
+/// The string `chat_id`/`sender` are mapped:
+/// - `chat_id` onto integer `conversations.id` via `conversations::ensure_dm`.
+/// - `sender` onto `messages.sender_peer_id` (the wire identity, always
+///   preserved). If a `devices` row for that peer exists (i.e. we know their
+///   real user), `messages.sender_user_id` is populated from it; otherwise it
+///   stays NULL. **No user row is ever created here** — historical ghost
+///   `users` rows keyed by `<PeerId>` are gone (see migration 0003).
 pub async fn insert_row(pool: &Pool, m: &MsgRow) -> anyhow::Result<()> {
     let conversation_id = conversations::ensure_dm(pool, &m.chat_id).await?;
-    let sender_id = crate::devices::ensure_user_by_peer(pool, &m.sender).await?;
+    let sender_user_id = crate::devices::ensure_user_by_peer(pool, &m.sender).await?;
     // A message from the peer reveals the DM's peer identity.
     if !m.mine {
         conversations::set_peer_id(pool, conversation_id, &m.sender).await?;
@@ -151,7 +160,8 @@ pub async fn insert_row(pool: &Pool, m: &MsgRow) -> anyhow::Result<()> {
         pool,
         &NewMessage {
             conversation_id,
-            sender_id,
+            sender_user_id,
+            sender_peer_id: Some(m.sender.clone()),
             msg_type: MSG_TYPE_TEXT,
             text_content: Some(m.text.clone()),
             timestamp: Some(m.t as i64),
@@ -198,13 +208,16 @@ async fn load_rows(
 ) -> anyhow::Result<Vec<MsgRow>> {
     let limit = limit.unwrap_or(-1);
     let offset = offset.unwrap_or(0);
+    // Prefer the wire peer id (set on every P2P message); fall back to the
+    // sender user's username for legacy rows that only carried a users.id.
     let rows: Vec<(i64, String, Option<String>, bool, i64)> = sqlx::query_as(
-        "SELECT m.id, COALESCE(u.username, '') AS sender, m.text_content, m.is_encrypted, m.timestamp
-         FROM messages m
-         LEFT JOIN users u ON u.id = m.sender_id
-         WHERE m.conversation_id = ?1
-         ORDER BY m.timestamp DESC
-         LIMIT ?2 OFFSET ?3",
+        "SELECT m.id, COALESCE(m.sender_peer_id, u.username, '') AS sender,
+                m.text_content, m.is_encrypted, m.timestamp
+          FROM messages m
+          LEFT JOIN users u ON u.id = m.sender_user_id
+          WHERE m.conversation_id = ?1
+          ORDER BY m.timestamp DESC
+          LIMIT ?2 OFFSET ?3",
     )
     .bind(conversation_id)
     .bind(limit)

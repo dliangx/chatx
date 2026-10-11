@@ -210,7 +210,10 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
     let mut b = DataBackend::default();
 
     // Resolve the string account id onto an integer user row id.
-    let me_id = sqlite::users::ensure_identity(pool, me).await?;
+    let me_id = sqlite::users::get_by_username(pool, me)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no user row for {me}; run login to create one"))?
+        .id;
     let my_nickname = sqlite::users::get(pool, me_id)
         .await?
         .and_then(|u| u.nickname)
@@ -365,7 +368,10 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
 
 /// Persist a discovery like/unlike toggle to SQLite (fire and forget).
 pub async fn persist_like_toggle(pool: &SqlitePool, me: &str, post_id: i64, want_liked: bool) -> anyhow::Result<()> {
-    let me_id = sqlite::users::ensure_identity(pool, me).await?;
+    let me_id = sqlite::users::get_by_username(pool, me)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no user row for {me}; run login to create one"))?
+        .id;
     let currently = sqlite::social_feed::has_liked(pool, post_id, me_id).await?;
     if currently == want_liked {
         return Ok(());
