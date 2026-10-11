@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use store::Store;
 use swarm::{self as sw, Cmd, Running};
+use tokio::sync::oneshot;
 use parking_lot::RwLock;
 
 pub struct Client<D: DirectoryClient + ?Sized> {
@@ -343,7 +344,15 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             if let Some(pos) = v.iter().position(|a| a.contains(&ip)) {
                 v.swap_remove(pos);
             }
-            v.insert(0, format!("/ip4/{ip}/tcp/0"));
+            // Reuse the real listening port rather than fabricating tcp/0,
+            // which is an invalid, un-routable endpoint.
+            let port = v.iter().find_map(|a| tcp_port_of(a));
+            match port {
+                Some(p) => v.insert(0, format!("/ip4/{ip}/tcp/{p}")),
+                None => {
+                    eprintln!("[dir] no listening port found; not advertising egress {ip}");
+                }
+            }
         }
         v
     }
@@ -624,6 +633,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             from,
             e2e,
             text: text.to_string(),
+            ack_tx: None,
         })?;
         Ok(())
     }
@@ -686,26 +696,90 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     pub async fn send_dm(&self, peer_base58: &str, text: &str) -> anyhow::Result<String> {
+        eprintln!("[dm] send_dm peer={peer_base58} text_len={}", text.len());
         let rec = self
             .dir
             .resolve_device(peer_base58)
             .map_err(|e| anyhow::anyhow!("device {peer_base58} not found in directory: {e}"))?;
-        let endpoint = rec
-            .endpoints
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("device {peer_base58} is offline (no endpoints)"))?
-            .clone();
+        if rec.endpoints.is_empty() {
+            anyhow::bail!("device {peer_base58} is offline (no endpoints)");
+        }
         let peer: PeerId = peer_base58
             .parse()
             .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
-        let addr: Multiaddr = endpoint
-            .parse()
-            .map_err(|e| anyhow::anyhow!("bad endpoint: {e}"))?;
-        self.running.cmd_tx.send(Cmd::Connect { peer: peer.clone(), addr })?;
-        self.send_text(peer, text)?;
-        let chat = store::dm_chat_id(&self.peer_base58(), peer_base58);
-        self.store.push(&chat, &self.peer_base58(), text, false).await;
-        Ok(chat)
+
+        // Collect dialable endpoints, skipping ones that can never be reached
+        // across machines (tcp/0, loopback, wildcard) and unparseable strings.
+        let mut candidates: Vec<Multiaddr> = Vec::new();
+        for endpoint in &rec.endpoints {
+            let Ok(addr) = endpoint.parse::<Multiaddr>() else {
+                eprintln!("[dm] skip unparseable endpoint: {endpoint}");
+                continue;
+            };
+            if let Some(reason) = unroutable_reason(&addr) {
+                eprintln!("[dm] skip unroutable endpoint ({reason}): {addr}");
+                continue;
+            }
+            candidates.push(addr);
+        }
+        if candidates.is_empty() {
+            anyhow::bail!("device {peer_base58} has no dialable endpoint (only loopback/tcp0 addrs are registered — restart the peer with a LAN-reachable address)");
+        }
+
+        let from = self.peer_base58();
+        let e2e = self.e2e_public().to_string();
+        let timeout = std::time::Duration::from_secs(8);
+
+        let mut last_err = String::new();
+        for addr in &candidates {
+            eprintln!("[dm] attempting send -> {addr}");
+            // Ensure the swarm knows this peer's address and starts a dial
+            // before we hand it the message (Connect is enqueued first, so it
+            // is processed before SendText in the swarm loop).
+            if let Err(e) = self
+                .running
+                .cmd_tx
+                .send(Cmd::Connect { peer: peer.clone(), addr: addr.clone() })
+            {
+                last_err = format!("cmd channel closed: {e}");
+                continue;
+            }
+            let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+            let sent_cmd = self.running.cmd_tx.send(Cmd::SendText {
+                peer: peer.clone(),
+                from: from.clone(),
+                e2e: e2e.clone(),
+                text: text.to_string(),
+                ack_tx: Some(tx),
+            });
+            if let Err(e) = sent_cmd {
+                last_err = format!("cmd channel closed: {e}");
+                continue;
+            }
+            // Wait for the peer's ack (or a hard failure), bounded by a timeout.
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(Ok(()))) => {
+                    eprintln!("[dm] acked via {addr}");
+                    let chat = store::dm_chat_id(&self.peer_base58(), peer_base58);
+                    self.store.push(&chat, &self.peer_base58(), text, false).await;
+                    eprintln!("[dm] send_dm done, chat={chat}");
+                    return Ok(chat);
+                }
+                Ok(Ok(Err(e))) => {
+                    eprintln!("[dm] send to {addr} failed: {e}");
+                    last_err = e.to_string();
+                }
+                Ok(Err(_)) => {
+                    // rx dropped without a value (caller cancelled / sender gone).
+                    last_err = "peer connection dropped before ack".to_string();
+                }
+                Err(_) => {
+                    eprintln!("[dm] no ack from {addr} within {timeout:?}");
+                    last_err = format!("no ack from peer within {timeout_secs}s", timeout_secs = timeout.as_secs());
+                }
+            }
+        }
+        anyhow::bail!("failed to deliver to {peer_base58}: {last_err}");
     }
 
     pub fn all_messages(&self) -> Vec<store::StoredMsg> {
@@ -1002,6 +1076,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     pub async fn send_group_message(&self, group_id: &str, text: &str) -> anyhow::Result<()> {
+        eprintln!("[group] send_group_message group={group_id} text_len={}", text.len());
         let env = self.seal_group_message(group_id, text)?;
         let wire = group::msg_wire(&env)?;
         let topic = sw::IdentTopic::new(sw::group_topic_name(group_id));
@@ -1011,6 +1086,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .send(Cmd::GroupPublish { topic, data: wire })
             .map_err(|e| anyhow::anyhow!("publish group msg: {e}"))?;
         self.store_group_outbound(&env).await?;
+        eprintln!("[group] send_group_message done group={group_id}");
         Ok(())
     }
 
@@ -1106,6 +1182,45 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 /// kernel's egress interface for *future* packets; no datagram is actually
 /// sent and the call returns immediately. If the host is offline or has no
 /// IPv4 route, returns `None` so the caller keeps whatever it already had.
+fn tcp_port_of(addr: &str) -> Option<u16> {
+    addr.parse::<Multiaddr>()
+        .ok()
+        .as_ref()
+        .and_then(|a| {
+            a.iter().find_map(|c| {
+                if let libp2p::multiaddr::Protocol::Tcp(p) = c {
+                    Some(p)
+                } else {
+                    None
+                }
+            })
+        })
+        .filter(|p| *p != 0)
+}
+
+/// Return a human-readable reason if `addr` can never be dialed from *another*
+/// machine (loopback, wildcard 0.0.0.0, or a `tcp/0` placeholder), else `None`.
+fn unroutable_reason(addr: &Multiaddr) -> Option<&'static str> {
+    let mut saw_tcp0 = false;
+    for comp in addr.iter() {
+        match comp {
+            libp2p::multiaddr::Protocol::Tcp(0) => saw_tcp0 = true,
+            libp2p::multiaddr::Protocol::Ip4(ip) if ip.is_loopback() || ip.is_unspecified() => {
+                return Some("loopback/wildcard ip");
+            }
+            libp2p::multiaddr::Protocol::Ip6(ip) if ip.is_loopback() || ip.is_unspecified() => {
+                return Some("loopback/wildcard ip");
+            }
+            _ => {}
+        }
+    }
+    if saw_tcp0 {
+        return Some("tcp/0 placeholder");
+    }
+    None
+}
+
+
 fn current_egress_ip() -> Option<String> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     // 8.8.8.8:53 — the address never matters; only the chosen local socket.

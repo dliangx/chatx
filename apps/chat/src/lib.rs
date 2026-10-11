@@ -1459,10 +1459,14 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         let g = backend.blocking_read();
         g.chat_id_for(key).map(|s| s.to_string())
     };
-    let Some(chat_id) = chat_id else { return };
+    let Some(chat_id) = chat_id else {
+        eprintln!("[send] no chat_id for key={key}, aborting");
+        return;
+    };
     let is_group = {
         backend.blocking_read().chats.iter().find(|r| r.key == key).map(|r| r.is_group).unwrap_or(false)
     };
+    eprintln!("[send] key={key} chat_id={chat_id} is_group={is_group} body_len={}", body.len());
 
     if is_group {
         if let Some(ui) = weak.upgrade() {
@@ -1471,8 +1475,10 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         let rt = runtime();
         let weak2 = weak.clone();
         rt.spawn(async move {
+            eprintln!("[send] group message -> chat_id={chat_id}");
             match client.send_group_message(&chat_id, &body).await {
                 Ok(_) => {
+                    eprintln!("[send] group message ok");
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
                             ui.global::<ChatSession>().set_send_status(SharedString::new());
@@ -1483,6 +1489,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                     load_chat_messages(weak2, key);
                 }
                 Err(e) => {
+                    eprintln!("[send] group message FAILED: {e}");
                     let msg = e.to_string();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
@@ -1518,20 +1525,27 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     let rt = runtime();
     let weak2 = weak.clone();
     let my_peer = client.peer_base58();
+    eprintln!("[send] dm candidates: {me_peers:?}, me={my_peer}");
     rt.spawn(async move {
         let mut last_err = String::new();
         let mut sent = false;
         'outer: for cand in &me_peers {
             // Skip self (defensive; extraction above already excludes it).
             if cand == &my_peer {
+                eprintln!("[send] skip self {cand}");
                 continue;
             }
+            eprintln!("[send] dm trying peer={cand}");
             match client.send_dm(cand, &body).await {
                 Ok(_) => {
+                    eprintln!("[send] dm ok -> {cand}");
                     sent = true;
                     break 'outer;
                 }
-                Err(e) => last_err = e.to_string(),
+                Err(e) => {
+                    eprintln!("[send] dm peer={cand} failed: {e}");
+                    last_err = e.to_string();
+                }
             }
         }
         if !sent {
@@ -1540,6 +1554,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
             } else {
                 last_err
             };
+            eprintln!("[send] dm ALL candidates failed: {msg}");
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<ChatSession>()

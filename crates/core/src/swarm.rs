@@ -12,8 +12,9 @@ use libp2p::request_response::{
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::swarm::{StreamProtocol, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, Swarm, SwarmBuilder};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 pub const TEXT_PROTOCOL: StreamProtocol = StreamProtocol::new("/p2pchat/text/1");
 
@@ -94,6 +95,9 @@ pub enum Cmd {
         from: String,
         e2e: String,
         text: String,
+        /// When `Some`, this send is tracked and the caller's future resolves
+        /// once the peer acks (or the send fails). `None` = fire and forget.
+        ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
     },
     SendAudio {
         peer: PeerId,
@@ -136,6 +140,12 @@ pub struct Running {
     pub cmd_tx: mpsc::UnboundedSender<Cmd>,
     pub listen_addrs: Arc<Mutex<Vec<Multiaddr>>>,
     pub my_peer_id: PeerId,
+    /// In-flight "wait for the peer to ack" senders.
+    ///
+    /// Keyed by the app-level [`ChatRequest::id`]. The `PeerId` is retained so
+    /// that when a request/response `OutboundFailure` (which only knows the
+    /// peer, not our id) arrives we can fail-fast every waiter for that peer.
+    pub pending_acks: Arc<Mutex<HashMap<u64, (PeerId, oneshot::Sender<anyhow::Result<()>>)>>>,
 }
 
 pub type EventRx = mpsc::UnboundedReceiver<ChatEvent>;
@@ -180,30 +190,32 @@ pub async fn boot(
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel();
     let listen_addrs: Arc<Mutex<Vec<Multiaddr>>> = Arc::new(Mutex::new(Vec::new()));
+    let pending_acks = Arc::new(Mutex::new(HashMap::new()));
+
+    let running = Arc::new(Running {
+        cmd_tx: cmd_tx.clone(),
+        listen_addrs: Arc::clone(&listen_addrs),
+        my_peer_id: my_peer,
+        pending_acks: Arc::clone(&pending_acks),
+    });
 
     tokio::spawn(swarm_loop(
         swarm,
         cmd_rx,
         evt_tx,
-        Arc::clone(&listen_addrs),
+        running.clone(),
     ));
 
-    Ok((
-        Arc::new(Running {
-            cmd_tx,
-            listen_addrs,
-            my_peer_id: my_peer,
-        }),
-        evt_rx,
-    ))
+    Ok((running, evt_rx))
 }
 
 async fn swarm_loop(
     mut swarm: Swarm<Net>,
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
     ev: mpsc::UnboundedSender<ChatEvent>,
-    listen_addrs: Arc<Mutex<Vec<Multiaddr>>>,
+    running: Arc<Running>,
 ) {
+    let pending_acks = running.pending_acks.clone();
     loop {
         tokio::select! {
             maybe_cmd = cmd_rx.recv() => match maybe_cmd {
@@ -211,8 +223,20 @@ async fn swarm_loop(
                     swarm.add_peer_address(peer, addr.clone());
                     let _ = swarm.dial(peer);
                 }
-                Some(Cmd::SendText { peer, from, e2e, text }) => {
+                Some(Cmd::SendText {
+                    peer,
+                    from,
+                    e2e,
+                    text,
+                    ack_tx,
+                }) => {
                     let id: u64 = rand::random();
+                    if let Some(tx) = ack_tx {
+                        pending_acks
+                            .lock()
+                            .unwrap()
+                            .insert(id, (peer, tx));
+                    }
                     let req = ChatRequest {
                         id,
                         from,
@@ -308,14 +332,19 @@ async fn swarm_loop(
             },
             Some(item) = swarm.next() => match item {
                 SwarmEvent::NewListenAddr { address, .. } => {
-                    listen_addrs.lock().unwrap().push(address.clone());
+                    running.listen_addrs.lock().unwrap().push(address.clone());
                     let _ = ev.send(ChatEvent::Listening(address));
                 }
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                    eprintln!("[swarm] CONNECTED to {peer_id}");
                     let _ = ev.send(ChatEvent::Connected(peer_id));
                 }
                 SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                    eprintln!("[swarm] DISCONNECTED from {peer_id}");
                     let _ = ev.send(ChatEvent::Disconnected(peer_id));
+                }
+                SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                    eprintln!("[swarm] DIAL FAILED peer={peer_id:?} err={error:?}");
                 }
                 SwarmEvent::Behaviour(inner) => {
                     let me = *swarm.local_peer_id();
@@ -365,6 +394,13 @@ async fn swarm_loop(
                                 }
                             }
                             RrMessage::Response { response, .. } => {
+                                // Peer acked this request — resolve its waiter (if any).
+                                if let Some((_peer, tx)) =
+                                    pending_acks.lock().unwrap().remove(&response.id)
+                                {
+                                    eprintln!("[swarm] ACKED id={}", response.id);
+                                    let _ = tx.send(Ok(()));
+                                }
                                 let _ = ev.send(ChatEvent::Acked {
                                     id: response.id,
                                     e2e: response.e2e,
@@ -372,6 +408,21 @@ async fn swarm_loop(
                             }
                         },
                         RrEvent::OutboundFailure { peer, error, .. } => {
+                            eprintln!("[swarm] SEND FAILED peer={peer} err={error:?}");
+                            // Fail every in-flight waiter addressed to this peer.
+                            let mut m = pending_acks.lock().unwrap();
+                            let ids: Vec<u64> = m
+                                .iter()
+                                .filter(|(_, (p, _))| *p == peer)
+                                .map(|(id, _)| *id)
+                                .collect();
+                            for id in ids {
+                                if let Some((_p, tx)) = m.remove(&id) {
+                                    let _ = tx.send(Err(anyhow::anyhow!(
+                                        "send to {peer} failed: {error:?}"
+                                    )));
+                                }
+                            }
                             let _ = ev.send(ChatEvent::SendFailed {
                                 peer,
                                 reason: format!("{error:?}"),
