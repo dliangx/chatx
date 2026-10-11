@@ -76,3 +76,7 @@ target/ios-derived/
 
 apps/platform/ios/DerivedData/
 apps/platform/ios/build/
+
+signal.db
+signal.db-shm
+signal.db-wal

@@ -37,8 +37,8 @@ fn main() {
         let stem = file.strip_suffix(".sql").unwrap_or(file);
         let version_str = stem.split('_').next().unwrap_or("0");
         let version: u32 = version_str.parse().unwrap_or(0);
-        let abs = format!("{}/migrations/{}", manifest, file);
-        out.push_str(&format!("    ({version}u32, include_str!( \"{abs}\" )),\n"));
+        let abs = format!("{}/migrations/{}", manifest.replace('\\', "/"), file);
+        out.push_str(&format!("    ({version}u32, include_str!( r\"{}\" )),\n", abs));
     }
     out.push_str("];\n");
 
