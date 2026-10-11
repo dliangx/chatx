@@ -29,7 +29,7 @@ $ErrorActionPreference = "Stop"
 
 # ── paths ─────────────────────────────────────────────────────────────────────
 $Root   = Split-Path -Parent $PSScriptRoot
-$OutDir = Join-Path $Root "build\windows"
+$OutDir = Join-Path $Root "target\windows"
 
 $Mode = if ($Dev) { "debug" } else { "release" }
 if ($Mode -eq "release") { $Release = $true } else { $Release = $false }
