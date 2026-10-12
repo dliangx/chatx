@@ -998,6 +998,18 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         group::open_message(&g.secret(), env).map_err(|e| anyhow::anyhow!("open group msg: {e}"))
     }
 
+    /// Open a group message as stored in the message store back into its
+    /// plaintext. `store_group_outbound`/`inbound` serialize the
+    /// `SealedGroupMsg` envelope directly (flat JSON, base64'd) — distinct
+    /// from the on-wire `GroupWire{env}` format used on the gossipsub topic.
+    pub fn open_stored_group_message(&self, group_id: &str, stored_b64: &str) -> anyhow::Result<String> {
+        let bytes = crate::account::from_b64(stored_b64)
+            .ok_or_else(|| anyhow::anyhow!("stored group msg is not base64"))?;
+        let env: group::SealedGroupMsg =
+            serde_json::from_slice(&bytes).map_err(|e| anyhow::anyhow!("stored group msg: {e}"))?;
+        self.open_group_message(group_id, &env)
+    }
+
     pub async fn store_group_outbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
         let wire = serde_json::to_string(env)?;
         let b64 = crate::account::b64(wire.as_bytes());

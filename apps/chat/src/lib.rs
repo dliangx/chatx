@@ -1365,9 +1365,10 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     let _ = pool;
     let me_peer = client.peer_base58().to_string();
     let me = client.user_id().to_string();
-    let title = {
+    let (title, is_group_chat) = {
         let g = backend.blocking_read();
-        g.chats.iter().find(|r| r.key == chat_key).map(|r| r.title.clone()).unwrap_or_default()
+        let row = g.chats.iter().find(|r| r.key == chat_key);
+        (row.map(|r| r.title.clone()).unwrap_or_default(), row.map(|r| r.is_group).unwrap_or(false))
     };
     let rt = runtime();
     let ui_weak2 = ui_weak.clone();
@@ -1403,6 +1404,21 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
 
         let mut rows = rows;
         rows.sort_by(|a, b| b.t.cmp(&a.t).then(b.id.cmp(&a.id)));
+        // Group rows are stored as a base64 sealed envelope (see
+        // `store_group_*`); open them into plaintext before rendering.
+        // DM rows are already plaintext.
+        let rows: Vec<chatx_core::store::StoredMsg> = rows.into_iter().map(|m| {
+            if !is_group_chat {
+                return Some(m);
+            }
+            match client.open_stored_group_message(&chat_id, &m.text) {
+                Ok(plain) => Some(chatx_core::store::StoredMsg { text: plain, ..m }),
+                Err(e) => {
+                    eprintln!("[chat] failed to open group msg in {chat_id}: {e}; hiding it");
+                    None
+                }
+            }
+        }).flatten().collect();
         let rendered: Vec<RenderedMsg> = {
             let mut r = RENDERER.get().unwrap().lock().unwrap();
             rows.iter().map(|m| {
