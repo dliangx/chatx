@@ -1892,15 +1892,26 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
     // Resolve each picked contact to its member public info via the directory.
     let mut members: Vec<MemberInfo> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
-    for key in &picked {
-        let username: Option<String> = {
-            let g = backend.blocking_read();
-            g.peer_id_for(*key).map(|s| s.to_string())
-        };
-        let Some(username) = username else {
-            failed.push(format!("#{key}(本地id失效)"));
-            continue;
-        };
+    // Take one read snapshot of the backend to map every picked key to its
+    // directory username up front. The directory's user lookup is by username
+    // (ContactRow.name); the base58 peer id (ContactRow.peer_id) is only valid
+    // for device lookups, so it is only used as a fallback.
+    let usernames: Vec<String> = {
+        let g = backend.blocking_read();
+        let mut v: Vec<String> = Vec::new();
+        for key in &picked {
+            match g
+                .username_for(*key)
+                .map(|s| s.to_string())
+                .or_else(|| g.peer_id_for(*key).map(|s| s.to_string()))
+            {
+                Some(u) => v.push(u),
+                None => failed.push(format!("#{key}(本地id失效)")),
+            }
+        }
+        v
+    };
+    for username in usernames {
         match client.resolve_user_registered(&username) {
             Ok(ur) => {
                 members.push(MemberInfo {

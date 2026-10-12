@@ -107,6 +107,12 @@ impl DataBackend {
         self.contacts.iter().find(|r| r.key == key).map(|r| r.peer_id.as_str())
     }
 
+    /// Resolve a contact list key to its directory username (the value used
+    /// for `/v1/users/` lookups), if the contact still exists.
+    pub fn username_for(&self, key: i32) -> Option<&str> {
+        self.contacts.iter().find(|r| r.key == key).map(|r| r.name.as_str())
+    }
+
     pub fn post_id_for(&self, key: i32) -> Option<i64> {
         self.key_to_post.get(&key).copied()
     }
