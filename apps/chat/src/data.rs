@@ -6,15 +6,15 @@ use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct ChatRow {
-    /// Stable display integer id handed to slint (navigation payload).
     pub key: i32,
-    /// Underlying conversation key (string chat id: DM peer pair or group id).
+    /// Underlying conversation key (string chat id: DM pair hash or group id).
     pub chat_id: String,
     pub title: String,
     pub preview: String,
     pub is_group: bool,
     pub time_ms: i64,
     pub unread: i64,
+    pub peer_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -111,9 +111,6 @@ impl DataBackend {
         self.key_to_post.get(&key).copied()
     }
 
-    /// Assign (or reuse) a stable row key for a social post. The same post always
-    /// maps to the same key, so all feed lists (discover / my_collect / my_share)
-    /// can reference it and a like toggle updates every row that shows it.
     pub fn key_for_post(&mut self, post_id: i64) -> i32 {
         if let Some(k) = self.post_to_key.get(&post_id) {
             return *k;
@@ -124,8 +121,6 @@ impl DataBackend {
         key
     }
 
-    /// Assign (or reuse) a stable 32-bit UI key for a note id (notes use 64-bit
-    /// ids, but Slint `int` is 32-bit, so the UI always refers to a note by key).
     pub fn key_for_note(&mut self, note_id: i64) -> i32 {
         if let Some(k) = self.note_to_key.get(&note_id) {
             return *k;
@@ -161,8 +156,8 @@ impl DataBackend {
         }
     }
 
-    /// Append a fresh conversation row (e.g. a brand-new group).
-    pub fn append_chat(&mut self, chat_id: String, title: String, is_group: bool) -> i32 {
+
+    pub fn append_chat(&mut self, chat_id: String, title: String, is_group: bool, peer_id: String) -> i32 {
         let key = self.bump();
         self.chat_key_to_id.insert(key, chat_id.clone());
         let now_ms = std::time::SystemTime::now()
@@ -177,6 +172,7 @@ impl DataBackend {
             is_group,
             time_ms: now_ms,
             unread: 0,
+            peer_id,
         });
         key
     }
@@ -244,6 +240,7 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
             is_group: c.type_ == 1,
             time_ms: c.last_message_time.unwrap_or(0),
             unread: c.unread_count,
+            peer_id: c.peer_id.unwrap_or_default(),
         });
     }
 
@@ -257,10 +254,7 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
         let user_id = f.user_id;
         b.contact_key_to_id.insert(key, user_id);
         let image = f.avatar_path.clone().unwrap_or_default();
-        // Directory `devices.peer_id` is the libp2p PeerId in base58 — the
-        // canonical key for `dm_chat_id` and call signalling. If the friend
-        // has no device yet, leave it empty so `open_conversation_with_contact`
-        // fails loudly instead of silently building a mixed-domain chat id.
+
         let peer_id = f.device_peer_id.clone().unwrap_or_default();
         b.contacts.push(ContactRow {
             key,
@@ -342,6 +336,7 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
             is_group: false,
             time_ms: 0,
             unread: 0,
+            peer_id: String::new(),
         });
         return Ok(true);
     };
@@ -349,19 +344,34 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
     let Some(row) = b.chats.iter_mut().find(|r| r.chat_id == src_chat_key) else {
         return Ok(false);
     };
+    // Title: same fallback chain as initial build (load_backend) — peer
+    // display niceness should survive in-place refreshes.
+    let title = if src.type_ == 1 {
+        src.name.clone().unwrap_or_else(|| src.id.to_string())
+    } else {
+        src.peer_nickname
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| src.peer_username.clone().filter(|s| !s.is_empty()))
+            .or_else(|| src.name.clone().filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| src.id.to_string())
+    };
+    let peer_id = src.peer_id.clone().unwrap_or_default();
     let new = ChatRow {
         key: row.key,
         chat_id: src_chat_key.clone(),
-        title: src.name.clone().unwrap_or_default(),
+        title,
         preview: src.last_message_preview.clone().unwrap_or_default(),
         is_group: src.type_ == 1,
         time_ms: src.last_message_time.unwrap_or(0),
         unread: src.unread_count,
+        peer_id: peer_id.clone(),
     };
     let changed = new.title != row.title
         || new.preview != row.preview
         || new.unread != row.unread
-        || new.time_ms != row.time_ms;
+        || new.time_ms != row.time_ms
+        || new.peer_id != row.peer_id;
     *row = new;
     Ok(changed)
 }

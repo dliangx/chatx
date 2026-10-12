@@ -23,6 +23,9 @@ pub struct ConversationListItem {
     pub is_pinned: bool,
     pub is_muted: bool,
     pub draft: Option<String>,
+    // DM remote peer id (base58) — canonical "who to send to" once the chat
+    // id no longer encodes the peer pair.
+    pub peer_id: Option<String>,
     // profile join (users)
     pub peer_username: Option<String>,
     pub peer_nickname: Option<String>,
@@ -48,6 +51,7 @@ pub async fn chat_list(pool: &Pool, me: &str, limit: u32) -> anyhow::Result<Vec<
             c.is_pinned  AS is_pinned,
             c.is_muted   AS is_muted,
             c.draft      AS draft,
+            c.peer_id    AS peer_id,
             u.username   AS peer_username,
             u.nickname   AS peer_nickname,
             g.owner_id   AS group_owner_id,

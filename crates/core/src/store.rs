@@ -1,4 +1,5 @@
 use crate::message::now_ms;
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
 #[derive(Debug, Clone)]
@@ -23,7 +24,28 @@ pub fn dm_chat_id(peer_a: &str, peer_b: &str) -> String {
     } else {
         (peer_b, peer_a)
     };
-    format!("{x}|{y}")
+    hash_chat_id(&[x, y])
+}
+
+pub fn hash_chat_id(parts: &[&str]) -> String {
+    let mut acc: Vec<u8> = Vec::new();
+    parts.iter().for_each(|s| {
+        acc.extend_from_slice(s.as_bytes());
+        acc.push(b'|');
+    });
+    let digest = Sha256::digest(&acc);
+    format!("c{}", hex(&digest[..8]))
+}
+
+
+fn hex(bytes: &[u8]) -> String {
+    const CHARS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(CHARS[(b >> 4) as usize] as char);
+        out.push(CHARS[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 #[derive(Debug)]

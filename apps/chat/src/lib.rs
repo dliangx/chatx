@@ -38,13 +38,9 @@ thread_local! {
     static PUMP_STARTED: std::cell::Cell<bool> = std::cell::Cell::new(false);
     static CAMERA: RefCell<Option<Camera>> = RefCell::new(None);
     static SCREEN: RefCell<Option<Screen>> = RefCell::new(None);
-    /// `true` iff the current device was logged in as an APPROVED device.
-    /// Recomputed on login/apply_result and after approving this device.
     static DEVICE_APPROVED: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
 
-/// True if the current device is approved (allow user actions); false while it
-/// is pending approval by another authenticated device of the same account.
 fn device_is_approved() -> bool {
     DEVICE_APPROVED.with(|c| c.get())
 }
@@ -59,14 +55,31 @@ static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> = std::sync::On
 static CHAT_SCROLL_POS: std::sync::LazyLock<std::sync::RwLock<std::collections::HashMap<i32, f32>>> =
     std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
 
-/// The conversation key currently shown in the detail panel, if any. Set every
+/// Cross-thread snapshot of the logged-in user id. Set at login, immutable
+/// until logout — used in place of `weak.upgrade()` when the current code
+/// path runs on a tokio worker thread. Empty string means "not logged in".
+static CURRENT_ME: std::sync::LazyLock<std::sync::RwLock<String>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(String::new()));
+
+fn set_current_me(user_id: &str) {
+    *CURRENT_ME.write().unwrap() = user_id.to_string();
+}
+
+fn current_me() -> String {
+    CURRENT_ME.read().unwrap().clone()
+}
+
+/// The chat_id string currently shown in the detail panel, if any. Set every
 /// time a chat is (re)loaded so inbound messages can decide whether the open
-/// bubble list needs a live refresh.
-static CURRENT_CHAT: std::sync::LazyLock<std::sync::RwLock<Option<i32>>> =
+/// bubble list needs a live refresh. String-based so it doesn't depend on the
+/// UI key namespace.
+static CURRENT_CHAT: std::sync::LazyLock<std::sync::RwLock<Option<String>>> =
     std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
 
-fn set_current_chat(key: i32) {
-    *CURRENT_CHAT.write().unwrap() = Some(key);
+
+
+fn set_current_chat_id(chat_id: &str) {
+    *CURRENT_CHAT.write().unwrap() = Some(chat_id.to_string());
 }
 
 /// Monotonic id for profile loads (each request gets a fresh id).
@@ -280,6 +293,7 @@ pub fn run_app() {
         *CLIENT.lock().unwrap() = None;
         *POOL.lock().unwrap() = None;
         *BACKEND.lock().unwrap() = None;
+        set_current_me("");
         PUMP_STARTED.set(false);
         DEVICE_APPROVED.with(|c| c.set(false));
         if let Some(ui) = w.upgrade() {
@@ -855,6 +869,7 @@ fn apply_result(
             eprintln!("[login] device status approved={approved}");
             DEVICE_APPROVED.with(|c| c.set(approved));
             *CLIENT.lock().unwrap() = Some(client);
+            set_current_me(&user_id);
 
             start_inbound_pump(weak.clone());
 
@@ -955,32 +970,34 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
     let (Some(pool), Some(backend)) = (pool, backend) else {
         return;
     };
-    let me = weak.clone().upgrade().and_then(|ui| Some(ui.global::<AppState>().get_user_id().to_string())).unwrap_or_default();
+    let me = current_me();
     if me.is_empty() {
+        eprintln!("[inbound] abort: no client/me yet");
         return;
     }
+    eprintln!("[inbound] refresh chat_id={chat_id} me={me}");
     {
         let mut b: data::DataBackend = backend.read().await.clone();
         let _ = data::refresh_chat_row(&pool, &me, &mut b, &chat_id).await;
         *backend.write().await = b;
     }
-    let is_open_key = {
+    // If this conversation is the one currently on screen, re-render its
+    // bubble list so the just-arrived message shows up immediately (no manual
+    // re-click). Deciding by chat_id string directly — no UI-key dependency.
+    let is_current = CURRENT_CHAT.read().unwrap().as_deref() == Some(chat_id.as_str());
+    let key = {
         backend.read().await.chats.iter().find(|r| r.chat_id == chat_id).map(|r| r.key)
     };
+    eprintln!("[inbound] chat_id={chat_id} key={key:?} is_current={is_current}");
     let weak2 = weak.clone();
     let backend2 = backend.clone();
-    let key = is_open_key;
+    let k = key;
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak2.upgrade() {
             let state = ui.global::<AppState>();
             publish_to_views(&state, backend2.clone());
-            // If this is the conversation currently on screen, re-render its
-            // bubble list so the just-arrived message shows up immediately
-            // (no manual re-click required).
-            if let Some(k) = key {
-                let open_now = *CURRENT_CHAT.read().unwrap();
-                eprintln!("[inbound] chat_id={chat_id} key={k} current={open_now:?}");
-                if open_now == Some(k) {
+            if is_current {
+                if let Some(k) = k {
                     load_chat_messages(ui.as_weak(), k);
                 }
             }
@@ -1107,22 +1124,30 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
                 friend_by_peer.insert(c.peer_id.clone(), c.user_id);
             }
         }
-        let dms: Vec<(String, i64)> = snapshot
+        let dms: Vec<(String, String, i64)> = snapshot
             .chats
             .iter()
             .filter(|c| !c.is_group)
-            .map(|c| (c.chat_id.clone(), c.time_ms))
+            .map(|c| (c.chat_id.clone(), c.peer_id.clone(), c.time_ms))
             .collect();
         if let (Some(pool), Some(me_peer)) = (pool, me_peer) {
             if !dms.is_empty() {
                 let rt = runtime();
                 rt.spawn(async move {
-                    for (chat_id, time_ms) in dms {
-                        let Some(pb) = chat_id
-                            .split('|')
-                            .find(|p| !p.is_empty() && *p != me_peer)
-                            .map(|s| s.to_string())
-                        else {
+                    for (chat_id, row_peer, time_ms) in dms {
+                        // Prefer the row's recorded peer id; fall back to the
+                        // legacy `a|b` chat-id shape for pre-hash records.
+                        let pb = if !row_peer.is_empty() && row_peer != me_peer {
+                            Some(row_peer)
+                        } else if chat_id.contains('|') {
+                            chat_id
+                                .split('|')
+                                .find(|p| !p.is_empty() && *p != me_peer)
+                                .map(|s| s.to_string())
+                        } else {
+                            None
+                        };
+                        let Some(pb) = pb else {
                             continue;
                         };
                         let conv_id = match sqlite::conversations::ensure_dm(&pool, &chat_id).await {
@@ -1321,9 +1346,6 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
         });
         return;
     }
-    // Record which conversation is now on screen (funnel for all opens, so
-    // inbound refresh knows whether to re-render the bubble list).
-    set_current_chat(chat_key);
     let client: Option<Arc<Client<HttpDirectory>>> = CLIENT.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
@@ -1337,6 +1359,9 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     let Some(chat_id) = chat_id else {
         return;
     };
+    // Record which conversation is now on screen (funnel for all opens, so
+    // inbound refresh knows whether to re-render the bubble list).
+    set_current_chat_id(&chat_id);
     let _ = pool;
     let me_peer = client.peer_base58().to_string();
     let me = client.user_id().to_string();
@@ -1513,19 +1538,35 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     if let Some(ui) = weak.upgrade() {
         ui.global::<ChatSession>().set_send_status(SharedString::from("发送中…"));
     }
+    // Determine the remote peer(s) to send to. Chat ids no longer encode the
+    // peer pair (they're content-addressed now), so the authoritative source
+    // is the backend row's `peer_id` (populated from `conversations.peer_id`)
+    // or, if the chat id still carries a legacy `a|b` shape, the string itself.
+    let row_peer: String = {
+        backend
+            .blocking_read()
+            .chats
+            .iter()
+            .find(|r| r.key == key)
+            .map(|r| r.peer_id.clone())
+            .unwrap_or_default()
+    };
+    let me = client.peer_base58();
     let me_peers: Vec<String> = {
         let mut v: Vec<String> = Vec::new();
-        if let Some(p) = client.other_peer_of(&chat_id) {
-            v.push(p);
+        if !row_peer.is_empty() && row_peer != me {
+            v.push(row_peer.clone());
         }
-        let me = client.peer_base58();
-        for part in chat_id.split('|') {
-            if !part.is_empty() && part != me && !v.iter().any(|x| x == part) {
-                v.push(part.to_string());
+        // Legacy fallback for pre-hash chat ids shaped as `{me}|{peer}|...`.
+        if chat_id.contains('|') {
+            for part in chat_id.split('|') {
+                if !part.is_empty() && part != me && !v.iter().any(|x| x == part) {
+                    v.push(part.to_string());
+                }
             }
         }
         if v.is_empty() {
-            v.push(chat_id.clone());
+            eprintln!("[send] no known peer for chat {chat_id}; cannot send");
         }
         v
     };
@@ -1534,7 +1575,11 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     let my_peer = client.peer_base58();
     eprintln!("[send] dm candidates: {me_peers:?}, me={my_peer}");
     rt.spawn(async move {
-        let mut last_err = String::new();
+        let mut last_err: String = if me_peers.is_empty() {
+            "无法确定对端（会话缺少 peer id）".to_string()
+        } else {
+            String::new()
+        };
         let mut sent = false;
         'outer: for cand in &me_peers {
             // Skip self (defensive; extraction above already excludes it).
@@ -1616,9 +1661,7 @@ fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
         let (liked, _likes) = g.toggle_like(key);
         (g.post_id_for(key), liked)
     };
-    let me = weak.clone().upgrade()
-        .map(|ui| ui.global::<AppState>().get_user_id().to_string())
-        .unwrap_or_default();
+    let me = current_me();
     // memory -> UI
     if let Some(ui) = weak.upgrade() {
         publish_to_views(&ui.global::<AppState>(), backend.clone());
@@ -1725,9 +1768,7 @@ fn refresh_my_notes(weak: slint::Weak<MainWindow>) {
     let pool = POOL.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
     let Some(backend) = backend else { return; };
-    let me = weak.clone().upgrade()
-        .map(|ui| ui.global::<AppState>().get_user_id().to_string())
-        .unwrap_or_default();
+    let me = current_me();
     if me.is_empty() {
         return;
     }
@@ -1768,9 +1809,7 @@ fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
     let pool = POOL.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
     let (Some(pool), Some(backend)) = (pool, backend) else { return; };
-    let me = weak.clone().upgrade()
-        .map(|ui| ui.global::<AppState>().get_user_id().to_string())
-        .unwrap_or_default();
+    let me = current_me();
     if me.is_empty() || content.trim().is_empty() {
         return;
     }
@@ -1895,7 +1934,7 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
             // Insert a conversation row and open it.
             let new_key = {
                 let mut g = backend.blocking_write();
-                g.append_chat(group_id.clone(), title, true)
+                g.append_chat(group_id.clone(), title, true, String::new())
             };
             let w = weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
@@ -2017,9 +2056,7 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
         return;
     };
 
-    let me = weak.clone().upgrade()
-        .map(|ui| ui.global::<AppState>().get_user_id().to_string())
-        .unwrap_or_default();
+    let me = current_me();
 
     // Self-add guard: the directory key resolves to the user's own id.
     if !me.is_empty() && username.eq_ignore_ascii_case(&me) {
@@ -2650,7 +2687,7 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
             eprintln!("[chat] open_conversation: +{}ms THREAD {:?} about to acquire WRITE lock (append_chat)",
                 t0.elapsed().as_millis(), std::thread::current().id());
             let mut g = backend.blocking_write();
-            let k = g.append_chat(chat_id, title, false);
+            let k = g.append_chat(chat_id, title, false, peer_id.clone());
             drop(g);
             eprintln!("[chat] open_conversation: +{}ms THREAD {:?} WRITE lock released, appended new chat key={k}",
                 t0.elapsed().as_millis(), std::thread::current().id());
@@ -2731,9 +2768,7 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
         return;
     };
 
-    let me = weak.clone().upgrade()
-        .map(|ui| ui.global::<AppState>().get_user_id().to_string())
-        .unwrap_or_default();
+    let me = current_me();
     let author = {
         let g = backend.blocking_read();
         g.discover
@@ -2875,9 +2910,7 @@ fn toggle_detail_like(weak: slint::Weak<MainWindow>, key: i32) {
     }
     if let Some(post_id) = post_id {
         let rt = runtime();
-        let me = weak.clone().upgrade()
-            .map(|ui| ui.global::<AppState>().get_user_id().to_string())
-            .unwrap_or_default();
+        let me = current_me();
         rt.spawn(async move {
             let _ = data::persist_like_toggle(&pool, &me, post_id, want_liked).await;
         });
@@ -2897,8 +2930,11 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         publish_detail_status(weak, key, SharedString::from("帖子已失效"));
         return;
     };
-    let me = weak.clone().upgrade()
-        .map(|ui| ui.global::<AppState>().get_user_id().to_string())
+    let me = CLIENT
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.user_id().to_string())
         .unwrap_or_default();
     let my_name = {
         let n = weak.clone().upgrade()
