@@ -443,6 +443,38 @@ pub async fn persist_like_toggle(pool: &SqlitePool, me: &str, post_id: i64, want
     Ok(())
 }
 
+/// Resolve a group-message sender to a display name: the account's nickname,
+/// falling back to its username, falling back to the raw sender string. The
+/// sender may be a libp2p PeerId (group members are keyed by device) or, for
+/// legacy rows, a username.
+pub async fn group_sender_name(pool: &SqlitePool, sender: &str) -> String {
+    if let Ok(Some(user_id)) = sqlite::devices::ensure_user_by_peer(pool, sender).await {
+        if let Ok(Some(u)) = sqlite::users::get(pool, user_id).await {
+            let label = u
+                .nickname
+                .clone()
+                .filter(|s| !s.is_empty())
+                .or_else(|| u.username.clone().filter(|s| !s.is_empty()));
+            if let Some(label) = label {
+                return label;
+            }
+        }
+    }
+    if !sender.is_empty() {
+        if let Ok(Some(u)) = sqlite::users::get_by_username(pool, sender).await {
+            let label = u
+                .nickname
+                .clone()
+                .filter(|s| !s.is_empty())
+                .or_else(|| u.username.clone().filter(|s| !s.is_empty()));
+            if let Some(label) = label {
+                return label;
+            }
+        }
+    }
+    sender.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

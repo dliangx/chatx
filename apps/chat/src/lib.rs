@@ -1362,7 +1362,6 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     // Record which conversation is now on screen (funnel for all opens, so
     // inbound refresh knows whether to re-render the bubble list).
     set_current_chat_id(&chat_id);
-    let _ = pool;
     let me_peer = client.peer_base58().to_string();
     let me = client.user_id().to_string();
     let is_group_chat = chat_id.starts_with("grp-");
@@ -1421,12 +1420,31 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 }
             }
         }).flatten().collect();
+        // Group bubbles must show the per-message sender's nickname (or
+        // username), not the conversation title — the title is just "群聊".
+        // DM bubbles keep using the title (the peer's own nickname/username).
+        let mut sender_names: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        if is_group_chat {
+            for sender in rows.iter().map(|m| m.sender.clone()).collect::<std::collections::HashSet<_>>() {
+                sender_names.insert(sender.clone(), crate::data::group_sender_name(&pool, &sender).await);
+            }
+        }
         let rendered: Vec<RenderedMsg> = {
             let mut r = RENDERER.get().unwrap().lock().unwrap();
             rows.iter().map(|m| {
                 let is_self = m.sender == me_peer || m.sender == me;
                 let time = time_label(m.t as i64);
-                let sender = if is_self { "".to_string() } else { title.clone() };
+                let sender = if is_self {
+                    String::new()
+                } else if is_group_chat {
+                    sender_names
+                        .get(&m.sender)
+                        .cloned()
+                        .unwrap_or_else(|| m.sender.clone())
+                } else {
+                    title.clone()
+                };
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 std::hash::Hash::hash(&m.text, &mut h);
                 std::hash::Hash::hash(&sender, &mut h);
