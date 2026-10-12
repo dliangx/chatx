@@ -1365,10 +1365,12 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     let _ = pool;
     let me_peer = client.peer_base58().to_string();
     let me = client.user_id().to_string();
-    let (title, is_group_chat) = {
+    let is_group_chat = chat_id.starts_with("grp-");
+    let title = {
         let g = backend.blocking_read();
-        let row = g.chats.iter().find(|r| r.key == chat_key);
-        (row.map(|r| r.title.clone()).unwrap_or_default(), row.map(|r| r.is_group).unwrap_or(false))
+        g.chats.iter().find(|r| r.key == chat_key).map(|r| r.title.clone()).unwrap_or_else(|| {
+            if is_group_chat { "群聊".into() } else { chat_id.clone() }
+        })
     };
     let rt = runtime();
     let ui_weak2 = ui_weak.clone();
@@ -1511,9 +1513,9 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         eprintln!("[send] no chat_id for key={key}, aborting");
         return;
     };
-    let is_group = {
-        backend.blocking_read().chats.iter().find(|r| r.key == key).map(|r| r.is_group).unwrap_or(false)
-    };
+    // Group vs DM by chat id prefix (`grp-…`), the authoritative signal —
+    // independent of the in-memory row's `is_group` flag.
+    let is_group = chat_id.starts_with("grp-");
     eprintln!("[send] key={key} chat_id={chat_id} is_group={is_group} body_len={}", body.len());
 
     if is_group {

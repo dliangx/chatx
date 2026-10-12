@@ -227,8 +227,13 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
         let key = b.bump();
         // Chat key: the string chat id (stored in `name` for core-created rows).
         let chat_key = c.name.clone().unwrap_or_else(|| c.id.to_string());
-        let title = if c.type_ == 1 {
-            c.name.clone().unwrap_or_else(|| c.id.to_string())
+        // Group vs DM: the chat id is authoritative. core always names group
+        // ids `grp-…` whereas DM ids are `c<hash>` (and never `grp-`), so the
+        // `conversations.type` column — which `ensure_dm` forces to 0 — cannot
+        // be trusted for groups. Fall back to it for legacy rows.
+        let is_group = chat_key.starts_with("grp-") || c.type_ == 1;
+        let title = if is_group {
+            "群聊".to_string()
         } else {
             c.peer_nickname
                 .clone()
@@ -242,8 +247,15 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
             key,
             chat_id: chat_key,
             title,
-            preview: c.last_message_preview.unwrap_or_default(),
-            is_group: c.type_ == 1,
+            // Group previews at rest are ciphertext (E2E); the chat window
+            // decrypts them, but the list preview is left empty rather than
+            // surfacing the base64 blob.
+            preview: if is_group {
+                String::new()
+            } else {
+                c.last_message_preview.unwrap_or_default()
+            },
+            is_group,
             time_ms: c.last_message_time.unwrap_or(0),
             unread: c.unread_count,
             peer_id: c.peer_id.unwrap_or_default(),
@@ -331,15 +343,33 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
     // Use full chat_list to find the matching entry (cheap for a local sqlite on a single user).
     let items = sqlite::joins::chat_list(pool, me, 200).await?;
     let Some(src) = items.iter().find(|c| c.name.as_deref() == Some(chat_id)) else {
-        // New conversation (e.g. first message from an unknown peer): append.
+        // Idempotent: group conversations live only in the in-memory backend
+        // (created by `append_chat`, never persisted to the sqlite
+        // `conversations` table), so this fallback is re-entered on every
+        // inbound refresh. Reuse the existing row instead of appending a
+        // duplicate on each message.
+        if b.chats.iter().any(|r| r.chat_id == chat_id) {
+            return Ok(false);
+        }
+        // New conversation: append. Group ids (`grp-…` from the gossipsub
+        // topic) are not in the sqlite chat rows; classify by the `grp-`
+        // prefix so they land in the group list — otherwise they fall into the
+        // DM list and render the stored ciphertext. The creator's `append_chat`
+        // already set a friendly title, so a generic one suffices here.
+        let is_group = chat_id.starts_with("grp-");
+        let title = if is_group {
+            "群聊".to_string()
+        } else {
+            chat_id.to_string()
+        };
         let key = b.bump();
         b.chat_key_to_id.insert(key, chat_id.to_string());
         b.chats.push(ChatRow {
             key,
             chat_id: chat_id.into(),
-            title: chat_id.into(),
+            title,
             preview: String::new(),
-            is_group: false,
+            is_group,
             time_ms: 0,
             unread: 0,
             peer_id: String::new(),
@@ -350,10 +380,17 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
     let Some(row) = b.chats.iter_mut().find(|r| r.chat_id == src_chat_key) else {
         return Ok(false);
     };
+    // Group vs DM is decided by the chat id prefix (`grp-…`), not sqlite's
+    // `conversations.type` — `insert_row` always writes type=0 via
+    // `ensure_dm`, so a group's type column is unreliable.
+    let is_group = chat_id.starts_with("grp-");
     // Title: same fallback chain as initial build (load_backend) — peer
     // display niceness should survive in-place refreshes.
-    let title = if src.type_ == 1 {
-        src.name.clone().unwrap_or_else(|| src.id.to_string())
+    let title = if is_group {
+        // Group messages are stored as ciphertext; a generic label is what the
+        // receiving side has (the creator's `append_chat` already set a real
+        // title for their own copy).
+        "群聊".to_string()
     } else {
         src.peer_nickname
             .clone()
@@ -367,8 +404,14 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
         key: row.key,
         chat_id: src_chat_key.clone(),
         title,
-        preview: src.last_message_preview.clone().unwrap_or_default(),
-        is_group: src.type_ == 1,
+        // Group previews are ciphertext at rest, so keep whatever the row
+        // already showed rather than overwriting with the base64 blob.
+        preview: if is_group {
+            row.preview.clone()
+        } else {
+            src.last_message_preview.clone().unwrap_or_default()
+        },
+        is_group,
         time_ms: src.last_message_time.unwrap_or(0),
         unread: src.unread_count,
         peer_id: peer_id.clone(),
