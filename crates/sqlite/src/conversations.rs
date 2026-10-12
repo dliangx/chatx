@@ -79,14 +79,34 @@ pub async fn resolve_id(pool: &Pool, chat_id: &str) -> anyhow::Result<Option<i64
     Ok(row.map(|(id,)| id))
 }
 
-/// Find-or-create a DM conversation keyed by its text `name`.
+/// Conversation type implied by a text chat id. core names group ids `grp-…`
+/// whereas DM ids are `c<hash>` (or the legacy `a|b` pair) and never start
+/// with `grp-`, so the prefix is the authoritative DM/group signal.
+pub fn type_for_chat_id(chat_id: &str) -> i64 {
+    if chat_id.starts_with("grp-") {
+        ConversationType::Group as i64
+    } else {
+        ConversationType::Dm as i64
+    }
+}
+
+/// Find-or-create a conversation keyed by its text `name`, with the type
+/// (DM=0 / Group=1) derived from the chat id prefix. Self-heals legacy rows
+/// that were created as type=0 by the old unconditional-DM path.
 pub async fn ensure_dm(pool: &Pool, chat_id: &str) -> anyhow::Result<i64> {
+    let t = type_for_chat_id(chat_id);
     if let Some(id) = resolve_id(pool, chat_id).await? {
+        sqlx::query("UPDATE conversations SET type = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(t)
+            .execute(pool)
+            .await?;
         return Ok(id);
     }
     let id = crate::new_id();
-    sqlx::query("INSERT INTO conversations (id, type, name) VALUES (?1, 0, ?2)")
+    sqlx::query("INSERT INTO conversations (id, type, name) VALUES (?1, ?2, ?3)")
         .bind(id)
+        .bind(t)
         .bind(chat_id)
         .execute(pool)
         .await?;
