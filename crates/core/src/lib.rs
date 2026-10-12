@@ -1,4 +1,3 @@
-
 pub mod account;
 pub mod group;
 pub mod identity;
@@ -13,13 +12,13 @@ use account::{Account, Attestation, AttestationAction, DeviceRecord, DeviceStatu
 use group::{Group, MemberInfo};
 use identity::DeviceIdentity;
 use libp2p::{Multiaddr, PeerId};
+use parking_lot::RwLock;
 use signal::{DirectoryClient, UserResolve};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use store::Store;
 use swarm::{self as sw, Cmd, Running};
 use tokio::sync::oneshot;
-use parking_lot::RwLock;
 
 pub struct Client<D: DirectoryClient + ?Sized> {
     account: Account,
@@ -34,7 +33,9 @@ pub struct Client<D: DirectoryClient + ?Sized> {
 
 #[derive(Debug)]
 pub enum InboundGroup {
-    Key { group_id: String },
+    Key {
+        group_id: String,
+    },
     Message {
         group_id: String,
         from: String,
@@ -43,7 +44,6 @@ pub enum InboundGroup {
 }
 
 impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
-
     pub async fn from_parts(
         account: Account,
         device: DeviceIdentity,
@@ -75,16 +75,31 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
         }
 
-        // Re-subscribe to every group's gossipsub topic after (re)start. The
-        // swarm is freshly booted here (see `sw::boot` above) and holds no
-        // prior subscriptions, so without this the client would neither
-        // receive group messages published on the topic nor reliably publish
-        // its own — both directions of group chat break after a restart.
-        for group_id in groups.keys() {
+        let me = device.peer_base58().to_string();
+        for (group_id, g) in &groups {
             if let Err(e) = running.cmd_tx.send(Cmd::GroupSubscribe {
                 group_id: group_id.clone(),
             }) {
                 tracing::warn!("re-subscribe group {group_id} after start failed: {e}");
+                continue;
+            }
+            for member in g.member_ids() {
+                if member == me {
+                    continue;
+                }
+                let Ok(rec) = dir.resolve_device(&member) else {
+                    continue;
+                };
+                let Some(endpoint) = rec.endpoints.first() else {
+                    continue;
+                };
+                let (Ok(addr), Ok(pid)) = (endpoint.parse::<Multiaddr>(), member.parse::<PeerId>())
+                else {
+                    continue;
+                };
+                if let Err(e) = running.cmd_tx.send(Cmd::Connect { peer: pid, addr }) {
+                    tracing::warn!("re-dial group member {member} after start failed: {e}");
+                }
             }
         }
 
@@ -120,7 +135,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 );
             }
             let device = DeviceIdentity::load_or_create(profile)?;
-            let c = Self::from_parts(acct.clone(), device, dir, &DeviceIdentity::home_dir(), profile).await?;
+            let c = Self::from_parts(
+                acct.clone(),
+                device,
+                dir,
+                &DeviceIdentity::home_dir(),
+                profile,
+            )
+            .await?;
             c.refresh_directory_auto(uid.clone()).await?;
             return Ok((c, acct));
         }
@@ -134,7 +156,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let device = DeviceIdentity::generate();
         device.save(&DeviceIdentity::device_path(profile))?;
 
-        let c = Self::from_parts(acct.clone(), device, dir, &DeviceIdentity::home_dir(), profile).await?;
+        let c = Self::from_parts(
+            acct.clone(),
+            device,
+            dir,
+            &DeviceIdentity::home_dir(),
+            profile,
+        )
+        .await?;
         c.refresh_directory_auto(uid.clone()).await?;
         Ok((c, acct))
     }
@@ -160,7 +189,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .open(passphrase)
             .map_err(|e| anyhow::anyhow!("keystore open: {e}"))?;
         let device = DeviceIdentity::load_or_create(profile)?;
-        let c = Self::from_parts(acct.clone(), device, dir, &DeviceIdentity::home_dir(), profile).await?;
+        let c = Self::from_parts(
+            acct.clone(),
+            device,
+            dir,
+            &DeviceIdentity::home_dir(),
+            profile,
+        )
+        .await?;
         c.refresh_directory_auto(label).await?;
         Ok((c, acct))
     }
@@ -272,10 +308,16 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     ) -> anyhow::Result<Attestation> {
         let me = self.dir.resolve_device(self.device.peer_base58())?;
         if me.user_id != self.account.user_id() {
-            anyhow::bail!("this device is not registered under user {}", self.account.user_id());
+            anyhow::bail!(
+                "this device is not registered under user {}",
+                self.account.user_id()
+            );
         }
         if me.status != DeviceStatus::Approved {
-            anyhow::bail!("this device is {:?} — only APPROVED can issue attestations", me.status);
+            anyhow::bail!(
+                "this device is {:?} — only APPROVED can issue attestations",
+                me.status
+            );
         }
 
         let target = self.dir.resolve_device(target_peer)?;
@@ -314,7 +356,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         })
     }
 
-
     pub fn heartbeat(&self) {
         let ep = self.endpoints_with_egress();
         let user_rec = UserRecord {
@@ -325,9 +366,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         };
         self.dir.upsert_user(&user_rec);
 
-        let touched = self
-            .dir
-            .touch_presence(self.device.peer_base58(), &ep);
+        let touched = self.dir.touch_presence(self.device.peer_base58(), &ep);
         if !touched {
             self.fallback_register();
         }
@@ -369,7 +408,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
         v
     }
-
 
     fn fallback_register(&self) {
         let is_approved = self
@@ -533,7 +571,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
     }
 
-
     pub fn account(&self) -> &Account {
         &self.account
     }
@@ -593,7 +630,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         seen.into_iter().collect()
     }
 
-
     pub fn resolve_user(&self, user_id: &str) -> anyhow::Result<UserResolve> {
         self.dir.resolve_user_and_device(user_id)
     }
@@ -615,7 +651,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     pub fn pending_devices(&self) -> Vec<DeviceRecord> {
         self.dir.list_pending(self.account.user_id())
     }
-
 
     pub fn connect(&self, ur: &UserResolve) -> anyhow::Result<(PeerId, Multiaddr)> {
         let peer: PeerId = ur
@@ -663,11 +698,16 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .endpoints
             .first()
             .ok_or_else(|| anyhow::anyhow!("peer {peer_base58} is offline (no endpoints)"))?;
-        let peer: PeerId =
-            peer_base58.parse().map_err(|e| anyhow::anyhow!("bad peer id: {e}"))?;
-        let addr: Multiaddr =
-            endpoint.parse().map_err(|e| anyhow::anyhow!("bad endpoint: {e}"))?;
-        self.running.cmd_tx.send(Cmd::Connect { peer: peer.clone(), addr })?;
+        let peer: PeerId = peer_base58
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad peer id: {e}"))?;
+        let addr: Multiaddr = endpoint
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad endpoint: {e}"))?;
+        self.running.cmd_tx.send(Cmd::Connect {
+            peer: peer.clone(),
+            addr,
+        })?;
         Ok(peer)
     }
 
@@ -686,9 +726,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     ) -> anyhow::Result<()> {
         let from = self.peer_base58();
         let e2e = self.e2e_public().to_string();
-        self.running
-            .cmd_tx
-            .send(Cmd::SendAudio { peer, from, e2e, rate, ch, data })?;
+        self.running.cmd_tx.send(Cmd::SendAudio {
+            peer,
+            from,
+            e2e,
+            rate,
+            ch,
+            data,
+        })?;
         Ok(())
     }
 
@@ -736,7 +781,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             candidates.push(addr);
         }
         if candidates.is_empty() {
-            anyhow::bail!("device {peer_base58} has no dialable endpoint (only loopback/tcp0 addrs are registered — restart the peer with a LAN-reachable address)");
+            anyhow::bail!(
+                "device {peer_base58} has no dialable endpoint (only loopback/tcp0 addrs are registered — restart the peer with a LAN-reachable address)"
+            );
         }
 
         let from = self.peer_base58();
@@ -749,11 +796,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             // Ensure the swarm knows this peer's address and starts a dial
             // before we hand it the message (Connect is enqueued first, so it
             // is processed before SendText in the swarm loop).
-            if let Err(e) = self
-                .running
-                .cmd_tx
-                .send(Cmd::Connect { peer: peer.clone(), addr: addr.clone() })
-            {
+            if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
+                peer: peer.clone(),
+                addr: addr.clone(),
+            }) {
                 last_err = format!("cmd channel closed: {e}");
                 continue;
             }
@@ -774,7 +820,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 Ok(Ok(Ok(()))) => {
                     eprintln!("[dm] acked via {addr}");
                     let chat = store::dm_chat_id(&self.peer_base58(), peer_base58);
-                    self.store.push(&chat, &self.peer_base58(), text, false).await;
+                    self.store
+                        .push(&chat, &self.peer_base58(), text, false)
+                        .await;
                     eprintln!("[dm] send_dm done, chat={chat}");
                     return Ok(chat);
                 }
@@ -788,7 +836,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 }
                 Err(_) => {
                     eprintln!("[dm] no ack from {addr} within {timeout:?}");
-                    last_err = format!("no ack from peer within {timeout_secs}s", timeout_secs = timeout.as_secs());
+                    last_err = format!(
+                        "no ack from peer within {timeout_secs}s",
+                        timeout_secs = timeout.as_secs()
+                    );
                 }
             }
         }
@@ -799,7 +850,12 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         self.store.all()
     }
 
-    pub async fn history(&self, chat_id: &str, limit: usize, offset: usize) -> anyhow::Result<Vec<store::StoredMsg>> {
+    pub async fn history(
+        &self,
+        chat_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<Vec<store::StoredMsg>> {
         self.store.load(chat_id, limit, offset).await
     }
 
@@ -820,14 +876,20 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         self.events.lock().await.try_recv().ok()
     }
 
-    pub async fn process_inbound(&self, evt: &sw::ChatEvent) -> anyhow::Result<Option<InboundGroup>> {
+    pub async fn process_inbound(
+        &self,
+        evt: &sw::ChatEvent,
+    ) -> anyhow::Result<Option<InboundGroup>> {
         match evt {
             sw::ChatEvent::Text { req, .. } => self.apply_inbound(req).await,
             _ => Ok(None),
         }
     }
 
-    pub async fn apply_inbound(&self, req: &message::ChatRequest) -> anyhow::Result<Option<InboundGroup>> {
+    pub async fn apply_inbound(
+        &self,
+        req: &message::ChatRequest,
+    ) -> anyhow::Result<Option<InboundGroup>> {
         match req.kind {
             message::MsgKind::Dm => Ok(None),
             message::MsgKind::Audio => Ok(None), // handled by the caller (playback sink)
@@ -862,10 +924,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     });
                 }
                 self.save_group(&g)?;
-                let _ = self
-                    .running
-                    .cmd_tx
-                    .send(Cmd::GroupSubscribe { group_id: group_id.clone() });
+                let _ = self.running.cmd_tx.send(Cmd::GroupSubscribe {
+                    group_id: group_id.clone(),
+                });
                 Ok(Some(InboundGroup::Key { group_id }))
             }
             message::MsgKind::GroupMsg => {
@@ -883,11 +944,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 let from = env.from.clone();
                 let text = self.open_group_message(&group_id, &env)?;
                 self.store_group_inbound(&env).await?;
-                Ok(Some(InboundGroup::Message { group_id, from, text }))
+                Ok(Some(InboundGroup::Message {
+                    group_id,
+                    from,
+                    text,
+                }))
             }
         }
     }
-
 
     pub fn create_group(
         &self,
@@ -907,25 +971,28 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             g.set_member(m);
         }
         self.save_group(&g)?;
-        if let Err(e) = self
-            .running
-            .cmd_tx
-            .send(Cmd::GroupSubscribe { group_id: group_id.clone() })
-        {
+        if let Err(e) = self.running.cmd_tx.send(Cmd::GroupSubscribe {
+            group_id: group_id.clone(),
+        }) {
             tracing::warn!("GroupSubscribe cmd failed: {e}");
         }
         Ok(g)
     }
 
     pub fn add_member(&self, group_id: &str, info: MemberInfo) -> anyhow::Result<()> {
-        let mut g = self.groups.write().get_mut(group_id).cloned()
+        let mut g = self
+            .groups
+            .write()
+            .get_mut(group_id)
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
         g.set_member(info.clone());
         self.save_group(&g)?;
-        self
-            .running
+        self.running
             .cmd_tx
-            .send(Cmd::GroupSubscribe { group_id: group_id.into() })
+            .send(Cmd::GroupSubscribe {
+                group_id: group_id.into(),
+            })
             .map_err(|e| anyhow::anyhow!("GroupSubscribe cmd failed: {e}"))?;
         // The new member must receive the group secret: redistribute the key
         // (sealed per-peer) so the added member can decrypt future group messages.
@@ -936,7 +1003,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     pub fn rotate_group(&self, group_id: &str) -> anyhow::Result<group::Group> {
-        let mut g = self.groups.write().get_mut(group_id).cloned()
+        let mut g = self
+            .groups
+            .write()
+            .get_mut(group_id)
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
         g.rotate();
         self.save_group(&g)?;
@@ -948,10 +1019,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         if !self.groups.read().contains_key(group_id) {
             anyhow::bail!("unknown group {group_id}");
         }
-        let _ = self
-            .running
-            .cmd_tx
-            .send(Cmd::GroupUnsubscribe { group_id: group_id.into() });
+        let _ = self.running.cmd_tx.send(Cmd::GroupUnsubscribe {
+            group_id: group_id.into(),
+        });
         self.groups.write().remove(group_id);
         let _ = std::fs::remove_file(self.groups_dir.join(format!("{group_id}.json")));
         Ok(())
@@ -965,10 +1035,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// `InboundGroup::Key` for this group arrives, at which point the local
     /// `Group` record exists and `send_group_message` will work.
     pub fn join_group(&self, group_id: &str) -> anyhow::Result<()> {
-        let _ = self
-            .running
-            .cmd_tx
-            .send(Cmd::GroupSubscribe { group_id: group_id.into() });
+        let _ = self.running.cmd_tx.send(Cmd::GroupSubscribe {
+            group_id: group_id.into(),
+        });
         Ok(())
     }
 
@@ -993,7 +1062,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         group_id: &str,
         text: &str,
     ) -> anyhow::Result<group::SealedGroupMsg> {
-        let g = self.get_group(group_id).ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        let g = self
+            .get_group(group_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
         let me = self.peer_base58();
         group::seal_message(&g, &self.account, &me, text)
             .map_err(|e| anyhow::anyhow!("seal group msg: {e}"))
@@ -1007,7 +1078,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         if env.group_id != group_id {
             anyhow::bail!("group id mismatch");
         }
-        let g = self.get_group(group_id).ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        let g = self
+            .get_group(group_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
         group::open_message(&g.secret(), env).map_err(|e| anyhow::anyhow!("open group msg: {e}"))
     }
 
@@ -1015,7 +1088,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// plaintext. `store_group_outbound`/`inbound` serialize the
     /// `SealedGroupMsg` envelope directly (flat JSON, base64'd) — distinct
     /// from the on-wire `GroupWire{env}` format used on the gossipsub topic.
-    pub fn open_stored_group_message(&self, group_id: &str, stored_b64: &str) -> anyhow::Result<String> {
+    pub fn open_stored_group_message(
+        &self,
+        group_id: &str,
+        stored_b64: &str,
+    ) -> anyhow::Result<String> {
         let bytes = crate::account::from_b64(stored_b64)
             .ok_or_else(|| anyhow::anyhow!("stored group msg is not base64"))?;
         let env: group::SealedGroupMsg =
@@ -1078,7 +1155,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             if let Ok(rec) = self.dir.resolve_device(&peer) {
                 if let Some(endpoint) = rec.endpoints.first() {
                     if let Ok(addr) = endpoint.parse::<Multiaddr>() {
-                        let _ = self.running.cmd_tx.send(Cmd::Connect { peer: pid.clone(), addr });
+                        let _ = self.running.cmd_tx.send(Cmd::Connect {
+                            peer: pid.clone(),
+                            addr,
+                        });
                     }
                 }
             }
@@ -1101,12 +1181,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     pub async fn send_group_message(&self, group_id: &str, text: &str) -> anyhow::Result<()> {
-        eprintln!("[group] send_group_message group={group_id} text_len={}", text.len());
+        eprintln!(
+            "[group] send_group_message group={group_id} text_len={}",
+            text.len()
+        );
         let env = self.seal_group_message(group_id, text)?;
         let wire = group::msg_wire(&env)?;
         let topic = sw::IdentTopic::new(sw::group_topic_name(group_id));
-        self
-            .running
+        self.running
             .cmd_tx
             .send(Cmd::GroupPublish { topic, data: wire })
             .map_err(|e| anyhow::anyhow!("publish group msg: {e}"))?;
@@ -1116,7 +1198,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     fn save_group(&self, g: &group::Group) -> anyhow::Result<()> {
-        g.save(&self.account, &self.groups_dir.join(format!("{}.json", g.group_id)))?;
+        g.save(
+            &self.account,
+            &self.groups_dir.join(format!("{}.json", g.group_id)),
+        )?;
         self.groups.write().insert(g.group_id.clone(), g.clone());
         Ok(())
     }
@@ -1133,7 +1218,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     message::MsgKind::Dm => {
                         let text = req.text.clone().unwrap_or_default();
                         let chat = store::dm_chat_id(&self.peer_base58(), &peer_b58);
-                        self.store.push(&chat, &peer_b58, &text, req.sealed.is_some()).await;
+                        self.store
+                            .push(&chat, &peer_b58, &text, req.sealed.is_some())
+                            .await;
                         Some(chat)
                     }
                     _ => {
@@ -1198,7 +1285,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .map(|g| g.has(&self.peer_base58()))
             .unwrap_or(false)
     }
-
 }
 
 /// Probe the host's current egress IPv4 address (e.g. `192.168.1.42`).
@@ -1244,7 +1330,6 @@ fn unroutable_reason(addr: &Multiaddr) -> Option<&'static str> {
     }
     None
 }
-
 
 fn current_egress_ip() -> Option<String> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
