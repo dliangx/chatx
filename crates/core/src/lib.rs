@@ -75,6 +75,19 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
         }
 
+        // Re-subscribe to every group's gossipsub topic after (re)start. The
+        // swarm is freshly booted here (see `sw::boot` above) and holds no
+        // prior subscriptions, so without this the client would neither
+        // receive group messages published on the topic nor reliably publish
+        // its own — both directions of group chat break after a restart.
+        for group_id in groups.keys() {
+            if let Err(e) = running.cmd_tx.send(Cmd::GroupSubscribe {
+                group_id: group_id.clone(),
+            }) {
+                tracing::warn!("re-subscribe group {group_id} after start failed: {e}");
+            }
+        }
+
         Ok(Self {
             account,
             device,
