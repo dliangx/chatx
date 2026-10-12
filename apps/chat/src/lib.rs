@@ -59,6 +59,16 @@ static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> = std::sync::On
 static CHAT_SCROLL_POS: std::sync::LazyLock<std::sync::RwLock<std::collections::HashMap<i32, f32>>> =
     std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
 
+/// The conversation key currently shown in the detail panel, if any. Set every
+/// time a chat is (re)loaded so inbound messages can decide whether the open
+/// bubble list needs a live refresh.
+static CURRENT_CHAT: std::sync::LazyLock<std::sync::RwLock<Option<i32>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
+
+fn set_current_chat(key: i32) {
+    *CURRENT_CHAT.write().unwrap() = Some(key);
+}
+
 /// Monotonic id for profile loads (each request gets a fresh id).
 static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Id of the most-recent profile load; stale ones are dropped before publishing.
@@ -964,20 +974,14 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
         if let Some(ui) = weak2.upgrade() {
             let state = ui.global::<AppState>();
             publish_to_views(&state, backend2.clone());
+            // If this is the conversation currently on screen, re-render its
+            // bubble list so the just-arrived message shows up immediately
+            // (no manual re-click required).
             if let Some(k) = key {
-                use slint::Model;
-                let nav = state.get_nav_state();
-                let tabs = nav.tabs.clone();
-                if let Some(tab) = tabs.row_data(nav.active_tab as usize) {
-                    let top = tab.sub_top;
-                    if top >= 0 {
-                        let hist = tab.sub_history.clone();
-                        if let Some(entry) = hist.row_data(top as usize) {
-                            if entry.page == SubPageType::ChatRoom && entry.payload == k {
-                                load_chat_messages(ui.as_weak(), k);
-                            }
-                        }
-                    }
+                let open_now = *CURRENT_CHAT.read().unwrap();
+                eprintln!("[inbound] chat_id={chat_id} key={k} current={open_now:?}");
+                if open_now == Some(k) {
+                    load_chat_messages(ui.as_weak(), k);
                 }
             }
         }
@@ -1317,6 +1321,9 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
         });
         return;
     }
+    // Record which conversation is now on screen (funnel for all opens, so
+    // inbound refresh knows whether to re-render the bubble list).
+    set_current_chat(chat_key);
     let client: Option<Arc<Client<HttpDirectory>>> = CLIENT.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
