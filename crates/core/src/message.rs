@@ -1,7 +1,7 @@
 
 use serde::{Deserialize, Serialize};
 
-const _PROTOCOL: &str = "/p2pchat/text/1";
+const _PROTOCOL: &str = "/chatx/text/1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]

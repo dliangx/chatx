@@ -462,15 +462,15 @@ async fn list_groups(
 #[tokio::main]
 async fn main() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "p2pchat_signal=info".into()))
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "chatx_signal=info".into()))
         .try_init();
 
-    let addr: SocketAddr = std::env::var("P2PCHAT_SIGNAL_ADDR")
+    let addr: SocketAddr = std::env::var("CHATX_SIGNAL_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8787".into())
         .parse()
-        .expect("P2PCHAT_SIGNAL_ADDR must be a socket address");
+        .expect("CHATX_SIGNAL_ADDR must be a socket address");
 
-    let db_path = std::env::var("P2PCHAT_SIGNAL_DB")
+    let db_path = std::env::var("CHATX_SIGNAL_DB")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("signal.db"));
     let db = Arc::new(db::open(&db_path).await.expect("open sqlite db"));
@@ -509,6 +509,6 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("bind TCP listener");
-    tracing::info!(%addr, "p2pchat-signal listening");
+    tracing::info!(%addr, "chatx-signal listening");
     axum::serve(listener, router).await.expect("serve");
 }

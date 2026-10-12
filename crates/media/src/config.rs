@@ -1,7 +1,7 @@
 use webrtc_rs::ice_transport::ice_server::RTCIceServer;
 
 /// TURN / STUN servers. Empty `turn_url` disables TURN. Three-row env:
-/// `P2PCHAT_TURN_URL`, `P2PCHAT_TURN_USER`, `P2PCHAT_TURN_PASS`.
+/// `CHATX_TURN_URL`, `CHATX_TURN_USER`, `CHATX_TURN_PASS`.
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     pub turn_url: Option<String>,
@@ -13,10 +13,10 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let turn_url = std::env::var("P2PCHAT_TURN_URL").ok().filter(|s| !s.trim().is_empty());
-        let turn_user = std::env::var("P2PCHAT_TURN_USER").ok().filter(|s| !s.trim().is_empty());
-        let turn_pass = std::env::var("P2PCHAT_TURN_PASS").ok().filter(|s| !s.trim().is_empty());
-        let stun_url = std::env::var("P2PCHAT_STUN").ok().filter(|s| !s.trim().is_empty());
+        let turn_url = std::env::var("CHATX_TURN_URL").ok().filter(|s| !s.trim().is_empty());
+        let turn_user = std::env::var("CHATX_TURN_USER").ok().filter(|s| !s.trim().is_empty());
+        let turn_pass = std::env::var("CHATX_TURN_PASS").ok().filter(|s| !s.trim().is_empty());
+        let stun_url = std::env::var("CHATX_STUN").ok().filter(|s| !s.trim().is_empty());
         Self { turn_url, turn_user, turn_pass, stun_url }
     }
 

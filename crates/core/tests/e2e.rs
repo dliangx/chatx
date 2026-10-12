@@ -9,7 +9,7 @@ struct TmpBase(std::path::PathBuf);
 
 impl TmpBase {
     fn new(tag: &str) -> Self {
-        let p = std::env::temp_dir().join(format!("p2pchat-test-{}-{tag}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("chatx-test-{}-{tag}", std::process::id()));
         let _ = std::fs::create_dir_all(&p);
         Self(p)
     }

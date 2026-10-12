@@ -142,7 +142,7 @@ impl Group {
 pub fn message_key(g_secret: &[u8; 32], group_id: &str) -> [u8; 32] {
     let hk = hkdf::Hkdf::<Sha256>::new(None, g_secret);
     let mut out = [0u8; 32];
-    hk.expand(format!("p2pchat/grp/v1|{group_id}").as_bytes(), &mut out)
+    hk.expand(format!("chatx/grp/v1|{group_id}").as_bytes(), &mut out)
         .expect("hkdf expand");
     out
 }

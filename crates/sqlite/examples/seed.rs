@@ -4,7 +4,7 @@
 //! Usage:
 //!   cargo run -p sqlite --example seed -- [DB_PATH] [ME]
 //!
-//! Defaults: DB_PATH = ~/.config/p2pchat/default/messages.db, ME = "dliang".
+//! Defaults: DB_PATH = ~/.config/chatx/default/messages.db, ME = "dliang".
 //! The target file is removed first so the seed is idempotent.
 
 use sqlite::conversations::{self, ConversationPatch};
@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
     let db_path = args
         .get(1)
         .map(|s| s.as_str())
-        .unwrap_or("/Users/liang/.config/p2pchat/default/messages.db");
+        .unwrap_or("/Users/liang/.config/chatx/default/messages.db");
     let me = args.get(2).map(|s| s.as_str()).unwrap_or("dliang");
 
     let _ = std::fs::remove_file(db_path);

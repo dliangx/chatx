@@ -16,14 +16,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
-pub const TEXT_PROTOCOL: StreamProtocol = StreamProtocol::new("/p2pchat/text/1");
+pub const TEXT_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/text/1");
 
 pub fn group_topic_name(group_id: &str) -> String {
-    format!("/p2pchat/group/{}", group_id)
+    format!("/chatx/group/{}", group_id)
 }
 
 pub fn topic_to_group_id(topic: &str) -> Option<String> {
-    let prefix = "/p2pchat/group/";
+    let prefix = "/chatx/group/";
     topic.strip_prefix(prefix).map(|s| s.to_string()).filter(|s| !s.is_empty())
 }
 

@@ -236,7 +236,7 @@ pub struct HttpDirectory {
 impl HttpDirectory {
     pub fn default_server() -> Self {
         Self::new(
-            std::env::var("P2PCHAT_SIGNAL")
+            std::env::var("CHATX_SIGNAL")
                 .unwrap_or_else(|_| "http://192.168.1.2:8787".into()),
         )
     }

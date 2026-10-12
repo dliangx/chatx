@@ -68,14 +68,14 @@ impl DeviceIdentity {
     }
 
     pub fn home_dir() -> std::path::PathBuf {
-        if let Ok(p) = std::env::var("P2PCHAT_HOME") {
+        if let Ok(p) = std::env::var("CHATX_HOME") {
             return std::path::PathBuf::from(p);
         }
         #[cfg(windows)]
         let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
         #[cfg(not(windows))]
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        std::path::PathBuf::from(format!("{home}/.config/p2pchat"))
+        std::path::PathBuf::from(format!("{home}/.config/chatx"))
     }
 
     pub fn profile_dir(profile: &str) -> std::path::PathBuf {
@@ -88,7 +88,7 @@ impl DeviceIdentity {
     }
 
     pub fn default_profile() -> String {
-        std::env::var("P2PCHAT_PROFILE")
+        std::env::var("CHATX_PROFILE")
             .unwrap_or_else(|_| "default".into())
             .trim()
             .to_lowercase()
@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn device_save_load_roundtrip() {
         let d = DeviceIdentity::generate();
-        let path = std::env::temp_dir().join(format!("p2pchat-dev-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!("chatx-dev-{}.json", std::process::id()));
         d.save(&path).unwrap();
         let d2 = DeviceIdentity::load(&path).unwrap();
         assert_eq!(d2.peer_base58(), d.peer_base58());

@@ -9,7 +9,7 @@ use sha2::Sha256;
 use x25519_dalek::{PublicKey as X25519Pub, StaticSecret};
 
 pub const KDF_ITERATIONS: u32 = 200_000;
-const DOMAIN_APPROVE: &[u8] = b"p2pchat/attest/v1";
+const DOMAIN_APPROVE: &[u8] = b"chatx/attest/v1";
 
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -146,7 +146,7 @@ impl Account {
 
     pub fn data_protect_key(&self) -> [u8; 32] {
         let mut out = [0u8; 32];
-        hkdf::Hkdf::<Sha256>::new(Some(b"p2pchat/data-protect/v1"), &self.secret().sign_sk)
+        hkdf::Hkdf::<Sha256>::new(Some(b"chatx/data-protect/v1"), &self.secret().sign_sk)
             .expand(b"32b-aes", &mut out)
             .expect("hkdf 32B");
         out
@@ -194,7 +194,7 @@ impl Account {
         let their_pub = X25519Pub::from(their);
         let my_static = StaticSecret::from(self.secret().e2e_sk);
         let shared = my_static.diffie_hellman(&their_pub);
-        let hk = hkdf::Hkdf::<Sha256>::new(Some(b"p2pchat/e2e/v1"), &shared.to_bytes());
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(b"chatx/e2e/v1"), &shared.to_bytes());
         let mut out = [0u8; 32];
         hk.expand(b"chat-message", &mut out)
             .map_err(|e| AcctError::Crypto(e.to_string()))?;
