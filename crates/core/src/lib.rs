@@ -93,8 +93,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     pub fn reconnect_groups(&self) {
-        let me = self.peer_base58();
-
         let have_circuit = self.running.listen_addrs.lock().unwrap().iter().any(|a| {
             a.iter()
                 .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2pCircuit))
@@ -120,56 +118,134 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
         }
 
-        let mut want: Vec<PeerId> = Vec::new();
-        {
-            let connected = self.running.connected.lock().unwrap();
-            let groups = self.groups.read();
-            for g in groups.values() {
-                for member in g.member_ids() {
-                    if member == me {
-                        continue;
-                    }
-                    if let Ok(pid) = member.parse::<PeerId>() {
-                        if connected.get(&pid).copied().unwrap_or(0) == 0 {
-                            want.push(pid);
-                        }
-                    }
-                }
-            }
+        // Best-effort initial dial of P2P members. The "connect on enter,
+        // disconnect after X idle" policy is now driven by the UI: calling
+        // `connect_to_group` / `disconnect_from_group` per chat the user
+        // actually opens (and the presence loop no longer auto-redials, so we
+        // don't keep NAT mappings alive for groups the user never visits).
+    }
+
+    /// Dial every P2P member of `group_id` (resolve their endpoints from the
+    /// directory and enqueue `Cmd::Connect`). Used when the user opens a
+    /// group chat screen so the connection is available before the first
+    /// message is sent.
+    ///
+    /// Server-mode ("B") groups are intentionally ignored: their traffic is
+    /// relayed through the signaling server (HTTP `post_group_message`), so no
+    /// P2P connection is required for delivery.
+    pub fn connect_to_group(&self, group_id: &str) -> Result<(), anyhow::Error> {
+        let g = self
+            .get_group(group_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        if g.mode == crate::group::GroupMode::Server {
+            return Ok(());
         }
+        let me = self.peer_base58();
         let mut dials = 0usize;
-        for pid in want {
+        for pid_b58 in g.member_ids() {
+            if pid_b58 == me {
+                continue;
+            }
             if dials >= sw::MAX_DIALS_PER_TICK {
                 break;
             }
-            let key = pid.to_base58();
-            if self.dial_suppressed(&key) {
-                continue; // keep failing — wait out the backoff
-            }
-            let Ok(rec) = self.dir.resolve_device(&key) else {
+            let Ok(pid) = pid_b58.parse::<PeerId>() else {
                 continue;
             };
-            let mut endpoints: Vec<Multiaddr> = rec
+            if self
+                .running
+                .connected
+                .lock()
+                .unwrap()
+                .get(&pid)
+                .copied()
+                .unwrap_or(0)
+                > 0
+            {
+                continue; // already connected; no need to re-dial
+            }
+            if self.dial_suppressed(&pid_b58) {
+                continue;
+            }
+            let Ok(rec) = self.dir.resolve_device(&pid_b58) else {
+                // Member not registered — we can't reach them yet; will
+                // retry on the next `connect_to_group` (e.g. on re-entry).
+                continue;
+            };
+            let Some(endpoint) = rec
                 .endpoints
                 .iter()
                 .filter_map(|e| e.parse::<Multiaddr>().ok())
-                .filter(|a| unroutable_reason(a).is_none())
-                .collect();
-            if endpoints.is_empty() {
+                .find(|a| unroutable_reason(a).is_none())
+            else {
                 continue;
-            }
-            // One dial attempt per candidate endpoint, but only until the first
-            // accepted command (libp2p dedupes anyway); count against the cap.
-            let addr = endpoints.remove(0);
+            };
             if self
                 .running
                 .cmd_tx
-                .send(Cmd::Connect { peer: pid, addr })
+                .send(Cmd::Connect {
+                    peer: pid,
+                    addr: endpoint,
+                })
                 .is_ok()
             {
                 dials += 1;
-                self.dial_attempted(&key);
+                self.dial_attempted(&pid_b58);
             }
+        }
+        if dials > 0 {
+            eprintln!("[group] connect_group {group_id}: dialed {dials} peers");
+        }
+        Ok(())
+    }
+
+    /// Close every connection to a P2P member of `group_id`. Called by the UI
+    /// sweeper after the 10-minute "grace" window following the last time the
+    /// user was in the chat, so we stop keeping NAT mappings alive (and the
+    /// libp2p ping keep-alive that was maintaining them) for peers the user is
+    /// no longer interacting with.
+    ///
+    /// Server-mode groups are ignored (no P2P conns to close).
+    pub fn disconnect_from_group(&self, group_id: &str) {
+        let g = match self.get_group(group_id) {
+            Some(g) => g,
+            None => return,
+        };
+        if g.mode == crate::group::GroupMode::Server {
+            return;
+        }
+        let me = self.peer_base58();
+        let mut n = 0usize;
+        for pid_b58 in g.member_ids() {
+            if pid_b58 == me {
+                continue;
+            }
+            let Ok(pid) = pid_b58.parse::<PeerId>() else {
+                continue;
+            };
+            let is_conn = self
+                .running
+                .connected
+                .lock()
+                .unwrap()
+                .get(&pid)
+                .copied()
+                .unwrap_or(0)
+                > 0;
+            if !is_conn {
+                continue;
+            }
+            if self
+                .running
+                .cmd_tx
+                .send(Cmd::Disconnect { peer: pid })
+                .is_ok()
+            {
+                n += 1;
+            }
+        }
+        if n > 0 {
+            eprintln!("[group] disconnect {group_id}: closed {n} peers");
         }
     }
 
@@ -473,13 +549,18 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     eprintln!("[presence] tick #{tick} starting");
                     std::thread::sleep(std::time::Duration::from_secs(15));
                     client.heartbeat();
-                    client.reconnect_groups();
+                    // NOTE: P2P group (re)connections are NOT driven here.
+                    // They are user-driven by the UI: `connect_to_group`
+                    // on chat-screen open, `disconnect_from_group` 10 min
+                    // after leaving. Doing it here would keep NAT mappings +
+                    // ping keep-alive alive for every group forever, which is
+                    // exactly the idle-churn / stale-session problem we're
+                    // removing.
                 }
             })
             .expect("spawn presence thread");
         // Keep the handle alive so a panic in the thread is recoverable and
-        // reported (instead of silently killing presence forever). Any panic
-        // is also mirrored to our stderr so it is not lost.
+        // reported (instead of silently killing presence forever).
         let _ = handle;
     }
 

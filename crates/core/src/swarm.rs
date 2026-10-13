@@ -149,6 +149,13 @@ pub enum Cmd {
         relay_peer: PeerId,
         relay_addr: Multiaddr,
     },
+    /// Tear down every connection to this peer (and drop the ping handler
+    /// that was keeping those conns alive). Used when a user leaves a group
+    /// chat after the "grace" period, so we stop maintaining NAT mappings
+    /// for members we no longer need to reach.
+    Disconnect {
+        peer: PeerId,
+    },
 }
 
 #[derive(Clone)]
@@ -459,6 +466,17 @@ async fn swarm_loop(
                         tracing::warn!("reserve relay {relay_peer}: {e}");
                     } else {
                         eprintln!("[swarm] reserve relay via {circuit}");
+                    }
+                }
+                Some(Cmd::Disconnect { peer }) => {
+                    // `disconnect_peer_id` returns `Ok(())` if a live conn was
+                    // closed, `Err(())` if the peer was not connected (no-op).
+                    // Both outcomes are fine — we intentionally do not remove
+                    // the peer from the address book, so mDNS / identify can
+                    // rediscover them if the user re-enters the chat.
+                    match swarm.disconnect_peer_id(peer) {
+                        Ok(()) => eprintln!("[swarm] DISCONNECTED {peer} (via cmd)"),
+                        Err(()) => eprintln!("[swarm] DISCONNECT {peer}: was not connected"),
                     }
                 }
                 None => return,

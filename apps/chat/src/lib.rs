@@ -81,6 +81,94 @@ fn set_current_chat_id(chat_id: &str) {
     *CURRENT_CHAT.write().unwrap() = Some(chat_id.to_string());
 }
 
+// ── Group P2P connection lifecycle ("connect on chat-screen enter, disconnect
+// ── 10 minutes after the user stops being in it") ────────────────────────────
+//
+// P2P group connections are NOT maintained by the presence loop; they are
+// driven by UI navigation. Server-fanout ("B") groups don't use P2P at all
+// — they're HTTP, so they're skipped here.
+//
+// Model: every group the user opens gets a `last_enter_ms` stamp. A single
+// background sweeper, spawned once, scans this map on a short interval and
+// closes any group whose last enter is older than the grace window. Re-entering
+// a chat refreshes its stamp, so its pending close is naturally deferred. This
+// means "leave the chat → disconnect 10 min later, but if I come back within
+// 10 min it stays connected" with no per-exit timers to juggle.
+const GROUP_DISCONNECT_GRACE_MS: u64 = 10 * 60 * 1000; // 10 minutes
+const GROUP_SWEEP_INTERVAL_MS: u64 = 15 * 1000; // check every 15s
+
+#[derive(Clone, Copy)]
+struct GroupConnSlot {
+    /// Monotonic ms of the last time the user opened this chat.
+    last_enter_ms: u64,
+}
+
+static GROUP_CONNS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, GroupConnSlot>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Record that the user is in a group chat and (re-)connect its P2P members.
+/// Called from `on_push_sub` the moment a group chat screen opens. The
+/// sweeper will close it 10 minutes after this stamp unless re-entered.
+fn group_conn_enter(chat_id: &str) {
+    if !chat_id.starts_with("grp-") {
+        return; // DM — no group dial
+    }
+    let now = chatx_core::message::now_ms();
+    GROUP_CONNS
+        .lock()
+        .unwrap()
+        .insert(chat_id.to_string(), GroupConnSlot { last_enter_ms: now });
+    let Some(client) = CLIENT.lock().unwrap().clone() else {
+        return;
+    };
+    eprintln!("[group] ENTER {chat_id} (grace {GROUP_DISCONNECT_GRACE_MS}ms)");
+    if let Err(e) = client.connect_to_group(chat_id) {
+        eprintln!("[group] enter {chat_id} failed: {e}");
+    }
+}
+
+/// Spawn (once) a background task that closes P2P connections for any group
+/// the user has not been in for longer than the grace window. Must be called
+/// from a tokio runtime context (e.g. during login, after `start_presence_loop`).
+fn start_group_conn_sweeper() {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+    let rt = runtime().clone();
+    rt.spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(
+            GROUP_SWEEP_INTERVAL_MS,
+        ));
+        loop {
+            tick.tick().await;
+            let now = chatx_core::message::now_ms();
+            // Decide which groups are stale under the lock, then act outside it.
+            let expired: Vec<String> = {
+                let m = GROUP_CONNS.lock().unwrap();
+                m.iter()
+                    .filter(|(_, s)| {
+                        now.saturating_sub(s.last_enter_ms) >= GROUP_DISCONNECT_GRACE_MS
+                    })
+                    .map(|(g, _)| g.clone())
+                    .collect()
+            };
+            if expired.is_empty() {
+                continue;
+            }
+            for gid in &expired {
+                GROUP_CONNS.lock().unwrap().remove(gid);
+                let Some(client) = CLIENT.lock().unwrap().clone() else {
+                    continue;
+                };
+                eprintln!("[group] grace expired for {gid} — closing P2P conns");
+                client.disconnect_from_group(gid);
+            }
+        }
+    });
+}
+
 /// Monotonic id for profile loads (each request gets a fresh id).
 static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Id of the most-recent profile load; stale ones are dropped before publishing.
@@ -913,6 +1001,9 @@ fn apply_result(
             // (server TTL is 30s) and our egress IP is re-published whenever
             // the local interface changes (WiFi ↔ ethernet, VPN, …).
             client.start_presence_loop();
+            // Background sweeper: close P2P conns for any group the user has
+            // not opened within the last 10 minutes (see `group_conn_enter`).
+            start_group_conn_sweeper();
             let approved = client
                 .status()
                 .ok()
@@ -1469,6 +1560,9 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     // Record which conversation is now on screen (funnel for all opens, so
     // inbound refresh knows whether to re-render the bubble list).
     set_current_chat_id(&chat_id);
+    // If this is a group chat, (re)connect its P2P members and refresh the
+    // "last user entered" stamp (so the 10-min grace window is reset).
+    group_conn_enter(&chat_id);
     let me_peer = client.peer_base58().to_string();
     let me = client.user_id().to_string();
     let is_group_chat = chat_id.starts_with("grp-");
