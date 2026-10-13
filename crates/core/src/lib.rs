@@ -529,7 +529,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             self.fallback_register();
         }
         eprintln!(
-            "[presence] heartbeat ok in {}ms (touched={touched})",
+            "[presence] heartbeat ok in {}ms (touch_presence={touched})",
             t0.elapsed().as_millis()
         );
     }

@@ -107,9 +107,6 @@ static GROUP_CONNS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, GroupConnSlot>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-/// Record that the user is in a group chat and (re-)connect its P2P members.
-/// Called from `on_push_sub` the moment a group chat screen opens. The
-/// sweeper will close it 10 minutes after this stamp unless re-entered.
 fn group_conn_enter(chat_id: &str) {
     if !chat_id.starts_with("grp-") {
         return; // DM — no group dial
@@ -119,18 +116,20 @@ fn group_conn_enter(chat_id: &str) {
         .lock()
         .unwrap()
         .insert(chat_id.to_string(), GroupConnSlot { last_enter_ms: now });
+
+    let gid = chat_id.to_string();
+    eprintln!("[group] ENTER {gid} (grace {GROUP_DISCONNECT_GRACE_MS}ms)");
     let Some(client) = CLIENT.lock().unwrap().clone() else {
         return;
     };
-    eprintln!("[group] ENTER {chat_id} (grace {GROUP_DISCONNECT_GRACE_MS}ms)");
-    if let Err(e) = client.connect_to_group(chat_id) {
-        eprintln!("[group] enter {chat_id} failed: {e}");
-    }
+
+    std::thread::spawn(move || {
+        if let Err(e) = client.connect_to_group(&gid) {
+            eprintln!("[group] enter {gid} failed: {e}");
+        }
+    });
 }
 
-/// Spawn (once) a background task that closes P2P connections for any group
-/// the user has not been in for longer than the grace window. Must be called
-/// from a tokio runtime context (e.g. during login, after `start_presence_loop`).
 fn start_group_conn_sweeper() {
     static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     if STARTED.set(()).is_err() {
@@ -138,9 +137,8 @@ fn start_group_conn_sweeper() {
     }
     let rt = runtime().clone();
     rt.spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_millis(
-            GROUP_SWEEP_INTERVAL_MS,
-        ));
+        let mut tick =
+            tokio::time::interval(std::time::Duration::from_millis(GROUP_SWEEP_INTERVAL_MS));
         loop {
             tick.tick().await;
             let now = chatx_core::message::now_ms();
