@@ -1,4 +1,3 @@
-
 use crate::account::Account;
 use crate::account::AcctError;
 use aes_gcm::aead::{Aead, KeyInit};
@@ -14,17 +13,29 @@ pub struct MemberInfo {
     pub e2e_public: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupMode {
+    #[default]
+    P2P,
+    Server,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupPublic {
     pub group_id: String,
     pub owner: String,
     pub members: BTreeMap<String, MemberInfo>,
     pub created_at: u64,
+    #[serde(default)]
+    pub mode: GroupMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Group {
     pub group_id: String,
+    #[serde(default)]
+    pub last_server_seq: u64,
     #[serde(skip)]
     g_secret: [u8; 32],
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,6 +43,8 @@ pub struct Group {
     pub owner: String,
     pub members: BTreeMap<String, MemberInfo>,
     pub created_at: u64,
+    #[serde(default)]
+    pub mode: GroupMode,
 }
 
 impl Group {
@@ -41,11 +54,13 @@ impl Group {
         let owner = owner.into();
         Self {
             group_id: group_id.into(),
+            last_server_seq: 0,
             g_secret: s,
             g_secret_enc: None,
             owner,
             members: BTreeMap::new(),
             created_at: crate::message::now_ms(),
+            mode: GroupMode::P2P,
         }
     }
 
@@ -56,11 +71,13 @@ impl Group {
     ) -> Self {
         Self {
             group_id: group_id.into(),
+            last_server_seq: 0,
             g_secret: secret,
             g_secret_enc: None,
             owner: owner.into(),
             members: BTreeMap::new(),
             created_at: crate::message::now_ms(),
+            mode: GroupMode::P2P,
         }
     }
 
@@ -104,7 +121,12 @@ impl Group {
             owner: self.owner.clone(),
             members: self.members.clone(),
             created_at: self.created_at,
+            mode: self.mode,
         }
+    }
+
+    pub fn set_mode(&mut self, mode: GroupMode) {
+        self.mode = mode;
     }
 
     pub fn save(&self, acct: &Account, path: &std::path::Path) -> anyhow::Result<()> {
@@ -127,7 +149,9 @@ impl Group {
             .ok_or_else(|| anyhow::anyhow!("group file lacks g_secret_enc"))?;
         let bytes = crate::account::from_b64(&enc)
             .ok_or_else(|| anyhow::anyhow!("bad g_secret_enc base64"))?;
-        let plain = acct.decrypt_data(&bytes).map_err(|e| anyhow::anyhow!("g_secret decrypt: {e}"))?;
+        let plain = acct
+            .decrypt_data(&bytes)
+            .map_err(|e| anyhow::anyhow!("g_secret decrypt: {e}"))?;
         if plain.len() != 32 {
             anyhow::bail!("g_secret len != 32");
         }
@@ -188,10 +212,18 @@ impl GroupPayload {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupWire {
     pub env: SealedGroupMsg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupMailEntry {
+    pub group_id: String,
+    pub seq: u64,
+    pub from: String,
+    pub t: u64,
+    pub wire: String,
 }
 
 pub fn msg_wire(env: &SealedGroupMsg) -> anyhow::Result<Vec<u8>> {
@@ -229,7 +261,9 @@ pub fn open_secret(
         return Err(AcctError::Crypto("secret bundle too short".into()));
     }
     let (nonce_b, ct) = bundle.split_at(12);
-    let nonce: [u8; 12] = nonce_b.try_into().map_err(|_| AcctError::Crypto("nonce len".into()))?;
+    let nonce: [u8; 12] = nonce_b
+        .try_into()
+        .map_err(|_| AcctError::Crypto("nonce len".into()))?;
     let key = my_account.derive_session_key(sender_e2e_public)?;
     let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).expect("32B key");
     let plain = cipher
@@ -239,7 +273,6 @@ pub fn open_secret(
         .try_into()
         .map_err(|_| AcctError::Crypto("secret len".into()))
 }
-
 
 type GmResult<T> = Result<T, AcctError>;
 
@@ -283,7 +316,10 @@ pub fn open_message(my_secret: &[u8; 32], env: &SealedGroupMsg) -> GmResult<Stri
     let key = message_key(my_secret, &env.group_id);
     let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).expect("32B key");
     let plaintext = cipher
-        .decrypt(aes_gcm::Nonce::from_slice(&env.nonce), env.ciphertext.as_slice())
+        .decrypt(
+            aes_gcm::Nonce::from_slice(&env.nonce),
+            env.ciphertext.as_slice(),
+        )
         .map_err(|_| AcctError::Crypto("group msg decrypt".into()))?;
     let payload: GroupPayload = serde_json::from_slice(&plaintext)
         .map_err(|e| AcctError::Crypto(format!("group msg payload: {e}")))?;
@@ -327,7 +363,10 @@ mod tests {
         let to_bob = seal_secret(&alice, bob.e2e_public(), &s0).unwrap();
         assert_eq!(open_secret(&bob, alice.e2e_public(), &to_bob).unwrap(), s0);
         let to_carol = seal_secret(&alice, carol.e2e_public(), &s0).unwrap();
-        assert_eq!(open_secret(&carol, alice.e2e_public(), &to_carol).unwrap(), s0);
+        assert_eq!(
+            open_secret(&carol, alice.e2e_public(), &to_carol).unwrap(),
+            s0
+        );
 
         let sealed_bob = seal_message(&group, &bob, bob_p, "hello group").unwrap();
         assert_eq!(open_message(&s0, &sealed_bob).unwrap(), "hello group");
@@ -339,7 +378,10 @@ mod tests {
         let s1 = group.secret();
         assert_ne!(s0, s1, "secret must change after rotation");
         let sealed_after = seal_message(&group, &bob, bob_p, "secret msg").unwrap();
-        assert!(open_message(&s0, &sealed_after).is_err(), "old secret must not open new message");
+        assert!(
+            open_message(&s0, &sealed_after).is_err(),
+            "old secret must not open new message"
+        );
         assert_eq!(open_message(&s1, &sealed_after).unwrap(), "secret msg");
 
         let mut other = Group::with_secret("grp-2", alice_p, s1);
@@ -350,7 +392,10 @@ mod tests {
 
         let mut tampered = sealed_bob.clone();
         tampered.from = carol_p.into();
-        assert!(open_message(&s0, &tampered).is_err(), "tampered from must fail");
+        assert!(
+            open_message(&s0, &tampered).is_err(),
+            "tampered from must fail"
+        );
     }
 
     #[test]

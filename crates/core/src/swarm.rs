@@ -1,8 +1,8 @@
 use crate::identity::DeviceIdentity;
 use crate::message::{AudioPayload, ChatRequest, ChatResponse};
 use anyhow::Result;
-pub use libp2p::gossipsub::IdentTopic;
 use libp2p::futures::StreamExt as _;
+pub use libp2p::gossipsub::IdentTopic;
 use libp2p::mdns::tokio::Behaviour as Mdns;
 use libp2p::mdns::{Config as MdnsConfig, Event as MdnsEvent};
 use libp2p::request_response::json::Behaviour as Chat;
@@ -11,6 +11,7 @@ use libp2p::request_response::{
 };
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::swarm::{StreamProtocol, SwarmEvent};
+use libp2p::upnp::tokio::Behaviour as Upnp;
 use libp2p::{Multiaddr, PeerId, Swarm, SwarmBuilder};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -24,13 +25,18 @@ pub fn group_topic_name(group_id: &str) -> String {
 
 pub fn topic_to_group_id(topic: &str) -> Option<String> {
     let prefix = "/chatx/group/";
-    topic.strip_prefix(prefix).map(|s| s.to_string()).filter(|s| !s.is_empty())
+    topic
+        .strip_prefix(prefix)
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
 }
 
 #[derive(NetworkBehaviour)]
 #[behaviour(prelude = "libp2p::swarm::derive_prelude")]
 pub struct Net {
     pub mdns: Mdns,
+    pub upnp: Upnp,
+    pub relay: libp2p::relay::client::Behaviour,
     pub chat: Chat<ChatRequest, ChatResponse>,
     pub group: libp2p::gossipsub::Behaviour,
 }
@@ -41,16 +47,14 @@ pub enum ChatEvent {
         peer: PeerId,
         req: ChatRequest,
     },
-    /// Inbound realtime-audio frame (decoded s16le PCM + rate/channels).
-    /// Delivered on arrival; not persisted.
+
     Audio {
         peer: PeerId,
         rate: u32,
         ch: u32,
         data: Vec<u8>,
     },
-    /// Inbound WebRTC signaling frame. `json` is the opaque payload — the app
-    /// crate parses it (it's a `media::SignalFrame` JSON string).
+
     Webrtc {
         peer: PeerId,
         json: String,
@@ -75,6 +79,13 @@ pub enum ChatEvent {
         from: PeerId,
         data: Vec<u8>,
     },
+
+    GroupMail {
+        topic: String,
+        from: PeerId,
+        data: Vec<u8>,
+        seq: u64,
+    },
     GroupPeerSubscribed {
         peer: PeerId,
         topic: String,
@@ -95,8 +106,6 @@ pub enum Cmd {
         from: String,
         e2e: String,
         text: String,
-        /// When `Some`, this send is tracked and the caller's future resolves
-        /// once the peer acks (or the send fails). `None` = fire and forget.
         ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
     },
     SendAudio {
@@ -105,15 +114,12 @@ pub enum Cmd {
         e2e: String,
         rate: u32,
         ch: u32,
-        /// s16le PCM bytes (base64-encoded on the wire).
         data: Vec<u8>,
     },
-    /// WebRTC signaling frame (opaque JSON).
     SendWebrtc {
         peer: PeerId,
         from: String,
         e2e: String,
-        /// JSON-encoded `media::SignalFrame`.
         payload: String,
     },
     GroupKeyDirect {
@@ -133,6 +139,10 @@ pub enum Cmd {
         topic: IdentTopic,
         data: Vec<u8>,
     },
+    ReserveRelay {
+        relay_peer: PeerId,
+        relay_addr: Multiaddr,
+    },
 }
 
 #[derive(Clone)]
@@ -140,13 +150,47 @@ pub struct Running {
     pub cmd_tx: mpsc::UnboundedSender<Cmd>,
     pub listen_addrs: Arc<Mutex<Vec<Multiaddr>>>,
     pub my_peer_id: PeerId,
-    /// In-flight "wait for the peer to ack" senders.
-    ///
-    /// Keyed by the app-level [`ChatRequest::id`]. The `PeerId` is retained so
-    /// that when a request/response `OutboundFailure` (which only knows the
-    /// peer, not our id) arrives we can fail-fast every waiter for that peer.
     pub pending_acks: Arc<Mutex<HashMap<u64, (PeerId, oneshot::Sender<anyhow::Result<()>>)>>>,
+    pub connected: Arc<Mutex<HashMap<PeerId, u32>>>,
+    pub dial_backoff: Arc<Mutex<HashMap<String, (u64, u32)>>>,
+    pub relays: Arc<Mutex<Vec<(PeerId, Multiaddr)>>>,
+    pub injected: mpsc::UnboundedSender<ChatEvent>,
 }
+
+pub fn split_relay_addr(full: &Multiaddr) -> Option<(PeerId, Multiaddr)> {
+    let mut base = Multiaddr::empty();
+    for p in full.iter() {
+        match p {
+            libp2p::multiaddr::Protocol::P2p(peer) => return Some((peer, base)),
+            other => base.push(other),
+        }
+    }
+    None
+}
+
+fn parse_relay_env() -> Vec<(PeerId, Multiaddr)> {
+    let spec: std::collections::BTreeSet<String> = std::env::var("CHATX_RELAYS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut out = Vec::new();
+    for s in spec {
+        match s.parse::<Multiaddr>() {
+            Ok(addr) => match split_relay_addr(&addr) {
+                Some(pair) => out.push(pair),
+                None => eprintln!("[relay] {s} has no /p2p/.../ component; ignored"),
+            },
+            Err(e) => eprintln!("[relay] {s}: {e}"),
+        }
+    }
+    out
+}
+
+pub const MAX_DIALS_PER_TICK: usize = 64;
+pub const DIAL_BACKOFF_BASE_MS: u64 = 5_000;
+pub const DIAL_BACKOFF_MAX_MS: u64 = 60_000;
 
 pub type EventRx = mpsc::UnboundedReceiver<ChatEvent>;
 
@@ -159,17 +203,15 @@ pub async fn boot(
         .build()
         .map_err(|e| anyhow::anyhow!("gossipsub config: {e}"))?;
     let mdns = Mdns::new(MdnsConfig::default(), my_peer)?;
-    let chat: Chat<ChatRequest, ChatResponse> =
-        Chat::new([(TEXT_PROTOCOL, ProtocolSupport::Full)], RrConfig::default());
-    let net = Net {
-        mdns,
-        chat,
-        group: libp2p::gossipsub::Behaviour::new(
-            libp2p::gossipsub::MessageAuthenticity::Signed(device.keypair()),
-            gossip_cfg,
-        )
-        .map_err(|e| anyhow::anyhow!("gossipsub init: {e}"))?,
-    };
+    let chat: Chat<ChatRequest, ChatResponse> = Chat::new(
+        [(TEXT_PROTOCOL, ProtocolSupport::Full)],
+        RrConfig::default(),
+    );
+    let group: libp2p::gossipsub::Behaviour = libp2p::gossipsub::Behaviour::new(
+        libp2p::gossipsub::MessageAuthenticity::Signed(device.keypair()),
+        gossip_cfg,
+    )
+    .map_err(|e| anyhow::anyhow!("gossipsub init: {e}"))?;
 
     let mut swarm = SwarmBuilder::with_existing_identity(device.keypair())
         .with_tokio()
@@ -179,7 +221,14 @@ pub async fn boot(
             libp2p::yamux::Config::default,
         )
         .expect("tcp+noise+yamux")
-        .with_behaviour(|_k| net)?
+        .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
+        .with_behaviour(move |_k, relay| Net {
+            mdns,
+            upnp: Upnp::default(),
+            relay,
+            chat,
+            group,
+        })?
         .build();
 
     let tcp0: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
@@ -189,22 +238,48 @@ pub async fn boot(
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel();
+    let (injected_tx, injected_rx) = mpsc::unbounded_channel();
     let listen_addrs: Arc<Mutex<Vec<Multiaddr>>> = Arc::new(Mutex::new(Vec::new()));
     let pending_acks = Arc::new(Mutex::new(HashMap::new()));
+    let connected = Arc::new(Mutex::new(HashMap::new()));
+    let dial_backoff = Arc::new(Mutex::new(HashMap::new()));
+    let relays = Arc::new(Mutex::new(parse_relay_env()));
+
+    let me = *swarm.local_peer_id();
+    for (peer, base) in relays.lock().unwrap().iter().cloned() {
+        let circuit = base
+            .with(libp2p::multiaddr::Protocol::P2p(peer))
+            .with(libp2p::multiaddr::Protocol::P2pCircuit)
+            .with(libp2p::multiaddr::Protocol::P2p(me));
+        match swarm.listen_on(circuit.clone()) {
+            Ok(_) => eprintln!("[swarm] reserving relay slot on {circuit}"),
+            Err(e) => tracing::warn!("reserve relay {peer}: {e}"),
+        }
+    }
 
     let running = Arc::new(Running {
         cmd_tx: cmd_tx.clone(),
         listen_addrs: Arc::clone(&listen_addrs),
         my_peer_id: my_peer,
         pending_acks: Arc::clone(&pending_acks),
+        connected: Arc::clone(&connected),
+        dial_backoff: Arc::clone(&dial_backoff),
+        relays: Arc::clone(&relays),
+        injected: injected_tx.clone(),
     });
 
-    tokio::spawn(swarm_loop(
-        swarm,
-        cmd_rx,
-        evt_tx,
-        running.clone(),
-    ));
+    // Fan injected (server-fanout / B-mode) events into the app event stream.
+    let ev_fan = evt_tx.clone();
+    tokio::spawn(async move {
+        let mut rx = injected_rx;
+        while let Some(evt) = rx.recv().await {
+            if ev_fan.send(evt).is_err() {
+                break;
+            }
+        }
+    });
+
+    tokio::spawn(swarm_loop(swarm, cmd_rx, evt_tx, running.clone()));
 
     Ok((running, evt_rx))
 }
@@ -328,6 +403,19 @@ async fn swarm_loop(
                 Some(Cmd::GroupPublish { topic, data }) => {
                     let _ = swarm.behaviour_mut().group.publish(topic, data);
                 }
+                Some(Cmd::ReserveRelay { relay_peer, relay_addr }) => {
+                    let me = *swarm.local_peer_id();
+                    let circuit = relay_addr
+                        .clone()
+                        .with(libp2p::multiaddr::Protocol::P2p(relay_peer))
+                        .with(libp2p::multiaddr::Protocol::P2pCircuit)
+                        .with(libp2p::multiaddr::Protocol::P2p(me));
+                    if let Err(e) = swarm.listen_on(circuit.clone()) {
+                        tracing::warn!("reserve relay {relay_peer}: {e}");
+                    } else {
+                        eprintln!("[swarm] reserve relay via {circuit}");
+                    }
+                }
                 None => return,
             },
             Some(item) = swarm.next() => match item {
@@ -335,12 +423,39 @@ async fn swarm_loop(
                     running.listen_addrs.lock().unwrap().push(address.clone());
                     let _ = ev.send(ChatEvent::Listening(address));
                 }
+                // UPnP / relay-confirmed external addresses (e.g.
+                // `/ip4/{public}/tcp/{port}` or a `/p2p-circuit/{me}` form).
+                // Push into the local address set so `endpoints()` and the
+                // heartbeat/`refresh` path re-announces them to the directory.
+                SwarmEvent::ExternalAddrConfirmed { address } => {
+                    let mut addrs = running.listen_addrs.lock().unwrap();
+                    if !addrs.iter().any(|a| a == &address) {
+                        addrs.push(address.clone());
+                    }
+                    eprintln!("[swarm] EXTERNAL ADDR {address}");
+                }
+                SwarmEvent::ExternalAddrExpired { address } => {
+                    running
+                        .listen_addrs
+                        .lock()
+                        .unwrap()
+                        .retain(|a| a != &address);
+                    eprintln!("[swarm] EXTERNAL ADDR EXPIRED {address}");
+                }
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     eprintln!("[swarm] CONNECTED to {peer_id}");
+                    *running.connected.lock().unwrap().entry(peer_id).or_insert(0) += 1;
+                    running.dial_backoff.lock().unwrap().remove(&peer_id.to_base58()); // reachable again — clear backoff
                     let _ = ev.send(ChatEvent::Connected(peer_id));
                 }
                 SwarmEvent::ConnectionClosed { peer_id, .. } => {
                     eprintln!("[swarm] DISCONNECTED from {peer_id}");
+                    if let Some(n) = running.connected.lock().unwrap().get_mut(&peer_id) {
+                        *n = n.saturating_sub(1);
+                        if *n == 0 {
+                            running.connected.lock().unwrap().remove(&peer_id);
+                        }
+                    }
                     let _ = ev.send(ChatEvent::Disconnected(peer_id));
                 }
                 SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
@@ -349,6 +464,21 @@ async fn swarm_loop(
                 SwarmEvent::Behaviour(inner) => {
                     let me = *swarm.local_peer_id();
                     match inner {
+                    // UPnP: a NAT gateway confirmed an external mapping for our
+                    // listener. This surfaces as `ExternalAddrConfirmed` above
+                    // (libp2p-swarm aggregates it), so nothing extra to do here.
+                    NetEvent::Upnp(_) => {}
+                    // Relay client: reservation accepted / circuit established.
+                    // The resulting `/p2p-circuit/{me}` endpoint likewise reaches
+                    // us via `ExternalAddrConfirmed`, so we only log here.
+                    NetEvent::Relay(r) => {
+                        if let libp2p::relay::client::Event::ReservationReqAccepted {
+                            relay_peer_id, ..
+                        } = r
+                        {
+                            eprintln!("[swarm] RELAY reservation accepted from {relay_peer_id}");
+                        }
+                    }
                     NetEvent::Mdns(m) => {
                         if let MdnsEvent::Discovered(ips) = m {
                             for (p, addr) in ips {

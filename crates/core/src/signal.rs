@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -37,6 +36,45 @@ pub trait DirectoryClient: Sync + Send {
     fn list_groups(&self) -> Vec<crate::group::GroupPublic> {
         Vec::new()
     }
+
+    fn post_group_message(
+        &self,
+        _group_id: &str,
+        _env: &crate::group::SealedGroupMsg,
+    ) -> anyhow::Result<u64> {
+        anyhow::bail!("directory does not support server-fanout group messages")
+    }
+
+    fn poll_group_messages(
+        &self,
+        _group_id: &str,
+        _after: u64,
+    ) -> anyhow::Result<Vec<crate::group::GroupMailEntry>> {
+        Ok(Vec::new())
+    }
+
+    fn put_group_key_slot(
+        &self,
+        _group_id: &str,
+        _peer_id: &str,
+        _sender_e2e: &str,
+        _sealed_b64: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("directory does not support server-fanout key slots")
+    }
+
+    fn get_group_key_slot(
+        &self,
+        _group_id: &str,
+        _peer_id: &str,
+    ) -> anyhow::Result<(String, String)> {
+        anyhow::bail!("directory does not support server-fanout key slots")
+    }
+
+    fn delete_group_key_slot(&self, _group_id: &str, _peer_id: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
     fn check(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -52,12 +90,18 @@ pub trait DirectoryClient: Sync + Send {
     }
 }
 
+#[derive(Default, Clone)]
+pub struct GroupKeySlots {
+    peers: std::collections::BTreeMap<String, (String, String)>,
+}
 
 #[derive(Default, Clone)]
 pub struct InMemoryDirectory {
     users: Arc<Mutex<HashMap<String, UserRecord>>>,
     devices: Arc<Mutex<HashMap<String, DeviceRecord>>>,
     groups: Arc<Mutex<HashMap<String, crate::group::GroupPublic>>>,
+    inbox: Arc<Mutex<HashMap<String, Vec<crate::group::GroupMailEntry>>>>,
+    keyslots: Arc<Mutex<HashMap<String, GroupKeySlots>>>,
 }
 
 impl InMemoryDirectory {
@@ -65,14 +109,24 @@ impl InMemoryDirectory {
         Self::default()
     }
 
+    pub fn shared(n: usize) -> Vec<Arc<InMemoryDirectory>> {
+        let head = Arc::new(InMemoryDirectory::default());
+        (0..n).map(|_| Self::clone_shared(&head)).collect()
+    }
+
+    fn clone_shared(src: &Arc<InMemoryDirectory>) -> Arc<InMemoryDirectory> {
+        Arc::new(InMemoryDirectory {
+            users: Arc::clone(&src.users),
+            devices: Arc::clone(&src.devices),
+            groups: Arc::clone(&src.groups),
+            inbox: Arc::clone(&src.inbox),
+            keyslots: Arc::clone(&src.keyslots),
+        })
+    }
+
     pub fn pair() -> (Arc<InMemoryDirectory>, Arc<InMemoryDirectory>) {
-        let a = Arc::new(InMemoryDirectory::default());
-        let b = Arc::new(InMemoryDirectory {
-            users: Arc::clone(&a.users),
-            devices: Arc::clone(&a.devices),
-            groups: Arc::clone(&a.groups),
-        });
-        (a, b)
+        let v = Self::shared(2);
+        (v[0].clone(), v[1].clone())
     }
 
     pub fn inject_user(&self, r: UserRecord) {
@@ -81,6 +135,90 @@ impl InMemoryDirectory {
 
     pub fn inject_device(&self, r: DeviceRecord) {
         self.devices.lock().unwrap().insert(r.peer_id.clone(), r);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::group::{GroupMode, GroupPublic, MemberInfo};
+
+    fn sample_user(id: &str) -> UserRecord {
+        UserRecord {
+            user_id: id.into(),
+            e2e_public: format!("E2E-{id}"),
+            sign_pk: format!("SIGN-{id}"),
+            seen: 1,
+        }
+    }
+
+    fn sample_group(id: &str) -> GroupPublic {
+        let mut members = std::collections::BTreeMap::new();
+        members.insert(
+            "peer".into(),
+            MemberInfo {
+                peer_id: "peer".into(),
+                sign_pk: "S".into(),
+                e2e_public: "E".into(),
+            },
+        );
+        GroupPublic {
+            group_id: id.into(),
+            owner: "owner".into(),
+            members,
+            created_at: 1,
+            mode: GroupMode::Server,
+        }
+    }
+
+    #[test]
+    fn shared_key_slot_round_trip() {
+        let handles = InMemoryDirectory::shared(2);
+        assert_eq!(handles.len(), 2);
+        assert_ne!(
+            Arc::as_ptr(&handles[0]),
+            Arc::as_ptr(&handles[1]),
+            "handles must be distinct Arcs"
+        );
+
+        // Write via one handle, read via the other.
+        handles[0]
+            .put_group_key_slot("grp-x", "peer", "SENDER-E2E", "SEAL")
+            .expect("put slot");
+        let (sender, sealed) = handles[1]
+            .get_group_key_slot("grp-x", "peer")
+            .expect("get slot from another handle");
+        assert_eq!(sender, "SENDER-E2E");
+        assert_eq!(sealed, "SEAL");
+
+        // Delete via one handle, gone from the other.
+        let removed = handles[0]
+            .delete_group_key_slot("grp-x", "peer")
+            .expect("delete");
+        assert!(removed);
+        assert!(handles[1].get_group_key_slot("grp-x", "peer").is_err());
+
+        // User upsert / resolve via different handles.
+        handles[0].inject_user(sample_user("alice"));
+        assert!(handles[1].resolve_user("alice").is_ok());
+
+        // Group upsert / resolve via different handles.
+        handles[0].upsert_group(&sample_group("grp-p"));
+        assert!(handles[1].resolve_group("grp-p").is_ok());
+    }
+
+    #[test]
+    fn shared_zero_is_empty() {
+        assert!(InMemoryDirectory::shared(0).is_empty());
+    }
+
+    #[tokio::test]
+    async fn pair_still_works() {
+        let (a, b) = InMemoryDirectory::pair();
+        a.inject_user(sample_user("bob"));
+        assert!(b.resolve_user("bob").is_ok());
+        a.upsert_group(&sample_group("grp-q"));
+        assert!(b.resolve_group("grp-q").is_ok());
     }
 }
 
@@ -117,7 +255,10 @@ impl DirectoryClient for InMemoryDirectory {
         if let Some(r) = t.get(user_id) {
             return Ok(r.clone());
         }
-        let pref: Vec<&UserRecord> = t.values().filter(|r| r.user_id.starts_with(user_id)).collect();
+        let pref: Vec<&UserRecord> = t
+            .values()
+            .filter(|r| r.user_id.starts_with(user_id))
+            .collect();
         if pref.len() == 1 {
             return Ok(pref[0].clone());
         }
@@ -146,8 +287,13 @@ impl DirectoryClient for InMemoryDirectory {
                 _ => {}
             }
         }
-        let device = best.ok_or_else(|| anyhow::anyhow!("no online APPROVED device for user {}", user.user_id))?;
-        Ok(UserResolve { user, device: device.clone() })
+        let device = best.ok_or_else(|| {
+            anyhow::anyhow!("no online APPROVED device for user {}", user.user_id)
+        })?;
+        Ok(UserResolve {
+            user,
+            device: device.clone(),
+        })
     }
 
     fn list_devices(&self, user_id: &str) -> Vec<DeviceRecord> {
@@ -225,8 +371,87 @@ impl DirectoryClient for InMemoryDirectory {
     fn list_groups(&self) -> Vec<crate::group::GroupPublic> {
         self.groups.lock().unwrap().values().cloned().collect()
     }
-}
 
+    fn post_group_message(
+        &self,
+        group_id: &str,
+        env: &crate::group::SealedGroupMsg,
+    ) -> anyhow::Result<u64> {
+        let wire = crate::group::msg_wire(env)?;
+        let b64 = crate::account::b64(&wire);
+        let mut inbox = self.inbox.lock().unwrap();
+        let list = inbox.entry(group_id.to_string()).or_default();
+        let seq = list.iter().map(|e| e.seq).max().unwrap_or(0) + 1;
+        list.push(crate::group::GroupMailEntry {
+            group_id: group_id.to_string(),
+            seq,
+            from: env.from.clone(),
+            t: crate::message::now_ms(),
+            wire: b64,
+        });
+        Ok(seq)
+    }
+
+    fn poll_group_messages(
+        &self,
+        group_id: &str,
+        after: u64,
+    ) -> anyhow::Result<Vec<crate::group::GroupMailEntry>> {
+        let inbox = self.inbox.lock().unwrap();
+        let out: Vec<_> = inbox
+            .get(group_id)
+            .into_iter()
+            .flatten()
+            .filter(|e| e.seq > after)
+            .cloned()
+            .collect();
+        Ok(out)
+    }
+
+    fn put_group_key_slot(
+        &self,
+        group_id: &str,
+        peer_id: &str,
+        sender_e2e: &str,
+        sealed_b64: &str,
+    ) -> anyhow::Result<()> {
+        let mut slots = self.keyslots.lock().unwrap();
+        let slot = slots.entry(group_id.to_string()).or_default();
+        slot.peers.insert(
+            peer_id.to_string(),
+            (sender_e2e.to_string(), sealed_b64.to_string()),
+        );
+        Ok(())
+    }
+
+    fn get_group_key_slot(
+        &self,
+        group_id: &str,
+        peer_id: &str,
+    ) -> anyhow::Result<(String, String)> {
+        let slots = self.keyslots.lock().unwrap();
+        let slot = slots
+            .get(group_id)
+            .ok_or_else(|| anyhow::anyhow!("no key slots for group {group_id}"))?;
+        slot.peers
+            .get(peer_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no key slot for {peer_id} in group {group_id}"))
+    }
+
+    fn delete_group_key_slot(&self, group_id: &str, peer_id: &str) -> anyhow::Result<bool> {
+        let mut slots = self.keyslots.lock().unwrap();
+        let slot = match slots.get_mut(group_id) {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        let removed = slot.peers.remove(peer_id).is_some();
+        if slot.peers.is_empty() {
+            slots.remove(group_id);
+        }
+        Ok(removed)
+    }
+}
 
 #[derive(Clone)]
 pub struct HttpDirectory {
@@ -236,8 +461,7 @@ pub struct HttpDirectory {
 impl HttpDirectory {
     pub fn default_server() -> Self {
         Self::new(
-            std::env::var("CHATX_SIGNAL")
-                .unwrap_or_else(|_| "http://192.168.1.2:8787".into()),
+            std::env::var("CHATX_SIGNAL").unwrap_or_else(|_| "http://192.168.1.4:8787".into()),
         )
     }
 
@@ -298,8 +522,7 @@ impl DirectoryClient for HttpDirectory {
         let resp = ureq::request("GET", &url)
             .call()
             .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
-        resp
-            .into_json()
+        resp.into_json()
             .map_err(|e| anyhow::anyhow!("resolve device failed: {e}"))
     }
 
@@ -308,8 +531,7 @@ impl DirectoryClient for HttpDirectory {
         let resp = ureq::request("GET", &url)
             .call()
             .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
-        resp
-            .into_json()
+        resp.into_json()
             .map_err(|e| anyhow::anyhow!("resolve user failed: {e}"))
     }
 
@@ -318,8 +540,7 @@ impl DirectoryClient for HttpDirectory {
         let resp = ureq::request("GET", &url)
             .call()
             .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
-        resp
-            .into_json()
+        resp.into_json()
             .map_err(|e| anyhow::anyhow!("resolve user failed: {e}"))
     }
 
@@ -366,14 +587,110 @@ impl DirectoryClient for HttpDirectory {
         let resp = ureq::request("GET", &url)
             .call()
             .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
-        resp.into_json().map_err(|e| anyhow::anyhow!("resolve group failed: {e}"))
+        resp.into_json()
+            .map_err(|e| anyhow::anyhow!("resolve group failed: {e}"))
     }
 
     fn list_groups(&self) -> Vec<crate::group::GroupPublic> {
         let url = format!("{}/v1/groups", self.base);
         match ureq::request("GET", &url).call() {
-            Ok(resp) => resp.into_json::<Vec<crate::group::GroupPublic>>().unwrap_or_default(),
+            Ok(resp) => resp
+                .into_json::<Vec<crate::group::GroupPublic>>()
+                .unwrap_or_default(),
             Err(_) => Vec::new(),
+        }
+    }
+
+    fn post_group_message(
+        &self,
+        group_id: &str,
+        env: &crate::group::SealedGroupMsg,
+    ) -> anyhow::Result<u64> {
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            from: &'a str,
+            wire: String,
+        }
+        let wire = crate::group::msg_wire(env)?;
+        let body = serde_json::to_string(&Body {
+            from: &env.from,
+            wire: crate::account::b64(&wire),
+        })
+        .expect("serialize group msg body");
+        let url = format!("{}/v1/groups/{group_id}/messages", self.base);
+        let resp = ureq::request("POST", &url)
+            .set("content-type", "application/json")
+            .send_string(&body)
+            .map_err(|e| anyhow::anyhow!("post group message: {e}"))?;
+        #[derive(serde::Deserialize)]
+        struct Out {
+            seq: u64,
+        }
+        resp.into_json::<Out>()
+            .map(|o| o.seq)
+            .map_err(|e| anyhow::anyhow!("bad post group message response: {e}"))
+    }
+
+    fn poll_group_messages(
+        &self,
+        group_id: &str,
+        after: u64,
+    ) -> anyhow::Result<Vec<crate::group::GroupMailEntry>> {
+        let url = format!("{}/v1/groups/{group_id}/messages?after={after}", self.base);
+        match ureq::request("GET", &url).call() {
+            Ok(resp) => resp
+                .into_json::<Vec<crate::group::GroupMailEntry>>()
+                .map_err(|e| anyhow::anyhow!("poll group messages: {e}")),
+            Err(_) => Ok(Vec::new()),
+        }
+    }
+
+    fn put_group_key_slot(
+        &self,
+        group_id: &str,
+        peer_id: &str,
+        sender_e2e: &str,
+        sealed_b64: &str,
+    ) -> anyhow::Result<()> {
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            sender_e2e: &'a str,
+            sealed: &'a str,
+        }
+        let body = serde_json::to_string(&Body {
+            sender_e2e,
+            sealed: sealed_b64,
+        })
+        .expect("serialize key slot body");
+        let url = format!("{}/v1/groups/{group_id}/keys/{peer_id}", self.base);
+        let res = ureq::request("PUT", &url)
+            .set("content-type", "application/json")
+            .send_string(&body);
+        res.map(|_| ())
+            .map_err(|e| anyhow::anyhow!("put group key slot: {e}"))
+    }
+
+    fn get_group_key_slot(
+        &self,
+        group_id: &str,
+        peer_id: &str,
+    ) -> anyhow::Result<(String, String)> {
+        let url = format!("{}/v1/groups/{group_id}/keys/{peer_id}", self.base);
+        let resp = ureq::request("GET", &url)
+            .call()
+            .map_err(|e| anyhow::anyhow!("get group key slot: {e}"))?;
+        let v: (String, String) = resp
+            .into_json()
+            .map_err(|e| anyhow::anyhow!("bad key slot response: {e}"))?;
+        Ok(v)
+    }
+
+    fn delete_group_key_slot(&self, group_id: &str, peer_id: &str) -> anyhow::Result<bool> {
+        let url = format!("{}/v1/groups/{group_id}/keys/{peer_id}", self.base);
+        match ureq::request("DELETE", &url).call() {
+            Ok(_) => Ok(true),
+            Err(ureq::Error::Status(404, _)) => Ok(false),
+            Err(e) => Err(anyhow::anyhow!("delete group key slot: {e}")),
         }
     }
 
@@ -401,7 +718,6 @@ impl DirectoryClient for HttpDirectory {
         }
     }
 }
-
 
 #[derive(Default, Clone)]
 pub struct NullDirectory;

@@ -20,6 +20,8 @@ use store::Store;
 use swarm::{self as sw, Cmd, Running};
 use tokio::sync::oneshot;
 
+pub const GROUP_P2P_MAX: usize = 15;
+
 pub struct Client<D: DirectoryClient + ?Sized> {
     account: Account,
     device: DeviceIdentity,
@@ -75,35 +77,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
         }
 
-        let me = device.peer_base58().to_string();
-        for (group_id, g) in &groups {
-            if let Err(e) = running.cmd_tx.send(Cmd::GroupSubscribe {
-                group_id: group_id.clone(),
-            }) {
-                tracing::warn!("re-subscribe group {group_id} after start failed: {e}");
-                continue;
-            }
-            for member in g.member_ids() {
-                if member == me {
-                    continue;
-                }
-                let Ok(rec) = dir.resolve_device(&member) else {
-                    continue;
-                };
-                let Some(endpoint) = rec.endpoints.first() else {
-                    continue;
-                };
-                let (Ok(addr), Ok(pid)) = (endpoint.parse::<Multiaddr>(), member.parse::<PeerId>())
-                else {
-                    continue;
-                };
-                if let Err(e) = running.cmd_tx.send(Cmd::Connect { peer: pid, addr }) {
-                    tracing::warn!("re-dial group member {member} after start failed: {e}");
-                }
-            }
-        }
-
-        Ok(Self {
+        let client = Self {
             account,
             device,
             dir,
@@ -112,7 +86,114 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             events: tokio::sync::Mutex::new(events),
             groups: RwLock::new(groups),
             groups_dir,
-        })
+        };
+
+        client.reconnect_groups();
+        Ok(client)
+    }
+
+    pub fn reconnect_groups(&self) {
+        let me = self.peer_base58();
+
+        let have_circuit = self.running.listen_addrs.lock().unwrap().iter().any(|a| {
+            a.iter()
+                .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2pCircuit))
+        });
+        if !have_circuit {
+            let relays: Vec<(PeerId, Multiaddr)> = self.running.relays.lock().unwrap().clone();
+            for (peer, base) in relays {
+                if let Err(e) = self.running.cmd_tx.send(Cmd::ReserveRelay {
+                    relay_peer: peer,
+                    relay_addr: base,
+                }) {
+                    tracing::warn!("reserve relay {peer}: {e}");
+                }
+            }
+        }
+
+        let group_ids: Vec<String> = self.groups.read().keys().cloned().collect();
+        for group_id in &group_ids {
+            if let Err(e) = self.running.cmd_tx.send(Cmd::GroupSubscribe {
+                group_id: group_id.clone(),
+            }) {
+                tracing::warn!("re-subscribe group {group_id}: {e}");
+            }
+        }
+
+        let mut want: Vec<PeerId> = Vec::new();
+        {
+            let connected = self.running.connected.lock().unwrap();
+            let groups = self.groups.read();
+            for g in groups.values() {
+                for member in g.member_ids() {
+                    if member == me {
+                        continue;
+                    }
+                    if let Ok(pid) = member.parse::<PeerId>() {
+                        if connected.get(&pid).copied().unwrap_or(0) == 0 {
+                            want.push(pid);
+                        }
+                    }
+                }
+            }
+        }
+        let mut dials = 0usize;
+        for pid in want {
+            if dials >= sw::MAX_DIALS_PER_TICK {
+                break;
+            }
+            let key = pid.to_base58();
+            if self.dial_suppressed(&key) {
+                continue; // keep failing — wait out the backoff
+            }
+            let Ok(rec) = self.dir.resolve_device(&key) else {
+                continue;
+            };
+            let mut endpoints: Vec<Multiaddr> = rec
+                .endpoints
+                .iter()
+                .filter_map(|e| e.parse::<Multiaddr>().ok())
+                .filter(|a| unroutable_reason(a).is_none())
+                .collect();
+            if endpoints.is_empty() {
+                continue;
+            }
+            // One dial attempt per candidate endpoint, but only until the first
+            // accepted command (libp2p dedupes anyway); count against the cap.
+            let addr = endpoints.remove(0);
+            if self
+                .running
+                .cmd_tx
+                .send(Cmd::Connect { peer: pid, addr })
+                .is_ok()
+            {
+                dials += 1;
+                self.dial_attempted(&key);
+            }
+        }
+    }
+
+    /// True if this peer's re-dial should be suppressed by backoff right now.
+    fn dial_suppressed(&self, peer: &str) -> bool {
+        let (last, fails) = {
+            let m = self.running.dial_backoff.lock().unwrap();
+            match m.get(peer) {
+                Some(v) => *v,
+                None => return false,
+            }
+        };
+        let elapsed = crate::message::now_ms().saturating_sub(last);
+        let delay = sw::DIAL_BACKOFF_BASE_MS.saturating_mul(1u64 << fails.min(6));
+        elapsed < delay.min(sw::DIAL_BACKOFF_MAX_MS)
+    }
+
+    /// Record a re-dial attempt; bumps the failure backoff (reset on connect in
+    /// the event loop). Call only when `Cmd::Connect` was actually enqueued.
+    fn dial_attempted(&self, peer: &str) {
+        let mut m = self.running.dial_backoff.lock().unwrap();
+        let entry = m.entry(peer.to_string()).or_insert((0, 0));
+        entry.0 = crate::message::now_ms();
+        entry.1 = entry.1.saturating_add(1);
     }
 
     pub async fn bootstrap(
@@ -372,10 +453,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
     }
 
-    /// Start a background keepalive loop that re-touches the directory roughly
-    /// every 15s (well under the server-side 30s presence TTL), so the device
-    /// stays "online" in the directory and the caller never has to re-invoke
-    /// it manually.
     pub fn start_presence_loop(self: &Arc<Self>) {
         static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         if STARTED.set(()).is_err() {
@@ -386,6 +463,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(15));
                 client.heartbeat();
+
+                client.reconnect_groups();
             }
         });
     }
@@ -634,8 +713,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         self.dir.resolve_user_and_device(user_id)
     }
 
-    /// Resolve a user that only needs to be registered (an approved device
-    /// exists), regardless of whether it is currently online.
     pub fn resolve_user_registered(&self, user_id: &str) -> anyhow::Result<UserResolve> {
         self.dir.resolve_user_registered(user_id)
     }
@@ -988,6 +1065,31 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
         g.set_member(info.clone());
         self.save_group(&g)?;
+        let mode = g.mode;
+        drop(g);
+
+        if mode == group::GroupMode::Server {
+            // B / server-fanout: no P2P dial; seal a key slot for the new
+            // member on the server and re-announce the group (the server
+            // becomes the authoritative membership source). The member will
+            // claim their secret via `join_server_group`.
+            let secret = self
+                .get_group(group_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?
+                .secret();
+            let me = self.peer_base58();
+            if !info.peer_id.is_empty() && info.peer_id != me {
+                let bundle = group::seal_secret(&self.account, &info.e2e_public, &secret)
+                    .map_err(|e| anyhow::anyhow!("seal key: {e}"))?;
+                let sealed = crate::account::b64(&bundle);
+                let my_e2e = self.e2e_public().to_string();
+                self.dir
+                    .put_group_key_slot(group_id, &info.peer_id, &my_e2e, &sealed)?;
+            }
+            self.announce_group(group_id)?;
+            return Ok(());
+        }
+
         self.running
             .cmd_tx
             .send(Cmd::GroupSubscribe {
@@ -1005,14 +1107,59 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     pub fn rotate_group(&self, group_id: &str) -> anyhow::Result<group::Group> {
         let mut g = self
             .groups
-            .write()
-            .get_mut(group_id)
+            .read()
+            .get(group_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        let mode = g.mode;
+        let me = self.peer_base58();
+        let my_e2e = self.e2e_public().to_string();
         g.rotate();
+        let secret = g.secret();
+
+        if mode == group::GroupMode::Server {
+            let members = g.members.clone();
+            for (peer, mi) in members.iter() {
+                if peer.as_str() == me.as_str() {
+                    continue;
+                }
+                let bundle = group::seal_secret(&self.account, &mi.e2e_public, &secret)
+                    .map_err(|e| anyhow::anyhow!("re-seal key for {peer}: {e}"))?;
+                let sealed = crate::account::b64(&bundle);
+                self.dir
+                    .put_group_key_slot(group_id, peer, &my_e2e, &sealed)
+                    .map_err(|e| anyhow::anyhow!("put rotated key slot {peer}: {e}"))?;
+            }
+            self.save_group(&g)?;
+            self.announce_group(group_id)?;
+            return Ok(g);
+        }
         self.save_group(&g)?;
         self.publish_group_key(group_id)?;
         Ok(g)
+    }
+
+    pub fn kick_member(&self, group_id: &str, peer_id: &str) -> anyhow::Result<bool> {
+        let mut g = self
+            .groups
+            .read()
+            .get(group_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        let existed = g.remove_member(peer_id);
+        if !existed {
+            return Ok(false);
+        }
+        self.save_group(&g)?;
+        if g.mode == group::GroupMode::Server {
+            // Drop the key slot so the kicked member can no longer claim the
+            // group secret (belt-and-suspenders: the envelope is already
+            // E2E-encrypted under the group key, but this prevents a stale
+            // slot from being reused on a re-join).
+            let _ = self.dir.delete_group_key_slot(group_id, peer_id);
+            self.announce_group(group_id)?;
+        }
+        Ok(true)
     }
 
     pub fn leave_group(&self, group_id: &str) -> anyhow::Result<()> {
@@ -1027,13 +1174,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok(())
     }
 
-    /// Subscribes the local swarm to the group's gossipsub topic.
-    ///
-    /// This is the first step after learning a group_id out-of-band: it opens the
-    /// pub/sub stream for that group so the owner's key publication can be
-    /// received. The caller must subsequently call `drain_inbound` until
-    /// `InboundGroup::Key` for this group arrives, at which point the local
-    /// `Group` record exists and `send_group_message` will work.
     pub fn join_group(&self, group_id: &str) -> anyhow::Result<()> {
         let _ = self.running.cmd_tx.send(Cmd::GroupSubscribe {
             group_id: group_id.into(),
@@ -1186,29 +1326,207 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             text.len()
         );
         let env = self.seal_group_message(group_id, text)?;
-        let wire = group::msg_wire(&env)?;
-        let topic = sw::IdentTopic::new(sw::group_topic_name(group_id));
-        self.running
-            .cmd_tx
-            .send(Cmd::GroupPublish { topic, data: wire })
-            .map_err(|e| anyhow::anyhow!("publish group msg: {e}"))?;
+        if self.group_mode(group_id) == group::GroupMode::Server {
+            // B / server-fanout: post the sealed envelope to the server inbox.
+            let seq = self.dir.post_group_message(group_id, &env)?;
+            tracing::debug!(group_id, seq, "sent group msg via server");
+        } else {
+            // A / P2P: broadcast on the gossipsub topic.
+            let wire = group::msg_wire(&env)?;
+            let topic = sw::IdentTopic::new(sw::group_topic_name(group_id));
+            self.running
+                .cmd_tx
+                .send(Cmd::GroupPublish { topic, data: wire })
+                .map_err(|e| anyhow::anyhow!("publish group msg: {e}"))?;
+        }
         self.store_group_outbound(&env).await?;
         eprintln!("[group] send_group_message done group={group_id}");
         Ok(())
     }
 
+    fn group_mode(&self, group_id: &str) -> group::GroupMode {
+        self.groups
+            .read()
+            .get(group_id)
+            .map(|g| g.mode)
+            .unwrap_or_default()
+    }
+
+    pub fn create_server_group(
+        &self,
+        group_id: impl Into<String>,
+        members: Vec<MemberInfo>,
+    ) -> anyhow::Result<group::Group> {
+        let group_id = group_id.into();
+        let me_peer = self.peer_base58();
+        let mut g = group::Group::create(&group_id, me_peer.clone());
+        g.set_mode(group::GroupMode::Server);
+        g.set_member(MemberInfo {
+            peer_id: me_peer.clone(),
+            sign_pk: self.my_sign_pk().to_string(),
+            e2e_public: self.e2e_public().to_string(),
+        });
+        let secret = g.secret();
+        for m in members {
+            if m.peer_id == me_peer {
+                continue;
+            }
+            let bundle = group::seal_secret(&self.account, &m.e2e_public, &secret)
+                .map_err(|e| anyhow::anyhow!("seal key for {}: {e}", m.peer_id))?;
+            let sealed = crate::account::b64(&bundle);
+            // Store *my own* e2e public key alongside the bundle — that's the
+            // counterparty identity Bob needs to derive the X25519 shared key
+            // when unsealing.
+            let my_e2e = self.e2e_public().to_string();
+            self.dir
+                .put_group_key_slot(&group_id, &m.peer_id, &my_e2e, &sealed)?;
+            g.set_member(m);
+        }
+        self.save_group(&g)?;
+        // Server becomes the authoritative registry for membership + mode.
+        self.announce_group(&group_id)?;
+        Ok(g)
+    }
+
+    pub fn join_server_group(&self, group_id: &str) -> anyhow::Result<group::Group> {
+        let pubinfo = self.dir.resolve_group(group_id)?;
+        let me = self.peer_base58();
+        let my_info = pubinfo.members.get(&me).cloned().ok_or_else(|| {
+            anyhow::anyhow!("not a member of group {group_id} (ask the owner to add you)")
+        })?;
+
+        let (sender_e2e, sealed_b64) = self.dir.get_group_key_slot(group_id, &me)?;
+        let bundle = crate::account::from_b64(&sealed_b64)
+            .ok_or_else(|| anyhow::anyhow!("bad server key slot for {group_id}"))?;
+
+        let secret = group::open_secret(&self.account, &sender_e2e, &bundle)
+            .map_err(|e| anyhow::anyhow!("open group key: {e}"))?;
+        let mut g = group::Group::with_secret(pubinfo.group_id, pubinfo.owner, secret);
+        g.set_mode(pubinfo.mode);
+        for (pid, mi) in pubinfo.members {
+            g.set_member(mi);
+            let _ = pid;
+        }
+        if !g.has(&me) {
+            g.set_member(my_info);
+        }
+        self.save_group(&g)?;
+        Ok(g)
+    }
+
+    pub async fn fetch_server_inbox_from(&self, group_id: &str, from_seq: u64) -> Vec<String> {
+        let entries = match self.dir.poll_group_messages(group_id, from_seq) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("fetch_server_inbox_from {group_id}: {e}");
+                return Vec::new();
+            }
+        };
+        let me = self.peer_base58();
+        let mut touched = Vec::new();
+        for entry in entries {
+            if entry.from == me {
+                continue;
+            }
+            let wire_b = match crate::account::from_b64(&entry.wire) {
+                Some(b) => b,
+                None => continue,
+            };
+            let _ = group::parse_group_wire(&wire_b); // best-effort; validated in pump
+            let _ = self.running.injected.send(sw::ChatEvent::GroupMail {
+                topic: sw::group_topic_name(group_id),
+                from: PeerId::random(),
+                data: wire_b,
+                seq: entry.seq,
+            });
+            touched.push(group_id.to_string());
+        }
+        touched
+    }
+
+    pub async fn poll_group_server_inbox(&self) -> Vec<String> {
+        let work: Vec<(String, u64)> = {
+            let groups = self.groups.read();
+            groups
+                .values()
+                .filter(|g| g.mode == group::GroupMode::Server)
+                .map(|g| (g.group_id.clone(), g.last_server_seq))
+                .collect()
+        };
+
+        let me = self.peer_base58();
+        let mut touched: Vec<String> = Vec::new();
+        for (sid, after) in work {
+            let entries = match self.dir.poll_group_messages(&sid, after) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("poll server inbox {sid}: {e}");
+                    continue;
+                }
+            };
+            for entry in &entries {
+                if entry.from == me {
+                    // Our own outbound is already stored locally.
+                    continue;
+                }
+                let wire_b = match crate::account::from_b64(&entry.wire) {
+                    Some(b) => b,
+                    None => {
+                        tracing::warn!(
+                            "malformed server inbox entry (b64) for {sid} @ seq {}",
+                            entry.seq
+                        );
+                        continue;
+                    }
+                };
+                let wire = match group::parse_group_wire(&wire_b) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        tracing::warn!(
+                            "malformed server inbox wire {sid} @ seq {}: {e}",
+                            entry.seq
+                        );
+                        continue;
+                    }
+                };
+                if wire.env.group_id != sid {
+                    continue;
+                }
+                let _ = self.running.injected.send(sw::ChatEvent::GroupMail {
+                    topic: sw::group_topic_name(&sid),
+                    from: PeerId::random(),
+                    data: wire_b,
+                    seq: entry.seq,
+                });
+                touched.push(sid.clone());
+            }
+        }
+        touched
+    }
+
+    fn advance_group_cursor(&self, group_id: &str, seq: u64) {
+        if let Some(g) = self.groups.write().get_mut(group_id) {
+            if seq > g.last_server_seq {
+                g.last_server_seq = seq;
+                let _ = self.persist_group_to_disk(g);
+            }
+        }
+    }
+
     fn save_group(&self, g: &group::Group) -> anyhow::Result<()> {
-        g.save(
-            &self.account,
-            &self.groups_dir.join(format!("{}.json", g.group_id)),
-        )?;
+        self.persist_group_to_disk(g)?;
         self.groups.write().insert(g.group_id.clone(), g.clone());
         Ok(())
     }
 
-    /// Process a single inbound event. Returns the touched chat/group id, if
-    /// the event produced a new stored message. Safe to call from a shared
-    /// `Arc<Client>` on a dedicated pump task.
+    fn persist_group_to_disk(&self, g: &group::Group) -> anyhow::Result<()> {
+        g.save(
+            &self.account,
+            &self.groups_dir.join(format!("{}.json", g.group_id)),
+        )?;
+        Ok(())
+    }
+
     pub async fn process_event(&self, evt: sw::ChatEvent) -> Option<String> {
         use sw::ChatEvent as E;
         match evt {
@@ -1236,35 +1554,70 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 }
             }
             E::GroupPacket { topic, from, data } => {
-                let group_id = sw::topic_to_group_id(&topic)?;
-                if from.to_base58() == self.peer_base58() {
-                    return None;
+                self.inbound_group_wire(&topic, from, &data, 0).await
+            }
+            E::GroupMail {
+                topic,
+                from,
+                data,
+                seq,
+            } => {
+                let gid = self.inbound_group_wire(&topic, from, &data, seq).await;
+                if let Some(gid) = &gid {
+                    self.advance_group_cursor(gid, seq);
                 }
-                if !self.group_member(&group_id) {
-                    return None;
-                }
-                let wire = match group::parse_group_wire(&data) {
-                    Ok(w) => w,
-                    Err(e) => {
-                        tracing::warn!("parse group wire for {group_id}: {e}");
-                        return None;
-                    }
-                };
-                if wire.env.group_id != group_id {
-                    return None;
-                }
-                match self.open_group_message(&group_id, &wire.env) {
-                    Ok(_text) => {
-                        let _ = self.store_group_inbound(&wire.env).await;
-                        Some(group_id)
-                    }
-                    Err(e) => {
-                        tracing::warn!("open group msg {group_id}: {e}");
-                        None
-                    }
-                }
+                gid
             }
             _ => None,
+        }
+    }
+
+    async fn inbound_group_wire(
+        &self,
+        topic: &str,
+        from: PeerId,
+        data: &[u8],
+        seq: u64,
+    ) -> Option<String> {
+        let group_id = sw::topic_to_group_id(topic)?;
+        if from.to_base58() == self.peer_base58() {
+            return None;
+        }
+        if !self.group_member(&group_id) {
+            return None;
+        }
+        let wire = match group::parse_group_wire(data) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!("parse group wire for {group_id}: {e}");
+                return None;
+            }
+        };
+        if wire.env.group_id != group_id {
+            return None;
+        }
+        match self.open_group_message(&group_id, &wire.env) {
+            Ok(_text) => {
+                if seq > 0 {
+                    let b64 =
+                        crate::account::b64(&serde_json::to_vec(&wire.env).unwrap_or_default());
+                    let dup = self
+                        .store
+                        .all()
+                        .iter()
+                        .any(|m| m.chat_id == group_id && m.text == b64);
+                    if dup {
+                        tracing::debug!(group_id, "drop duplicate group envelope");
+                        return Some(group_id);
+                    }
+                }
+                let _ = self.store_group_inbound(&wire.env).await;
+                Some(group_id)
+            }
+            Err(e) => {
+                tracing::warn!("open group msg {group_id}: {e}");
+                None
+            }
         }
     }
 
@@ -1287,12 +1640,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 }
 
-/// Probe the host's current egress IPv4 address (e.g. `192.168.1.42`).
-///
-/// Uses a UDP socket `connect` to public DNS — this only selects the
-/// kernel's egress interface for *future* packets; no datagram is actually
-/// sent and the call returns immediately. If the host is offline or has no
-/// IPv4 route, returns `None` so the caller keeps whatever it already had.
 fn tcp_port_of(addr: &str) -> Option<u16> {
     addr.parse::<Multiaddr>()
         .ok()
@@ -1309,8 +1656,6 @@ fn tcp_port_of(addr: &str) -> Option<u16> {
         .filter(|p| *p != 0)
 }
 
-/// Return a human-readable reason if `addr` can never be dialed from *another*
-/// machine (loopback, wildcard 0.0.0.0, or a `tcp/0` placeholder), else `None`.
 fn unroutable_reason(addr: &Multiaddr) -> Option<&'static str> {
     let mut saw_tcp0 = false;
     for comp in addr.iter() {

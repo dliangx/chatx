@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -7,7 +6,7 @@ use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use chatx_core::account::{AttestationAction, DeviceRecord, DeviceStatus, UserRecord};
 use chatx_core::group::GroupPublic;
 use chatx_core::message::now_ms;
@@ -15,6 +14,7 @@ use chatx_core::signal::{ONLINE_TTL_MS, UserResolve};
 use serde::{Deserialize, Serialize};
 
 mod db;
+mod relay;
 
 #[derive(Clone)]
 struct App {
@@ -75,7 +75,6 @@ fn best_device(
     }
     best.cloned()
 }
-
 
 async fn upsert_user(
     State(App { users, db, .. }): State<App>,
@@ -187,7 +186,6 @@ async fn list_users(
     Ok(ok_json(&out))
 }
 
-
 /// True if `approver` is an APPROVED device of the same account (`user_id`),
 /// distinct from the target device. An account can only approve/attest via
 /// one of its already-trusted devices.
@@ -200,24 +198,9 @@ fn approver_is_trusted(
     let Some(a) = devices.get(approver) else {
         return false;
     };
-    a.status == DeviceStatus::Approved
-        && a.user_id == user_id
-        && approver != self_peer
+    a.status == DeviceStatus::Approved && a.user_id == user_id && approver != self_peer
 }
 
-/// Server-side authorization check for a device status transition.
-///
-/// The client is expected to sign an [`chatx_core::account::Attestation`]
-/// with its account key. The *previous* status is read from the in-memory
-/// directory, so the server does not trust arbitrary upserts.
-///
-/// - New device (no prior record): only `Pending`, or `Approved` via a valid
-///   **self-attestation** (i.e. the first device of a fresh account).
-/// - Status unchanged: allowed (heartbeat / endpoints refresh).
-/// - `Pending -> Approved`: requires a valid signed attestation whose
-///   `approver` is a distinct, already-approved device of the same account.
-/// - `Approved / Revoked -> Revoked`: same requirements.
-/// - Any other transition is rejected.
 fn validate_device_update(
     devices: &HashMap<String, DeviceRecord>,
     existing: Option<&DeviceRecord>,
@@ -286,9 +269,7 @@ fn validate_device_update(
         if att.action != expected {
             return Err(format!(
                 "attestation action mismatch: got {:?}, expected {:?} (status {:?})",
-                att.action,
-                expected,
-                incoming.status
+                att.action, expected, incoming.status
             ));
         }
         if !approver_is_trusted(devices, &incoming.user_id, &att.approver, &incoming.peer_id) {
@@ -419,7 +400,6 @@ async fn health() -> ApiResult {
     Ok(ok_json(&"ok"))
 }
 
-
 async fn upsert_group(
     State(App { groups, db, .. }): State<App>,
     Path(group_id): Path<String>,
@@ -427,7 +407,12 @@ async fn upsert_group(
 ) -> ApiResult {
     let mut g: GroupPublic = match serde_json::from_str(&body) {
         Ok(r) => r,
-        Err(e) => return Err(bad(StatusCode::BAD_REQUEST, format!("bad GroupPublic: {e}"))),
+        Err(e) => {
+            return Err(bad(
+                StatusCode::BAD_REQUEST,
+                format!("bad GroupPublic: {e}"),
+            ));
+        }
     };
     g.group_id = group_id.clone();
     if let Err(e) = db::upsert_group(db.as_ref(), &g).await {
@@ -451,12 +436,192 @@ async fn resolve_group(
     Ok(ok_json(&g))
 }
 
-async fn list_groups(
-    State(App { groups, .. }): State<App>,
-) -> ApiResult {
+async fn list_groups(State(App { groups, .. }): State<App>) -> ApiResult {
     let mut out: Vec<GroupPublic> = groups.lock().unwrap().values().cloned().collect();
     out.sort_by_key(|g| g.group_id.clone());
     Ok(ok_json(&out))
+}
+
+#[derive(serde::Deserialize)]
+struct GroupMsgBody {
+    from: String,
+    wire: String,
+}
+
+async fn post_group_message(
+    State(App { groups, db, .. }): State<App>,
+    Path(group_id): Path<String>,
+    body: String,
+) -> ApiResult {
+    let b: GroupMsgBody = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return Err(bad(StatusCode::BAD_REQUEST, format!("bad body: {e}"))),
+    };
+
+    let is_member = groups
+        .lock()
+        .unwrap()
+        .get(&group_id)
+        .map(|g| g.owner == b.from || g.members.values().any(|m| m.peer_id == b.from))
+        .unwrap_or(false);
+    if !is_member {
+        return Err(bad(
+            StatusCode::FORBIDDEN,
+            format!(
+                "sender {from} is not a member of group {group_id}",
+                from = b.from
+            ),
+        ));
+    }
+    let seq = match db::append_group_message(
+        db.as_ref(),
+        &group_id,
+        &b.from,
+        chatx_core::message::now_ms(),
+        &b.wire,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(%e, "appending group message failed");
+            return Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
+        }
+    };
+    tracing::debug!(%group_id, seq, from = %b.from, "group message appended");
+    #[derive(serde::Serialize)]
+    struct Out {
+        seq: u64,
+    }
+    Ok(ok_json(&Out { seq }))
+}
+
+async fn poll_group_messages(
+    State(App { db, .. }): State<App>,
+    Path(group_id): Path<String>,
+    Query(q): Query<MsgQuery>,
+) -> ApiResult {
+    match db::list_group_messages(db.as_ref(), &group_id, q.after).await {
+        Ok(out) => Ok(ok_json(&out)),
+        Err(e) => {
+            tracing::warn!(%e, "listing group messages failed");
+            Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"))
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MsgQuery {
+    #[serde(default)]
+    after: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct KeySlotBody {
+    sender_e2e: String,
+    sealed: String,
+}
+
+async fn put_group_key_slot(
+    State(App { groups, db, .. }): State<App>,
+    Path((group_id, peer_id)): Path<(String, String)>,
+    body: String,
+) -> ApiResult {
+    let owner = groups
+        .lock()
+        .unwrap()
+        .get(&group_id)
+        .map(|g| g.owner.clone())
+        .ok_or_else(|| bad(StatusCode::NOT_FOUND, format!("group {group_id} not found")))?;
+    let b: KeySlotBody = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return Err(bad(StatusCode::BAD_REQUEST, format!("bad body: {e}"))),
+    };
+    if let Err(e) = db::upsert_group_key_slot(
+        db.as_ref(),
+        &group_id,
+        &owner,
+        &peer_id,
+        &b.sender_e2e,
+        &b.sealed,
+    )
+    .await
+    {
+        tracing::warn!(%e, "storing group key slot failed");
+        return Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
+    }
+    Ok(ok_json(&"ok"))
+}
+
+async fn get_group_key_slot(
+    State(App { db, .. }): State<App>,
+    Path((group_id, peer_id)): Path<(String, String)>,
+) -> ApiResult {
+    let (_owner, slots) = match db::load_group_key_slots(db.as_ref(), &group_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(%e, "loading group key slots failed");
+            return Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
+        }
+    };
+    match slots.get(&peer_id).cloned() {
+        Some(v) => Ok(ok_json(&v)),
+        None => Err(bad(
+            StatusCode::NOT_FOUND,
+            format!("no key slot for {peer_id}"),
+        )),
+    }
+}
+
+async fn delete_group_key_slot(
+    State(App { db, .. }): State<App>,
+    Path((group_id, peer_id)): Path<(String, String)>,
+) -> ApiResult {
+    let removed = match db::delete_group_key_slot(db.as_ref(), &group_id, &peer_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(%e, "deleting group key slot failed");
+            return Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
+        }
+    };
+    if removed {
+        Ok(StatusCode::NO_CONTENT.into_response())
+    } else {
+        Err(bad(
+            StatusCode::NOT_FOUND,
+            format!("no key slot for {peer_id}"),
+        ))
+    }
+}
+
+pub(crate) fn make_router(app: App) -> Router {
+    Router::new()
+        .route("/v1/health", get(health))
+        .route("/v1/users", get(list_users))
+        .route("/v1/users/{user_id}", put(upsert_user).get(resolve_user))
+        .route("/v1/users/{user_id}/resolve", get(resolve_and_device))
+        .route("/v1/users/{user_id}/devices", get(list_user_devices))
+        .route(
+            "/v1/devices/{peer_id}",
+            put(upsert_device).get(resolve_device).delete(delete_device),
+        )
+        .route("/v1/devices/{peer_id}/presence", put(device_presence))
+        .route("/v1/groups", get(list_groups))
+        .route(
+            "/v1/groups/{group_id}",
+            put(upsert_group).get(resolve_group),
+        )
+        .route(
+            "/v1/groups/{group_id}/messages",
+            post(post_group_message).get(poll_group_messages),
+        )
+        .route(
+            "/v1/groups/{group_id}/keys/{peer_id}",
+            put(put_group_key_slot)
+                .get(get_group_key_slot)
+                .delete(delete_group_key_slot),
+        )
+        .with_state(app)
 }
 
 #[tokio::main]
@@ -491,24 +656,170 @@ async fn main() {
         db,
     };
 
-    let router = Router::new()
-        .route("/v1/health", get(health))
-        .route("/v1/users", get(list_users))
-        .route("/v1/users/{user_id}", put(upsert_user).get(resolve_user))
-        .route("/v1/users/{user_id}/resolve", get(resolve_and_device))
-        .route("/v1/users/{user_id}/devices", get(list_user_devices))
-        .route(
-            "/v1/devices/{peer_id}",
-            put(upsert_device).get(resolve_device).delete(delete_device),
-        )
-        .route("/v1/devices/{peer_id}/presence", put(device_presence))
-        .route("/v1/groups", get(list_groups))
-        .route("/v1/groups/{group_id}", put(upsert_group).get(resolve_group))
-        .with_state(app.clone());
+    let router = make_router(app.clone());
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("bind TCP listener");
     tracing::info!(%addr, "chatx-signal listening");
+
+    // Built-in circuit-relay v2 server (enable with a CHATX_RELAY_ADDR value,
+    // disable with `CHATX_RELAY_ADDR=off`). Defaults to 0.0.0.0:4039.
+    let relay_spec = std::env::var("CHATX_RELAY_ADDR").unwrap_or_else(|_| "0.0.0.0:4039".into());
+    if relay_spec.to_ascii_lowercase() != "off" {
+        let relay_addr: SocketAddr = relay_spec
+            .parse()
+            .expect("CHATX_RELAY_ADDR must be host:port or `off`");
+        tokio::spawn(async move {
+            if let Err(e) = relay::serve(relay_addr).await {
+                tracing::error!(%e, "relay exited");
+            }
+        });
+    } else {
+        tracing::info!("circuit-relay disabled");
+    }
+
     axum::serve(listener, router).await.expect("serve");
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+    use chatx_core::group::GroupMode;
+
+    /// Start the real axum router (with a real SQLite db) on a background
+    /// thread with its own tokio runtime, and hand back the base URL. The
+    /// server lives as long as the guard (dropped when the test ends).
+    struct Server {
+        base: String,
+        _thread: std::thread::JoinHandle<()>,
+        _db: tempfile::TempDir,
+    }
+
+    impl Server {
+        fn start() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            // Bind the listener OUTSIDE the server thread so we know the port
+            // before spawning it, and can report the address back.
+            let (tx, rx) = std::sync::mpsc::channel::<std::net::SocketAddr>();
+            let path = dir.path().join("signal.db").to_path_buf();
+
+            let thread = std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async move {
+                    let db = Arc::new(db::open(&path).await.unwrap());
+                    let app = App {
+                        users: Arc::new(Mutex::new(HashMap::new())),
+                        devices: Arc::new(Mutex::new(HashMap::new())),
+                        groups: Arc::new(Mutex::new(HashMap::new())),
+                        db: db.clone(),
+                    };
+                    // Seed one server-mode group: owner "owner" + member "member-a".
+                    let mut members = std::collections::BTreeMap::new();
+                    for (pid, sign, e2e) in
+                        [("owner", "S-OWNER", "E-OWNER"), ("member-a", "S-A", "E-A")]
+                    {
+                        members.insert(
+                            pid.to_string(),
+                            chatx_core::group::MemberInfo {
+                                peer_id: pid.into(),
+                                sign_pk: sign.into(),
+                                e2e_public: e2e.into(),
+                            },
+                        );
+                    }
+                    let grp = GroupPublic {
+                        group_id: "grp-it".into(),
+                        owner: "owner".into(),
+                        members,
+                        created_at: 1,
+                        mode: GroupMode::Server,
+                    };
+                    db::upsert_group(app.db.as_ref(), &grp).await.unwrap();
+                    app.groups.lock().unwrap().insert("grp-it".into(), grp);
+
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let addr = listener.local_addr().unwrap();
+                    tx.send(addr).unwrap();
+                    axum::serve(listener, make_router(app)).await.unwrap();
+                });
+            });
+
+            let addr = rx.recv().unwrap();
+            Server {
+                base: format!("http://{addr}"),
+                _thread: thread,
+                _db: dir,
+            }
+        }
+    }
+
+    #[test]
+    fn b_mode_endpoints_over_http() {
+        use chatx_core::signal::{DirectoryClient, HttpDirectory};
+        let server = Server::start();
+        let dir = HttpDirectory::new(server.base.clone());
+
+        // resolve_group works.
+        let pubinfo = dir.resolve_group("grp-it").expect("resolve group");
+        assert_eq!(pubinfo.mode, GroupMode::Server);
+
+        // Key slot PUT + GET round-trip.
+        dir.put_group_key_slot("grp-it", "member-a", "E-OWNER", "SEAL-A")
+            .expect("put key slot");
+        let (sender_e2e, sealed) = dir
+            .get_group_key_slot("grp-it", "member-a")
+            .expect("get key slot");
+        assert_eq!(sender_e2e, "E-OWNER");
+        assert_eq!(sealed, "SEAL-A");
+
+        fn post(base: &str, from: &str) -> std::result::Result<u64, ureq::Error> {
+            #[derive(serde::Deserialize)]
+            struct Out {
+                seq: u64,
+            }
+            let url = format!("{base}/v1/groups/grp-it/messages");
+            let body = serde_json::json!({"from": from, "wire": "WIRE"}).to_string();
+            let resp = ureq::request("POST", &url)
+                .set("content-type", "application/json")
+                .send_string(&body)?;
+            Ok(resp.into_json::<Out>().expect("parse post response").seq)
+        }
+
+        // Member "owner" is allowed (membership check passes).
+        let seq = post(&server.base, "owner").expect("owner may post");
+        assert!(seq >= 1, "posted message must have a seq");
+
+        // Non-member is rejected with 403.
+        match post(&server.base, "intruder") {
+            Err(ureq::Error::Status(403, _)) => {}
+            other => panic!("expected 403 for non-member, got {other:?}"),
+        }
+
+        // Poll returns the one accepted message.
+        let msgs = dir.poll_group_messages("grp-it", 0).expect("poll messages");
+        assert_eq!(msgs.len(), 1, "only the accepted message is stored");
+        assert_eq!(msgs[0].from, "owner");
+
+        // Delete the key slot, then it is gone.
+        assert!(
+            dir.delete_group_key_slot("grp-it", "member-a")
+                .expect("delete slot"),
+            "slot must be removed"
+        );
+        assert!(
+            !dir.delete_group_key_slot("grp-it", "member-a")
+                .expect("second delete"),
+            "second delete must be a no-op"
+        );
+        assert!(
+            dir.get_group_key_slot("grp-it", "member-a").is_err(),
+            "slot must be gone after delete"
+        );
+
+        drop(server); // drop tempdir
+    }
 }

@@ -1,17 +1,9 @@
-//! SQLite persistence for the signaling server's in-memory directory.
-//!
-//! Backs the `App` maps (users / devices / groups) so a restart repopulates
-//! the durable data: identity keys, device authorization, groups, and the
-//! last-known device endpoints (so a direct reconnect can dial them).
-//! The one thing reset to a cold start is liveness — `seen` is zeroed so no
-//! device reads as "online" until it re-heartbeats (the presence TTL then
-//! filters it out everywhere).
 use std::collections::HashMap;
 
 use chatx_core::account::{Attestation, DeviceRecord, DeviceStatus, UserRecord};
 use chatx_core::group::GroupPublic;
-use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::Pool;
+use sqlx::sqlite::SqlitePoolOptions;
 
 pub type Sdb = Pool<sqlx::Sqlite>;
 
@@ -20,24 +12,47 @@ pub async fn open(path: &std::path::Path) -> anyhow::Result<Sdb> {
         std::fs::create_dir_all(parent)?;
     }
     let url = format!("sqlite:{}?mode=rwc", path.display());
-    let pool = SqlitePoolOptions::new().max_connections(1).connect(&url).await?;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await?;
     {
         let mut conn = pool.acquire().await?;
-        sqlx::query("PRAGMA journal_mode = WAL").execute(&mut *conn).await?;
-        sqlx::query("PRAGMA synchronous = NORMAL").execute(&mut *conn).await?;
+        sqlx::query("PRAGMA journal_mode = WAL")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("PRAGMA synchronous = NORMAL")
+            .execute(&mut *conn)
+            .await?;
     }
     apply_migrations(&pool).await?;
     Ok(pool)
 }
 
 async fn apply_migrations(pool: &Sdb) -> anyhow::Result<()> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY);",
-    )
-    .execute(pool)
-    .await?;
-    const SQL: &str = include_str!("migrations/0001_signal.sql");
-    sqlx::raw_sql(SQL).execute(pool).await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY);")
+        .execute(pool)
+        .await?;
+    for sql in [
+        include_str!("migrations/0001_signal.sql"),
+        include_str!("migrations/0002_group_mail.sql"),
+    ] {
+        sqlx::raw_sql(sql).execute(pool).await?;
+    }
+    ensure_group_mode_column(pool).await?;
+    Ok(())
+}
+
+async fn ensure_group_mode_column(pool: &Sdb) -> anyhow::Result<()> {
+    let has: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('groups') WHERE name = 'mode'")
+            .fetch_one(pool)
+            .await?;
+    if has == 0 {
+        sqlx::query("ALTER TABLE groups ADD COLUMN mode TEXT NOT NULL DEFAULT 'p2p'")
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }
 
@@ -121,18 +136,24 @@ pub async fn upsert_device(db: &Sdb, d: &DeviceRecord) -> anyhow::Result<()> {
 
 pub async fn upsert_group(db: &Sdb, g: &GroupPublic) -> anyhow::Result<()> {
     let members = serde_json::to_string(&g.members)?;
+    let mode = match g.mode {
+        chatx_core::group::GroupMode::Server => "server",
+        chatx_core::group::GroupMode::P2P => "p2p",
+    };
     sqlx::query(
-        "INSERT INTO groups (group_id, owner, members, created_at)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO groups (group_id, owner, members, created_at, mode)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(group_id) DO UPDATE SET
             owner      = ?2,
             members    = ?3,
-            created_at = ?4",
+            created_at = ?4,
+            mode       = ?5",
     )
     .bind(&g.group_id)
     .bind(&g.owner)
     .bind(members)
     .bind(g.created_at as i64)
+    .bind(mode)
     .execute(db)
     .await?;
     Ok(())
@@ -148,15 +169,194 @@ pub async fn delete_device(db: &Sdb, peer_id: &str) -> anyhow::Result<bool> {
     Ok(n.rows_affected() > 0)
 }
 
-// --- hydration (reload from disk) ------------------------------------------
+// --- B-mode (server-fanout group) -----------------------------------------
+pub const GROUP_MESSAGES_KEEP_WINDOW: u64 = 10_000;
 
-/// Restore the directory from disk.
-///
-/// `seen` is zeroed so nothing is "online" immediately after a bounce; the
-/// online-status filters (`now - seen > ONLINE_TTL_MS`) treat every restored
-/// device as offline until it re-heartbeats / touches presence. `endpoints`
-/// are kept as the last-known addresses for a potential direct reconnect.
-pub async fn load_all(db: &Sdb) -> anyhow::Result<(
+pub async fn trim_group_messages(
+    db: &Sdb,
+    group_id: &str,
+    keep_window: u64,
+) -> anyhow::Result<u64> {
+    if keep_window == 0 {
+        return Ok(0);
+    }
+    let max_seq: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM group_messages WHERE group_id = ?1")
+            .bind(group_id)
+            .fetch_one(db)
+            .await?;
+    let floor = max_seq - keep_window as i64 + 1;
+    if floor <= 0 {
+        return Ok(0);
+    }
+    let n = sqlx::query("DELETE FROM group_messages WHERE group_id = ?1 AND seq < ?2")
+        .bind(group_id)
+        .bind(floor)
+        .execute(db)
+        .await?;
+    Ok(n.rows_affected() as u64)
+}
+
+pub async fn append_group_message(
+    db: &Sdb,
+    group_id: &str,
+    sender_peer: &str,
+    t: u64,
+    wire: &str,
+) -> anyhow::Result<u64> {
+    let next: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(seq), 0) + 1 FROM group_messages WHERE group_id = ?1",
+    )
+    .bind(group_id)
+    .fetch_one(db)
+    .await?;
+    sqlx::query(
+        "INSERT INTO group_messages (group_id, seq, sender_peer, t, wire)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(group_id)
+    .bind(next)
+    .bind(sender_peer)
+    .bind(t as i64)
+    .bind(wire)
+    .execute(db)
+    .await?;
+    // Enforce the cap (no-op under the window).
+    let _ = trim_group_messages(db, group_id, GROUP_MESSAGES_KEEP_WINDOW).await?;
+    Ok(next as u64)
+}
+
+pub async fn list_group_messages(
+    db: &Sdb,
+    group_id: &str,
+    after: u64,
+) -> anyhow::Result<Vec<chatx_core::group::GroupMailEntry>> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        seq: i64,
+        sender_peer: String,
+        t: i64,
+        wire: String,
+    }
+    let rows: Vec<Row> = sqlx::query_as::<_, Row>(
+        "SELECT seq, sender_peer, t, wire FROM group_messages
+             WHERE group_id = ?1 AND seq > ?2 ORDER BY seq",
+    )
+    .bind(group_id)
+    .bind(after as i64)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| chatx_core::group::GroupMailEntry {
+            group_id: group_id.to_string(),
+            seq: r.seq as u64,
+            from: r.sender_peer,
+            t: r.t as u64,
+            wire: r.wire,
+        })
+        .collect())
+}
+
+/// Upsert a single member's sealed group-secret slot.
+pub async fn upsert_group_key_slot(
+    db: &Sdb,
+    group_id: &str,
+    owner: &str,
+    peer_id: &str,
+    e2e_public: &str,
+    sealed_b64: &str,
+) -> anyhow::Result<()> {
+    // Read current slots if any, update this member's entry, write back.
+    let mut slots: std::collections::BTreeMap<String, (String, String)> =
+        sqlx::query_scalar("SELECT slots FROM group_key_slots WHERE group_id = ?1")
+            .bind(group_id)
+            .fetch_optional(db)
+            .await?
+            .map(|s: String| serde_json::from_str(&s).unwrap_or_default())
+            .unwrap_or_default();
+    slots.insert(
+        peer_id.to_string(),
+        (e2e_public.to_string(), sealed_b64.to_string()),
+    );
+    let json = serde_json::to_string(&slots)?;
+    sqlx::query(
+        "INSERT INTO group_key_slots (group_id, owner, slots)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT (group_id) DO UPDATE SET owner = ?2, slots = ?3",
+    )
+    .bind(group_id)
+    .bind(owner)
+    .bind(&json)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Load all key slots for one group.
+pub async fn load_group_key_slots(
+    db: &Sdb,
+    group_id: &str,
+) -> anyhow::Result<(String, std::collections::BTreeMap<String, (String, String)>)> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        owner: String,
+        slots: String,
+    }
+    let row: Option<Row> =
+        sqlx::query_as::<_, Row>("SELECT owner, slots FROM group_key_slots WHERE group_id = ?1")
+            .bind(group_id)
+            .fetch_optional(db)
+            .await?;
+    let Some(row) = row else {
+        return Ok((String::new(), std::collections::BTreeMap::new()));
+    };
+    let slots: std::collections::BTreeMap<String, (String, String)> =
+        serde_json::from_str(&row.slots).unwrap_or_default();
+    Ok((row.owner, slots))
+}
+
+pub async fn delete_group_key_slot(
+    db: &Sdb,
+    group_id: &str,
+    peer_id: &str,
+) -> anyhow::Result<bool> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        slots: String,
+    }
+    let row: Option<Row> =
+        sqlx::query_as::<_, Row>("SELECT slots FROM group_key_slots WHERE group_id = ?1")
+            .bind(group_id)
+            .fetch_optional(db)
+            .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let mut slots: std::collections::BTreeMap<String, (String, String)> =
+        serde_json::from_str(&row.slots).unwrap_or_default();
+    let removed = slots.remove(peer_id).is_some();
+    if removed {
+        let json = serde_json::to_string(&slots)?;
+        if slots.is_empty() {
+            sqlx::query("DELETE FROM group_key_slots WHERE group_id = ?1")
+                .bind(group_id)
+                .execute(db)
+                .await?;
+        } else {
+            sqlx::query("UPDATE group_key_slots SET slots = ?2 WHERE group_id = ?1")
+                .bind(group_id)
+                .bind(json)
+                .execute(db)
+                .await?;
+        }
+    }
+    Ok(removed)
+}
+
+pub async fn load_all(
+    db: &Sdb,
+) -> anyhow::Result<(
     HashMap<String, UserRecord>,
     HashMap<String, DeviceRecord>,
     HashMap<String, GroupPublic>,
@@ -169,13 +369,14 @@ pub async fn load_all(db: &Sdb) -> anyhow::Result<(
         .map(|r| (r.user_id.clone(), r))
         .collect();
 
-    let devices: HashMap<String, DeviceRecord> = sqlx::query_as::<_, DevRow>("SELECT * FROM devices")
-        .fetch_all(db)
-        .await?
-        .into_iter()
-        .map(DevRow::into_record)
-        .map(|r| (r.peer_id.clone(), r))
-        .collect();
+    let devices: HashMap<String, DeviceRecord> =
+        sqlx::query_as::<_, DevRow>("SELECT * FROM devices")
+            .fetch_all(db)
+            .await?
+            .into_iter()
+            .map(DevRow::into_record)
+            .map(|r| (r.peer_id.clone(), r))
+            .collect();
 
     let groups: HashMap<String, GroupPublic> = sqlx::query_as::<_, GrpRow>("SELECT * FROM groups")
         .fetch_all(db)
@@ -255,17 +456,23 @@ struct GrpRow {
     owner: String,
     members: String,
     created_at: i64,
+    mode: Option<String>,
 }
 
 impl GrpRow {
     fn into_record(self) -> GroupPublic {
         let members: std::collections::BTreeMap<String, chatx_core::group::MemberInfo> =
             serde_json::from_str(&self.members).unwrap_or_default();
+        let mode = match self.mode.as_deref() {
+            Some("server") => chatx_core::group::GroupMode::Server,
+            _ => chatx_core::group::GroupMode::P2P,
+        };
         GroupPublic {
             group_id: self.group_id,
             owner: self.owner,
             members,
             created_at: self.created_at as u64,
+            mode,
         }
     }
 }
@@ -360,6 +567,7 @@ mod tests {
             owner: "QmDev1".into(),
             members,
             created_at: 42,
+            mode: chatx_core::group::GroupMode::P2P,
         };
         upsert_group(&db, &grp).await.unwrap();
 
@@ -382,7 +590,10 @@ mod tests {
             vec!["/ip4/1.2.3.4/tcp/8787".to_string()],
             "last-known endpoints are restored for reconnection"
         );
-        assert_eq!(d1.seen, 0, "seen must be reset cold (online state re-earned)");
+        assert_eq!(
+            d1.seen, 0,
+            "seen must be reset cold (online state re-earned)"
+        );
         let a = d1.attestation.as_ref().expect("attestation restored");
         assert_eq!(a.device, "QmDev1");
         assert_eq!(a.signature, "sig==");
@@ -403,5 +614,118 @@ mod tests {
         let (_2u, devs2, _2g) = load_all(&db).await.unwrap();
         assert!(!devs2.contains_key("QmDev1"));
         assert!(delete_device(&db, "QmGhost").await.unwrap() == false);
+    }
+
+    #[tokio::test]
+    async fn group_mail_and_key_slots_roundtrip() {
+        let (_d, db) = tmp_db().await;
+        let gid = "grp-b";
+
+        // Inbox: three appends yield strictly increasing seqs.
+        let s1 = append_group_message(&db, gid, "peera", 100, "WIRE-A")
+            .await
+            .unwrap();
+        let s2 = append_group_message(&db, gid, "peerb", 200, "WIRE-B")
+            .await
+            .unwrap();
+        let s3 = append_group_message(&db, gid, "peerc", 300, "WIRE-C")
+            .await
+            .unwrap();
+        assert!(s1 < s2 && s2 < s3, "seqs must be strictly increasing");
+
+        // Poll `after=0` returns everything in order.
+        let all = list_group_messages(&db, gid, 0).await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].wire, "WIRE-A");
+        assert_eq!(all[2].wire, "WIRE-C");
+        assert_eq!(all[2].group_id, gid);
+
+        // Cursor semantics: `after=seq` excludes that entry.
+        let tail = list_group_messages(&db, gid, s2).await.unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].wire, "WIRE-C");
+        assert!(list_group_messages(&db, gid, s3).await.unwrap().is_empty());
+
+        // Key slots: upsert two members, read back both, then overwrite one.
+        upsert_group_key_slot(&db, gid, "owner", "Qmbob", "E2E-BOB", "SEAL-BOB")
+            .await
+            .unwrap();
+        upsert_group_key_slot(&db, gid, "owner", "Qmcarol", "E2E-CAROL", "SEAL-CAROL")
+            .await
+            .unwrap();
+        let (_owner, slots) = load_group_key_slots(&db, gid).await.unwrap();
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots["Qmbob"].0, "E2E-BOB");
+        assert_eq!(slots["Qmbob"].1, "SEAL-BOB");
+
+        // Overwrite bob's slot (e.g. key rotation); count unchanged.
+        upsert_group_key_slot(&db, gid, "owner", "Qmbob", "E2E-BOB", "SEAL-BOB-2")
+            .await
+            .unwrap();
+        let (_o2, slots2) = load_group_key_slots(&db, gid).await.unwrap();
+        assert_eq!(slots2.len(), 2, "overwrite does not add a third slot");
+        assert_eq!(slots2["Qmbob"].1, "SEAL-BOB-2");
+
+        // Unknown group yields empty slots, not an error.
+        let (_no, empty) = load_group_key_slots(&db, "grp-unknown").await.unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn kick_deletes_key_slot() {
+        let (_d, db) = tmp_db().await;
+        let gid = "grp-k";
+
+        upsert_group_key_slot(&db, gid, "owner", "Alice", "E2E-A", "SEAL-A")
+            .await
+            .unwrap();
+        upsert_group_key_slot(&db, gid, "owner", "Bob", "E2E-B", "SEAL-B")
+            .await
+            .unwrap();
+
+        // Kick Alice.
+        assert!(delete_group_key_slot(&db, gid, "Alice").await.unwrap());
+        let (_o, slots) = load_group_key_slots(&db, gid).await.unwrap();
+        assert!(!slots.contains_key("Alice"));
+        assert!(slots.contains_key("Bob"), "Bob stays after Alice is kicked");
+        assert_eq!(slots.len(), 1);
+
+        // Kick Bob — row deleted entirely.
+        assert!(delete_group_key_slot(&db, gid, "Bob").await.unwrap());
+        let (_o2, slots2) = load_group_key_slots(&db, gid).await.unwrap();
+        assert!(slots2.is_empty());
+
+        // Repeat kicks return false.
+        assert!(!delete_group_key_slot(&db, gid, "Alice").await.unwrap());
+        assert!(!delete_group_key_slot(&db, "ghost", "Alice").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn inbox_trim_enforces_keep_window() {
+        let (_d, db) = tmp_db().await;
+        let gid = "grp-trim";
+
+        // Append 7 messages, then request keep_window=3. The oldest 4 go.
+        for i in 0..7u64 {
+            append_group_message(&db, gid, "owner", i, &format!("WIRE-{i}"))
+                .await
+                .unwrap();
+        }
+        assert_eq!(list_group_messages(&db, gid, 0).await.unwrap().len(), 7);
+
+        let removed = trim_group_messages(&db, gid, 3).await.unwrap();
+        assert_eq!(removed, 4, "keep 3 -> delete 4 oldest");
+
+        let kept = list_group_messages(&db, gid, 0).await.unwrap();
+        assert_eq!(kept.len(), 3);
+        assert_eq!(kept[0].wire, "WIRE-4", "oldest kept is WIRE-4");
+        assert_eq!(kept[2].wire, "WIRE-6", "newest kept is WIRE-6");
+
+        // Trimming to a window >= current row count is a no-op.
+        assert_eq!(trim_group_messages(&db, gid, 10).await.unwrap(), 0);
+        assert_eq!(list_group_messages(&db, gid, 0).await.unwrap().len(), 3);
+
+        // Trimming an unknown group is a no-op.
+        assert_eq!(trim_group_messages(&db, "ghost", 3).await.unwrap(), 0);
     }
 }

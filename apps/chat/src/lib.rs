@@ -6,10 +6,10 @@ use chatx_core::Client;
 use chatx_core::group::MemberInfo;
 use chatx_core::signal::{DirectoryClient, HttpDirectory};
 use chatx_core::store::dm_chat_id;
+use render::Renderer;
 use render::bubble::parse::parse_text;
 use render::bubble::{Bubble, GroupPos, Side};
 use render::canvas::Image;
-use render::Renderer;
 
 pub mod data;
 use data::ArcBackend;
@@ -52,8 +52,9 @@ static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> = std::sync::On
 /// Per-conversation "distance-from-bottom" of the last scroll position the
 /// user viewed, in logical px (0 = fully at the newest message). Restored when
 /// the chat view (re)enters so the user picks up where they left off.
-static CHAT_SCROLL_POS: std::sync::LazyLock<std::sync::RwLock<std::collections::HashMap<i32, f32>>> =
-    std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+static CHAT_SCROLL_POS: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashMap<i32, f32>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
 
 /// Cross-thread snapshot of the logged-in user id. Set at login, immutable
 /// until logout — used in place of `weak.upgrade()` when the current code
@@ -75,8 +76,6 @@ fn current_me() -> String {
 /// UI key namespace.
 static CURRENT_CHAT: std::sync::LazyLock<std::sync::RwLock<Option<String>>> =
     std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
-
-
 
 fn set_current_chat_id(chat_id: &str) {
     *CURRENT_CHAT.write().unwrap() = Some(chat_id.to_string());
@@ -151,7 +150,6 @@ fn clear_passphrase(_user_id: &str) {
 }
 
 pub fn run_app() {
-
     #[cfg(any(target_os = "android", target_os = "ios"))]
     install_bridge_sinks();
 
@@ -166,7 +164,8 @@ pub fn run_app() {
         .map(|ks| ks.user_id)
         .ok();
     if let Some(uid) = existing_uid {
-        ui.global::<AppState>().set_auth_message(SharedString::from("please logging in "));
+        ui.global::<AppState>()
+            .set_auth_message(SharedString::from("please logging in "));
         state.set_user_id(SharedString::from(uid.clone()));
 
         if let Some(pass) = load_passphrase(&uid) {
@@ -188,10 +187,12 @@ pub fn run_app() {
     }
 
     {
-        let tabs: Vec<TabState> = (0..4).map(|_| TabState {
-            sub_history: slint::ModelRc::new(slint::VecModel::from(Vec::<SubPageEntry>::new())),
-            sub_top: -1,
-        }).collect();
+        let tabs: Vec<TabState> = (0..4)
+            .map(|_| TabState {
+                sub_history: slint::ModelRc::new(slint::VecModel::from(Vec::<SubPageEntry>::new())),
+                sub_top: -1,
+            })
+            .collect();
         let mut nav = state.get_nav_state();
         nav.tabs = slint::ModelRc::new(slint::VecModel::from(tabs));
         state.set_nav_state(nav);
@@ -210,7 +211,6 @@ pub fn run_app() {
                 let s = ui.global::<AppState>();
                 push_sub_history(&s, SubPageEntry { page, payload });
             }
-
         });
     }
     {
@@ -303,18 +303,38 @@ pub fn run_app() {
                 clear_passphrase(&uid);
             }
             clear_sub_history(&st);
-            st.set_chats(slint::ModelRc::new(slint::VecModel::from(Vec::<ConversationRow>::new())));
-            st.set_contacts(slint::ModelRc::new(slint::VecModel::from(Vec::<ContactRow>::new())));
-            st.set_contact_letters(slint::ModelRc::new(slint::VecModel::from(Vec::<LetterEntry>::new())));
-            st.set_discover(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
-            st.set_my_collect(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
-            st.set_my_share(slint::ModelRc::new(slint::VecModel::from(Vec::<DiscoverCard>::new())));
-            st.set_my_devices(slint::ModelRc::new(slint::VecModel::from(Vec::<MyDevice>::new())));
+            st.set_chats(slint::ModelRc::new(slint::VecModel::from(Vec::<
+                ConversationRow,
+            >::new(
+            ))));
+            st.set_contacts(slint::ModelRc::new(slint::VecModel::from(
+                Vec::<ContactRow>::new(),
+            )));
+            st.set_contact_letters(slint::ModelRc::new(slint::VecModel::from(
+                Vec::<LetterEntry>::new(),
+            )));
+            st.set_discover(slint::ModelRc::new(slint::VecModel::from(Vec::<
+                DiscoverCard,
+            >::new(
+            ))));
+            st.set_my_collect(slint::ModelRc::new(slint::VecModel::from(Vec::<
+                DiscoverCard,
+            >::new(
+            ))));
+            st.set_my_share(slint::ModelRc::new(slint::VecModel::from(Vec::<
+                DiscoverCard,
+            >::new(
+            ))));
+            st.set_my_devices(slint::ModelRc::new(slint::VecModel::from(
+                Vec::<MyDevice>::new(),
+            )));
             st.set_device_approved(true);
             st.set_notice_text(SharedString::new());
             st.set_data_status(SharedString::new());
             let cs = ui.global::<ChatSession>();
-            cs.set_messages(slint::ModelRc::new(slint::VecModel::from(Vec::<MessageData>::new())));
+            cs.set_messages(slint::ModelRc::new(slint::VecModel::from(
+                Vec::<MessageData>::new(),
+            )));
             cs.set_send_status(SharedString::new());
             ui.set_logged_in(false);
         }
@@ -354,7 +374,8 @@ pub fn run_app() {
             if let Some(ui) = w.upgrade() {
                 let st = ui.global::<AppState>();
                 let m = st.get_group_picked();
-                let mut picked: Vec<i32> = (0..m.row_count()).filter_map(|i| m.row_data(i)).collect();
+                let mut picked: Vec<i32> =
+                    (0..m.row_count()).filter_map(|i| m.row_data(i)).collect();
                 if !picked.contains(&key) {
                     picked.push(key);
                     st.set_group_picked(slint::ModelRc::new(slint::VecModel::from(picked)));
@@ -369,7 +390,8 @@ pub fn run_app() {
             if let Some(ui) = w.upgrade() {
                 let st = ui.global::<AppState>();
                 let m = st.get_group_picked();
-                let mut picked: Vec<i32> = (0..m.row_count()).filter_map(|i| m.row_data(i)).collect();
+                let mut picked: Vec<i32> =
+                    (0..m.row_count()).filter_map(|i| m.row_data(i)).collect();
                 picked.retain(|k| *k != key);
                 st.set_group_picked(slint::ModelRc::new(slint::VecModel::from(picked)));
             }
@@ -384,7 +406,9 @@ pub fn run_app() {
                 let m = st.get_group_picked();
                 let picked: Vec<i32> = (0..m.row_count()).filter_map(|i| m.row_data(i)).collect();
                 if create_group_flow(w.clone(), picked) {
-                    st.set_group_picked(slint::ModelRc::new(slint::VecModel::from(Vec::<i32>::new())));
+                    st.set_group_picked(slint::ModelRc::new(slint::VecModel::from(
+                        Vec::<i32>::new(),
+                    )));
                 }
             }
         });
@@ -392,18 +416,19 @@ pub fn run_app() {
 
     {
         let w = weak.clone();
-        ui.global::<AppState>().on_show_qr_code(move |peer: SharedString| {
-            let peer = peer.to_string();
-            eprintln!("[qr] on_show_qr_code: target={peer}");
-            if let Some(ui) = w.upgrade() {
-                let st = ui.global::<AppState>();
-                st.set_qr_target_id(SharedString::from(peer.clone()));
-                st.set_qr_image(qr_image(&peer));
-                let mut nav = st.get_nav_state();
-                nav.global_overlay = GlobalOverlayType::QrCode;
-                st.set_nav_state(nav);
-            }
-        });
+        ui.global::<AppState>()
+            .on_show_qr_code(move |peer: SharedString| {
+                let peer = peer.to_string();
+                eprintln!("[qr] on_show_qr_code: target={peer}");
+                if let Some(ui) = w.upgrade() {
+                    let st = ui.global::<AppState>();
+                    st.set_qr_target_id(SharedString::from(peer.clone()));
+                    st.set_qr_image(qr_image(&peer));
+                    let mut nav = st.get_nav_state();
+                    nav.global_overlay = GlobalOverlayType::QrCode;
+                    st.set_nav_state(nav);
+                }
+            });
     }
 
     {
@@ -460,12 +485,13 @@ pub fn run_app() {
     }
     {
         let weak = weak.clone();
-        ui.global::<ProfileState>().on_open_conversation(move |key| {
-            eprintln!("[chat] on_open_conversation: got key={key}");
-            open_conversation_with_contact(weak.clone(), key);
-        });
+        ui.global::<ProfileState>()
+            .on_open_conversation(move |key| {
+                eprintln!("[chat] on_open_conversation: got key={key}");
+                open_conversation_with_contact(weak.clone(), key);
+            });
     }
-       {
+    {
         let weak = weak.clone();
         ui.global::<ProfileState>().on_start_audio_call(move |key| {
             begin_voice_call(weak.clone(), key);
@@ -479,9 +505,10 @@ pub fn run_app() {
     }
     {
         let weak = weak.clone();
-        ui.global::<ProfileState>().on_start_screen_share(move |key| {
-            begin_screen_share(weak.clone(), key);
-        });
+        ui.global::<ProfileState>()
+            .on_start_screen_share(move |key| {
+                begin_screen_share(weak.clone(), key);
+            });
     }
     {
         let weak = weak.clone();
@@ -505,8 +532,8 @@ pub fn run_app() {
     }
     {
         let weak = weak.clone();
-        ui.global::<CallState>().on_toggle_mute(move || {
-            match weak.upgrade() {
+        ui.global::<CallState>()
+            .on_toggle_mute(move || match weak.upgrade() {
                 Some(ui) => {
                     let st = ui.global::<CallState>();
                     let new = !st.get_muted();
@@ -514,32 +541,37 @@ pub fn run_app() {
                     call::mute_mic(new);
                 }
                 None => {}
-            }
-        });
+            });
     }
 
     {
         let weak = weak.clone();
-        ui.global::<ChatSession>().on_message_sent(move |key, body| {
-            let b = body.as_str().trim().to_string();
-            if b.is_empty() {
-                return;
-            }
-            send_chat_message(weak.clone(), key, b);
-        });
+        ui.global::<ChatSession>()
+            .on_message_sent(move |key, body| {
+                let b = body.as_str().trim().to_string();
+                if b.is_empty() {
+                    return;
+                }
+                send_chat_message(weak.clone(), key, b);
+            });
     }
 
     {
-        ui.global::<ChatSession>().on_update_scroll(move |key, dist| {
-            CHAT_SCROLL_POS.write().unwrap().insert(key, dist);
-        });
+        ui.global::<ChatSession>()
+            .on_update_scroll(move |key, dist| {
+                CHAT_SCROLL_POS.write().unwrap().insert(key, dist);
+            });
     }
 
     {
         let weak = weak.clone();
         ui.global::<ChatSession>().on_scroll_request(move |key| {
-
-            let dist = CHAT_SCROLL_POS.read().unwrap().get(&key).copied().unwrap_or(0.0);
+            let dist = CHAT_SCROLL_POS
+                .read()
+                .unwrap()
+                .get(&key)
+                .copied()
+                .unwrap_or(0.0);
             if let Some(ui) = weak.upgrade() {
                 let cs = ui.global::<ChatSession>();
                 cs.set_scroll_dist(dist);
@@ -563,13 +595,14 @@ pub fn run_app() {
     }
     {
         let weak = weak.clone();
-        ui.global::<PostDetailState>().on_add_comment(move |key, body| {
-            let b = body.as_str().trim().to_string();
-            if b.is_empty() {
-                return;
-            }
-            add_post_comment(weak.clone(), key, b);
-        });
+        ui.global::<PostDetailState>()
+            .on_add_comment(move |key, body| {
+                let b = body.as_str().trim().to_string();
+                if b.is_empty() {
+                    return;
+                }
+                add_post_comment(weak.clone(), key, b);
+            });
     }
 
     {
@@ -655,11 +688,19 @@ fn push_sub_history(app: &AppState, entry: SubPageEntry) {
     let active = nav.active_tab as usize;
     use slint::Model;
     let tabs_model = nav.tabs.clone();
-    let mut v: Vec<TabState> = (0..tabs_model.row_count()).filter_map(|i| tabs_model.row_data(i)).collect();
-    if active >= v.len() { return; }
+    let mut v: Vec<TabState> = (0..tabs_model.row_count())
+        .filter_map(|i| tabs_model.row_data(i))
+        .collect();
+    if active >= v.len() {
+        return;
+    }
     let tab = v.get_mut(active).unwrap();
     let h = tab.sub_history.clone();
-    let keep = if tab.sub_top < 0 { 0 } else { tab.sub_top as usize + 1 };
+    let keep = if tab.sub_top < 0 {
+        0
+    } else {
+        tab.sub_top as usize + 1
+    };
     let mut v2: Vec<SubPageEntry> = (0..h.row_count()).filter_map(|i| h.row_data(i)).collect();
     v2.truncate(keep);
     v2.push(entry);
@@ -673,8 +714,12 @@ fn pop_sub_history(app: &AppState) {
     let mut nav = app.get_nav_state();
     let active = nav.active_tab as usize;
     use slint::Model;
-    let mut v: Vec<TabState> = (0..nav.tabs.row_count()).filter_map(|i| nav.tabs.row_data(i)).collect();
-    if active >= v.len() { return; }
+    let mut v: Vec<TabState> = (0..nav.tabs.row_count())
+        .filter_map(|i| nav.tabs.row_data(i))
+        .collect();
+    if active >= v.len() {
+        return;
+    }
     let tab = v.get_mut(active).unwrap();
     let next_top = tab.sub_top - 1;
     if next_top < 0 {
@@ -756,12 +801,17 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
                     }
                     let n = frame_n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if n < 3 {
-                        eprintln!("[scan.preview] app sink #{n}: {w}x{h} fmt={fmt} bytes={}", bytes.len());
+                        eprintln!(
+                            "[scan.preview] app sink #{n}: {w}x{h} fmt={fmt} bytes={}",
+                            bytes.len()
+                        );
                     }
                     let data = bytes.to_vec();
                     let wk = wsink2.clone();
                     let _ = slint::invoke_from_event_loop(move || {
-                        let Some(ui) = wk.upgrade() else { return; };
+                        let Some(ui) = wk.upgrade() else {
+                            return;
+                        };
                         let st = ui.global::<AppState>();
                         st.set_scan_preview(make_preview_image(&data, w, h, fmt));
                     });
@@ -792,7 +842,9 @@ fn make_preview_image(data: &[u8], w: u32, h: u32, fmt: u32) -> slint::Image {
             // Expand Y → R=G=B.
             let mut di = 0usize;
             for &y in data.iter().take(n) {
-                if di + 4 > dst.len() { break; }
+                if di + 4 > dst.len() {
+                    break;
+                }
                 dst[di] = y;
                 dst[di + 1] = y;
                 dst[di + 2] = y;
@@ -898,8 +950,9 @@ fn apply_result(
                         Err(err) => {
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(ui) = weak.upgrade() {
-                                    ui.global::<AppState>()
-                                        .set_data_status(SharedString::from(format!("load failed: {err}")));
+                                    ui.global::<AppState>().set_data_status(SharedString::from(
+                                        format!("load failed: {err}"),
+                                    ));
                                 }
                             });
                         }
@@ -909,7 +962,8 @@ fn apply_result(
         }
         Err(err) => {
             if let Some(ui) = weak.upgrade() {
-                ui.global::<AppState>().set_auth_message(SharedString::from(err.to_string()));
+                ui.global::<AppState>()
+                    .set_auth_message(SharedString::from(err.to_string()));
                 ui.set_logged_in(false);
             }
             return;
@@ -917,8 +971,10 @@ fn apply_result(
     }
 
     if let Some(ui) = weak.upgrade() {
-        ui.global::<AppState>().set_auth_message(SharedString::from(format!("logged in:{user_id}")));
-        ui.global::<AppState>().set_user_id(SharedString::from(user_id));
+        ui.global::<AppState>()
+            .set_auth_message(SharedString::from(format!("logged in:{user_id}")));
+        ui.global::<AppState>()
+            .set_user_id(SharedString::from(user_id));
         ui.set_logged_in(true);
         refresh_devices(ui.as_weak());
     }
@@ -932,33 +988,51 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
     let weak = weak.clone();
     let rt = runtime();
     rt.spawn(async move {
+        // Periodically pull sealed group envelopes from the signaling server's
+        // inbox (B / server-fanout groups) and inject them as `GroupMail`
+        // events into the client's event stream. The event arm below delivers
+        // them exactly like live P2P gossip.
+        let mut server_poll = tokio::time::interval(std::time::Duration::from_secs(2));
+        server_poll.tick().await; // first tick completes immediately
         loop {
-            let client: std::sync::Arc<chatx_core::Client<chatx_core::signal::HttpDirectory>> = match CLIENT.lock().unwrap().clone() {
-                Some(c) => c,
-                None => break,
-            };
-            let Some(evt) = client.next_event().await else {
-                break;
-            };
-            // ── Inbound WebRTC signaling: answer Offer or apply Answer/ICE
-            // on the active call. `handle_signal_offer` blocks the UI
-            // thread while it does the offer/answer handshake; acceptable
-            // (rare and brief). ────────────────────────────────────────────
-            if let chatx_core::swarm::ChatEvent::Webrtc { peer, json, .. } = &evt {
-                let client_arc = client.clone();
-                let peer = *peer;
-                let json = json.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    call::handle_signal_offer(client_arc, peer, &json);
-                });
-                continue;
-            }
-            // Note: `ChatEvent::Audio` is intentionally not handled — the
-            // `PeerCall` remote sink (installed by `call::wire_remote_sinks`)
-            // already routes inbound peer audio into the cpal speaker queue.
-            let touched = client.process_event(evt).await;
-            if let Some(touched) = touched {
-                refresh_inbound_chat(weak.clone(), touched).await;
+            let client: std::sync::Arc<chatx_core::Client<chatx_core::signal::HttpDirectory>> =
+                match CLIENT.lock().unwrap().clone() {
+                    Some(c) => c,
+                    None => break,
+                };
+            tokio::select! {
+                _ = server_poll.tick() => {
+                    // Pull any pending server-fanout group mail; each new
+                    // envelope is appended to the client's event channel so the
+                    // next `next_event` iteration processes it.
+                    let _touched = client.poll_group_server_inbox().await;
+                    continue;
+                }
+                maybe_evt = client.next_event() => {
+                    let Some(evt) = maybe_evt else {
+                        break;
+                    };
+                    // ── Inbound WebRTC signaling: answer Offer or apply Answer/ICE
+                    // on the active call. `handle_signal_offer` blocks the UI
+                    // thread while it does the offer/answer handshake; acceptable
+                    // (rare and brief). ────────────────────────────────────────────
+                    if let chatx_core::swarm::ChatEvent::Webrtc { peer, json, .. } = &evt {
+                        let client_arc = client.clone();
+                        let peer = *peer;
+                        let json = json.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            call::handle_signal_offer(client_arc, peer, &json);
+                        });
+                        continue;
+                    }
+                    // Note: `ChatEvent::Audio` is intentionally not handled — the
+                    // `PeerCall` remote sink (installed by `call::wire_remote_sinks`)
+                    // already routes inbound peer audio into the cpal speaker queue.
+                    let touched = client.process_event(evt).await;
+                    if let Some(touched) = touched {
+                        refresh_inbound_chat(weak.clone(), touched).await;
+                    }
+                }
             }
         }
     });
@@ -986,7 +1060,13 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
     // re-click). Deciding by chat_id string directly — no UI-key dependency.
     let is_current = CURRENT_CHAT.read().unwrap().as_deref() == Some(chat_id.as_str());
     let key = {
-        backend.read().await.chats.iter().find(|r| r.chat_id == chat_id).map(|r| r.key)
+        backend
+            .read()
+            .await
+            .chats
+            .iter()
+            .find(|r| r.chat_id == chat_id)
+            .map(|r| r.key)
     };
     eprintln!("[inbound] chat_id={chat_id} key={key:?} is_current={is_current}");
     let weak2 = weak.clone();
@@ -1010,11 +1090,11 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
     let mut snapshot = backend.blocking_read().clone();
 
     let rank = |c: char| if c == '#' { '[' } else { c };
-    snapshot
-        .contacts
-        .sort_by(|a, b| rank(data::contact_letter(&a.name))
+    snapshot.contacts.sort_by(|a, b| {
+        rank(data::contact_letter(&a.name))
             .cmp(&rank(data::contact_letter(&b.name)))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
 
     let mut chats_sorted = snapshot.chats.clone();
     chats_sorted.sort_by(|a, b| b.time_ms.cmp(&a.time_ms).then(b.key.cmp(&a.key)));
@@ -1049,7 +1129,11 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
 
     let mut letter_entries: Vec<(char, i32)> = Vec::new();
     for (i, &ltr) in contact_letters.iter().enumerate() {
-        if letter_entries.last().map(|(c, _)| *c).map_or(true, |c| c != ltr) {
+        if letter_entries
+            .last()
+            .map(|(c, _)| *c)
+            .map_or(true, |c| c != ltr)
+        {
             letter_entries.push((ltr, i as i32));
         }
     }
@@ -1110,15 +1194,18 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
     let t0 = std::time::Instant::now();
     eprintln!("[chat] publish_chat_rows: enter");
     let snapshot = backend.blocking_read().clone();
-    eprintln!("[chat] publish_chat_rows: +{}ms snapshot chats={}",
+    eprintln!(
+        "[chat] publish_chat_rows: +{}ms snapshot chats={}",
         t0.elapsed().as_millis(),
-        snapshot.chats.len());
+        snapshot.chats.len()
+    );
 
     {
         let pool = POOL.lock().unwrap().clone();
         let me_peer = CLIENT.lock().unwrap().as_ref().map(|c| c.peer_base58());
         // friend peer id -> real users.id, so the reload join shows the name.
-        let mut friend_by_peer: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut friend_by_peer: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
         for c in &snapshot.contacts {
             if !c.peer_id.is_empty() {
                 friend_by_peer.insert(c.peer_id.clone(), c.user_id);
@@ -1150,7 +1237,8 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
                         let Some(pb) = pb else {
                             continue;
                         };
-                        let conv_id = match sqlite::conversations::ensure_dm(&pool, &chat_id).await {
+                        let conv_id = match sqlite::conversations::ensure_dm(&pool, &chat_id).await
+                        {
                             Ok(id) => id,
                             Err(e) => {
                                 eprintln!("[chat] ensure_dm({chat_id}) failed: {e}");
@@ -1170,7 +1258,8 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
                         // Give a just-opened DM a time for ordering/label; only
                         // fills it if no real message time has been recorded yet.
                         if time_ms > 0 {
-                            let _ = sqlite::conversations::ensure_time(&pool, conv_id, time_ms).await;
+                            let _ =
+                                sqlite::conversations::ensure_time(&pool, conv_id, time_ms).await;
                         }
                     }
                 });
@@ -1191,8 +1280,11 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
-    eprintln!("[chat] publish_chat_rows: +{}ms done (chats={})",
-        t0.elapsed().as_millis(), snapshot.chats.len());
+    eprintln!(
+        "[chat] publish_chat_rows: +{}ms done (chats={})",
+        t0.elapsed().as_millis(),
+        snapshot.chats.len()
+    );
 }
 
 /// Bundled fonts (SIL OFL / Apache-2.0), embedded at compile time.
@@ -1220,7 +1312,15 @@ fn renderer() -> Renderer {
         }
     }
     let px = r.theme.font_size.max(16.0);
-    r.emoji.add_color_font_bytes(FONT_EMOJI, 0, &['😀','😂','😅','😉','😊','😍','😘','😜','😎','😢','😭','😡','👍','👎','🙏','👏','🎉','🔥','💯','🚀'], px);
+    r.emoji.add_color_font_bytes(
+        FONT_EMOJI,
+        0,
+        &[
+            '😀', '😂', '😅', '😉', '😊', '😍', '😘', '😜', '😎', '😢', '😭', '😡', '👍', '👎',
+            '🙏', '👏', '🎉', '🔥', '💯', '🚀',
+        ],
+        px,
+    );
     r
 }
 
@@ -1262,7 +1362,11 @@ fn make_avatar(seed: &str, size: u32) -> Image {
     let n = size.max(1) as usize;
     let mut rgba = vec![0u8; n * n * 4];
     for y in 0..n {
-        let t = if n > 1 { y as f32 / (n - 1) as f32 } else { 0.0 };
+        let t = if n > 1 {
+            y as f32 / (n - 1) as f32
+        } else {
+            0.0
+        };
         let rr = (top.0 as f32 + (bottom.0 as f32 - top.0 as f32) * t) as u8;
         let gg = (top.1 as f32 + (bottom.1 as f32 - top.1 as f32) * t) as u8;
         let bb = (top.2 as f32 + (bottom.2 as f32 - top.2 as f32) * t) as u8;
@@ -1274,7 +1378,11 @@ fn make_avatar(seed: &str, size: u32) -> Image {
             rgba[i + 3] = 255;
         }
     }
-    Image { rgba, w: n as u32, h: n as u32 }
+    Image {
+        rgba,
+        w: n as u32,
+        h: n as u32,
+    }
 }
 
 /// Intermediate render result produced on a background thread.
@@ -1338,7 +1446,6 @@ fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> MessageData {
 
 /// Load a conversation's messages from SQLite into the ChatSession global (memory -> UI).
 fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
-
     if tokio::runtime::Handle::try_current().is_ok() {
         let weak = ui_weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -1367,9 +1474,17 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     let is_group_chat = chat_id.starts_with("grp-");
     let title = {
         let g = backend.blocking_read();
-        g.chats.iter().find(|r| r.key == chat_key).map(|r| r.title.clone()).unwrap_or_else(|| {
-            if is_group_chat { "群聊".into() } else { chat_id.clone() }
-        })
+        g.chats
+            .iter()
+            .find(|r| r.key == chat_key)
+            .map(|r| r.title.clone())
+            .unwrap_or_else(|| {
+                if is_group_chat {
+                    "群聊".into()
+                } else {
+                    chat_id.clone()
+                }
+            })
     };
     let rt = runtime();
     let ui_weak2 = ui_weak.clone();
@@ -1408,62 +1523,86 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
         // Group rows are stored as a base64 sealed envelope (see
         // `store_group_*`); open them into plaintext before rendering.
         // DM rows are already plaintext.
-        let rows: Vec<chatx_core::store::StoredMsg> = rows.into_iter().map(|m| {
-            if !is_group_chat {
-                return Some(m);
-            }
-            match client.open_stored_group_message(&chat_id, &m.text) {
-                Ok(plain) => Some(chatx_core::store::StoredMsg { text: plain, ..m }),
-                Err(e) => {
-                    eprintln!("[chat] failed to open group msg in {chat_id}: {e}; hiding it");
-                    None
+        let rows: Vec<chatx_core::store::StoredMsg> = rows
+            .into_iter()
+            .map(|m| {
+                if !is_group_chat {
+                    return Some(m);
                 }
-            }
-        }).flatten().collect();
+                match client.open_stored_group_message(&chat_id, &m.text) {
+                    Ok(plain) => Some(chatx_core::store::StoredMsg { text: plain, ..m }),
+                    Err(e) => {
+                        eprintln!("[chat] failed to open group msg in {chat_id}: {e}; hiding it");
+                        None
+                    }
+                }
+            })
+            .flatten()
+            .collect();
         // Group bubbles must show the per-message sender's nickname (or
         // username), not the conversation title — the title is just "群聊".
         // DM bubbles keep using the title (the peer's own nickname/username).
         let mut sender_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         if is_group_chat {
-            for sender in rows.iter().map(|m| m.sender.clone()).collect::<std::collections::HashSet<_>>() {
-                sender_names.insert(sender.clone(), crate::data::group_sender_name(&pool, &sender).await);
+            for sender in rows
+                .iter()
+                .map(|m| m.sender.clone())
+                .collect::<std::collections::HashSet<_>>()
+            {
+                sender_names.insert(
+                    sender.clone(),
+                    crate::data::group_sender_name(&pool, &sender).await,
+                );
             }
         }
         let rendered: Vec<RenderedMsg> = {
             let mut r = RENDERER.get().unwrap().lock().unwrap();
-            rows.iter().map(|m| {
-                let is_self = m.sender == me_peer || m.sender == me;
-                let time = time_label(m.t as i64);
-                let sender = if is_self {
-                    String::new()
-                } else if is_group_chat {
-                    sender_names
-                        .get(&m.sender)
-                        .cloned()
-                        .unwrap_or_else(|| m.sender.clone())
-                } else {
-                    title.clone()
-                };
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                std::hash::Hash::hash(&m.text, &mut h);
-                std::hash::Hash::hash(&sender, &mut h);
-                std::hash::Hash::hash(&is_self, &mut h);
-                std::hash::Hash::hash(&time, &mut h);
+            rows.iter()
+                .map(|m| {
+                    let is_self = m.sender == me_peer || m.sender == me;
+                    let time = time_label(m.t as i64);
+                    let sender = if is_self {
+                        String::new()
+                    } else if is_group_chat {
+                        sender_names
+                            .get(&m.sender)
+                            .cloned()
+                            .unwrap_or_else(|| m.sender.clone())
+                    } else {
+                        title.clone()
+                    };
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    std::hash::Hash::hash(&m.text, &mut h);
+                    std::hash::Hash::hash(&sender, &mut h);
+                    std::hash::Hash::hash(&is_self, &mut h);
+                    std::hash::Hash::hash(&time, &mut h);
 
-                let avatar = Some(make_avatar(&m.sender, 80));
-                let msg = DemoMsg {
-                    sender,
-                    side: if is_self { Side::SelfSide } else { Side::Other },
-                    time,
-                    text: m.text.clone(),
-                    avatar,
-                };
-                render_msg(&mut r, std::hash::Hasher::finish(&h), &msg, available_w, scale)
-            }).collect()
+                    let avatar = Some(make_avatar(&m.sender, 80));
+                    let msg = DemoMsg {
+                        sender,
+                        side: if is_self { Side::SelfSide } else { Side::Other },
+                        time,
+                        text: m.text.clone(),
+                        avatar,
+                    };
+                    render_msg(
+                        &mut r,
+                        std::hash::Hasher::finish(&h),
+                        &msg,
+                        available_w,
+                        scale,
+                    )
+                })
+                .collect()
         };
         let dist: f32 = {
-            CHAT_SCROLL_POS.read().unwrap().get(&chat_key).copied().unwrap_or(0.0)
+            CHAT_SCROLL_POS
+                .read()
+                .unwrap()
+                .get(&chat_key)
+                .copied()
+                .unwrap_or(0.0)
         };
         let _ = slint::invoke_from_event_loop(move || {
             let ui = match ui_weak2.upgrade() {
@@ -1534,11 +1673,15 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     // Group vs DM by chat id prefix (`grp-…`), the authoritative signal —
     // independent of the in-memory row's `is_group` flag.
     let is_group = chat_id.starts_with("grp-");
-    eprintln!("[send] key={key} chat_id={chat_id} is_group={is_group} body_len={}", body.len());
+    eprintln!(
+        "[send] key={key} chat_id={chat_id} is_group={is_group} body_len={}",
+        body.len()
+    );
 
     if is_group {
         if let Some(ui) = weak.upgrade() {
-            ui.global::<ChatSession>().set_send_status(SharedString::from("发送中…"));
+            ui.global::<ChatSession>()
+                .set_send_status(SharedString::from("发送中…"));
         }
         let rt = runtime();
         let weak2 = weak.clone();
@@ -1549,7 +1692,8 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                     eprintln!("[send] group message ok");
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
-                            ui.global::<ChatSession>().set_send_status(SharedString::new());
+                            ui.global::<ChatSession>()
+                                .set_send_status(SharedString::new());
                         }
                     });
                     // Sending a message should land us on the newest one.
@@ -1572,7 +1716,8 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     }
 
     if let Some(ui) = weak.upgrade() {
-        ui.global::<ChatSession>().set_send_status(SharedString::from("发送中…"));
+        ui.global::<ChatSession>()
+            .set_send_status(SharedString::from("发送中…"));
     }
     // Determine the remote peer(s) to send to. Chat ids no longer encode the
     // peer pair (they're content-addressed now), so the authoritative source
@@ -1654,7 +1799,8 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    ui.global::<ChatSession>().set_send_status(SharedString::new());
+                    ui.global::<ChatSession>()
+                        .set_send_status(SharedString::new());
                 }
             });
             load_chat_messages(weak2, key);
@@ -1792,7 +1938,9 @@ fn publish_my_notes(state: &AppState, backend: &ArcBackend) {
 
 fn relayout_notes(weak: slint::Weak<MainWindow>, w: i32) {
     let backend = BACKEND.lock().unwrap().clone();
-    let Some(backend) = backend else { return; };
+    let Some(backend) = backend else {
+        return;
+    };
     if let Some(ui) = weak.upgrade() {
         let state = ui.global::<AppState>();
         state.set_my_notes_w(w.max(1));
@@ -1803,12 +1951,16 @@ fn relayout_notes(weak: slint::Weak<MainWindow>, w: i32) {
 fn refresh_my_notes(weak: slint::Weak<MainWindow>) {
     let pool = POOL.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
-    let Some(backend) = backend else { return; };
+    let Some(backend) = backend else {
+        return;
+    };
     let me = current_me();
     if me.is_empty() {
         return;
     }
-    let Some(pool) = pool else { return; };
+    let Some(pool) = pool else {
+        return;
+    };
     let rt = runtime();
     rt.spawn(async move {
         let me_id = sqlite::users::get_by_username(&pool, &me)
@@ -1817,7 +1969,9 @@ fn refresh_my_notes(weak: slint::Weak<MainWindow>) {
             .flatten()
             .map(|u| u.id)
             .unwrap_or(0);
-        let stored = sqlite::notes::list_notes(&pool, me_id).await.unwrap_or_default();
+        let stored = sqlite::notes::list_notes(&pool, me_id)
+            .await
+            .unwrap_or_default();
         let _ = slint::invoke_from_event_loop(move || {
             {
                 let mut g = backend.blocking_write();
@@ -1844,7 +1998,9 @@ fn refresh_my_notes(weak: slint::Weak<MainWindow>) {
 fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
     let pool = POOL.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
-    let (Some(pool), Some(backend)) = (pool, backend) else { return; };
+    let (Some(pool), Some(backend)) = (pool, backend) else {
+        return;
+    };
     let me = current_me();
     if me.is_empty() || content.trim().is_empty() {
         return;
@@ -1892,9 +2048,13 @@ fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
 fn delete_my_note(weak: slint::Weak<MainWindow>, key: i32) {
     let pool = POOL.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
-    let (Some(pool), Some(backend)) = (pool, backend) else { return; };
+    let (Some(pool), Some(backend)) = (pool, backend) else {
+        return;
+    };
     let note_id = { backend.blocking_read().note_id_for(key) };
-    let Some(note_id) = note_id else { return; };
+    let Some(note_id) = note_id else {
+        return;
+    };
     {
         let mut g = backend.blocking_write();
         g.notes.retain(|n| n.note_id != note_id);
@@ -1908,6 +2068,16 @@ fn delete_my_note(weak: slint::Weak<MainWindow>, key: i32) {
             publish_my_notes(&ui.global::<AppState>(), &backend);
         }
     });
+}
+
+/// Decision for the B (server-fanout) vs A (P2P) delivery path for a group.
+///
+/// A: small groups — everyone keeps a direct/relay path to everyone else.
+/// B: large groups (>= `GROUP_P2P_MAX` members) — the signaling server is the
+///    hub; messages and key distribution go through it so clients never need
+///    O(N^2) direct paths. The server only ever holds E2E ciphertext.
+fn should_use_server_fanout(member_count: usize) -> bool {
+    member_count >= chatx_core::GROUP_P2P_MAX
 }
 
 fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
@@ -1963,21 +2133,57 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
         }
     }
     if members.is_empty() && !failed.is_empty() {
-        let msg = format!("无法解析用户设备：{}\n请确认对方账号已在目录注册。", failed.join(", "));
+        let msg = format!(
+            "无法解析用户设备：{}\n请确认对方账号已在目录注册。",
+            failed.join(", ")
+        );
         eprintln!("[create_group_flow] {msg}");
         show_app_error(weak.clone(), String::from("无法解析用户设备"));
         return false;
     }
     if !failed.is_empty() {
-        eprintln!("[create_group_flow] some members failed: {} (continuing with {} resolved)", failed.join(", "), members.len());
+        eprintln!(
+            "[create_group_flow] some members failed: {} (continuing with {} resolved)",
+            failed.join(", "),
+            members.len()
+        );
+    }
+    if members.len() >= chatx_core::GROUP_P2P_MAX {
+        tracing::warn!(
+            count = members.len(),
+            max = chatx_core::GROUP_P2P_MAX,
+            "群成员达到 P2P 群上限（成员对数 O(N²)，可达性风险显著上升），启用 server 扇出方案 B"
+        );
     }
 
-    let group_id = format!("grp-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
+    let group_id = format!(
+        "grp-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
     let title = format!("群聊({})", members.len());
-    match client.create_group(&group_id, members) {
+    let use_b = should_use_server_fanout(members.len());
+    let create_ok = if use_b {
+        // B / server-fanout: owner stores an E2E key slot for each member and
+        // the group is registered on the server (announce is done internally).
+        // `send_group_message` will take the server-inbox branch automatically
+        // because the local `Group` is marked `GroupMode::Server`.
+        client.create_server_group(&group_id, members).map(|_| ())
+    } else {
+        // A / P2P: gossip-based. Create, announce to the directory, and push
+        // the group key to each member over request/response.
+        client
+            .create_group(&group_id, members.clone())
+            .and_then(|_| {
+                client.announce_group(&group_id)?;
+                client.publish_group_key(&group_id)?;
+                Ok(())
+            })
+    };
+    match create_ok {
         Ok(_) => {
-            let _ = client.announce_group(&group_id);
-            let _ = client.publish_group_key(&group_id);
             // Insert a conversation row and open it.
             let new_key = {
                 let mut g = backend.blocking_write();
@@ -1990,7 +2196,13 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
                     state.set_group_status(SharedString::new());
                     publish_to_views(&state, backend.clone());
                     load_chat_messages(ui.as_weak(), new_key);
-                    push_sub_history(&state, SubPageEntry { page: SubPageType::ChatRoom, payload: new_key });
+                    push_sub_history(
+                        &state,
+                        SubPageEntry {
+                            page: SubPageType::ChatRoom,
+                            payload: new_key,
+                        },
+                    );
                 }
             });
             true
@@ -2078,7 +2290,8 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
         _ => {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    ui.global::<AppState>().set_add_status(SharedString::from("尚未登录或后端未就绪"));
+                    ui.global::<AppState>()
+                        .set_add_status(SharedString::from("尚未登录或后端未就绪"));
                 }
             });
         }
@@ -2086,7 +2299,10 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
 }
 
 fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
-    let username: String = username_raw.chars().filter(|c| !c.is_whitespace()).collect();
+    let username: String = username_raw
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     if username.is_empty() {
         return;
     }
@@ -2097,7 +2313,8 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
     let (Some(backend), Some(pool), Some(client)) = (backend.clone(), pool, client) else {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
-                ui.global::<AppState>().set_add_status(SharedString::from("尚未登录或后端未就绪"));
+                ui.global::<AppState>()
+                    .set_add_status(SharedString::from("尚未登录或后端未就绪"));
             }
         });
         return;
@@ -2109,7 +2326,8 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
     if !me.is_empty() && username.eq_ignore_ascii_case(&me) {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
-                ui.global::<AppState>().set_add_status(SharedString::from("不能添加自己"));
+                ui.global::<AppState>()
+                    .set_add_status(SharedString::from("不能添加自己"));
             }
         });
         return;
@@ -2119,7 +2337,8 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
     if backend.blocking_read().has_contact(&username, &username) {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
-                ui.global::<AppState>().set_add_status(SharedString::from("已在通讯录中"));
+                ui.global::<AppState>()
+                    .set_add_status(SharedString::from("已在通讯录中"));
             }
         });
         return;
@@ -2130,7 +2349,8 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
         if let Err(e) = do_add(&pool, &me, &username, &client, &backend).await {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    ui.global::<AppState>().set_add_status(SharedString::from(format!("添加失败: {e}")));
+                    ui.global::<AppState>()
+                        .set_add_status(SharedString::from(format!("添加失败: {e}")));
                 }
             });
             return;
@@ -2161,17 +2381,19 @@ async fn do_add(
     // them"), unlike my own row which keeps nickname empty.
     let their_id = match sqlite::users::get_by_username(pool, username).await? {
         Some(u) => u.id,
-        None => sqlite::users::upsert(
-            pool,
-            sqlite::new_id(),
-            &sqlite::users::UserPatch {
-                username: Some(username.to_string()),
-                nickname: Some(username.to_string()),
-                ..Default::default()
-            },
-        )
-        .await?
-        .id,
+        None => {
+            sqlite::users::upsert(
+                pool,
+                sqlite::new_id(),
+                &sqlite::users::UserPatch {
+                    username: Some(username.to_string()),
+                    nickname: Some(username.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?
+            .id
+        }
     };
     if their_id == me_id {
         anyhow::bail!("不能添加自己");
@@ -2180,10 +2402,7 @@ async fn do_add(
 
     // Bind the friend's libp2p device (from the server directory) to their
     // user id so incoming DMs resolve to them instead of a raw peer id.
-    let their_peer = client
-        .resolve_user(username)
-        .ok()
-        .map(|r| r.device.peer_id);
+    let their_peer = client.resolve_user(username).ok().map(|r| r.device.peer_id);
 
     if let Some(peer) = &their_peer {
         let _ = sqlite::devices::bind_device(pool, their_id, peer).await;
@@ -2191,7 +2410,12 @@ async fn do_add(
 
     let (name, image) = (username.to_string(), String::new());
     let mut g = backend.write().await;
-    g.append_contact(their_id, their_peer.unwrap_or_else(|| username.to_string()), name, image);
+    g.append_contact(
+        their_id,
+        their_peer.unwrap_or_else(|| username.to_string()),
+        name,
+        image,
+    );
     Ok(())
 }
 
@@ -2212,7 +2436,11 @@ fn refresh_devices(weak: slint::Weak<MainWindow>) {
         .into_iter()
         .map(|d| MyDevice {
             peer_id: SharedString::from(d.peer_id.clone()),
-            label: SharedString::from(if d.label.is_empty() { d.peer_id.clone() } else { d.label }),
+            label: SharedString::from(if d.label.is_empty() {
+                d.peer_id.clone()
+            } else {
+                d.label
+            }),
             online: now - d.seen as i64 <= chatx_core::signal::ONLINE_TTL_MS as i64,
             approved: d.status == chatx_core::account::DeviceStatus::Approved,
             self_device: d.peer_id == me_peer,
@@ -2295,7 +2523,10 @@ fn require_approved(weak: slint::Weak<MainWindow>) -> bool {
     if device_is_approved() {
         return true;
     }
-    show_app_error(weak, "当前设备待审批，请先在已登录设备上批准该设备".to_string());
+    show_app_error(
+        weak,
+        "当前设备待审批，请先在已登录设备上批准该设备".to_string(),
+    );
     false
 }
 
@@ -2317,7 +2548,6 @@ fn show_app_notice(weak: slint::Weak<MainWindow>, msg: String, success: bool) {
         }
     });
 }
-
 
 /// Switch to a global call overlay (audio / video / screen share).
 fn show_call_overlay(weak: slint::Weak<MainWindow>, overlay: GlobalOverlayType) {
@@ -2384,9 +2614,7 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
             .find(|r| r.key == key)
             .map(|r| r.name.clone())
             .unwrap_or_else(|| pid.clone());
-        eprintln!(
-            "[audio.call] begin_voice_call: resolving peer_base58={pid} name={name}"
-        );
+        eprintln!("[audio.call] begin_voice_call: resolving peer_base58={pid} name={name}");
         (pid, name)
     };
 
@@ -2394,7 +2622,10 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
     match call::start_call(
         Arc::clone(&client),
         &peer_base58,
-        call::CallOptions { include_cam: false, include_scr: false },
+        call::CallOptions {
+            include_cam: false,
+            include_scr: false,
+        },
     ) {
         Ok(()) => {
             eprintln!("[audio.call] begin_voice_call: start_call OK — showing AudioCall overlay");
@@ -2425,7 +2656,12 @@ fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
         let Some(pid) = g.peer_id_for(key).map(|s| s.to_string()) else {
             return;
         };
-        let name = g.contacts.iter().find(|r| r.key == key).map(|r| r.name.clone()).unwrap_or_else(|| pid.clone());
+        let name = g
+            .contacts
+            .iter()
+            .find(|r| r.key == key)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| pid.clone());
         (pid, name)
     };
 
@@ -2446,7 +2682,10 @@ fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
     if let Err(e) = call::start_call(
         Arc::clone(&client),
         &peer_base58,
-        call::CallOptions { include_cam: true, include_scr: false },
+        call::CallOptions {
+            include_cam: true,
+            include_scr: false,
+        },
     ) {
         publish_call_error(weak, format!("视频通话开始失败: {e}"));
         return;
@@ -2493,7 +2732,12 @@ fn begin_screen_share(weak: slint::Weak<MainWindow>, key: i32) {
         let Some(pid) = g.peer_id_for(key).map(|s| s.to_string()) else {
             return;
         };
-        let name = g.contacts.iter().find(|r| r.key == key).map(|r| r.name.clone()).unwrap_or_else(|| pid.clone());
+        let name = g
+            .contacts
+            .iter()
+            .find(|r| r.key == key)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| pid.clone());
         (pid, name)
     };
 
@@ -2528,7 +2772,10 @@ fn begin_screen_share(weak: slint::Weak<MainWindow>, key: i32) {
     if let Err(e) = call::start_call(
         Arc::clone(&client),
         &peer_base58,
-        call::CallOptions { include_cam: false, include_scr: true },
+        call::CallOptions {
+            include_cam: false,
+            include_scr: true,
+        },
     ) {
         publish_call_error(weak, format!("屏幕共享开始失败: {e}"));
         return;
@@ -2633,7 +2880,11 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
             }
             Err(e) => {
                 if PROFILE_LATEST.load(std::sync::atomic::Ordering::SeqCst) == seq {
-                    publish_profile_status(weak2, my_key, SharedString::from(format!("读取失败: {e}")));
+                    publish_profile_status(
+                        weak2,
+                        my_key,
+                        SharedString::from(format!("读取失败: {e}")),
+                    );
                 }
                 return;
             }
@@ -2694,9 +2945,15 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
     let t0 = std::time::Instant::now();
     eprintln!("[chat] open_conversation_with_contact: enter key={key}");
     let client = CLIENT.lock().unwrap().clone();
-    eprintln!("[chat] open_conversation: +{}ms grabbed CLIENT", t0.elapsed().as_millis());
+    eprintln!(
+        "[chat] open_conversation: +{}ms grabbed CLIENT",
+        t0.elapsed().as_millis()
+    );
     let backend = BACKEND.lock().unwrap().clone();
-    eprintln!("[chat] open_conversation: +{}ms grabbed BACKEND", t0.elapsed().as_millis());
+    eprintln!(
+        "[chat] open_conversation: +{}ms grabbed BACKEND",
+        t0.elapsed().as_millis()
+    );
     let (Some(client), Some(backend)) = (client, backend) else {
         show_app_error(weak, format!("尚未登录或后端未就绪"));
         return;
@@ -2707,7 +2964,11 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
         drop(g);
         row
     };
-    eprintln!("[chat] open_conversation: +{}ms backend row_clone ok={}", t0.elapsed().as_millis(), row_clone.is_some());
+    eprintln!(
+        "[chat] open_conversation: +{}ms backend row_clone ok={}",
+        t0.elapsed().as_millis(),
+        row_clone.is_some()
+    );
     let Some(c) = row_clone else {
         show_app_error(weak, format!("联系人已失效"));
         return;
@@ -2718,42 +2979,82 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
     }
     let peer_id = c.peer_id;
     let title = c.name;
-    eprintln!("[chat] open_conversation: +{}ms peer_id={peer_id}", t0.elapsed().as_millis());
+    eprintln!(
+        "[chat] open_conversation: +{}ms peer_id={peer_id}",
+        t0.elapsed().as_millis()
+    );
     let me_peer = client.peer_base58();
-    eprintln!("[chat] open_conversation: +{}ms self peer={me_peer}", t0.elapsed().as_millis());
+    eprintln!(
+        "[chat] open_conversation: +{}ms self peer={me_peer}",
+        t0.elapsed().as_millis()
+    );
     let chat_id = dm_chat_id(&me_peer, &peer_id);
-    eprintln!("[chat] open_conversation: +{}ms chat_id={chat_id}", t0.elapsed().as_millis());
-    eprintln!("[chat] open_conversation: +{}ms THREAD {:?} about to acquire READ lock (2nd time, after row_clone)",
-        t0.elapsed().as_millis(), std::thread::current().id());
-    let existing_key = backend.blocking_read().chats.iter().find(|c| c.chat_id == chat_id).map(|c| c.key);
-    eprintln!("[chat] open_conversation: +{}ms THREAD {:?} READ lock released, existing={:?}",
-        t0.elapsed().as_millis(), std::thread::current().id(), existing_key);
+    eprintln!(
+        "[chat] open_conversation: +{}ms chat_id={chat_id}",
+        t0.elapsed().as_millis()
+    );
+    eprintln!(
+        "[chat] open_conversation: +{}ms THREAD {:?} about to acquire READ lock (2nd time, after row_clone)",
+        t0.elapsed().as_millis(),
+        std::thread::current().id()
+    );
+    let existing_key = backend
+        .blocking_read()
+        .chats
+        .iter()
+        .find(|c| c.chat_id == chat_id)
+        .map(|c| c.key);
+    eprintln!(
+        "[chat] open_conversation: +{}ms THREAD {:?} READ lock released, existing={:?}",
+        t0.elapsed().as_millis(),
+        std::thread::current().id(),
+        existing_key
+    );
     let new_key = match existing_key {
         Some(k) => k,
         None => {
-            eprintln!("[chat] open_conversation: +{}ms THREAD {:?} about to acquire WRITE lock (append_chat)",
-                t0.elapsed().as_millis(), std::thread::current().id());
+            eprintln!(
+                "[chat] open_conversation: +{}ms THREAD {:?} about to acquire WRITE lock (append_chat)",
+                t0.elapsed().as_millis(),
+                std::thread::current().id()
+            );
             let mut g = backend.blocking_write();
             let k = g.append_chat(chat_id, title, false, peer_id.clone());
             drop(g);
-            eprintln!("[chat] open_conversation: +{}ms THREAD {:?} WRITE lock released, appended new chat key={k}",
-                t0.elapsed().as_millis(), std::thread::current().id());
+            eprintln!(
+                "[chat] open_conversation: +{}ms THREAD {:?} WRITE lock released, appended new chat key={k}",
+                t0.elapsed().as_millis(),
+                std::thread::current().id()
+            );
             k
         }
     };
-    eprintln!("[chat] open_conversation: +{}ms new_key={new_key}, about to invoke_from_event_loop", t0.elapsed().as_millis());
+    eprintln!(
+        "[chat] open_conversation: +{}ms new_key={new_key}, about to invoke_from_event_loop",
+        t0.elapsed().as_millis()
+    );
     let _ = slint::invoke_from_event_loop(move || {
-        eprintln!("[chat] open_conversation: +{}ms eventloop cb enter", t0.elapsed().as_millis());
+        eprintln!(
+            "[chat] open_conversation: +{}ms eventloop cb enter",
+            t0.elapsed().as_millis()
+        );
         let Some(ui) = weak.upgrade() else {
-            eprintln!("[chat] open_conversation: +{}ms weak upgrade failed", t0.elapsed().as_millis());
+            eprintln!(
+                "[chat] open_conversation: +{}ms weak upgrade failed",
+                t0.elapsed().as_millis()
+            );
             return;
         };
         eprintln!("[chat] open_conversation: eventloop cb calling publish_chat_rows");
         let state = ui.global::<AppState>();
         publish_chat_rows(&state, backend.clone());
-        eprintln!("[chat] open_conversation: eventloop cb publish_chat_rows done, calling load_chat_messages");
+        eprintln!(
+            "[chat] open_conversation: eventloop cb publish_chat_rows done, calling load_chat_messages"
+        );
         load_chat_messages(ui.as_weak(), new_key);
-        eprintln!("[chat] open_conversation: eventloop cb load_chat_messages spawned, calling push_sub_history");
+        eprintln!(
+            "[chat] open_conversation: eventloop cb load_chat_messages spawned, calling push_sub_history"
+        );
         // Ensure we're on the Chat tab (first tab) so the pushed ChatRoom
         // subpage lands under the visible tab, regardless of which tab the
         // user was on when they opened the conversation from a profile.
@@ -2764,10 +3065,22 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
                 state.set_nav_state(nav);
             }
         }
-        push_sub_history(&state, SubPageEntry { page: SubPageType::ChatRoom, payload: new_key });
-        eprintln!("[chat] open_conversation: +{}ms eventloop cb done", t0.elapsed().as_millis());
+        push_sub_history(
+            &state,
+            SubPageEntry {
+                page: SubPageType::ChatRoom,
+                payload: new_key,
+            },
+        );
+        eprintln!(
+            "[chat] open_conversation: +{}ms eventloop cb done",
+            t0.elapsed().as_millis()
+        );
     });
-    eprintln!("[chat] open_conversation: +{}ms invoke_from_event_loop queued (not yet run)", t0.elapsed().as_millis());
+    eprintln!(
+        "[chat] open_conversation: +{}ms invoke_from_event_loop queued (not yet run)",
+        t0.elapsed().as_millis()
+    );
 }
 
 /// Publish a status-only update for a post-detail key (data fields untouched).
@@ -2847,7 +3160,9 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
             .flatten()
             .map(|u| u.id)
             .unwrap_or(0);
-        let i_liked = sqlite::social_feed::has_liked(&pool, post_id, me_id).await.unwrap_or(false);
+        let i_liked = sqlite::social_feed::has_liked(&pool, post_id, me_id)
+            .await
+            .unwrap_or(false);
         // Resolve each liker to a display name for the "who liked" line.
         let mut likers: Vec<String> = Vec::new();
         if let Ok(ids) = sqlite::social_feed::likers(&pool, post_id).await {
@@ -2879,7 +3194,11 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
             Ok(rows) => rows,
             Err(e) => {
                 if POST_LATEST.load(std::sync::atomic::Ordering::SeqCst) == seq {
-                    publish_detail_status(weak2, key, SharedString::from(format!("读取评论失败: {e}")));
+                    publish_detail_status(
+                        weak2,
+                        key,
+                        SharedString::from(format!("读取评论失败: {e}")),
+                    );
                 }
                 return;
             }
@@ -2984,7 +3303,9 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         .map(|c| c.user_id().to_string())
         .unwrap_or_default();
     let my_name = {
-        let n = weak.clone().upgrade()
+        let n = weak
+            .clone()
+            .upgrade()
             .map(|ui| ui.global::<AppState>().get_nickname().to_string())
             .unwrap_or_default();
         if n.is_empty() { me.clone() } else { n }
@@ -2998,7 +3319,11 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                 return;
             }
             Err(e) => {
-                publish_detail_status(weak.clone(), key, SharedString::from(format!("评论失败: {e}")));
+                publish_detail_status(
+                    weak.clone(),
+                    key,
+                    SharedString::from(format!("评论失败: {e}")),
+                );
                 return;
             }
         };

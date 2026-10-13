@@ -13,7 +13,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 sqlx = { workspace = true }
 anyhow = { workspace = true }
+libp2p = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+ureq = { workspace = true }
