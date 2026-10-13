@@ -112,14 +112,29 @@ fn group_conn_enter(chat_id: &str) {
         return; // DM — no group dial
     }
     let now = chatx_core::message::now_ms();
-    GROUP_CONNS
-        .lock()
-        .unwrap()
-        .insert(chat_id.to_string(), GroupConnSlot { last_enter_ms: now });
+    // If the group is already in the map its P2P conns are alive (not yet
+    // swept) — just refresh the grace stamp and skip re-dialing. Only dial
+    // when the entry is missing (first enter, or it was closed by the sweeper).
+    let needs_connect = {
+        let mut m = GROUP_CONNS.lock().unwrap();
+        match m.get_mut(chat_id) {
+            Some(slot) => {
+                slot.last_enter_ms = now;
+                false
+            }
+            None => {
+                m.insert(chat_id.to_string(), GroupConnSlot { last_enter_ms: now });
+                true
+            }
+        }
+    };
+    if !needs_connect {
+        return;
+    }
 
     let gid = chat_id.to_string();
-    eprintln!("[group] ENTER {gid} (grace {GROUP_DISCONNECT_GRACE_MS}ms)");
     let Some(client) = CLIENT.lock().unwrap().clone() else {
+        // No client yet — keep the stamp so a later sweep doesn't mismanage it.
         return;
     };
 

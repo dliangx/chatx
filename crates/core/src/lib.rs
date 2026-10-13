@@ -528,10 +528,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         if !touched {
             self.fallback_register();
         }
-        eprintln!(
-            "[presence] heartbeat ok in {}ms (touch_presence={touched})",
-            t0.elapsed().as_millis()
-        );
     }
 
     pub fn start_presence_loop(self: &Arc<Self>) {
@@ -546,7 +542,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 let mut tick = 0u32;
                 loop {
                     tick = tick.wrapping_add(1);
-                    eprintln!("[presence] tick #{tick} starting");
                     std::thread::sleep(std::time::Duration::from_secs(15));
                     client.heartbeat();
                     // NOTE: P2P group (re)connections are NOT driven here.
