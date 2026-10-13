@@ -3,6 +3,23 @@ use std::sync::{Arc, Mutex};
 
 use crate::account::{DeviceRecord, DeviceStatus, UserRecord};
 
+/// Shared `ureq::Agent` with hard timeouts. `http_client().request(...)` default has
+/// `timeout_read = None` — a socket that connects and then stalls blocks the
+/// caller indefinitely. Our presence thread + all directory clients would
+/// therefore hang for minutes / forever on a single bad network blip, leaving
+/// `seen` stale and the device "offline" (until restart). Capping every
+/// network call gives us self-healing within seconds.
+fn http_client() -> &'static ureq::Agent {
+    static A: std::sync::LazyLock<ureq::Agent> = std::sync::LazyLock::new(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(5))
+            .timeout_read(std::time::Duration::from_secs(8))
+            .timeout_write(std::time::Duration::from_secs(8))
+            .build()
+    });
+    &A
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UserResolve {
     pub user: UserRecord,
@@ -504,7 +521,7 @@ impl HttpDirectory {
 
     pub fn ping(&self) -> anyhow::Result<()> {
         let url = format!("{}/v1/health", self.base);
-        ureq::request("GET", &url)
+        http_client().request("GET", &url)
             .call()
             .map(|_| ())
             .map_err(|e| anyhow::anyhow!("signal server unreachable: {e}"))
@@ -525,7 +542,7 @@ impl DirectoryClient for HttpDirectory {
     fn upsert_user(&self, user: &UserRecord) {
         let url = format!("{}/v1/users/{}", self.base, user.user_id);
         let body = serde_json::to_string(user).expect("serialize UserRecord");
-        let res = ureq::request("PUT", &url)
+        let res = http_client().request("PUT", &url)
             .set("content-type", "application/json")
             .send_string(&body);
         if let Err(e) = res {
@@ -536,7 +553,7 @@ impl DirectoryClient for HttpDirectory {
     fn upsert_device(&self, rec: &DeviceRecord) {
         let url = format!("{}/v1/devices/{}", self.base, rec.peer_id);
         let body = serde_json::to_string(rec).expect("serialize DeviceRecord");
-        let res = ureq::request("PUT", &url)
+        let res = http_client().request("PUT", &url)
             .set("content-type", "application/json")
             .send_string(&body);
         if let Err(e) = res {
@@ -546,7 +563,7 @@ impl DirectoryClient for HttpDirectory {
 
     fn resolve_device(&self, peer_id: &str) -> anyhow::Result<DeviceRecord> {
         let url = format!("{}/v1/devices/{peer_id}", self.base);
-        let resp = ureq::request("GET", &url)
+        let resp = http_client().request("GET", &url)
             .call()
             .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
         resp.into_json()
@@ -555,7 +572,7 @@ impl DirectoryClient for HttpDirectory {
 
     fn resolve_user(&self, user_id: &str) -> anyhow::Result<UserRecord> {
         let url = format!("{}/v1/users/{user_id}", self.base);
-        let resp = ureq::request("GET", &url)
+        let resp = http_client().request("GET", &url)
             .call()
             .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
         resp.into_json()
@@ -564,7 +581,7 @@ impl DirectoryClient for HttpDirectory {
 
     fn resolve_user_and_device(&self, user_id: &str) -> anyhow::Result<UserResolve> {
         let url = format!("{}/v1/users/{user_id}/resolve", self.base);
-        let resp = ureq::request("GET", &url)
+        let resp = http_client().request("GET", &url)
             .call()
             .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
         resp.into_json()
@@ -573,7 +590,7 @@ impl DirectoryClient for HttpDirectory {
 
     fn list_devices(&self, user_id: &str) -> Vec<DeviceRecord> {
         let url = format!("{}/v1/users/{user_id}/devices", self.base);
-        match ureq::request("GET", &url).call() {
+        match http_client().request("GET", &url).call() {
             Ok(resp) => resp.into_json::<Vec<DeviceRecord>>().unwrap_or_default(),
             Err(_) => Vec::new(),
         }
@@ -584,7 +601,7 @@ impl DirectoryClient for HttpDirectory {
         if !exclude.is_empty() {
             url.push_str(&format!("?exclude={}", exclude));
         }
-        match ureq::request("GET", &url).call() {
+        match http_client().request("GET", &url).call() {
             Ok(resp) => resp.into_json::<Vec<UserResolve>>().unwrap_or_default(),
             Err(_) => Vec::new(),
         }
@@ -592,7 +609,7 @@ impl DirectoryClient for HttpDirectory {
 
     fn list_pending(&self, user_id: &str) -> Vec<DeviceRecord> {
         let url = format!("{}/v1/users/{user_id}/devices?status=pending", self.base);
-        match ureq::request("GET", &url).call() {
+        match http_client().request("GET", &url).call() {
             Ok(resp) => resp.into_json::<Vec<DeviceRecord>>().unwrap_or_default(),
             Err(_) => Vec::new(),
         }
@@ -601,7 +618,7 @@ impl DirectoryClient for HttpDirectory {
     fn upsert_group(&self, g: &crate::group::GroupPublic) {
         let url = format!("{}/v1/groups/{}", self.base, g.group_id);
         let body = serde_json::to_string(g).expect("serialize GroupPublic");
-        let res = ureq::request("PUT", &url)
+        let res = http_client().request("PUT", &url)
             .set("content-type", "application/json")
             .send_string(&body);
         if let Err(e) = res {
@@ -611,7 +628,7 @@ impl DirectoryClient for HttpDirectory {
 
     fn resolve_group(&self, group_id: &str) -> anyhow::Result<crate::group::GroupPublic> {
         let url = format!("{}/v1/groups/{group_id}", self.base);
-        let resp = ureq::request("GET", &url)
+        let resp = http_client().request("GET", &url)
             .call()
             .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
         resp.into_json()
@@ -620,7 +637,7 @@ impl DirectoryClient for HttpDirectory {
 
     fn list_groups(&self) -> Vec<crate::group::GroupPublic> {
         let url = format!("{}/v1/groups", self.base);
-        match ureq::request("GET", &url).call() {
+        match http_client().request("GET", &url).call() {
             Ok(resp) => resp
                 .into_json::<Vec<crate::group::GroupPublic>>()
                 .unwrap_or_default(),
@@ -645,7 +662,7 @@ impl DirectoryClient for HttpDirectory {
         })
         .expect("serialize group msg body");
         let url = format!("{}/v1/groups/{group_id}/messages", self.base);
-        let resp = ureq::request("POST", &url)
+        let resp = http_client().request("POST", &url)
             .set("content-type", "application/json")
             .send_string(&body)
             .map_err(|e| anyhow::anyhow!("post group message: {e}"))?;
@@ -664,7 +681,7 @@ impl DirectoryClient for HttpDirectory {
         after: u64,
     ) -> anyhow::Result<Vec<crate::group::GroupMailEntry>> {
         let url = format!("{}/v1/groups/{group_id}/messages?after={after}", self.base);
-        match ureq::request("GET", &url).call() {
+        match http_client().request("GET", &url).call() {
             Ok(resp) => resp
                 .into_json::<Vec<crate::group::GroupMailEntry>>()
                 .map_err(|e| anyhow::anyhow!("poll group messages: {e}")),
@@ -690,7 +707,7 @@ impl DirectoryClient for HttpDirectory {
         })
         .expect("serialize key slot body");
         let url = format!("{}/v1/groups/{group_id}/keys/{peer_id}", self.base);
-        let res = ureq::request("PUT", &url)
+        let res = http_client().request("PUT", &url)
             .set("content-type", "application/json")
             .send_string(&body);
         res.map(|_| ())
@@ -703,7 +720,7 @@ impl DirectoryClient for HttpDirectory {
         peer_id: &str,
     ) -> anyhow::Result<(String, String)> {
         let url = format!("{}/v1/groups/{group_id}/keys/{peer_id}", self.base);
-        let resp = ureq::request("GET", &url)
+        let resp = http_client().request("GET", &url)
             .call()
             .map_err(|e| anyhow::anyhow!("get group key slot: {e}"))?;
         let v: (String, String) = resp
@@ -714,7 +731,7 @@ impl DirectoryClient for HttpDirectory {
 
     fn delete_group_key_slot(&self, group_id: &str, peer_id: &str) -> anyhow::Result<bool> {
         let url = format!("{}/v1/groups/{group_id}/keys/{peer_id}", self.base);
-        match ureq::request("DELETE", &url).call() {
+        match http_client().request("DELETE", &url).call() {
             Ok(_) => Ok(true),
             Err(ureq::Error::Status(404, _)) => Ok(false),
             Err(e) => Err(anyhow::anyhow!("delete group key slot: {e}")),
@@ -733,7 +750,7 @@ impl DirectoryClient for HttpDirectory {
             endpoints: endpoints.to_vec(),
         })
         .unwrap_or_else(|_| "{}".into());
-        match ureq::request("PUT", &url)
+        match http_client().request("PUT", &url)
             .set("content-type", "application/json")
             .send_string(&body)
         {

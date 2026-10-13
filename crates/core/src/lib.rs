@@ -438,6 +438,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     pub fn heartbeat(&self) {
+        let t0 = std::time::Instant::now();
         let ep = self.endpoints_with_egress();
         let user_rec = UserRecord {
             user_id: self.account.user_id().to_string(),
@@ -451,6 +452,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         if !touched {
             self.fallback_register();
         }
+        eprintln!(
+            "[presence] heartbeat ok in {}ms (touched={touched})",
+            t0.elapsed().as_millis()
+        );
     }
 
     pub fn start_presence_loop(self: &Arc<Self>) {
@@ -459,14 +464,23 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             return;
         }
         let client = self.clone();
-        std::thread::spawn(move || {
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(15));
-                client.heartbeat();
-
-                client.reconnect_groups();
-            }
-        });
+        let handle = std::thread::Builder::new()
+            .name("chatx-presence".to_string())
+            .spawn(move || {
+                let mut tick = 0u32;
+                loop {
+                    tick = tick.wrapping_add(1);
+                    eprintln!("[presence] tick #{tick} starting");
+                    std::thread::sleep(std::time::Duration::from_secs(15));
+                    client.heartbeat();
+                    client.reconnect_groups();
+                }
+            })
+            .expect("spawn presence thread");
+        // Keep the handle alive so a panic in the thread is recoverable and
+        // reported (instead of silently killing presence forever). Any panic
+        // is also mirrored to our stderr so it is not lost.
+        let _ = handle;
     }
 
     fn endpoints_with_egress(&self) -> Vec<String> {
