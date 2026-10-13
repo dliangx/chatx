@@ -41,6 +41,7 @@ libp2p = { version = "0.56", features = [
     "tokio",
     "upnp",
     "relay",
+    "ping",
 ] }
 libp2p-identity = "0.2"
 libp2p-core = "0.43"

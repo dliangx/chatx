@@ -39,6 +39,12 @@ pub struct Net {
     pub relay: libp2p::relay::client::Behaviour,
     pub chat: Chat<ChatRequest, ChatResponse>,
     pub group: libp2p::gossipsub::Behaviour,
+    // libp2p ping keeps the muxed TCP connection alive across idle periods:
+    // a ping sub-stream is exchanged every 15s on every established connection,
+    // so NAT / host firewalls don't time out a dormant yamux session. Without
+    // it, an otherwise-idle P2P session gets reaped by the peer's NAT after a
+    // few seconds — the exact "CONNECTED then DISCONNECTED" symptom we fixed.
+    pub ping: libp2p::ping::Behaviour,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +163,29 @@ pub struct Running {
     pub injected: mpsc::UnboundedSender<ChatEvent>,
 }
 
+/// True if `addr` is a local/loopback endpoint or one of our own advertised
+/// listen addresses (e.g. a sibling device on this host, or a stale self
+/// endpoint left in the directory) — dialing it would loop back to ourselves.
+fn is_own_address(addr: &Multiaddr, running: &Running) -> bool {
+    use libp2p::multiaddr::Protocol;
+    for p in addr.iter() {
+        match p {
+            Protocol::Ip4(ip) => {
+                if ip.is_loopback() {
+                    return true;
+                }
+            }
+            Protocol::Ip6(ip) => {
+                if ip.is_loopback() {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    running.listen_addrs.lock().unwrap().iter().any(|a| a == addr)
+}
+
 pub fn split_relay_addr(full: &Multiaddr) -> Option<(PeerId, Multiaddr)> {
     let mut base = Multiaddr::empty();
     for p in full.iter() {
@@ -189,8 +218,8 @@ fn parse_relay_env() -> Vec<(PeerId, Multiaddr)> {
 }
 
 pub const MAX_DIALS_PER_TICK: usize = 64;
-pub const DIAL_BACKOFF_BASE_MS: u64 = 5_000;
-pub const DIAL_BACKOFF_MAX_MS: u64 = 60_000;
+pub const DIAL_BACKOFF_BASE_MS: u64 = 10_000;
+pub const DIAL_BACKOFF_MAX_MS: u64 = 300_000;
 
 pub type EventRx = mpsc::UnboundedReceiver<ChatEvent>;
 
@@ -212,6 +241,11 @@ pub async fn boot(
         gossip_cfg,
     )
     .map_err(|e| anyhow::anyhow!("gossipsub init: {e}"))?;
+    let ping: libp2p::ping::Behaviour = libp2p::ping::Behaviour::new(
+        libp2p::ping::Config::new()
+            .with_interval(std::time::Duration::from_secs(15))
+            .with_timeout(std::time::Duration::from_secs(20)),
+    );
 
     let mut swarm = SwarmBuilder::with_existing_identity(device.keypair())
         .with_tokio()
@@ -228,6 +262,7 @@ pub async fn boot(
             relay,
             chat,
             group,
+            ping,
         })?
         .build();
 
@@ -295,9 +330,10 @@ async fn swarm_loop(
         tokio::select! {
             maybe_cmd = cmd_rx.recv() => match maybe_cmd {
                 Some(Cmd::Connect { peer, addr }) => {
+                    let own = is_own_address(&addr, &running);
                     if peer == *swarm.local_peer_id() {
                         eprintln!("[swarm] DIAL SKIPPED self peer={peer} addr={addr}");
-                    } else if running.listen_addrs.lock().unwrap().iter().any(|a| a == &addr) {
+                    } else if own {
                         // Dialing one of our own listen / confirmed-external
                         // addresses (e.g. a sibling device on this host, or a
                         // stale self endpoint in the directory) — skip.
@@ -477,6 +513,10 @@ async fn swarm_loop(
                     // listener. This surfaces as `ExternalAddrConfirmed` above
                     // (libp2p-swarm aggregates it), so nothing extra to do here.
                     NetEvent::Upnp(_) => {}
+                    // Ping success/failure only drives the ping handler's
+                    // own connection-drop logic (keep_alive + max_failures);
+                    // we don't inspect it here.
+                    NetEvent::Ping(_) => {}
                     // Relay client: reservation accepted / circuit established.
                     // The resulting `/p2p-circuit/{me}` endpoint likewise reaches
                     // us via `ExternalAddrConfirmed`, so we only log here.
