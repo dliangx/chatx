@@ -460,9 +460,36 @@ pub struct HttpDirectory {
 
 impl HttpDirectory {
     pub fn default_server() -> Self {
-        Self::new(
-            std::env::var("CHATX_SIGNAL").unwrap_or_else(|_| "http://192.168.1.4:8787".into()),
-        )
+        Self::new(Self::resolve_default_url())
+    }
+
+    pub fn resolve_default_url() -> String {
+        // 1. CHATX_SIGNAL env var (highest priority)
+        if let Ok(v) = std::env::var("CHATX_SIGNAL") {
+            if !v.trim().is_empty() {
+                return v;
+            }
+        }
+        // 2. ~/.config/chatx/<profile>/config.toml → signal_url
+        //    If the user config does not exist, seed it from the crate
+        //    default (crates/core/config.toml) so it is editable in one place.
+        let profile = crate::identity::DeviceIdentity::default_profile();
+        let dir = crate::identity::DeviceIdentity::profile_dir(&profile);
+        let path = dir.join("config.toml");
+        if !path.exists() {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(&path, include_str!("../config.toml"));
+        }
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(cfg) = toml::from_str::<toml::Value>(&text) {
+                if let Some(url) = cfg.get("signal_url").and_then(|v| v.as_str()) {
+                    if !url.trim().is_empty() {
+                        return url.to_string();
+                    }
+                }
+            }
+        }
+        return "https://signal.chatx.dev".into();
     }
 
     pub fn new(base: impl Into<String>) -> Self {
