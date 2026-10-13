@@ -295,8 +295,17 @@ async fn swarm_loop(
         tokio::select! {
             maybe_cmd = cmd_rx.recv() => match maybe_cmd {
                 Some(Cmd::Connect { peer, addr }) => {
-                    swarm.add_peer_address(peer, addr.clone());
-                    let _ = swarm.dial(peer);
+                    if peer == *swarm.local_peer_id() {
+                        eprintln!("[swarm] DIAL SKIPPED self peer={peer} addr={addr}");
+                    } else if running.listen_addrs.lock().unwrap().iter().any(|a| a == &addr) {
+                        // Dialing one of our own listen / confirmed-external
+                        // addresses (e.g. a sibling device on this host, or a
+                        // stale self endpoint in the directory) — skip.
+                        eprintln!("[swarm] DIAL SKIPPED own addr={addr} peer={peer}");
+                    } else {
+                        swarm.add_peer_address(peer, addr.clone());
+                        let _ = swarm.dial(peer);
+                    }
                 }
                 Some(Cmd::SendText {
                     peer,
