@@ -963,7 +963,7 @@ async fn handle_inbound_friendq(
             let _ =
                 sqlite::social::frq_upsert(&pool, from_peer, &me_b58, Some(&note)).await;
             {
-                let mut g = backend.blocking_write();
+                let mut g = backend.write().await;
                 g.add_friend_request(
                     from_peer,
                     note,
@@ -1004,7 +1004,7 @@ async fn handle_inbound_friendq(
                 eprintln!("[friendq] inbound accept failed to add contact: {e}");
             }
             {
-                let mut g = backend.blocking_write();
+                let mut g = backend.write().await;
                 g.remove_friend_request_if(&other, data::FrqDir::Sent);
             }
             let _ = slint::invoke_from_event_loop(move || {
@@ -1030,7 +1030,7 @@ async fn handle_inbound_friendq(
                 // Same role as in the sender's local row.
                 let _ = sqlite::social::frq_set_status(&pool, &me_b58, &other, sqlite::social::FRQ_REJECTED).await;
                 {
-                    let mut g = backend.blocking_write();
+                    let mut g = backend.write().await;
                     g.remove_friend_request_if(&other, data::FrqDir::Sent);
                 }
                 let _ = slint::invoke_from_event_loop(move || {
@@ -2177,7 +2177,7 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
         // later rendering even if it is never resolved locally.
         let _ = sqlite::social::frq_upsert(&pool, &me_peer, &peer_id, Some(&username)).await;
         {
-            let mut g = backend.blocking_write();
+            let mut g = backend.write().await;
             g.add_friend_request(
                 &peer_id,
                 username.clone(),
@@ -2306,7 +2306,7 @@ fn accept_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
 
         // 3. Refresh UI.
         {
-            let mut g = backend.blocking_write();
+            let mut g = backend.write().await;
             g.remove_friend_request(key);
         }
         let _ = slint::invoke_from_event_loop(move || {
@@ -2354,7 +2354,7 @@ fn reject_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
     rt.spawn(async move {
         let _ = sqlite::social::frq_set_status(&pool, &other_peer, &me_peer, sqlite::social::FRQ_REJECTED).await;
         {
-            let mut g = backend.blocking_write();
+            let mut g = backend.write().await;
             g.remove_friend_request(key);
         }
         let _ = slint::invoke_from_event_loop(move || {
