@@ -42,6 +42,27 @@ pub fn contact_letter(name: &str) -> char {
     '#'
 }
 
+/// Direction of a friend request relative to me.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrqDir {
+    /// Someone asked to add me (shows in the Contacts inbox).
+    Inbox,
+    /// I asked to add them (shows in the add-contact flow as pending).
+    Sent,
+}
+
+/// One friend request, in the inbox (they asked) or my sent list (I asked).
+/// `peer_id` is always the OTHER party's libp2p peer id.
+#[derive(Debug, Clone)]
+pub struct FriendRequestData {
+    pub id: i32,
+    pub peer_id: String,
+    /// Best-effort display name (username if known, else peer id).
+    pub name: String,
+    pub time_ms: i64,
+    pub dir: FrqDir,
+}
+
 #[derive(Debug, Clone)]
 pub struct DiscoverRow {
     pub key: i32,
@@ -68,6 +89,7 @@ pub struct NoteRowData {
 pub struct DataBackend {
     pub chats: Vec<ChatRow>,
     pub contacts: Vec<ContactRow>,
+    pub friend_requests: Vec<FriendRequestData>,
     pub discover: Vec<DiscoverRow>,
     /// Posts I have liked or commented on ("我的收藏").
     pub my_collect: Vec<DiscoverRow>,
@@ -84,6 +106,8 @@ pub struct DataBackend {
     /// Stable key <-> note id maps (UI keys are 32-bit, note ids are 64-bit).
     key_to_note: HashMap<i32, i64>,
     note_to_key: HashMap<i64, i32>,
+    /// Stable UI key -> friend request (dir + other peer) for accept/reject.
+    frq_key_to: HashMap<i32, (FrqDir, String)>,
     next_key: i32,
 }
 
@@ -204,9 +228,106 @@ impl DataBackend {
     pub fn has_contact(&self, peer_id: &str, name: &str) -> bool {
         self.contacts.iter().any(|c| c.peer_id == peer_id || c.name == name)
     }
+
+    /// Record a friend request in the UI state and return its stable key.
+    pub fn add_friend_request(
+        &mut self,
+        other_peer: &str,
+        name: String,
+        time_ms: i64,
+        dir: FrqDir,
+    ) -> i32 {
+        let key = self.bump();
+        self.frq_key_to.insert(key, (dir, other_peer.to_string()));
+        self.friend_requests.push(FriendRequestData {
+            id: key,
+            peer_id: other_peer.to_string(),
+            name,
+            time_ms,
+            dir,
+        });
+        key
+    }
+
+    /// Resolve a friend-request UI key back to its (dir, other peer).
+    pub fn frq_for(&self, key: i32) -> Option<(FrqDir, &str)> {
+        self.frq_key_to
+            .get(&key)
+            .map(|(dir, peer)| (*dir, peer.as_str()))
+    }
+
+    /// Remove a friend request by UI key.
+    pub fn remove_friend_request(&mut self, key: i32) {
+        self.friend_requests.retain(|r| r.id != key);
+        self.frq_key_to.remove(&key);
+    }
+
+    /// Remove any friend request between me and `other` of the given direction.
+    pub fn remove_friend_request_if(&mut self, other: &str, dir: FrqDir) {
+        let mut hit: Option<i32> = None;
+        for r in &self.friend_requests {
+            if r.peer_id == other && r.dir == dir {
+                hit = Some(r.id);
+                break;
+            }
+        }
+        if let Some(k) = hit {
+            self.remove_friend_request(k);
+        }
+    }
 }
 
 pub type ArcBackend = Arc<RwLock<DataBackend>>;
+
+/// Resolve a libp2p peer id (or username) to a display name: the account's
+/// nickname, falling back to its username, falling back to the raw string.
+pub async fn name_for_peer(pool: &SqlitePool, peer: &str) -> String {
+    if !peer.is_empty() {
+        if let Ok(Some(user_id)) = sqlite::devices::ensure_user_by_peer(pool, peer).await {
+            if let Ok(Some(u)) = sqlite::users::get(pool, user_id).await {
+                let label = u
+                    .nickname
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| u.username.clone().filter(|s| !s.is_empty()));
+                if let Some(label) = label {
+                    return label;
+                }
+            }
+        }
+    }
+    if !peer.is_empty() {
+        if let Ok(Some(u)) = sqlite::users::get_by_username(pool, peer).await {
+            let label = u
+                .nickname
+                .clone()
+                .filter(|s| !s.is_empty())
+                .or_else(|| u.username.clone().filter(|s| !s.is_empty()));
+            if let Some(label) = label {
+                return label;
+            }
+        }
+    }
+    peer.to_string()
+}
+
+/// Load the friend-request state (inbox + sent) for `me_peer` into `b`.
+pub async fn load_fr_requests(pool: &SqlitePool, me_peer: &str, b: &mut DataBackend) -> anyhow::Result<()> {
+    b.friend_requests.clear();
+    b.frq_key_to.clear();
+
+    let inbox = sqlite::social::frq_inbox(pool, me_peer).await?;
+    for r in inbox {
+        let name = r.note.unwrap_or_else(|| r.requester.clone());
+        b.add_friend_request(&r.requester, name, r.created_at, FrqDir::Inbox);
+    }
+
+    let sent = sqlite::social::frq_sent(pool, me_peer).await?;
+    for r in sent {
+        b.add_friend_request(&r.recipient, r.note.unwrap_or_else(|| r.recipient.clone()), r.created_at, FrqDir::Sent);
+    }
+    Ok(())
+}
 
 pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, String)> {
     let mut b = DataBackend::default();

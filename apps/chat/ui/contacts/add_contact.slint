@@ -70,7 +70,7 @@ component ResultRow inherits Rectangle {
         TouchArea {
             width: parent.width;
             height: parent.height;
-            clicked => { AppState.add-contact(root.username); }
+            clicked => { AppState.add-contact(root.username, root.peer_id); }
         }
     }
 }

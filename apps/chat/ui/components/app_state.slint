@@ -97,6 +97,13 @@ export struct SearchUser {
     peer_id: string,
 }
 
+export struct FriendRequestRow {
+    key: int,
+    peer_id: string,
+    name: string,
+    time-label: string,
+}
+
 export struct MyDevice {
     peer_id: string,
     label: string,
@@ -125,7 +132,12 @@ export global AppState {
     in property <[SearchUser]> search-results: [];
     in property <[int]> group-picked: [];
     callback search-users(string);
-    callback add-contact(string);
+    callback add-contact(string, string);
+
+    // Incoming friend requests awaiting a decision (shown at the top of Contacts).
+    in-out property <[FriendRequestRow]> friend-requests: [];
+    callback accept-friend-request(int);
+    callback reject-friend-request(int);
     in property <image> qr-image;
     in property <string> qr-target-id: "";
     in property <string> lang: "cn";

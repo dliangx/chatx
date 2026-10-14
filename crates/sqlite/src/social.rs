@@ -209,6 +209,138 @@ pub async fn cancel(pool: &Pool, request_id: i64) -> anyhow::Result<bool> {
     Ok(n.rows_affected() > 0)
 }
 
+// --- friend requests (peer-based) -----------------------------------------
+//
+// These tables/key off libp2p peer ids (base58) because local user-row ids are
+// not shared across a user's devices. The request travels over the P2P channel;
+// this is the persistent log the inbox UI reads and the accept/reject path
+// updates.
+
+pub const FRQ_PENDING: &str = "pending";
+pub const FRQ_ACCEPTED: &str = "accepted";
+pub const FRQ_REJECTED: &str = "rejected";
+
+#[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
+pub struct PeerFriendRequest {
+    pub id: i64,
+    pub requester: String,
+    pub recipient: String,
+    pub note: Option<String>,
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: Option<i64>,
+}
+
+/// Record a friend request between `requester` and `recipient` (both peer
+/// ids). `note` is a free-form display hint (typically the other party's
+/// username) that the caller knows. Re-requesting a pair upserts back to
+/// pending and refreshes the note.
+pub async fn frq_upsert(
+    pool: &Pool,
+    requester: &str,
+    recipient: &str,
+    note: Option<&str>,
+) -> anyhow::Result<i64> {
+    let now = now_ms();
+    let row: (i64,) = sqlx::query_as(
+        "INSERT INTO fr_requests (requester, recipient, note, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+         ON CONFLICT(requester, recipient) DO UPDATE SET
+            note = COALESCE(?3, note), status = ?4, updated_at = ?5
+         RETURNING id",
+    )
+    .bind(requester)
+    .bind(recipient)
+    .bind(note)
+    .bind(FRQ_PENDING)
+    .bind(now)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
+/// Pending inbound requests addressed to `recipient` (the local device),
+/// newest first — this is the "friend requests" inbox.
+pub async fn frq_inbox(pool: &Pool, recipient: &str) -> anyhow::Result<Vec<PeerFriendRequest>> {
+    let rows =
+        sqlx::query_as::<_, PeerFriendRequest>(
+            "SELECT * FROM fr_requests WHERE recipient = ?1 AND status = ?2
+             ORDER BY created_at DESC",
+        )
+        .bind(recipient)
+        .bind(FRQ_PENDING)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows)
+}
+
+/// Pending outgoing requests *from* `requester` the local device sent, newest
+/// first — surfaced in the add-contact flow as "已发送，等待对方通过".
+pub async fn frq_sent(pool: &Pool, requester: &str) -> anyhow::Result<Vec<PeerFriendRequest>> {
+    let rows =
+        sqlx::query_as::<_, PeerFriendRequest>(
+            "SELECT * FROM fr_requests WHERE requester = ?1 AND status = ?2
+             ORDER BY created_at DESC",
+        )
+        .bind(requester)
+        .bind(FRQ_PENDING)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows)
+}
+
+/// True if a pending request already exists from `requester` to `recipient`.
+pub async fn frq_pending_between(
+    pool: &Pool,
+    requester: &str,
+    recipient: &str,
+) -> anyhow::Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM fr_requests WHERE requester = ?1 AND recipient = ?2 AND status = ?3",
+    )
+    .bind(requester)
+    .bind(recipient)
+    .bind(FRQ_PENDING)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
+}
+
+async fn frq_id_for_pair(
+    pool: &Pool,
+    requester: &str,
+    recipient: &str,
+) -> anyhow::Result<Option<i64>> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT id FROM fr_requests WHERE requester = ?1 AND recipient = ?2",
+    )
+    .bind(requester)
+    .bind(recipient)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(id,)| id))
+}
+
+/// Set the status of the request sent by `requester` to `recipient`.
+pub async fn frq_set_status(
+    pool: &Pool,
+    requester: &str,
+    recipient: &str,
+    status: &str,
+) -> anyhow::Result<bool> {
+    let Some(id) = frq_id_for_pair(pool, requester, recipient).await? else {
+        return Ok(false);
+    };
+    let now = now_ms();
+    sqlx::query("UPDATE fr_requests SET status = ?1, updated_at = ?2 WHERE id = ?3")
+        .bind(status)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(true)
+}
+
 // --- follows ---------------------------------------------------------------
 
 pub async fn follow(pool: &Pool, follower: i64, following: i64) -> anyhow::Result<bool> {
@@ -299,6 +431,35 @@ mod tests {
 
         let id4 = send_request(&pool, 1, 5, None).await.unwrap();
         assert!(cancel(&pool, id4).await.unwrap(), "sender may cancel pending");
+    }
+
+    #[tokio::test]
+    async fn peer_friend_request_flow() {
+        let pool = open_memory().await.unwrap();
+        let mine = "PEER-LOCAL";
+        let other = "PEER-OTHER";
+
+        // Inbound request from `other` to `me` shows up in my inbox.
+        let _id = frq_upsert(&pool, other, mine, Some("other")).await.unwrap();
+        let inbox = frq_inbox(&pool, mine).await.unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].requester, other);
+        assert_eq!(inbox[0].recipient, mine);
+        assert!(frq_pending_between(&pool, other, mine).await.unwrap());
+
+        // After I accept, it leaves the inbox and the sender's sent list.
+        assert!(frq_set_status(&pool, other, mine, FRQ_ACCEPTED)
+            .await
+            .unwrap());
+        assert!(frq_inbox(&pool, mine).await.unwrap().is_empty());
+        assert!(!frq_pending_between(&pool, other, mine).await.unwrap());
+
+        // Outgoing request from `me` shows in my sent list.
+        let _id = frq_upsert(&pool, mine, "PEER-THIRD", Some("third")).await.unwrap();
+        let sent = frq_sent(&pool, mine).await.unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].requester, mine);
+        assert_eq!(sent[0].recipient, "PEER-THIRD");
     }
 
     #[tokio::test]

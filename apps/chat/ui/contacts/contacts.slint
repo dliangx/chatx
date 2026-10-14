@@ -2,15 +2,143 @@ import {
     SubPageType,
     ContactRow,
     LetterEntry,
+    FriendRequestRow,
     AppState,
 } from "../components/app_state.slint";
 import { ContactListItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
 import { SearchBar } from "../components/search.slint";
 
+component FriendRequestRowView inherits Rectangle {
+    in property <int> key: 0;
+    in property <string> name: "";
+    in property <string> time-label: "";
+    width: 100%;
+    height: 56px;
+    background: #f7f8fa;
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 4px;
+        height: 100%;
+        background: Theme.brand;
+    }
+
+    Rectangle {
+        x: 12px;
+        y: 12px;
+        width: 32px;
+        height: 32px;
+        border-radius: 16px;
+        background: #dfe3ee;
+
+        Text {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            text: "+";
+            font-size: 20px;
+            font-weight: 800;
+            color: Theme.brand;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    Text {
+        x: 56px;
+        y: 10px;
+        width: parent.width - 56px - 168px;
+        text: root.name;
+        font-size: 14px;
+        font-weight: 800;
+        color: Theme.fg;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+
+    Text {
+        x: 56px;
+        y: 30px;
+        width: parent.width - 56px - 168px;
+        text: "新的添加请求 · " + root.time-label;
+        font-size: 11px;
+        color: Theme.fg-muted;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+
+    Rectangle {
+        x: parent.width - 150px;
+        y: 17px;
+        width: 64px;
+        height: 22px;
+        border-radius: 11px;
+        border-width: 1px;
+        border-color: #d5d8e4;
+        background: #ffffff;
+
+        Text {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            text: "拒绝";
+            font-size: 12px;
+            color: Theme.fg-muted;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            clicked => { AppState.reject-friend-request(root.key); }
+        }
+    }
+
+    Rectangle {
+        x: parent.width - 78px;
+        y: 17px;
+        width: 64px;
+        height: 22px;
+        border-radius: 11px;
+        background: Theme.brand;
+
+        Text {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            text: "接收";
+            font-size: 12px;
+            color: white;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            clicked => { AppState.accept-friend-request(root.key); }
+        }
+    }
+
+    Rectangle {
+        x: 0px;
+        y: root.height;
+        width: 100%;
+        height: 1px;
+        background: #ececec;
+    }
+}
+
 export component ContactListView inherits Rectangle {
     in property <[ContactRow]> rows: [];
     in property <[LetterEntry]> letters: [];
+    in property <[FriendRequestRow]> requests: [];
     in-out property <int> selected-key: -1;
 
     width: 100%;
@@ -18,15 +146,38 @@ export component ContactListView inherits Rectangle {
     background: Theme.bg;
 
     out property <length> row-h: 52px;
+    out property <length> req-h: 56px;
     out property <length> bar-w: 28px;
     out property <length> list-top: 48px;
+    out property <length> req-block-h: root.requests.length * root.req-h;
     out property <length> bottom: AppState.is-mobile ? 58px : 0px;
 
     SearchBar {
         y: 0px;
     }
 
-    if root.rows.length == 0:
+    if root.requests.length > 0:
+    Text {
+        x: 12px;
+        y: root.list-top - 2px;
+        text: "添加请求";
+        font-size: 12px;
+        font-weight: 800;
+        color: Theme.fg-muted;
+        vertical-alignment: center;
+        height: 18px;
+    }
+
+    for fq[i] in root.requests: FriendRequestRowView {
+        x: 0px;
+        y: root.list-top + 18px + root.req-h * i;
+        width: parent.width;
+        key: fq.key;
+        name: fq.name;
+        time-label: fq.time-label;
+    }
+
+    if root.requests.length == 0 && root.rows.length == 0:
     Text {
         y: 180px;
         width: parent.width;
@@ -39,9 +190,9 @@ export component ContactListView inherits Rectangle {
 
     fk := Flickable {
         x: 0px;
-        y: root.list-top;
+        y: root.list-top + 18px + root.req-block-h;
         width: parent.width;
-        height: parent.height - root.list-top - root.bottom;
+        height: parent.height - root.list-top - 18px - root.req-block-h - root.bottom;
         content-height: root.rows.length * root.row-h;
         interactive: true;
 
@@ -65,9 +216,9 @@ export component ContactListView inherits Rectangle {
 
     for le[j] in root.letters: Rectangle {
         x: parent.width - root.bar-w - 8px;
-        y: root.list-top + 6px + j * ((parent.height - root.list-top - root.bottom - 12px) / root.letters.length);
+        y: root.list-top + 18px + root.req-block-h + 6px + j * ((parent.height - root.list-top - 18px - root.req-block-h - root.bottom - 12px) / root.letters.length);
         width: root.bar-w;
-        height: (parent.height - root.list-top - root.bottom - 12px) / root.letters.length;
+        height: (parent.height - root.list-top - 18px - root.req-block-h - root.bottom - 12px) / root.letters.length;
         background: transparent;
 
         out property <bool> active:

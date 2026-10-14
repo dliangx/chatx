@@ -1,4 +1,5 @@
 pub mod account;
+pub mod friendq;
 pub mod group;
 pub mod identity;
 pub mod message;
@@ -1007,6 +1008,76 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
         }
         anyhow::bail!("failed to deliver to {peer_base58}: {last_err}");
+    }
+
+    /// Send a friend-request frame to `peer_base58` over the DM channel and
+    /// wait for the peer's ack. Unlike `send_dm`, the frame is NOT stored in
+    /// the chat history.
+    pub async fn send_friendq(&self, peer_base58: &str, frame: &str) -> anyhow::Result<()> {
+        let rec = self
+            .dir
+            .resolve_device(peer_base58)
+            .map_err(|e| anyhow::anyhow!("device {peer_base58} not found in directory: {e}"))?;
+        if rec.endpoints.is_empty() {
+            anyhow::bail!("device {peer_base58} is offline (no endpoints)");
+        }
+        let peer: PeerId = peer_base58
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
+
+        let mut candidates: Vec<Multiaddr> = Vec::new();
+        for endpoint in &rec.endpoints {
+            let Ok(addr) = endpoint.parse::<Multiaddr>() else {
+                continue;
+            };
+            if let Some(reason) = unroutable_reason(&addr) {
+                eprintln!("[friendq] skip unroutable endpoint ({reason}): {addr}");
+                continue;
+            }
+            candidates.push(addr);
+        }
+        if candidates.is_empty() {
+            anyhow::bail!("device {peer_base58} has no dialable endpoint");
+        }
+
+        let from = self.peer_base58();
+        let e2e = self.e2e_public().to_string();
+        let timeout = std::time::Duration::from_secs(8);
+        let mut last_err = String::new();
+        for addr in &candidates {
+            eprintln!("[friendq] send -> {peer_base58} via {addr}");
+            if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
+                peer: peer.clone(),
+                addr: addr.clone(),
+            }) {
+                last_err = format!("cmd channel closed: {e}");
+                continue;
+            }
+            let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+            if let Err(e) = self.running.cmd_tx.send(Cmd::SendText {
+                peer: peer.clone(),
+                from: from.clone(),
+                e2e: e2e.clone(),
+                text: frame.to_string(),
+                ack_tx: Some(tx),
+            }) {
+                last_err = format!("cmd channel closed: {e}");
+                continue;
+            }
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(Ok(()))) => {
+                    eprintln!("[friendq] acked via {addr}");
+                    return Ok(());
+                }
+                Ok(Ok(Err(e))) => {
+                    eprintln!("[friendq] send to {addr} failed: {e}");
+                    last_err = e.to_string();
+                }
+                Ok(Err(_)) => last_err = "peer connection dropped before ack".to_string(),
+                Err(_) => last_err = format!("no ack from peer within {:?}s", timeout.as_secs()),
+            }
+        }
+        anyhow::bail!("failed to deliver friendq to {peer_base58}: {last_err}");
     }
 
     pub fn all_messages(&self) -> Vec<store::StoredMsg> {
