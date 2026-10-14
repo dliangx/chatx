@@ -118,21 +118,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
         }
 
-        // Best-effort initial dial of P2P members. The "connect on enter,
-        // disconnect after X idle" policy is now driven by the UI: calling
-        // `connect_to_group` / `disconnect_from_group` per chat the user
-        // actually opens (and the presence loop no longer auto-redials, so we
-        // don't keep NAT mappings alive for groups the user never visits).
     }
 
-    /// Dial every P2P member of `group_id` (resolve their endpoints from the
-    /// directory and enqueue `Cmd::Connect`). Used when the user opens a
-    /// group chat screen so the connection is available before the first
-    /// message is sent.
-    ///
-    /// Server-mode ("B") groups are intentionally ignored: their traffic is
-    /// relayed through the signaling server (HTTP `post_group_message`), so no
-    /// P2P connection is required for delivery.
     pub fn connect_to_group(&self, group_id: &str) -> Result<(), anyhow::Error> {
         let g = self
             .get_group(group_id)
@@ -162,14 +149,12 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 .unwrap_or(0)
                 > 0
             {
-                continue; // already connected; no need to re-dial
+                continue;
             }
             if self.dial_suppressed(&pid_b58) {
                 continue;
             }
             let Ok(rec) = self.dir.resolve_device(&pid_b58) else {
-                // Member not registered — we can't reach them yet; will
-                // retry on the next `connect_to_group` (e.g. on re-entry).
                 continue;
             };
             let Some(endpoint) = rec
@@ -199,13 +184,59 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok(())
     }
 
-    /// Close every connection to a P2P member of `group_id`. Called by the UI
-    /// sweeper after the 10-minute "grace" window following the last time the
-    /// user was in the chat, so we stop keeping NAT mappings alive (and the
-    /// libp2p ping keep-alive that was maintaining them) for peers the user is
-    /// no longer interacting with.
-    ///
-    /// Server-mode groups are ignored (no P2P conns to close).
+    pub fn warm_dial_peer(&self, peer_base58: &str) -> Result<(), anyhow::Error> {
+        let me = self.peer_base58();
+        if peer_base58 == me {
+            return Ok(());
+        }
+        let Ok(pid) = peer_base58.parse::<PeerId>() else {
+            return Ok(());
+        };
+        if self
+            .running
+            .connected
+            .lock()
+            .unwrap()
+            .get(&pid)
+            .copied()
+            .unwrap_or(0)
+            > 0
+        {
+            return Ok(());
+        }
+        if self.dial_suppressed(&peer_base58) {
+            return Ok(());
+        }
+        let rec = self
+            .dir
+            .resolve_device(peer_base58)
+            .map_err(|e| anyhow::anyhow!("device {peer_base58} not found in directory: {e}"))?;
+        let endpoint = rec
+            .endpoints
+            .iter()
+            .filter_map(|e| e.parse::<Multiaddr>().ok())
+            .find(|a| unroutable_reason(a).is_none());
+        let Some(endpoint) = endpoint else {
+            eprintln!(
+                "[dm] warm_dial skip {peer_base58}: only loopback/wildcard addrs registered"
+            );
+            return Ok(());
+        };
+        if self
+            .running
+            .cmd_tx
+            .send(Cmd::Connect {
+                peer: pid,
+                addr: endpoint.clone(),
+            })
+            .is_ok()
+        {
+            self.dial_attempted(&peer_base58);
+            eprintln!("[dm] warm_dial {peer_base58} -> {endpoint}");
+        }
+        Ok(())
+    }
+
     pub fn disconnect_from_group(&self, group_id: &str) {
         let g = match self.get_group(group_id) {
             Some(g) => g,
@@ -249,7 +280,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
     }
 
-    /// True if this peer's re-dial should be suppressed by backoff right now.
     fn dial_suppressed(&self, peer: &str) -> bool {
         let (last, fails) = {
             let m = self.running.dial_backoff.lock().unwrap();
@@ -263,8 +293,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         elapsed < delay.min(sw::DIAL_BACKOFF_MAX_MS)
     }
 
-    /// Record a re-dial attempt; bumps the failure backoff (reset on connect in
-    /// the event loop). Call only when `Cmd::Connect` was actually enqueued.
     fn dial_attempted(&self, peer: &str) {
         let mut m = self.running.dial_backoff.lock().unwrap();
         let entry = m.entry(peer.to_string()).or_insert((0, 0));
@@ -544,18 +572,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     tick = tick.wrapping_add(1);
                     std::thread::sleep(std::time::Duration::from_secs(15));
                     client.heartbeat();
-                    // NOTE: P2P group (re)connections are NOT driven here.
-                    // They are user-driven by the UI: `connect_to_group`
-                    // on chat-screen open, `disconnect_from_group` 10 min
-                    // after leaving. Doing it here would keep NAT mappings +
-                    // ping keep-alive alive for every group forever, which is
-                    // exactly the idle-churn / stale-session problem we're
-                    // removing.
                 }
             })
             .expect("spawn presence thread");
-        // Keep the handle alive so a panic in the thread is recoverable and
-        // reported (instead of silently killing presence forever).
         let _ = handle;
     }
 
@@ -565,8 +584,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             if let Some(pos) = v.iter().position(|a| a.contains(&ip)) {
                 v.swap_remove(pos);
             }
-            // Reuse the real listening port rather than fabricating tcp/0,
-            // which is an invalid, un-routable endpoint.
             let port = v.iter().find_map(|a| tcp_port_of(a));
             match port {
                 Some(p) => v.insert(0, format!("/ip4/{ip}/tcp/{p}")),
@@ -853,9 +870,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok(())
     }
 
-    /// Resolve a peer's current endpoint and request a connection. Called once
-    /// when a call starts; cached `PeerId` is used for every subsequent
-    /// [`send_audio`](Self::send_audio) frame.
     pub fn dial_peer(&self, peer_base58: &str) -> anyhow::Result<PeerId> {
         let rec = self
             .dir
@@ -878,12 +892,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok(peer)
     }
 
-    /// Transmit one realtime-audio frame (s16le PCM) to `peer`.
-    ///
-    /// Not persisted anywhere; the far end receives it as a
-    /// [`sw::ChatEvent::Audio`] and forwards it to its speaker sink. Cheap to
-    /// call every capture tick (tens of Hz) — it only enqueues one command on
-    /// the swarm loop.
     pub fn send_audio(
         &self,
         peer: PeerId,
@@ -904,10 +912,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok(())
     }
 
-    /// Send one WebRTC signaling frame (opaque JSON payload) to `peer`.
-    ///
-    /// `payload` is a `media::SignalFrame` serialized to JSON (this crate does
-    /// not parse it). The far end emits [`sw::ChatEvent::Webrtc`].
     pub fn send_webrtc_signal(&self, peer: PeerId, payload: &str) -> anyhow::Result<()> {
         let from = self.peer_base58();
         let e2e = self.e2e_public().to_string();
@@ -933,8 +937,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .parse()
             .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
 
-        // Collect dialable endpoints, skipping ones that can never be reached
-        // across machines (tcp/0, loopback, wildcard) and unparseable strings.
         let mut candidates: Vec<Multiaddr> = Vec::new();
         for endpoint in &rec.endpoints {
             let Ok(addr) = endpoint.parse::<Multiaddr>() else {
@@ -960,9 +962,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let mut last_err = String::new();
         for addr in &candidates {
             eprintln!("[dm] attempting send -> {addr}");
-            // Ensure the swarm knows this peer's address and starts a dial
-            // before we hand it the message (Connect is enqueued first, so it
-            // is processed before SendText in the swarm loop).
             if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
                 peer: peer.clone(),
                 addr: addr.clone(),
@@ -982,7 +981,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 last_err = format!("cmd channel closed: {e}");
                 continue;
             }
-            // Wait for the peer's ack (or a hard failure), bounded by a timeout.
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(Ok(()))) => {
                     eprintln!("[dm] acked via {addr}");
@@ -998,7 +996,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     last_err = e.to_string();
                 }
                 Ok(Err(_)) => {
-                    // rx dropped without a value (caller cancelled / sender gone).
                     last_err = "peer connection dropped before ack".to_string();
                 }
                 Err(_) => {
@@ -1038,7 +1035,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         self.events.lock().await.recv().await
     }
 
-    /// Try to receive a single already-buffered event without blocking.
     pub async fn try_next_event(&self) -> Option<sw::ChatEvent> {
         self.events.lock().await.try_recv().ok()
     }
@@ -1059,8 +1055,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     ) -> anyhow::Result<Option<InboundGroup>> {
         match req.kind {
             message::MsgKind::Dm => Ok(None),
-            message::MsgKind::Audio => Ok(None), // handled by the caller (playback sink)
-            message::MsgKind::Webrtc => Ok(None), // handled by the caller (media transport)
+            message::MsgKind::Audio => Ok(None),
+            message::MsgKind::Webrtc => Ok(None),
             message::MsgKind::GroupKey => {
                 let group_id = req
                     .group_id
@@ -1159,10 +1155,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         drop(g);
 
         if mode == group::GroupMode::Server {
-            // B / server-fanout: no P2P dial; seal a key slot for the new
-            // member on the server and re-announce the group (the server
-            // becomes the authoritative membership source). The member will
-            // claim their secret via `join_server_group`.
             let secret = self
                 .get_group(group_id)
                 .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?
@@ -1186,8 +1178,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 group_id: group_id.into(),
             })
             .map_err(|e| anyhow::anyhow!("GroupSubscribe cmd failed: {e}"))?;
-        // The new member must receive the group secret: redistribute the key
-        // (sealed per-peer) so the added member can decrypt future group messages.
         if !info.peer_id.is_empty() && info.peer_id != self.peer_base58() {
             self.publish_group_key(group_id)?;
         }
@@ -1242,10 +1232,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
         self.save_group(&g)?;
         if g.mode == group::GroupMode::Server {
-            // Drop the key slot so the kicked member can no longer claim the
-            // group secret (belt-and-suspenders: the envelope is already
-            // E2E-encrypted under the group key, but this prevents a stale
-            // slot from being reused on a re-join).
             let _ = self.dir.delete_group_key_slot(group_id, peer_id);
             self.announce_group(group_id)?;
         }
@@ -1314,10 +1300,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         group::open_message(&g.secret(), env).map_err(|e| anyhow::anyhow!("open group msg: {e}"))
     }
 
-    /// Open a group message as stored in the message store back into its
-    /// plaintext. `store_group_outbound`/`inbound` serialize the
-    /// `SealedGroupMsg` envelope directly (flat JSON, base64'd) — distinct
-    /// from the on-wire `GroupWire{env}` format used on the gossipsub topic.
     pub fn open_stored_group_message(
         &self,
         group_id: &str,
@@ -1353,9 +1335,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok(pubinfo)
     }
 
-    /// Sends the group's current secret to every other member over the
-    /// request/response channel (one sealed bundle per member). The receiver
-    /// handles it in `apply_inbound` under `MsgKind::GroupKey`.
     pub fn publish_group_key(&self, group_id: &str) -> anyhow::Result<usize> {
         let g = self
             .get_group(group_id)
@@ -1379,9 +1358,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            // Best-effort dial: pull endpoint from directory if available,
-            // but skip the addr requirement when the peer is already a local
-            // neighbour (request/response works over any established stream).
             if let Ok(rec) = self.dir.resolve_device(&peer) {
                 if let Some(endpoint) = rec.endpoints.first() {
                     if let Ok(addr) = endpoint.parse::<Multiaddr>() {
@@ -1410,9 +1386,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok(sent)
     }
 
-    /// `true` when every P2P member of `group_id` has zero live conns.
-    /// Server-mode groups never use P2P, so they always return `false`
-    /// (their messages travel over HTTP and there's no live-conn notion).
     fn p2p_all_peers_offline(&self, group_id: &str) -> bool {
         let g = match self.get_group(group_id) {
             Some(g) if g.mode != group::GroupMode::Server => g,
@@ -1444,15 +1417,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         );
         let env = self.seal_group_message(group_id, text)?;
         if self.group_mode(group_id) == group::GroupMode::Server {
-            // B / server-fanout: post the sealed envelope to the server inbox.
             let seq = self.dir.post_group_message(group_id, &env)?;
             tracing::debug!(group_id, seq, "sent group msg via server");
         } else {
-            // A / P2P: broadcast on the gossipsub topic. Be honest: if no peer
-            // is currently connected, the message would be published into the
-            // void (gossipsub has no delivery receipts), so we attempt a
-            // re-dial, and if still nothing comes online, surface an error
-            // to the caller instead of silently losing the message.
             if self.p2p_all_peers_offline(group_id) {
                 eprintln!(
                     "[group] all P2P peers offline — attempting re-dial for {group_id}"
@@ -1516,16 +1483,12 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             let bundle = group::seal_secret(&self.account, &m.e2e_public, &secret)
                 .map_err(|e| anyhow::anyhow!("seal key for {}: {e}", m.peer_id))?;
             let sealed = crate::account::b64(&bundle);
-            // Store *my own* e2e public key alongside the bundle — that's the
-            // counterparty identity Bob needs to derive the X25519 shared key
-            // when unsealing.
             let my_e2e = self.e2e_public().to_string();
             self.dir
                 .put_group_key_slot(&group_id, &m.peer_id, &my_e2e, &sealed)?;
             g.set_member(m);
         }
         self.save_group(&g)?;
-        // Server becomes the authoritative registry for membership + mode.
         self.announce_group(&group_id)?;
         Ok(g)
     }
@@ -1574,7 +1537,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 Some(b) => b,
                 None => continue,
             };
-            let _ = group::parse_group_wire(&wire_b); // best-effort; validated in pump
+            let _ = group::parse_group_wire(&wire_b);
             let _ = self.running.injected.send(sw::ChatEvent::GroupMail {
                 topic: sw::group_topic_name(group_id),
                 from: PeerId::random(),
@@ -1608,7 +1571,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             };
             for entry in &entries {
                 if entry.from == me {
-                    // Our own outbound is already stored locally.
                     continue;
                 }
                 let wire_b = match crate::account::from_b64(&entry.wire) {
@@ -1820,7 +1782,6 @@ fn unroutable_reason(addr: &Multiaddr) -> Option<&'static str> {
 
 fn current_egress_ip() -> Option<String> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    // 8.8.8.8:53 — the address never matters; only the chosen local socket.
     sock.connect("8.8.8.8:53").ok()?;
     sock.local_addr().ok()?.ip().to_string().into()
 }

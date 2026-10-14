@@ -16,9 +16,6 @@ use data::ArcBackend;
 pub mod call;
 pub mod call_dispatcher;
 
-// `camera::Camera` exists on every target (Apple: AVFoundation impl, others:
-// no-op fallback whose `start()` reports "unsupported"), so import it
-// unconditionally. The *usage* below is still gated to Apple.
 use camera::Camera;
 use screen::Screen;
 
@@ -26,9 +23,6 @@ slint::include_modules!();
 
 type Directory = HttpDirectory;
 
-// Shared, cross-thread data globals.
-// Must NOT be thread_local! because they are read from tokio worker threads
-// (inside `rt.spawn(async move { … })` blocks), not just from the UI thread.
 static CLIENT: std::sync::Mutex<Option<Arc<Client<Directory>>>> = std::sync::Mutex::new(None);
 static POOL: std::sync::Mutex<Option<Arc<sqlx::SqlitePool>>> = std::sync::Mutex::new(None);
 static BACKEND: std::sync::Mutex<Option<ArcBackend>> = std::sync::Mutex::new(None);
@@ -45,20 +39,12 @@ fn device_is_approved() -> bool {
     DEVICE_APPROVED.with(|c| c.get())
 }
 
-/// Shared renderer, initialized lazily (font parsing is expensive) and shared
-/// across worker threads via a mutex so it is only built once.
 static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> = std::sync::OnceLock::new();
 
-/// Per-conversation "distance-from-bottom" of the last scroll position the
-/// user viewed, in logical px (0 = fully at the newest message). Restored when
-/// the chat view (re)enters so the user picks up where they left off.
 static CHAT_SCROLL_POS: std::sync::LazyLock<
     std::sync::RwLock<std::collections::HashMap<i32, f32>>,
 > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
 
-/// Cross-thread snapshot of the logged-in user id. Set at login, immutable
-/// until logout — used in place of `weak.upgrade()` when the current code
-/// path runs on a tokio worker thread. Empty string means "not logged in".
 static CURRENT_ME: std::sync::LazyLock<std::sync::RwLock<String>> =
     std::sync::LazyLock::new(|| std::sync::RwLock::new(String::new()));
 
@@ -70,10 +56,6 @@ fn current_me() -> String {
     CURRENT_ME.read().unwrap().clone()
 }
 
-/// The chat_id string currently shown in the detail panel, if any. Set every
-/// time a chat is (re)loaded so inbound messages can decide whether the open
-/// bubble list needs a live refresh. String-based so it doesn't depend on the
-/// UI key namespace.
 static CURRENT_CHAT: std::sync::LazyLock<std::sync::RwLock<Option<String>>> =
     std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
 
@@ -81,32 +63,11 @@ fn set_current_chat_id(chat_id: &str) {
     *CURRENT_CHAT.write().unwrap() = Some(chat_id.to_string());
 }
 
-// ── Group P2P connection lifecycle ("connect on chat-screen enter, disconnect
-// ── 10 minutes after the user stops being in it") ────────────────────────────
-//
-// P2P group connections are NOT maintained by the presence loop; they are
-// driven by UI navigation. Server-fanout ("B") groups don't use P2P at all
-// — they're HTTP, so they're skipped here.
-//
-// Model: every group the user opens gets a `last_enter_ms` stamp. A single
-// background sweeper, spawned once, scans this map on a short interval and
-// closes any group whose last enter is older than the grace window. Re-entering
-// a chat refreshes its stamp, so its pending close is naturally deferred. This
-// means "leave the chat → disconnect 10 min later, but if I come back within
-// 10 min it stays connected" with no per-exit timers to juggle.
-// Stamp-window for "last user activity in this chat". When the window passes
-// we *drop the bookkeeping entry*, but we deliberately do NOT tear down the
-// underlying libp2p connection — libp2p's own ping keep-alive maintains the
-// NAT mapping, and DM + P2P group traffic share the same PeerId, so blindly
-// `Cmd::Disconnect` was silently killing active chats. Dropping the entry
-// still has a useful side effect on re-entry: it resets `needs_connect`
-// so a redial attempt is made in case the conn went stale.
-const GROUP_DISCONNECT_GRACE_MS: u64 = 10 * 60 * 1000; // 10 minutes
-const GROUP_SWEEP_INTERVAL_MS: u64 = 15 * 1000; // check every 15s
+const GROUP_DISCONNECT_GRACE_MS: u64 = 10 * 60 * 1000;
+const GROUP_SWEEP_INTERVAL_MS: u64 = 15 * 1000;
 
 #[derive(Clone, Copy)]
 struct GroupConnSlot {
-    /// Monotonic ms of the last time the user opened this chat.
     last_enter_ms: u64,
 }
 
@@ -116,12 +77,9 @@ static GROUP_CONNS: std::sync::LazyLock<
 
 fn group_conn_enter(chat_id: &str) {
     if !chat_id.starts_with("grp-") {
-        return; // DM — no group dial
+        return;
     }
     let now = chatx_core::message::now_ms();
-    // If the group is already in the map its P2P conns are alive (not yet
-    // swept) — just refresh the grace stamp and skip re-dialing. Only dial
-    // when the entry is missing (first enter, or it was closed by the sweeper).
     let needs_connect = {
         let mut m = GROUP_CONNS.lock().unwrap();
         match m.get_mut(chat_id) {
@@ -141,7 +99,6 @@ fn group_conn_enter(chat_id: &str) {
 
     let gid = chat_id.to_string();
     let Some(client) = CLIENT.lock().unwrap().clone() else {
-        // No client yet — keep the stamp so a later sweep doesn't mismanage it.
         return;
     };
 
@@ -152,11 +109,6 @@ fn group_conn_enter(chat_id: &str) {
     });
 }
 
-/// Touch the "last activity" stamp for a chat (DM peer id or `grp-` chat id).
-/// Used by the send/receive paths so an actively-conversed-with chat stays in
-/// the bookkeeping even after the grace window passes. (The sweeper no longer
-/// tears down connections, but keeping the map populated preserves the
-/// re-entry redial path and the log trail.)
 fn touch_chat_activity(chat_id: &str) {
     if chat_id.is_empty() {
         return;
@@ -185,7 +137,6 @@ fn start_group_conn_sweeper() {
         loop {
             tick.tick().await;
             let now = chatx_core::message::now_ms();
-            // Decide which groups are stale under the lock, then act outside it.
             let expired: Vec<String> = {
                 let m = GROUP_CONNS.lock().unwrap();
                 m.iter()
@@ -201,25 +152,14 @@ fn start_group_conn_sweeper() {
             for gid in &expired {
                 GROUP_CONNS.lock().unwrap().remove(gid);
                 eprintln!("[group] grace expired for {gid} — dropping bookkeeping (conn kept)");
-                // Intentionally NOT calling `client.disconnect_from_group(gid)`
-                // here. libp2p conns are shared between DM and P2P group
-                // gossip for the same PeerId, and the ping keep-alive already
-                // manages NAT lifetime. Tearing down here was the old root
-                // cause of "no ack within 8s" on the next DM and the
-                // silently-dropped group messages. Leaving the connection
-                // alive means re-entry via `group_conn_enter` just refreshes
-                // the stamp (and redials if the conn really is gone).
             }
         }
     });
 }
 
-/// Monotonic id for profile loads (each request gets a fresh id).
 static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// Id of the most-recent profile load; stale ones are dropped before publishing.
 static PROFILE_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Monotonic id for post-detail loads (each request gets a fresh id).
 static POST_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 thread_local! {
@@ -237,7 +177,6 @@ fn load_image_cached(path: &str) -> SlintImage {
     IMAGE_CACHE.with(|c| c.borrow_mut().insert(key, img.clone()));
     img
 }
-/// Id of the most-recent post-detail load; stale ones are dropped before publishing.
 static POST_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
@@ -269,7 +208,6 @@ fn autologin_path() -> std::path::PathBuf {
     keystore_path(&profile()).with_file_name("autologin")
 }
 
-/// Persist the passphrase in a local file so the app can auto-login next time.
 fn save_passphrase(_user_id: &str, pass: &str) {
     let _ = std::fs::write(autologin_path(), pass.as_bytes());
 }
@@ -292,7 +230,6 @@ pub fn run_app() {
     call::set_weak_window(weak.clone());
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
-    // state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
@@ -480,7 +417,6 @@ pub fn run_app() {
         });
     }
 
-    // ---- My note: save (from AddNoteView) / delete ----
     {
         let weak = weak.clone();
         ui.global::<NoteState>().on_note_saved(move |text| {
@@ -589,7 +525,6 @@ pub fn run_app() {
         });
     }
 
-    // ---- Device approval ----
     {
         let w = weak.clone();
         ui.global::<AppState>().on_refresh_devices(move || {
@@ -609,7 +544,6 @@ pub fn run_app() {
         });
     }
 
-    // ---- Contact profile actions ----
     {
         let weak = weak.clone();
         ui.global::<ProfileState>().on_request_load(move |key| {
@@ -650,7 +584,6 @@ pub fn run_app() {
         });
     }
 
-    // ---- Realtime voice call (M7) ----
     {
         let weak = weak.clone();
         ui.global::<CallState>().on_start_call(move |key| {
@@ -713,7 +646,6 @@ pub fn run_app() {
         });
     }
 
-    // ---- Discover post detail: load / like / comment ----
     {
         let weak = weak.clone();
         ui.global::<PostDetailState>().on_request_load(move |key| {
@@ -792,10 +724,6 @@ fn install_bridge_sinks() {
     use std::sync::atomic::{AtomicU64, Ordering};
     static AUDIO_N: AtomicU64 = AtomicU64::new(0);
 
-    // Mobile mic → webrtc. `bridge::set_audio_consumer` is the **inbound mic
-    // PCM** hook (`bridge_audio_pcm_in` from AVAudioEngine tap / AudioRecord),
-    // i.e. local-mic → peer. Route straight into the dispatcher, which pushes
-    // it into the active call's `AudSource` (no-op while no call).
     bridge::set_audio_consumer(Box::new(move |bytes, rate, ch| {
         let n = AUDIO_N.fetch_add(1, Ordering::Relaxed);
         if n % 100 == 0 {
@@ -803,14 +731,9 @@ fn install_bridge_sinks() {
         }
         call_dispatcher::on_audio_frame(bytes, rate);
     }));
-    // Mobile screen frames (ReplayKit/MediaProjection) — the dispatcher
-    // converts any `fmt` to RGBA8888 before pushing.
     bridge::set_screen_consumer(Box::new(move |bytes, w, h, fmt| {
         call_dispatcher::on_screen_frame(bytes.to_vec(), w, h, fmt);
     }));
-    // Mobile camera frames (JNI/ObjC shim) — routed through the dispatcher's
-    // camera-frame sink so an active call's `VidSource` + local preview +
-    // QR scanner all see them.
     bridge::set_camera_consumer(Box::new(move |bytes, w, h, fmt| {
         call_dispatcher::on_camera_frame(bytes, w, h, fmt);
     }));
@@ -879,8 +802,6 @@ fn clear_sub_history(app: &AppState) {
     app.set_nav_state(nav);
 }
 
-/// Open the camera and wire decoded QR payloads + raw preview frames into
-/// the scan UI.
 fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
     CAMERA.with(|slot| {
         if slot.borrow().is_none() {
@@ -912,7 +833,7 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
                 let latest_seen = std::sync::atomic::AtomicU64::new(0);
                 let frame_n = std::sync::atomic::AtomicU64::new(0);
                 call_dispatcher::install_qr_hook(move |bytes, w, h, fmt| {
-                    const GATE_MS: u64 = 30; // ~30 fps ceiling
+                    const GATE_MS: u64 = 30;
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
@@ -949,7 +870,6 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
                         st.set_scan_preview(make_preview_image(&data, w, h, fmt));
                     });
                 });
-                // Install the dispatcher's camera sink (single, global).
                 cam.set_frame_sink(call_dispatcher::on_camera_frame);
             }
             Err(err) => {
@@ -968,11 +888,9 @@ fn make_preview_image(data: &[u8], w: u32, h: u32, fmt: u32) -> slint::Image {
     let dst = buf.make_mut_bytes();
     match fmt {
         1 => {
-            // Already RGBA.
             copy_rgba(data, dst, n);
         }
         8 => {
-            // Expand Y → R=G=B.
             let mut di = 0usize;
             for &y in data.iter().take(n) {
                 if di + 4 > dst.len() {
@@ -986,7 +904,6 @@ fn make_preview_image(data: &[u8], w: u32, h: u32, fmt: u32) -> slint::Image {
             }
         }
         _ => {
-            // Unknown → leave the zero-initialised buffer (black).
         }
     }
     slint::Image::from_rgba8(buf)
@@ -1042,12 +959,7 @@ fn apply_result(
             let peer = client.peer_base58().to_string();
             let client = Arc::new(client);
             client.heartbeat();
-            // Re-touch the directory every 15s so the device stays "online"
-            // (server TTL is 30s) and our egress IP is re-published whenever
-            // the local interface changes (WiFi ↔ ethernet, VPN, …).
             client.start_presence_loop();
-            // Background sweeper: close P2P conns for any group the user has
-            // not opened within the last 10 minutes (see `group_conn_enter`).
             start_group_conn_sweeper();
             let approved = client
                 .status()
@@ -1124,12 +1036,8 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
     let weak = weak.clone();
     let rt = runtime();
     rt.spawn(async move {
-        // Periodically pull sealed group envelopes from the signaling server's
-        // inbox (B / server-fanout groups) and inject them as `GroupMail`
-        // events into the client's event stream. The event arm below delivers
-        // them exactly like live P2P gossip.
         let mut server_poll = tokio::time::interval(std::time::Duration::from_secs(2));
-        server_poll.tick().await; // first tick completes immediately
+        server_poll.tick().await;
         loop {
             let client: std::sync::Arc<chatx_core::Client<chatx_core::signal::HttpDirectory>> =
                 match CLIENT.lock().unwrap().clone() {
@@ -1138,9 +1046,6 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                 };
             tokio::select! {
                 _ = server_poll.tick() => {
-                    // Pull any pending server-fanout group mail; each new
-                    // envelope is appended to the client's event channel so the
-                    // next `next_event` iteration processes it.
                     let _touched = client.poll_group_server_inbox().await;
                     continue;
                 }
@@ -1148,10 +1053,6 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                     let Some(evt) = maybe_evt else {
                         break;
                     };
-                    // ── Inbound WebRTC signaling: answer Offer or apply Answer/ICE
-                    // on the active call. `handle_signal_offer` blocks the UI
-                    // thread while it does the offer/answer handshake; acceptable
-                    // (rare and brief). ────────────────────────────────────────────
                     if let chatx_core::swarm::ChatEvent::Webrtc { peer, json, .. } = &evt {
                         let client_arc = client.clone();
                         let peer = *peer;
@@ -1161,9 +1062,6 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                         });
                         continue;
                     }
-                    // Note: `ChatEvent::Audio` is intentionally not handled — the
-                    // `PeerCall` remote sink (installed by `call::wire_remote_sinks`)
-                    // already routes inbound peer audio into the cpal speaker queue.
                     let touched = client.process_event(evt).await;
                     if let Some(touched) = touched {
                         refresh_inbound_chat(weak.clone(), touched).await;
@@ -1191,12 +1089,7 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
         let _ = data::refresh_chat_row(&pool, &me, &mut b, &chat_id).await;
         *backend.write().await = b;
     }
-    // Receiving a message is strong evidence of an active chat — keep the
-    // sweeper's bookkeeping fresh for it (same reason as the send path).
     touch_chat_activity(&chat_id);
-    // If this conversation is the one currently on screen, re-render its
-    // bubble list so the just-arrived message shows up immediately (no manual
-    // re-click). Deciding by chat_id string directly — no UI-key dependency.
     let is_current = CURRENT_CHAT.read().unwrap().as_deref() == Some(chat_id.as_str());
     let key = {
         backend
@@ -1224,7 +1117,6 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
     });
 }
 
-/// Push the in-memory backend rows into the slint view models (memory -> UI).
 fn publish_to_views(state: &AppState, backend: ArcBackend) {
     let mut snapshot = backend.blocking_read().clone();
 
@@ -1342,7 +1234,6 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
     {
         let pool = POOL.lock().unwrap().clone();
         let me_peer = CLIENT.lock().unwrap().as_ref().map(|c| c.peer_base58());
-        // friend peer id -> real users.id, so the reload join shows the name.
         let mut friend_by_peer: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
         for c in &snapshot.contacts {
@@ -1361,8 +1252,6 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
                 let rt = runtime();
                 rt.spawn(async move {
                     for (chat_id, row_peer, time_ms) in dms {
-                        // Prefer the row's recorded peer id; fall back to the
-                        // legacy `a|b` chat-id shape for pre-hash records.
                         let pb = if !row_peer.is_empty() && row_peer != me_peer {
                             Some(row_peer)
                         } else if chat_id.contains('|') {
@@ -1386,16 +1275,11 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
                         };
                         match friend_by_peer.get(&pb).copied() {
                             Some(fuid) => {
-                                // Bind this friend's device (idempotent): lets
-                                // the chat list / DM history resolve the peer
-                                // to their real user row.
                                 let _ = sqlite::devices::bind_device(&pool, fuid, &pb).await;
                             }
                             None => {}
                         }
                         let _ = sqlite::conversations::set_peer_id(&pool, conv_id, &pb).await;
-                        // Give a just-opened DM a time for ordering/label; only
-                        // fills it if no real message time has been recorded yet.
                         if time_ms > 0 {
                             let _ =
                                 sqlite::conversations::ensure_time(&pool, conv_id, time_ms).await;
@@ -1426,12 +1310,10 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
     );
 }
 
-/// Bundled fonts (SIL OFL / Apache-2.0), embedded at compile time.
 const FONT_LATIN: &[u8] = include_bytes!("../fonts/NotoSans.ttf");
 const FONT_CJK: &[u8] = include_bytes!("../fonts/NotoSansSC.ttf");
 const FONT_EMOJI: &[u8] = include_bytes!("../fonts/NotoColorEmoji.ttf");
 
-/// Ensure the bubble renderer exists (fonts + emoji atlas loaded once).
 fn renderer() -> Renderer {
     let mut r = Renderer::new(render::theme::Theme::default());
     for bytes in [FONT_LATIN, FONT_CJK] {
@@ -1468,15 +1350,12 @@ fn ensure_renderer() {
 }
 
 fn make_avatar(seed: &str, size: u32) -> Image {
-    // Stable 32-bit hash of the seed so a given peer always gets the same
-    // colour across loads/sessions.
     let mut h: u64 = 0xcbf29ce484222325;
     for b in seed.as_bytes() {
         h ^= *b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
     let hue = (h % 360) as f32 / 360.0;
-    // Convert hue to an RGB pair of top (lighter) and bottom (darker) stops.
     let hsl_to_rgb = |h: f32, s: f32, l: f32| -> (u8, u8, u8) {
         let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
         let hp = h * 6.0;
@@ -1524,8 +1403,6 @@ fn make_avatar(seed: &str, size: u32) -> Image {
     }
 }
 
-/// Intermediate render result produced on a background thread.
-/// The slint image type is not `Send`, so we pass raw bytes across threads.
 struct RenderedMsg {
     rgba: Vec<u8>,
     width: u32,
@@ -1568,7 +1445,6 @@ fn render_msg(
     }
 }
 
-/// Build a slint [MessageData] from raw bytes on the UI thread.
 fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> MessageData {
     let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(m.width, m.height);
     buf.make_mut_bytes().copy_from_slice(&m.rgba);
@@ -1583,7 +1459,6 @@ fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> MessageData {
     }
 }
 
-/// Load a conversation's messages from SQLite into the ChatSession global (memory -> UI).
 fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     if tokio::runtime::Handle::try_current().is_ok() {
         let weak = ui_weak.clone();
@@ -1605,12 +1480,36 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     let Some(chat_id) = chat_id else {
         return;
     };
-    // Record which conversation is now on screen (funnel for all opens, so
-    // inbound refresh knows whether to re-render the bubble list).
     set_current_chat_id(&chat_id);
-    // If this is a group chat, (re)connect its P2P members and refresh the
-    // "last user entered" stamp (so the 10-min grace window is reset).
     group_conn_enter(&chat_id);
+    if !chat_id.starts_with("grp-") {
+        let me_peer = client.peer_base58();
+        let peer: Option<String> = {
+            let g = backend.blocking_read();
+            let from_row = g
+                .chats
+                .iter()
+                .find(|r| r.key == chat_key)
+                .map(|r| r.peer_id.clone())
+                .filter(|p| !p.is_empty() && p != &me_peer);
+            from_row.or_else(|| {
+                if chat_id.contains('|') {
+                    chat_id
+                        .split('|')
+                        .find(|p| !p.is_empty() && *p != me_peer)
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some(peer) = peer {
+            let client = client.clone();
+            std::thread::spawn(move || {
+                let _ = client.warm_dial_peer(&peer);
+            });
+        }
+    }
     let me_peer = client.peer_base58().to_string();
     let me = client.user_id().to_string();
     let is_group_chat = chat_id.starts_with("grp-");
@@ -1662,9 +1561,6 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
 
         let mut rows = rows;
         rows.sort_by(|a, b| b.t.cmp(&a.t).then(b.id.cmp(&a.id)));
-        // Group rows are stored as a base64 sealed envelope (see
-        // `store_group_*`); open them into plaintext before rendering.
-        // DM rows are already plaintext.
         let rows: Vec<chatx_core::store::StoredMsg> = rows
             .into_iter()
             .map(|m| {
@@ -1681,9 +1577,6 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             })
             .flatten()
             .collect();
-        // Group bubbles must show the per-message sender's nickname (or
-        // username), not the conversation title — the title is just "群聊".
-        // DM bubbles keep using the title (the peer's own nickname/username).
         let mut sender_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         if is_group_chat {
@@ -1762,7 +1655,6 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 .into_iter()
                 .enumerate()
                 .map(|(i, m)| {
-                    // Rows above row i are the older messages (index > i).
                     let older_sum: f32 = heights.iter().skip(i + 1).sum();
                     let rows_above = (n.saturating_sub(1).saturating_sub(i)) as f32;
                     let top = PAD + rows_above * GAP + older_sum;
@@ -1794,7 +1686,6 @@ fn time_label(ms: i64) -> String {
     format!("{h:02}:{m:02}")
 }
 
-/// Sent callback from ChatView: resolve peer, send via P2P, then re-render the chat.
 fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     if !require_approved(weak.clone()) {
         return;
@@ -1812,8 +1703,6 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         eprintln!("[send] no chat_id for key={key}, aborting");
         return;
     };
-    // Group vs DM by chat id prefix (`grp-…`), the authoritative signal —
-    // independent of the in-memory row's `is_group` flag.
     let is_group = chat_id.starts_with("grp-");
     eprintln!(
         "[send] key={key} chat_id={chat_id} is_group={is_group} body_len={}",
@@ -1839,7 +1728,6 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                                 .set_send_status(SharedString::new());
                         }
                     });
-                    // Sending a message should land us on the newest one.
                     CHAT_SCROLL_POS.write().unwrap().insert(key, 0.0);
                     load_chat_messages(weak2, key);
                 }
@@ -1862,10 +1750,6 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         ui.global::<ChatSession>()
             .set_send_status(SharedString::from("发送中…"));
     }
-    // Determine the remote peer(s) to send to. Chat ids no longer encode the
-    // peer pair (they're content-addressed now), so the authoritative source
-    // is the backend row's `peer_id` (populated from `conversations.peer_id`)
-    // or, if the chat id still carries a legacy `a|b` shape, the string itself.
     let row_peer: String = {
         backend
             .blocking_read()
@@ -1881,7 +1765,6 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         if !row_peer.is_empty() && row_peer != me {
             v.push(row_peer.clone());
         }
-        // Legacy fallback for pre-hash chat ids shaped as `{me}|{peer}|...`.
         if chat_id.contains('|') {
             for part in chat_id.split('|') {
                 if !part.is_empty() && part != me && !v.iter().any(|x| x == part) {
@@ -1906,7 +1789,6 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         };
         let mut sent = false;
         'outer: for cand in &me_peers {
-            // Skip self (defensive; extraction above already excludes it).
             if cand == &my_peer {
                 eprintln!("[send] skip self {cand}");
                 continue;
@@ -1952,7 +1834,6 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     });
 }
 
-/// Compact, human time label for the chat list (relative to now).
 fn fmt_time(ms: i64) -> String {
     if ms <= 0 {
         return String::new();
@@ -1975,7 +1856,6 @@ fn fmt_time(ms: i64) -> String {
     }
 }
 
-/// Toggle a discovery like: memory first, then async persist to SQLite.
 fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
@@ -1988,11 +1868,9 @@ fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
         (g.post_id_for(key), liked)
     };
     let me = current_me();
-    // memory -> UI
     if let Some(ui) = weak.upgrade() {
         publish_to_views(&ui.global::<AppState>(), backend.clone());
     }
-    // memory -> sqlite (async, fire-and-forget)
     if let Some(post_id) = post_id {
         let rt = runtime();
         rt.spawn(async move {
@@ -2023,7 +1901,6 @@ fn layout_my_notes(
     };
     let inner_w = (card_w - PAD_X).max(0);
 
-    // col_top[j] = the y where the next card in column j should be placed.
     let mut col_top = vec![GAP; n_cols as usize];
     let mut rows: Vec<NoteRow> = Vec::with_capacity(notes.len());
     let mut content_h = 0i32;
@@ -2047,7 +1924,6 @@ fn layout_my_notes(
         };
         let card_h = (PAD_TOP + lines * LINE_H + LABEL_H + PAD_BOTTOM).max(MIN_CARD_H);
 
-        // place into the currently-shortest column
         let mut c = 0;
         for j in 1..col_top.len() {
             if col_top[j] < col_top[c] {
@@ -2138,7 +2014,6 @@ fn refresh_my_notes(weak: slint::Weak<MainWindow>) {
     });
 }
 
-/// Persist a freshly-written note to SQLite, add it to the backend, publish.
 fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
     let pool = POOL.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
@@ -2188,7 +2063,6 @@ fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
     });
 }
 
-/// Delete a note by its stable UI key: remove from backend + SQLite, publish.
 fn delete_my_note(weak: slint::Weak<MainWindow>, key: i32) {
     let pool = POOL.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
@@ -2214,12 +2088,6 @@ fn delete_my_note(weak: slint::Weak<MainWindow>, key: i32) {
     });
 }
 
-/// Decision for the B (server-fanout) vs A (P2P) delivery path for a group.
-///
-/// A: small groups — everyone keeps a direct/relay path to everyone else.
-/// B: large groups (>= `GROUP_P2P_MAX` members) — the signaling server is the
-///    hub; messages and key distribution go through it so clients never need
-///    O(N^2) direct paths. The server only ever holds E2E ciphertext.
 fn should_use_server_fanout(member_count: usize) -> bool {
     member_count >= chatx_core::GROUP_P2P_MAX
 }
@@ -2239,13 +2107,8 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
         eprintln!("[create_group_flow] picked is empty");
         return false;
     }
-    // Resolve each picked contact to its member public info via the directory.
     let mut members: Vec<MemberInfo> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
-    // Take one read snapshot of the backend to map every picked key to its
-    // directory username up front. The directory's user lookup is by username
-    // (ContactRow.name); the base58 peer id (ContactRow.peer_id) is only valid
-    // for device lookups, so it is only used as a fallback.
     let usernames: Vec<String> = {
         let g = backend.blocking_read();
         let mut v: Vec<String> = Vec::new();
@@ -2310,14 +2173,8 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
     let title = format!("群聊({})", members.len());
     let use_b = should_use_server_fanout(members.len());
     let create_ok = if use_b {
-        // B / server-fanout: owner stores an E2E key slot for each member and
-        // the group is registered on the server (announce is done internally).
-        // `send_group_message` will take the server-inbox branch automatically
-        // because the local `Group` is marked `GroupMode::Server`.
         client.create_server_group(&group_id, members).map(|_| ())
     } else {
-        // A / P2P: gossip-based. Create, announce to the directory, and push
-        // the group key to each member over request/response.
         client
             .create_group(&group_id, members.clone())
             .and_then(|_| {
@@ -2328,7 +2185,6 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
     };
     match create_ok {
         Ok(_) => {
-            // Insert a conversation row and open it.
             let new_key = {
                 let mut g = backend.blocking_write();
                 g.append_chat(group_id.clone(), title, true, String::new())
@@ -2373,7 +2229,6 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
             let rt = runtime();
             let q2 = q.clone();
             rt.spawn(async move {
-                // (1) Try to resolve as a username against the server directory.
                 let ur = client.resolve_user(&q);
                 match &ur {
                     Ok(ur) => eprintln!("[search] resolve_user OK: user_id={} e2e_public={} sign_pk={} | peer_id={} label={} endpoints={:?}",
@@ -2398,7 +2253,6 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
                     });
                     return;
                 }
-                // (2) Try to resolve as a Peer ID (scan) against the server directory.
                 let dev = client.dir().resolve_device(&q);
                 match &dev {
                     Ok(dev) => eprintln!("[search] resolve_device OK: user_id={} peer_id={} label={} endpoints={:?} status={:?}",
@@ -2466,7 +2320,6 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
 
     let me = current_me();
 
-    // Self-add guard: the directory key resolves to the user's own id.
     if !me.is_empty() && username.eq_ignore_ascii_case(&me) {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
@@ -2477,7 +2330,6 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String) {
         return;
     }
 
-    // Already a contact? Short-circuit before hitting sqlite.
     if backend.blocking_read().has_contact(&username, &username) {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
@@ -2520,9 +2372,6 @@ async fn do_add(
         .await?
         .ok_or_else(|| anyhow::anyhow!("no user row for {me}; run login to create one"))?
         .id;
-    // Only explicit add intent creates a row for the friend. A friend's
-    // nickname defaults to their username (nickname is "what I show for
-    // them"), unlike my own row which keeps nickname empty.
     let their_id = match sqlite::users::get_by_username(pool, username).await? {
         Some(u) => u.id,
         None => {
@@ -2544,8 +2393,6 @@ async fn do_add(
     }
     sqlite::social::add(pool, me_id, their_id).await?;
 
-    // Bind the friend's libp2p device (from the server directory) to their
-    // user id so incoming DMs resolve to them instead of a raw peer id.
     let their_peer = client.resolve_user(username).ok().map(|r| r.device.peer_id);
 
     if let Some(peer) = &their_peer {
@@ -2563,8 +2410,6 @@ async fn do_add(
     Ok(())
 }
 
-/// Build the list of this account's devices (with online/pending flags) so the
-/// approval UI can render it. Called on the UI thread; reads directory (sync).
 fn refresh_devices(weak: slint::Weak<MainWindow>) {
     let client = CLIENT.lock().unwrap().clone();
     let Some(client) = client else {
@@ -2614,8 +2459,6 @@ fn refresh_devices(weak: slint::Weak<MainWindow>) {
     });
 }
 
-/// Approve a pending device of this account. Requires a valid signed
-/// attestation by an approved sibling; the server rejects invalid ones.
 fn approve_device(weak: slint::Weak<MainWindow>, peer: String) {
     let client = CLIENT.lock().unwrap().clone();
     let Some(client) = client else {
@@ -2638,7 +2481,6 @@ fn approve_device(weak: slint::Weak<MainWindow>, peer: String) {
     }
 }
 
-/// Revoke an approved or already-revoked device of this account.
 fn revoke_device(weak: slint::Weak<MainWindow>, peer: String) {
     let client = CLIENT.lock().unwrap().clone();
     let Some(client) = client else {
@@ -2661,8 +2503,6 @@ fn revoke_device(weak: slint::Weak<MainWindow>, peer: String) {
     }
 }
 
-/// Gate an outbound/privileged action on device approval. Returns `true` to
-/// proceed; on a pending device it shows a notice and returns `false`.
 fn require_approved(weak: slint::Weak<MainWindow>) -> bool {
     if device_is_approved() {
         return true;
@@ -2674,12 +2514,10 @@ fn require_approved(weak: slint::Weak<MainWindow>) -> bool {
     false
 }
 
-/// Show a transient global error dialog (transparent backdrop, message + 知道了).
 fn show_app_error(weak: slint::Weak<MainWindow>, msg: String) {
     show_app_notice(weak, msg, false);
 }
 
-/// Show a transient global notice dialog; `success` picks the green checkmark style.
 fn show_app_notice(weak: slint::Weak<MainWindow>, msg: String, success: bool) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
@@ -2693,7 +2531,6 @@ fn show_app_notice(weak: slint::Weak<MainWindow>, msg: String, success: bool) {
     });
 }
 
-/// Switch to a global call overlay (audio / video / screen share).
 fn show_call_overlay(weak: slint::Weak<MainWindow>, overlay: GlobalOverlayType) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
@@ -2705,7 +2542,6 @@ fn show_call_overlay(weak: slint::Weak<MainWindow>, overlay: GlobalOverlayType) 
     });
 }
 
-/// Push call-state into the global `CallState` (UI thread).
 fn publish_call_state(
     weak: slint::Weak<MainWindow>,
     peer_base58: Option<String>,
@@ -2726,8 +2562,6 @@ fn publish_call_state(
     });
 }
 
-/// Must run on the UI thread — the Slint event loop owns `call::CALL` (a
-/// thread_local) and cpal's streams.
 fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
     if !require_approved(weak.clone()) {
         return;
@@ -2745,8 +2579,6 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
 
     let (peer_base58, peer_name) = {
         let g = backend.blocking_read();
-        // `peer_id_for` returns the contact's base-58 peer id (what we use as
-        // the directory username to resolve).
         let Some(pid) = g.peer_id_for(key).map(|s| s.to_string()) else {
             eprintln!("[audio.call] begin_voice_call: no peer_id for key={key} — abort");
             show_app_error(weak, format!("联系人已失效（key={key}），无法发起通话"));
@@ -2885,7 +2717,6 @@ fn begin_screen_share(weak: slint::Weak<MainWindow>, key: i32) {
         (pid, name)
     };
 
-    // Desktop: ensure the screen capture is running.
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
         SCREEN.with(|slot| {
@@ -2928,7 +2759,6 @@ fn begin_screen_share(weak: slint::Weak<MainWindow>, key: i32) {
     show_call_overlay(weak, GlobalOverlayType::ScreenShare);
 }
 
-/// Stop the active screen share and clear the overlay.
 fn end_screen_share(weak: slint::Weak<MainWindow>) {
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
@@ -2951,7 +2781,6 @@ fn end_screen_share(weak: slint::Weak<MainWindow>) {
     show_call_overlay(weak, GlobalOverlayType::None);
 }
 
-/// Convert a unix timestamp (ms or s) to `YYYY-MM-DD`.
 fn fmt_profile_date(ms: i64) -> String {
     if ms <= 0 {
         return String::new();
@@ -2961,7 +2790,6 @@ fn fmt_profile_date(ms: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Days-since-epoch to Y/M/D (Howard Hinnant's civil_from_days).
 fn civil_date(z: i64) -> (i64, i64, i64) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_1;
@@ -2976,8 +2804,6 @@ fn civil_date(z: i64) -> (i64, i64, i64) {
     (y, m as i64, d)
 }
 
-/// Publish a status-only update (key is set, data fields left blank) for a
-/// given contact key.
 fn publish_profile_status(weak: slint::Weak<MainWindow>, key: i32, msg: SharedString) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
@@ -2999,14 +2825,12 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
         publish_profile_status(weak, key, SharedString::from("联系人已失效"));
         return;
     };
-    // Real peer id (username key used for directory lookups) for display / DM.
     let peer_id = backend
         .blocking_read()
         .peer_id_for(key)
         .map(|s| s.to_string())
         .unwrap_or_default();
 
-    // Each request gets a fresh id; a stale one is dropped before publishing.
     let seq = PROFILE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     PROFILE_LATEST.store(seq, std::sync::atomic::Ordering::SeqCst);
     let my_key = key;
@@ -3055,7 +2879,6 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
                 }),
             )
         };
-        // Drop if a newer request superseded this one.
         if PROFILE_LATEST.load(std::sync::atomic::Ordering::SeqCst) != seq {
             return;
         }
@@ -3083,8 +2906,6 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
     });
 }
 
-/// Open (or create) a 1:1 conversation row with the picked contact and
-/// navigate to it.
 fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
     let t0 = std::time::Instant::now();
     eprintln!("[chat] open_conversation_with_contact: enter key={key}");
@@ -3199,9 +3020,6 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
         eprintln!(
             "[chat] open_conversation: eventloop cb load_chat_messages spawned, calling push_sub_history"
         );
-        // Ensure we're on the Chat tab (first tab) so the pushed ChatRoom
-        // subpage lands under the visible tab, regardless of which tab the
-        // user was on when they opened the conversation from a profile.
         {
             let mut nav = state.get_nav_state();
             if nav.active_tab != 0 {
@@ -3227,7 +3045,6 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
     );
 }
 
-/// Publish a status-only update for a post-detail key (data fields untouched).
 fn publish_detail_status(weak: slint::Weak<MainWindow>, key: i32, msg: SharedString) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
@@ -3253,7 +3070,6 @@ fn parse_media_urls(s: &str) -> Vec<String> {
             return v;
         }
     }
-    // Single path/URL (no brackets).
     if !t.starts_with('[') {
         return vec![t.to_string()];
     }
@@ -3307,7 +3123,6 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
         let i_liked = sqlite::social_feed::has_liked(&pool, post_id, me_id)
             .await
             .unwrap_or(false);
-        // Resolve each liker to a display name for the "who liked" line.
         let mut likers: Vec<String> = Vec::new();
         if let Ok(ids) = sqlite::social_feed::likers(&pool, post_id).await {
             for uid in ids.iter().cloned().take(20) {
@@ -3348,14 +3163,11 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
             }
         };
 
-        // media_urls may be a JSON array of URLs/paths or a single path; keep the
-        // raw strings for the UI thread to load (slint::Image is not Send).
         let media_urls = match post.media_urls.clone() {
             Some(s) if !s.trim().is_empty() => parse_media_urls(&s),
             _ => Vec::new(),
         };
 
-        // Drop if a newer request superseded this one.
         if POST_LATEST.load(std::sync::atomic::Ordering::SeqCst) != seq {
             return;
         }
@@ -3370,7 +3182,6 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
             ps.set_likes(post.like_count as i32);
             ps.set_comments(post.comment_count as i32);
             ps.set_liked_by(SharedString::from(likers_line));
-            // Load media on the UI thread (slint::Image is not Send).
             let media: Vec<SlintImage> = media_urls
                 .into_iter()
                 .filter(|s| !s.is_empty())
@@ -3396,8 +3207,6 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
     });
 }
 
-/// Toggle a like on the post shown in the detail view: memory first (so the
-/// count/heart update immediately), then async persist to SQLite.
 fn toggle_detail_like(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
@@ -3411,7 +3220,6 @@ fn toggle_detail_like(weak: slint::Weak<MainWindow>, key: i32) {
         let (liked, likes) = g.toggle_like(key);
         (liked, likes)
     };
-    // Refresh memory -> UI (updates the discover feed + the detail view).
     if let Some(ui) = weak.upgrade() {
         publish_to_views(&ui.global::<AppState>(), backend.clone());
         let ps = ui.global::<PostDetailState>();
@@ -3427,8 +3235,6 @@ fn toggle_detail_like(weak: slint::Weak<MainWindow>, key: i32) {
     }
 }
 
-/// Add a comment to the post shown in the detail view: persist to SQLite,
-/// prepend it to the comment list, and bump the comment count.
 fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
