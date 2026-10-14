@@ -9,15 +9,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use webrtc_rs::api::APIBuilder;
 use webrtc_rs::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc_rs::peer_connection::RTCPeerConnection;
 use webrtc_rs::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc_rs::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc_rs::peer_connection::RTCPeerConnection;
 use webrtc_rs::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc_rs::track::track_remote::TrackRemote;
 
 use crate::config::Config;
 use crate::error::Result;
-use crate::media_source::{make_media_engine, AudSource, VidSource};
+use crate::media_source::{AudSource, VidSource, make_media_engine};
 use crate::signal::{SignalFrame, SignalKind};
 use crate::transport::SignalTransport;
 use webrtc_rs::api::API;
@@ -151,13 +151,18 @@ impl PeerCall {
         };
         let (api, cfg_pc) = Self::built_api(cfg)?;
         let pc = Arc::new(api.new_peer_connection(cfg_pc).await?);
-        let call = Self::new(offer.call_id.clone(), offer.from.clone(), pc.clone(), transport);
+        let call = Self::new(
+            offer.call_id.clone(),
+            offer.from.clone(),
+            pc.clone(),
+            transport,
+        );
         call.set_local_sources(aud, cam, scr);
         call.add_local_tracks().await?;
         call.wire_event_handlers();
 
         pc.set_remote_description(RTCSessionDescription::offer(sdp)?)
-        .await?;
+            .await?;
         let answer = pc.create_answer(None).await?;
         pc.set_local_description(answer.clone()).await?;
         let _ = pc.gathering_complete_promise().await;
@@ -359,10 +364,11 @@ impl PeerCall {
         // Inbound tracks → decode loop feeding the remote sinks.
         {
             let call = self.clone();
-            self.pc().on_track(Box::new(move |track: Arc<TrackRemote>, _, _| {
-                call.spawn_track_consumer(track);
-                Box::pin(async {})
-            }));
+            self.pc()
+                .on_track(Box::new(move |track: Arc<TrackRemote>, _, _| {
+                    call.spawn_track_consumer(track);
+                    Box::pin(async {})
+                }));
         }
     }
 
@@ -433,7 +439,11 @@ struct NalAcc {
 
 impl NalAcc {
     fn new() -> Self {
-        Self { ts: 0, acc: Vec::new(), have: false }
+        Self {
+            ts: 0,
+            acc: Vec::new(),
+            have: false,
+        }
     }
     fn push(&mut self, payload: &[u8], ts: u32) {
         if self.have && ts != self.ts {

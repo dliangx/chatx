@@ -166,6 +166,7 @@ pub struct Running {
     pub pending_acks: Arc<Mutex<HashMap<u64, (PeerId, oneshot::Sender<anyhow::Result<()>>)>>>,
     pub connected: Arc<Mutex<HashMap<PeerId, u32>>>,
     pub dial_backoff: Arc<Mutex<HashMap<String, (u64, u32)>>>,
+    pub dial_fail_log: Arc<Mutex<HashMap<String, u64>>>,
     pub relays: Arc<Mutex<Vec<(PeerId, Multiaddr)>>>,
     pub injected: mpsc::UnboundedSender<ChatEvent>,
 }
@@ -227,6 +228,7 @@ fn parse_relay_env() -> Vec<(PeerId, Multiaddr)> {
 pub const MAX_DIALS_PER_TICK: usize = 64;
 pub const DIAL_BACKOFF_BASE_MS: u64 = 10_000;
 pub const DIAL_BACKOFF_MAX_MS: u64 = 300_000;
+pub const FAIL_LOG_REPEAT_MS: u64 = 60_000;
 
 pub type EventRx = mpsc::UnboundedReceiver<ChatEvent>;
 
@@ -285,6 +287,7 @@ pub async fn boot(
     let pending_acks = Arc::new(Mutex::new(HashMap::new()));
     let connected = Arc::new(Mutex::new(HashMap::new()));
     let dial_backoff = Arc::new(Mutex::new(HashMap::new()));
+    let dial_fail_log = Arc::new(Mutex::new(HashMap::new()));
     let relays = Arc::new(Mutex::new(parse_relay_env()));
 
     let me = *swarm.local_peer_id();
@@ -306,6 +309,7 @@ pub async fn boot(
         pending_acks: Arc::clone(&pending_acks),
         connected: Arc::clone(&connected),
         dial_backoff: Arc::clone(&dial_backoff),
+        dial_fail_log: Arc::clone(&dial_fail_log),
         relays: Arc::clone(&relays),
         injected: injected_tx.clone(),
     });
@@ -522,7 +526,30 @@ async fn swarm_loop(
                     let _ = ev.send(ChatEvent::Disconnected(peer_id));
                 }
                 SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
-                    eprintln!("[swarm] DIAL FAILED peer={peer_id:?} err={error:?}");
+                    if let Some(peer_id) = peer_id {
+                        // Same peer can be re-dialed repeatedly (backoff, group
+                        // ticks). Don't spam the same error line on every retry —
+                        // log at most once per peer per FAIL_LOG_REPEAT_MS.
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        let key = peer_id.to_base58();
+                        let suppress = {
+                            let m = running.dial_fail_log.lock().unwrap();
+                            m.get(&key)
+                                .map(|last| now.saturating_sub(*last) < FAIL_LOG_REPEAT_MS)
+                                .unwrap_or(false)
+                        };
+                        if !suppress {
+                            running
+                                .dial_fail_log
+                                .lock()
+                                .unwrap()
+                                .insert(key.clone(), now);
+                            eprintln!("[swarm] DIAL FAILED peer={key} err={error:?}");
+                        }
+                    }
                 }
                 SwarmEvent::Behaviour(inner) => {
                     let me = *swarm.local_peer_id();

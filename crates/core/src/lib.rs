@@ -542,7 +542,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     pub fn heartbeat(&self) {
-        let t0 = std::time::Instant::now();
         let ep = self.endpoints_with_egress();
         let user_rec = UserRecord {
             user_id: self.account.user_id().to_string(),

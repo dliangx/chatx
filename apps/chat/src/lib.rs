@@ -1,4 +1,4 @@
-use slint::{Image as SlintImage, SharedPixelBuffer, SharedString};
+use slint::{Image as SlintImage, SharedString};
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -6,15 +6,21 @@ use chatx_core::Client;
 use chatx_core::group::MemberInfo;
 use chatx_core::signal::{DirectoryClient, HttpDirectory};
 use chatx_core::store::dm_chat_id;
-use render::Renderer;
-use render::bubble::parse::parse_text;
-use render::bubble::{Bubble, GroupPos, Side};
-use render::canvas::Image;
+use render::bubble::Side;
 
 pub mod data;
 use data::ArcBackend;
 pub mod call;
 pub mod call_dispatcher;
+pub mod image;
+pub mod process;
+pub mod time;
+use image::{
+    ChatMsg, RENDERER, RenderedMsg, ensure_renderer, load_image_cached, make_avatar,
+    make_preview_image, qr_image, render_msg, to_message_data,
+};
+use process::{group_conn_enter, start_group_conn_sweeper, touch_chat_activity};
+use time::{fmt_profile_date, fmt_time, time_label};
 
 use camera::Camera;
 use screen::Screen;
@@ -23,7 +29,8 @@ slint::include_modules!();
 
 type Directory = HttpDirectory;
 
-static CLIENT: std::sync::Mutex<Option<Arc<Client<Directory>>>> = std::sync::Mutex::new(None);
+pub(crate) static CLIENT: std::sync::Mutex<Option<Arc<Client<Directory>>>> =
+    std::sync::Mutex::new(None);
 static POOL: std::sync::Mutex<Option<Arc<sqlx::SqlitePool>>> = std::sync::Mutex::new(None);
 static BACKEND: std::sync::Mutex<Option<ArcBackend>> = std::sync::Mutex::new(None);
 
@@ -38,8 +45,6 @@ thread_local! {
 fn device_is_approved() -> bool {
     DEVICE_APPROVED.with(|c| c.get())
 }
-
-static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> = std::sync::OnceLock::new();
 
 static CHAT_SCROLL_POS: std::sync::LazyLock<
     std::sync::RwLock<std::collections::HashMap<i32, f32>>,
@@ -62,124 +67,14 @@ static CURRENT_CHAT: std::sync::LazyLock<std::sync::RwLock<Option<String>>> =
 fn set_current_chat_id(chat_id: &str) {
     *CURRENT_CHAT.write().unwrap() = Some(chat_id.to_string());
 }
-
-const GROUP_DISCONNECT_GRACE_MS: u64 = 10 * 60 * 1000;
-const GROUP_SWEEP_INTERVAL_MS: u64 = 15 * 1000;
-
-#[derive(Clone, Copy)]
-struct GroupConnSlot {
-    last_enter_ms: u64,
-}
-
-static GROUP_CONNS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, GroupConnSlot>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
-fn group_conn_enter(chat_id: &str) {
-    if !chat_id.starts_with("grp-") {
-        return;
-    }
-    let now = chatx_core::message::now_ms();
-    let needs_connect = {
-        let mut m = GROUP_CONNS.lock().unwrap();
-        match m.get_mut(chat_id) {
-            Some(slot) => {
-                slot.last_enter_ms = now;
-                false
-            }
-            None => {
-                m.insert(chat_id.to_string(), GroupConnSlot { last_enter_ms: now });
-                true
-            }
-        }
-    };
-    if !needs_connect {
-        return;
-    }
-
-    let gid = chat_id.to_string();
-    let Some(client) = CLIENT.lock().unwrap().clone() else {
-        return;
-    };
-
-    std::thread::spawn(move || {
-        if let Err(e) = client.connect_to_group(&gid) {
-            eprintln!("[group] enter {gid} failed: {e}");
-        }
-    });
-}
-
-fn touch_chat_activity(chat_id: &str) {
-    if chat_id.is_empty() {
-        return;
-    }
-    let now = chatx_core::message::now_ms();
-    let mut m = GROUP_CONNS.lock().unwrap();
-    match m.get_mut(chat_id) {
-        Some(slot) => slot.last_enter_ms = now,
-        None => {
-            if chat_id.starts_with("grp-") {
-                m.insert(chat_id.to_string(), GroupConnSlot { last_enter_ms: now });
-            }
-        }
-    }
-}
-
-fn start_group_conn_sweeper() {
-    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    if STARTED.set(()).is_err() {
-        return;
-    }
-    let rt = runtime().clone();
-    rt.spawn(async move {
-        let mut tick =
-            tokio::time::interval(std::time::Duration::from_millis(GROUP_SWEEP_INTERVAL_MS));
-        loop {
-            tick.tick().await;
-            let now = chatx_core::message::now_ms();
-            let expired: Vec<String> = {
-                let m = GROUP_CONNS.lock().unwrap();
-                m.iter()
-                    .filter(|(_, s)| {
-                        now.saturating_sub(s.last_enter_ms) >= GROUP_DISCONNECT_GRACE_MS
-                    })
-                    .map(|(g, _)| g.clone())
-                    .collect()
-            };
-            if expired.is_empty() {
-                continue;
-            }
-            for gid in &expired {
-                GROUP_CONNS.lock().unwrap().remove(gid);
-                eprintln!("[group] grace expired for {gid} — dropping bookkeeping (conn kept)");
-            }
-        }
-    });
-}
-
 static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PROFILE_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 static POST_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-thread_local! {
-    static IMAGE_CACHE: std::cell::RefCell<std::collections::HashMap<String, SlintImage>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-fn load_image_cached(path: &str) -> SlintImage {
-    let key = path.to_string();
-    let cached = IMAGE_CACHE.with(|c| c.borrow().get(&key).cloned());
-    if let Some(img) = cached {
-        return img;
-    }
-    let img = SlintImage::load_from_path(std::path::Path::new(&key)).unwrap_or_default();
-    IMAGE_CACHE.with(|c| c.borrow_mut().insert(key, img.clone()));
-    img
-}
 static POST_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn runtime() -> Arc<tokio::runtime::Runtime> {
+pub(crate) fn runtime() -> Arc<tokio::runtime::Runtime> {
     RUNTIME.with(|slot| {
         if slot.borrow().is_none() {
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -879,75 +774,6 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
     });
 }
 
-fn make_preview_image(data: &[u8], w: u32, h: u32, fmt: u32) -> slint::Image {
-    if w == 0 || h == 0 {
-        return slint::Image::default();
-    }
-    let n = (w as usize) * (h as usize);
-    let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(w, h);
-    let dst = buf.make_mut_bytes();
-    match fmt {
-        1 => {
-            copy_rgba(data, dst, n);
-        }
-        8 => {
-            let mut di = 0usize;
-            for &y in data.iter().take(n) {
-                if di + 4 > dst.len() {
-                    break;
-                }
-                dst[di] = y;
-                dst[di + 1] = y;
-                dst[di + 2] = y;
-                dst[di + 3] = 255;
-                di += 4;
-            }
-        }
-        _ => {
-        }
-    }
-    slint::Image::from_rgba8(buf)
-}
-
-fn copy_rgba(src: &[u8], dst: &mut [u8], n: usize) {
-    let want = n * 4;
-    let len = want.min(src.len()).min(dst.len());
-    dst[..len].copy_from_slice(&src[..len]);
-}
-
-fn qr_image(text: &str) -> slint::Image {
-    use qrcode::{Color, QrCode};
-    let code = match QrCode::new(text.as_bytes()) {
-        Ok(c) => c,
-        Err(_) => return slint::Image::default(),
-    };
-    let n = code.width();
-    let scale = 8usize;
-    let size = n * scale;
-    let colors = code.to_colors();
-    let mut rgba = vec![255u8; size * size * 4];
-    for y in 0..n {
-        for x in 0..n {
-            if colors[y * n + x] == Color::Dark {
-                for dy in 0..scale {
-                    for dx in 0..scale {
-                        let px = x * scale + dx;
-                        let py = y * scale + dy;
-                        let i = (py * size + px) * 4;
-                        rgba[i] = 0;
-                        rgba[i + 1] = 0;
-                        rgba[i + 2] = 0;
-                        rgba[i + 3] = 255;
-                    }
-                }
-            }
-        }
-    }
-    let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(size as u32, size as u32);
-    buf.make_mut_bytes().copy_from_slice(&rgba);
-    slint::Image::from_rgba8(buf)
-}
-
 fn apply_result(
     weak: slint::Weak<MainWindow>,
     user_id: String,
@@ -1310,155 +1136,6 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
     );
 }
 
-const FONT_LATIN: &[u8] = include_bytes!("../fonts/NotoSans.ttf");
-const FONT_CJK: &[u8] = include_bytes!("../fonts/NotoSansSC.ttf");
-const FONT_EMOJI: &[u8] = include_bytes!("../fonts/NotoColorEmoji.ttf");
-
-fn renderer() -> Renderer {
-    let mut r = Renderer::new(render::theme::Theme::default());
-    for bytes in [FONT_LATIN, FONT_CJK] {
-        if let Some(id) = r.fonts.add_font(bytes) {
-            let chain = r.fonts.ltr_chain().to_vec();
-            r.fonts.set_ltr_chain(&{
-                let mut v = chain;
-                v.push(id);
-                v
-            });
-            let rchain = r.fonts.rtl_chain().to_vec();
-            r.fonts.set_rtl_chain(&{
-                let mut v = rchain;
-                v.push(id);
-                v
-            });
-        }
-    }
-    let px = r.theme.font_size.max(16.0);
-    r.emoji.add_color_font_bytes(
-        FONT_EMOJI,
-        0,
-        &[
-            '😀', '😂', '😅', '😉', '😊', '😍', '😘', '😜', '😎', '😢', '😭', '😡', '👍', '👎',
-            '🙏', '👏', '🎉', '🔥', '💯', '🚀',
-        ],
-        px,
-    );
-    r
-}
-
-fn ensure_renderer() {
-    let _ = RENDERER.get_or_init(|| std::sync::Mutex::new(renderer()));
-}
-
-fn make_avatar(seed: &str, size: u32) -> Image {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in seed.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    let hue = (h % 360) as f32 / 360.0;
-    let hsl_to_rgb = |h: f32, s: f32, l: f32| -> (u8, u8, u8) {
-        let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-        let hp = h * 6.0;
-        let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
-        let (r, g, b) = match hp as u32 {
-            0 => (c, x, 0.0),
-            1 => (x, c, 0.0),
-            2 => (0.0, c, x),
-            3 => (0.0, x, c),
-            4 => (x, 0.0, c),
-            _ => (c, 0.0, 0.0),
-        };
-        let m = l - c / 2.0;
-        (
-            ((r + m) * 255.0) as u8,
-            ((g + m) * 255.0) as u8,
-            ((b + m) * 255.0) as u8,
-        )
-    };
-    let top = hsl_to_rgb(hue, 0.55, 0.62);
-    let bottom = hsl_to_rgb(hue, 0.75, 0.35);
-    let n = size.max(1) as usize;
-    let mut rgba = vec![0u8; n * n * 4];
-    for y in 0..n {
-        let t = if n > 1 {
-            y as f32 / (n - 1) as f32
-        } else {
-            0.0
-        };
-        let rr = (top.0 as f32 + (bottom.0 as f32 - top.0 as f32) * t) as u8;
-        let gg = (top.1 as f32 + (bottom.1 as f32 - top.1 as f32) * t) as u8;
-        let bb = (top.2 as f32 + (bottom.2 as f32 - top.2 as f32) * t) as u8;
-        for x in 0..n {
-            let i = (y * n + x) * 4;
-            rgba[i] = rr;
-            rgba[i + 1] = gg;
-            rgba[i + 2] = bb;
-            rgba[i + 3] = 255;
-        }
-    }
-    Image {
-        rgba,
-        w: n as u32,
-        h: n as u32,
-    }
-}
-
-struct RenderedMsg {
-    rgba: Vec<u8>,
-    width: u32,
-    height: u32,
-    is_self: bool,
-    text: String,
-}
-
-struct DemoMsg {
-    sender: String,
-    side: Side,
-    time: String,
-    text: String,
-    avatar: Option<Image>,
-}
-
-fn render_msg(
-    r: &mut Renderer,
-    id: u64,
-    msg: &DemoMsg,
-    available_w: u32,
-    scale: f32,
-) -> RenderedMsg {
-    let segs = parse_text(&msg.text);
-    let bubble = Bubble {
-        segments: &segs,
-        sender: msg.sender.as_str(),
-        time: msg.time.as_str(),
-        side: msg.side,
-        group: GroupPos::Single,
-        avatar: msg.avatar.as_ref(),
-    };
-    let out = r.render(id, &bubble, available_w, scale).clone();
-    RenderedMsg {
-        rgba: out.to_straight_rgba(),
-        width: out.width,
-        height: out.height,
-        is_self: msg.side == Side::SelfSide,
-        text: msg.text.clone(),
-    }
-}
-
-fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> MessageData {
-    let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(m.width, m.height);
-    buf.make_mut_bytes().copy_from_slice(&m.rgba);
-    MessageData {
-        bubble: SlintImage::from_rgba8(buf),
-        width: (m.width as f64 / scale as f64) as f32,
-        height: (m.height as f64 / scale as f64) as f32,
-        is_self: m.is_self,
-        text: SharedString::from(m.text),
-        selected: false,
-        top,
-    }
-}
-
 fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     if tokio::runtime::Handle::try_current().is_ok() {
         let weak = ui_weak.clone();
@@ -1614,7 +1291,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                     std::hash::Hash::hash(&time, &mut h);
 
                     let avatar = Some(make_avatar(&m.sender, 80));
-                    let msg = DemoMsg {
+                    let msg = ChatMsg {
                         sender,
                         side: if is_self { Side::SelfSide } else { Side::Other },
                         time,
@@ -1673,17 +1350,6 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             cs.set_send_status(SharedString::new());
         });
     });
-}
-
-fn time_label(ms: i64) -> String {
-    if ms <= 0 {
-        return "刚刚".into();
-    }
-    let secs = (ms / 1000) as i64;
-    let day_start = (secs / 86_400) * 86_400;
-    let h = ((secs - day_start) / 3600) % 24;
-    let m = ((secs - day_start) % 3600) / 60;
-    format!("{h:02}:{m:02}")
 }
 
 fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
@@ -1832,28 +1498,6 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
             load_chat_messages(weak2, key);
         }
     });
-}
-
-fn fmt_time(ms: i64) -> String {
-    if ms <= 0 {
-        return String::new();
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let diff = now.saturating_sub(ms);
-    if diff < 60_000 {
-        "刚刚".into()
-    } else if diff < 3_600_000 {
-        format!("{}分钟前", diff / 60_000)
-    } else if diff < 86_400_000 {
-        format!("{}小时前", diff / 3_600_000)
-    } else if diff < 86_400_000 * 365 {
-        format!("{}天前", diff / 86_400_000)
-    } else {
-        format!("{}年前", diff / 86_400_000 / 365)
-    }
 }
 
 fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
@@ -2779,29 +2423,6 @@ fn end_screen_share(weak: slint::Weak<MainWindow>) {
         bridge::request_screen_share_stop();
     }
     show_call_overlay(weak, GlobalOverlayType::None);
-}
-
-fn fmt_profile_date(ms: i64) -> String {
-    if ms <= 0 {
-        return String::new();
-    }
-    let t = if ms > 10_000_000_000 { ms / 1000 } else { ms };
-    let (y, m, d) = civil_date((t / 86_400) as i64);
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-fn civil_date(z: i64) -> (i64, i64, i64) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_1;
-    let doe = (z - era * 146_1).unsigned_abs();
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as i64;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m as i64, d)
 }
 
 fn publish_profile_status(weak: slint::Weak<MainWindow>, key: i32, msg: SharedString) {

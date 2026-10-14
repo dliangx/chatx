@@ -1,16 +1,15 @@
-
 slint::include_modules!();
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use render::Renderer;
 use render::bubble::parse::parse_text;
 use render::bubble::{Bubble, GroupPos, RenderedBubble, Side};
 use render::canvas::Image;
 use render::font::FontManager;
 use render::theme::Theme;
-use render::Renderer;
 use slint::{Model, VecModel};
 
 const AVAILABLE_W: u32 = 440;
@@ -21,7 +20,7 @@ const NASKH: &str = "/System/Library/Fonts/Supplemental/DecoTypeNaskh.ttc";
 const EMOJI_FONT: &str = "/System/Library/Fonts/Apple Color Emoji.ttc";
 const EMOJIS: &[char] = &['😀', '😊', '❤', '👍', '🎉', '🚀', '🔥'];
 
-struct DemoMsg {
+struct ChatMsg {
     sender: String,
     side: Side,
     time: String,
@@ -36,7 +35,11 @@ fn load(path: &str) -> Option<Vec<u8>> {
 fn make_avatar(size: u32, top: (u8, u8, u8), bottom: (u8, u8, u8)) -> Image {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     for y in 0..size {
-        let t = if size > 1 { y as f32 / (size - 1) as f32 } else { 0.0 };
+        let t = if size > 1 {
+            y as f32 / (size - 1) as f32
+        } else {
+            0.0
+        };
         let r = (top.0 as f32 + (bottom.0 as f32 - top.0 as f32) * t) as u8;
         let g = (top.1 as f32 + (bottom.1 as f32 - top.1 as f32) * t) as u8;
         let b = (top.2 as f32 + (bottom.2 as f32 - top.2 as f32) * t) as u8;
@@ -48,13 +51,15 @@ fn make_avatar(size: u32, top: (u8, u8, u8), bottom: (u8, u8, u8)) -> Image {
             rgba[i + 3] = 255;
         }
     }
-    Image { rgba, w: size, h: size }
+    Image {
+        rgba,
+        w: size,
+        h: size,
+    }
 }
 
 fn load_fonts(fonts: &mut FontManager) {
-    if let (Some(arial), Some(stheiti), Some(naskh)) =
-        (load(ARIAL), load(STHEITI), load(NASKH))
-    {
+    if let (Some(arial), Some(stheiti), Some(naskh)) = (load(ARIAL), load(STHEITI), load(NASKH)) {
         let l0 = fonts.add_font_owned(arial).unwrap();
         let l1 = fonts.add_font_owned(stheiti).unwrap();
         let r0 = fonts.add_font_owned(naskh).unwrap();
@@ -73,7 +78,7 @@ fn to_slint_image(r: &RenderedBubble) -> slint::Image {
 fn render_msg(
     renderer: &mut Renderer,
     id: u64,
-    msg: &DemoMsg,
+    msg: &ChatMsg,
     scale: f32,
     selected: bool,
 ) -> MessageData {
@@ -111,13 +116,13 @@ fn main() -> Result<(), slint::PlatformError> {
     let alice_avatar = make_avatar(64, (0x4A, 0x90, 0xD9), (0x2C, 0x5F, 0x9E));
     let ali_avatar = make_avatar(64, (0xE0, 0x8A, 0x3C), (0xB5, 0x5E, 0x1E));
 
-    let demo: Vec<DemoMsg> = vec![
-        DemoMsg { sender: "Alice".into(), side: Side::Other, time: "09:10".into(), text: "你好！这是我们 P2P 聊天应用的消息气泡渲染测试。".into(), avatar: Some(alice_avatar.clone()) },
-        DemoMsg { sender: "Me".into(), side: Side::SelfSide, time: "09:11".into(), text: "看起来不错 😀 中文 + English + 123 混排都能正确换行".into(), avatar: None },
-        DemoMsg { sender: "Alice".into(), side: Side::Other, time: "09:12".into(), text: "这条消息特别特别长，用来测试当文本宽度超过气泡最大宽度时，是否能够按照 unicode 换行算法正确地自动换行显示，同时保持气泡宽度不超过上限。".into(), avatar: Some(alice_avatar.clone()) },
-        DemoMsg { sender: "Me".into(), side: Side::SelfSide, time: "09:13".into(), text: "链接测试：https://example.com 以及 @Bob 的提及".into(), avatar: None },
-        DemoMsg { sender: "Ali".into(), side: Side::Other, time: "09:14".into(), text: "مرحبا بالعالم".into(), avatar: Some(ali_avatar.clone()) },
-        DemoMsg { sender: "Me".into(), side: Side::SelfSide, time: "09:15".into(), text: "表情测试 😀😊❤️👍🎉🚀🔥".into(), avatar: Some(ali_avatar.clone()) },
+    let demo: Vec<ChatMsg> = vec![
+        ChatMsg { sender: "Alice".into(), side: Side::Other, time: "09:10".into(), text: "你好！这是我们 P2P 聊天应用的消息气泡渲染测试。".into(), avatar: Some(alice_avatar.clone()) },
+        ChatMsg { sender: "Me".into(), side: Side::SelfSide, time: "09:11".into(), text: "看起来不错 😀 中文 + English + 123 混排都能正确换行".into(), avatar: None },
+        ChatMsg { sender: "Alice".into(), side: Side::Other, time: "09:12".into(), text: "这条消息特别特别长，用来测试当文本宽度超过气泡最大宽度时，是否能够按照 unicode 换行算法正确地自动换行显示，同时保持气泡宽度不超过上限。".into(), avatar: Some(alice_avatar.clone()) },
+        ChatMsg { sender: "Me".into(), side: Side::SelfSide, time: "09:13".into(), text: "链接测试：https://example.com 以及 @Bob 的提及".into(), avatar: None },
+        ChatMsg { sender: "Ali".into(), side: Side::Other, time: "09:14".into(), text: "مرحبا بالعالم".into(), avatar: Some(ali_avatar.clone()) },
+        ChatMsg { sender: "Me".into(), side: Side::SelfSide, time: "09:15".into(), text: "表情测试 😀😊❤️👍🎉🚀🔥".into(), avatar: Some(ali_avatar.clone()) },
     ];
 
     let model: Rc<VecModel<MessageData>> = Rc::new(VecModel::default());
