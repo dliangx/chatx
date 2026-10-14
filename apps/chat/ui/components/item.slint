@@ -234,7 +234,7 @@ export component ContactListItem inherits Rectangle {
     in property <string> peer_id;
     in property <string> title;
     in property <bool> selected: false;
-    callback clicked();
+    callback clicked(int);
 
     out property <length> swipe: 0px;
     animate swipe {
@@ -336,7 +336,7 @@ export component ContactListItem inherits Rectangle {
                         root.swipe = 0px;
                     }
                 } else {
-                    root.clicked();
+                    root.clicked(root.id);
                 }
             }
         }
