@@ -193,7 +193,7 @@ export component ChatListItem inherits Rectangle {
                 root.moved = false;
                 root.hit-btn = root.revealed && ta.mouse-x >= parent.width - 80px;
             } else if (e.kind == PointerEventKind.move) {
-                if (!root.revealed) {
+                if (!root.revealed && ta.pressed) {
                     if (ta.pressed-x - ta.mouse-x > 5px) {
                         root.moved = true;
                     }
@@ -306,7 +306,7 @@ export component ContactListItem inherits Rectangle {
                 root.moved = false;
                 root.hit-btn = root.revealed && ta.mouse-x >= parent.width - 80px;
             } else if (e.kind == PointerEventKind.move) {
-                if (!root.revealed) {
+                if (!root.revealed && ta.pressed) {
                     if (ta.pressed-x - ta.mouse-x > 5px) {
                         root.moved = true;
                     }
