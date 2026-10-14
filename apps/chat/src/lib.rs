@@ -94,6 +94,13 @@ fn set_current_chat_id(chat_id: &str) {
 // a chat refreshes its stamp, so its pending close is naturally deferred. This
 // means "leave the chat → disconnect 10 min later, but if I come back within
 // 10 min it stays connected" with no per-exit timers to juggle.
+// Stamp-window for "last user activity in this chat". When the window passes
+// we *drop the bookkeeping entry*, but we deliberately do NOT tear down the
+// underlying libp2p connection — libp2p's own ping keep-alive maintains the
+// NAT mapping, and DM + P2P group traffic share the same PeerId, so blindly
+// `Cmd::Disconnect` was silently killing active chats. Dropping the entry
+// still has a useful side effect on re-entry: it resets `needs_connect`
+// so a redial attempt is made in case the conn went stale.
 const GROUP_DISCONNECT_GRACE_MS: u64 = 10 * 60 * 1000; // 10 minutes
 const GROUP_SWEEP_INTERVAL_MS: u64 = 15 * 1000; // check every 15s
 
@@ -145,6 +152,27 @@ fn group_conn_enter(chat_id: &str) {
     });
 }
 
+/// Touch the "last activity" stamp for a chat (DM peer id or `grp-` chat id).
+/// Used by the send/receive paths so an actively-conversed-with chat stays in
+/// the bookkeeping even after the grace window passes. (The sweeper no longer
+/// tears down connections, but keeping the map populated preserves the
+/// re-entry redial path and the log trail.)
+fn touch_chat_activity(chat_id: &str) {
+    if chat_id.is_empty() {
+        return;
+    }
+    let now = chatx_core::message::now_ms();
+    let mut m = GROUP_CONNS.lock().unwrap();
+    match m.get_mut(chat_id) {
+        Some(slot) => slot.last_enter_ms = now,
+        None => {
+            if chat_id.starts_with("grp-") {
+                m.insert(chat_id.to_string(), GroupConnSlot { last_enter_ms: now });
+            }
+        }
+    }
+}
+
 fn start_group_conn_sweeper() {
     static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     if STARTED.set(()).is_err() {
@@ -172,11 +200,15 @@ fn start_group_conn_sweeper() {
             }
             for gid in &expired {
                 GROUP_CONNS.lock().unwrap().remove(gid);
-                let Some(client) = CLIENT.lock().unwrap().clone() else {
-                    continue;
-                };
-                eprintln!("[group] grace expired for {gid} — closing P2P conns");
-                client.disconnect_from_group(gid);
+                eprintln!("[group] grace expired for {gid} — dropping bookkeeping (conn kept)");
+                // Intentionally NOT calling `client.disconnect_from_group(gid)`
+                // here. libp2p conns are shared between DM and P2P group
+                // gossip for the same PeerId, and the ping keep-alive already
+                // manages NAT lifetime. Tearing down here was the old root
+                // cause of "no ack within 8s" on the next DM and the
+                // silently-dropped group messages. Leaving the connection
+                // alive means re-entry via `group_conn_enter` just refreshes
+                // the stamp (and redials if the conn really is gone).
             }
         }
     });
@@ -1159,6 +1191,9 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
         let _ = data::refresh_chat_row(&pool, &me, &mut b, &chat_id).await;
         *backend.write().await = b;
     }
+    // Receiving a message is strong evidence of an active chat — keep the
+    // sweeper's bookkeeping fresh for it (same reason as the send path).
+    touch_chat_activity(&chat_id);
     // If this conversation is the one currently on screen, re-render its
     // bubble list so the just-arrived message shows up immediately (no manual
     // re-click). Deciding by chat_id string directly — no UI-key dependency.
@@ -1797,6 +1832,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
             match client.send_group_message(&chat_id, &body).await {
                 Ok(_) => {
                     eprintln!("[send] group message ok");
+                    touch_chat_activity(&chat_id);
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
                             ui.global::<ChatSession>()
@@ -1879,6 +1915,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
             match client.send_dm(cand, &body).await {
                 Ok(_) => {
                     eprintln!("[send] dm ok -> {cand}");
+                    touch_chat_activity(&chat_id);
                     sent = true;
                     break 'outer;
                 }

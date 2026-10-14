@@ -1410,6 +1410,33 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok(sent)
     }
 
+    /// `true` when every P2P member of `group_id` has zero live conns.
+    /// Server-mode groups never use P2P, so they always return `false`
+    /// (their messages travel over HTTP and there's no live-conn notion).
+    fn p2p_all_peers_offline(&self, group_id: &str) -> bool {
+        let g = match self.get_group(group_id) {
+            Some(g) if g.mode != group::GroupMode::Server => g,
+            _ => return false,
+        };
+        let me = self.peer_base58();
+        let mut others = 0usize;
+        let mut any_online = false;
+        let conns = self.running.connected.lock().unwrap();
+        for p in g.member_ids() {
+            if p == me {
+                continue;
+            }
+            others += 1;
+            if let Ok(pid) = p.parse::<PeerId>() {
+                if *conns.get(&pid).unwrap_or(&0) > 0 {
+                    any_online = true;
+                    break;
+                }
+            }
+        }
+        others > 0 && !any_online
+    }
+
     pub async fn send_group_message(&self, group_id: &str, text: &str) -> anyhow::Result<()> {
         eprintln!(
             "[group] send_group_message group={group_id} text_len={}",
@@ -1421,7 +1448,32 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             let seq = self.dir.post_group_message(group_id, &env)?;
             tracing::debug!(group_id, seq, "sent group msg via server");
         } else {
-            // A / P2P: broadcast on the gossipsub topic.
+            // A / P2P: broadcast on the gossipsub topic. Be honest: if no peer
+            // is currently connected, the message would be published into the
+            // void (gossipsub has no delivery receipts), so we attempt a
+            // re-dial, and if still nothing comes online, surface an error
+            // to the caller instead of silently losing the message.
+            if self.p2p_all_peers_offline(group_id) {
+                eprintln!(
+                    "[group] all P2P peers offline — attempting re-dial for {group_id}"
+                );
+                let _ = self.connect_to_group(group_id);
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(6);
+                while std::time::Instant::now() < deadline {
+                    if !self.p2p_all_peers_offline(group_id) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                }
+                if self.p2p_all_peers_offline(group_id) {
+                    anyhow::bail!(
+                        "group {group_id}: no P2P peer online — \
+                         open the chat once (or wait for the peer) and retry"
+                    );
+                }
+                eprintln!("[group] re-dial succeeded for {group_id}");
+            }
             let wire = group::msg_wire(&env)?;
             let topic = sw::IdentTopic::new(sw::group_topic_name(group_id));
             self.running
