@@ -93,6 +93,7 @@ export component ChatListItem inherits Rectangle {
     }
 
     out property <bool> revealed: root.swipe >= 80px;
+    in-out property <bool> down-revealed: false;
     in-out property <bool> moved: false;
     in-out property <bool> hit-btn: false;
 
@@ -190,6 +191,7 @@ export component ChatListItem inherits Rectangle {
         height: 100%;
         pointer-event(e) => {
             if (e.kind == PointerEventKind.down) {
+                root.down-revealed = root.revealed;
                 root.moved = false;
                 root.hit-btn = root.revealed && ta.mouse-x >= parent.width - 80px;
             } else if (e.kind == PointerEventKind.move) {
@@ -206,7 +208,7 @@ export component ChatListItem inherits Rectangle {
                     }
                 }
             } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
-                if (root.revealed) {
+                if (root.down-revealed) {
                     if (root.hit-btn) {
                         AppState.delete-chat(root.id);
                     } else {
@@ -241,6 +243,7 @@ export component ContactListItem inherits Rectangle {
     }
 
     out property <bool> revealed: root.swipe >= 80px;
+    in-out property <bool> down-revealed: false;
     in-out property <bool> moved: false;
     in-out property <bool> hit-btn: false;
 
@@ -303,6 +306,7 @@ export component ContactListItem inherits Rectangle {
         height: 100%;
         pointer-event(e) => {
             if (e.kind == PointerEventKind.down) {
+                root.down-revealed = root.revealed;
                 root.moved = false;
                 root.hit-btn = root.revealed && ta.mouse-x >= parent.width - 80px;
             } else if (e.kind == PointerEventKind.move) {
@@ -319,7 +323,7 @@ export component ContactListItem inherits Rectangle {
                     }
                 }
             } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
-                if (root.revealed) {
+                if (root.down-revealed) {
                     if (root.hit-btn) {
                         AppState.delete-contact(root.id);
                     } else {
