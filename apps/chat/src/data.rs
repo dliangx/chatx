@@ -498,6 +498,39 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
         return Ok(true);
     };
     let src_chat_key = src.name.clone().unwrap_or_else(|| src.id.to_string());
+    let is_new = !b.chats.iter().any(|r| r.chat_id == src_chat_key);
+    if is_new {
+        // The conversation exists in sqlite (created by `ensure_dm` when the
+        // first message landed) but no in-memory row yet: materialize it now.
+        let is_group = chat_id.starts_with("grp-") || src.type_ == 1;
+        let title = if is_group {
+            "群聊".to_string()
+        } else {
+            src.peer_nickname
+                .clone()
+                .filter(|s| !s.is_empty())
+                .or_else(|| src.peer_username.clone().filter(|s| !s.is_empty()))
+                .or_else(|| src.name.clone().filter(|s| !s.is_empty()))
+                .unwrap_or_else(|| src.id.to_string())
+        };
+        let key = b.bump();
+        b.chat_key_to_id.insert(key, src_chat_key.clone());
+        b.chats.push(ChatRow {
+            key,
+            chat_id: src_chat_key.clone(),
+            title,
+            preview: if is_group {
+                String::new()
+            } else {
+                src.last_message_preview.clone().unwrap_or_default()
+            },
+            is_group,
+            time_ms: src.last_message_time.unwrap_or(0),
+            unread: src.unread_count,
+            peer_id: src.peer_id.clone().unwrap_or_default(),
+        });
+        return Ok(true);
+    }
     let Some(row) = b.chats.iter_mut().find(|r| r.chat_id == src_chat_key) else {
         return Ok(false);
     };
@@ -675,5 +708,78 @@ mod tests {
         assert_eq!(b.discover.len(), 1);
         assert!(b.discover[0].liked);
         assert_eq!(b.discover[0].likes, 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_chat_row_materializes_new_dm() {
+        // Regression: the receiving side of a DM has no in-memory chat row,
+        // but the sqlite `conversations` row is created by `ensure_dm` at
+        // message-insert time. `refresh_chat_row` must materialize the
+        // in-memory row from the sqlite row (previously it would silently
+        // return Ok(false), leaving the UI chat list empty).
+        let pool = sqlite::open_memory().await.unwrap();
+        let me = "me-peer";
+        let me_id = 100;
+        sqlite::users::upsert(
+            &pool,
+            me_id,
+            &sqlite::users::UserPatch {
+                username: Some(me.to_string()),
+                nickname: Some("Me".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let their_id = 200;
+        sqlite::users::upsert(
+            &pool,
+            their_id,
+            &sqlite::users::UserPatch {
+                username: Some("them".into()),
+                nickname: Some("Them".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // Bind a device for the peer so chat_list resolves the join → title.
+        sqlite::devices::bind_device(&pool, their_id, "them-peer").await.unwrap();
+
+        // The sender side already pushed a message into the shared store:
+        // `insert_row` ensures the conversation exists in sqlite.
+        let dm = chatx_core::store::dm_chat_id(me, "them-peer");
+        let _ = sqlite::messages::insert_row(
+            &pool,
+            &sqlite::MsgRow {
+                id: 0,
+                chat_id: dm.clone(),
+                sender: "them-peer".into(),
+                text: "hello!".into(),
+                sealed: false,
+                t: 1234,
+                mine: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Receiver's in-memory state: empty.
+        let mut b = DataBackend::default();
+        let _me_user = me_id;
+        let changed = refresh_chat_row(&pool, me, &mut b, &dm).await.unwrap();
+        assert!(changed, "inbound first message must produce a new chat row");
+        let row = b.chats.iter().find(|r| r.chat_id == dm).expect("chat row present");
+        assert!(!row.is_group);
+        assert_eq!(row.peer_id, "them-peer");
+        assert_eq!(row.title, "Them");
+        assert_eq!(row.preview, "hello!");
+        assert_eq!(row.unread, 1);
+        assert_eq!(row.time_ms, 1234);
+
+        // Idempotency: a second refresh must not duplicate the row.
+        let _ = refresh_chat_row(&pool, me, &mut b, &dm).await.unwrap();
+        let n_dm = b.chats.iter().filter(|r| r.chat_id == dm).count();
+        assert_eq!(n_dm, 1, "no duplicate rows on subsequent refresh");
     }
 }
