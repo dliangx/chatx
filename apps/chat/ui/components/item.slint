@@ -86,9 +86,21 @@ export component ChatListItem inherits Rectangle {
     in property <bool> selected: false;
     callback clicked(int);
 
-    background: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand : transparent;
+    out property <length> swipe: 0px;
+    animate swipe {
+        duration: 180ms;
+        easing: ease-in-out;
+    }
+
+    out property <bool> revealed: root.swipe >= 80px;
+    in-out property <bool> moved: false;
+    in-out property <bool> hit-btn: false;
+
+    background: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand : Theme.bg;
+    clip: true;
 
     HorizontalLayout {
+        x: -root.swipe;
         width: 100%;
         height: 100%;
         padding: 4px;
@@ -144,6 +156,28 @@ export component ChatListItem inherits Rectangle {
     }
 
     Rectangle {
+        x: parent.width - 80px;
+        y: 0px;
+        width: 80px;
+        height: 100%;
+        background: #e03131;
+        opacity: root.swipe / 80px;
+
+        Text {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 100%;
+            text: "删除";
+            font-size: 14px;
+            font-weight: 800;
+            color: white;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    Rectangle {
         x: 56px;
         y: root.height;
         width: 100%;
@@ -152,11 +186,43 @@ export component ChatListItem inherits Rectangle {
     }
 
     ta := TouchArea {
-        x: 0px;
-        y: 0px;
-        width: parent.width - 48px;
+        width: 100%;
         height: 100%;
-        clicked => { root.clicked(root.id); }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                root.moved = false;
+                root.hit-btn = root.revealed && ta.mouse-x >= parent.width - 80px;
+            } else if (e.kind == PointerEventKind.move) {
+                if (!root.revealed) {
+                    if (ta.pressed-x - ta.mouse-x > 5px) {
+                        root.moved = true;
+                    }
+                    if (ta.pressed-x - ta.mouse-x < 0px) {
+                        root.swipe = 0px;
+                    } else if (ta.pressed-x - ta.mouse-x > 80px) {
+                        root.swipe = 80px;
+                    } else {
+                        root.swipe = ta.pressed-x - ta.mouse-x;
+                    }
+                }
+            } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                if (root.revealed) {
+                    if (root.hit-btn) {
+                        AppState.delete-chat(root.id);
+                    } else {
+                        root.swipe = 0px;
+                    }
+                } else if (root.moved) {
+                    if (root.swipe > 40px) {
+                        root.swipe = 80px;
+                    } else {
+                        root.swipe = 0px;
+                    }
+                } else {
+                    root.clicked(root.id);
+                }
+            }
+        }
     }
 }
 
@@ -168,9 +234,21 @@ export component ContactListItem inherits Rectangle {
     in property <bool> selected: false;
     callback clicked();
 
-    background: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand : transparent;
+    out property <length> swipe: 0px;
+    animate swipe {
+        duration: 180ms;
+        easing: ease-in-out;
+    }
+
+    out property <bool> revealed: root.swipe >= 80px;
+    in-out property <bool> moved: false;
+    in-out property <bool> hit-btn: false;
+
+    background: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand : Theme.bg;
+    clip: true;
 
     HorizontalLayout {
+        x: -root.swipe;
         width: 100%;
         height: 100%;
         padding: 4px;
@@ -198,10 +276,66 @@ export component ContactListItem inherits Rectangle {
         }
     }
 
+    Rectangle {
+        x: parent.width - 80px;
+        y: 0px;
+        width: 80px;
+        height: 100%;
+        background: #e03131;
+        opacity: root.swipe / 80px;
+
+        Text {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 100%;
+            text: "删除";
+            font-size: 14px;
+            font-weight: 800;
+            color: white;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
     ta := TouchArea {
         width: 100%;
         height: 100%;
-        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                root.moved = false;
+                root.hit-btn = root.revealed && ta.mouse-x >= parent.width - 80px;
+            } else if (e.kind == PointerEventKind.move) {
+                if (!root.revealed) {
+                    if (ta.pressed-x - ta.mouse-x > 5px) {
+                        root.moved = true;
+                    }
+                    if (ta.pressed-x - ta.mouse-x < 0px) {
+                        root.swipe = 0px;
+                    } else if (ta.pressed-x - ta.mouse-x > 80px) {
+                        root.swipe = 80px;
+                    } else {
+                        root.swipe = ta.pressed-x - ta.mouse-x;
+                    }
+                }
+            } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                if (root.revealed) {
+                    if (root.hit-btn) {
+                        AppState.delete-contact(root.id);
+                    } else {
+                        root.swipe = 0px;
+                    }
+                } else if (root.moved) {
+                    if (root.swipe > 40px) {
+                        root.swipe = 80px;
+                    } else {
+                        root.swipe = 0px;
+                    }
+                } else {
+                    root.clicked();
+                }
+            }
+        }
     }
 }
 

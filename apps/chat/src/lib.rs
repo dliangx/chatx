@@ -327,6 +327,18 @@ pub fn run_app() {
     }
     {
         let weak = weak.clone();
+        ui.global::<AppState>().on_delete_contact(move |id| {
+            delete_contact(weak.clone(), id);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<AppState>().on_delete_chat(move |id| {
+            delete_chat(weak.clone(), id);
+        });
+    }
+    {
+        let weak = weak.clone();
         ui.global::<AppState>().on_notes_layout(move |w| {
             relayout_notes(weak.clone(), w);
         });
@@ -416,22 +428,25 @@ pub fn run_app() {
     }
     {
         let w = weak.clone();
-        ui.global::<AppState>().on_add_contact(move |username, peer_id| {
-            add_contact(w.clone(), username.to_string(), peer_id.to_string());
-        });
+        ui.global::<AppState>()
+            .on_add_contact(move |username, peer_id| {
+                add_contact(w.clone(), username.to_string(), peer_id.to_string());
+            });
     }
 
     {
         let w = weak.clone();
-        ui.global::<AppState>().on_accept_friend_request(move |key| {
-            accept_friend_request(w.clone(), key);
-        });
+        ui.global::<AppState>()
+            .on_accept_friend_request(move |key| {
+                accept_friend_request(w.clone(), key);
+            });
     }
     {
         let w = weak.clone();
-        ui.global::<AppState>().on_reject_friend_request(move |key| {
-            reject_friend_request(w.clone(), key);
-        });
+        ui.global::<AppState>()
+            .on_reject_friend_request(move |key| {
+                reject_friend_request(w.clone(), key);
+            });
     }
 
     {
@@ -926,11 +941,7 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
 /// Handle an inbound friendq frame (someone sent us Inquire / Accept / Reject
 /// over P2P). Persists the local copy, refreshes the UI, and sends any
 /// required local contact update on acceptance.
-async fn handle_inbound_friendq(
-    weak: slint::Weak<MainWindow>,
-    from_peer: &str,
-    q: FriendQ,
-) {
+async fn handle_inbound_friendq(weak: slint::Weak<MainWindow>, from_peer: &str, q: FriendQ) {
     eprintln!(
         "[friendq] INBOUND action={:?} from={from_peer} req={} rec={}",
         q.action, q.requester, q.recipient
@@ -960,16 +971,10 @@ async fn handle_inbound_friendq(
             } else {
                 q.sender_name.clone()
             };
-            let _ =
-                sqlite::social::frq_upsert(&pool, from_peer, &me_b58, Some(&note)).await;
+            let _ = sqlite::social::frq_upsert(&pool, from_peer, &me_b58, Some(&note)).await;
             {
                 let mut g = backend.write().await;
-                g.add_friend_request(
-                    from_peer,
-                    note,
-                    sqlite::now_ms(),
-                    data::FrqDir::Inbox,
-                );
+                g.add_friend_request(from_peer, note, sqlite::now_ms(), data::FrqDir::Inbox);
             }
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
@@ -994,7 +999,13 @@ async fn handle_inbound_friendq(
                 q.recipient
             };
             // In my local DB the row is (requester=me, recipient=other).
-            let _ = sqlite::social::frq_set_status(&pool, &me_b58, &other, sqlite::social::FRQ_ACCEPTED).await;
+            let _ = sqlite::social::frq_set_status(
+                &pool,
+                &me_b58,
+                &other,
+                sqlite::social::FRQ_ACCEPTED,
+            )
+            .await;
             let name = if q.sender_name.trim().is_empty() {
                 data::name_for_peer(&pool, &other).await
             } else {
@@ -1016,9 +1027,7 @@ async fn handle_inbound_friendq(
             });
         }
         FriendQAction::Reject => {
-            if let Some(me_b58) = {
-                CLIENT.lock().unwrap().clone().map(|c| c.peer_base58())
-            } {
+            if let Some(me_b58) = { CLIENT.lock().unwrap().clone().map(|c| c.peer_base58()) } {
                 if from_peer == me_b58 {
                     return;
                 }
@@ -1028,7 +1037,13 @@ async fn handle_inbound_friendq(
                     q.recipient
                 };
                 // Same role as in the sender's local row.
-                let _ = sqlite::social::frq_set_status(&pool, &me_b58, &other, sqlite::social::FRQ_REJECTED).await;
+                let _ = sqlite::social::frq_set_status(
+                    &pool,
+                    &me_b58,
+                    &other,
+                    sqlite::social::FRQ_REJECTED,
+                )
+                .await;
                 {
                     let mut g = backend.write().await;
                     g.remove_friend_request_if(&other, data::FrqDir::Sent);
@@ -1895,8 +1910,40 @@ fn delete_my_note(weak: slint::Weak<MainWindow>, key: i32) {
     });
 }
 
+fn delete_contact(weak: slint::Weak<MainWindow>, key: i32) {
+    let backend = BACKEND.lock().unwrap().clone();
+    let Some(backend) = backend else {
+        return;
+    };
+    {
+        let mut g = backend.blocking_write();
+        g.remove_contact(key);
+    }
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            publish_to_views(&ui.global::<AppState>(), backend);
+        }
+    });
+}
+
+fn delete_chat(weak: slint::Weak<MainWindow>, key: i32) {
+    let backend = BACKEND.lock().unwrap().clone();
+    let Some(backend) = backend else {
+        return;
+    };
+    {
+        let mut g = backend.blocking_write();
+        g.remove_chat(key);
+    }
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            publish_to_views(&ui.global::<AppState>(), backend);
+        }
+    });
+}
+
 fn should_use_server_fanout(member_count: usize) -> bool {
-    member_count >= chatx_core::GROUP_P2P_MAX
+    return member_count >= chatx_core::GROUP_P2P_MAX;
 }
 
 fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
@@ -2104,7 +2151,10 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
 }
 
 fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw: String) {
-    let username: String = username_raw.chars().filter(|c| !c.is_whitespace()).collect();
+    let username: String = username_raw
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     let peer_id: String = peer_id_raw.chars().filter(|c| !c.is_whitespace()).collect();
     if username.is_empty() && peer_id.is_empty() {
         return;
@@ -2237,7 +2287,12 @@ async fn do_add(
 
     let mut g = backend.write().await;
     if !g.has_contact(their_peer, name) {
-        g.append_contact(their_id, their_peer.to_string(), name.to_string(), String::new());
+        g.append_contact(
+            their_id,
+            their_peer.to_string(),
+            name.to_string(),
+            String::new(),
+        );
     }
     Ok(())
 }
@@ -2245,7 +2300,9 @@ async fn do_add(
 fn accept_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
-    let (Some(backend), Some(pool)) = (backend.clone(), pool) else { return };
+    let (Some(backend), Some(pool)) = (backend.clone(), pool) else {
+        return;
+    };
 
     let (dir, other_peer) = match backend.blocking_read().frq_for(key) {
         Some((dir, peer)) => (dir, peer.to_string()),
@@ -2282,9 +2339,13 @@ fn accept_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
     let rt = runtime();
     rt.spawn(async move {
         // 1. Persist the acceptance in the local DB.
-        let _ =
-            sqlite::social::frq_set_status(&pool, &other_peer, &me_peer, sqlite::social::FRQ_ACCEPTED)
-                .await;
+        let _ = sqlite::social::frq_set_status(
+            &pool,
+            &other_peer,
+            &me_peer,
+            sqlite::social::FRQ_ACCEPTED,
+        )
+        .await;
 
         // 2. Resolve a friendly name and create the contact entry (idempotent).
         let display = {
@@ -2322,7 +2383,9 @@ fn accept_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
 fn reject_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
-    let (Some(backend), Some(pool)) = (backend.clone(), pool) else { return };
+    let (Some(backend), Some(pool)) = (backend.clone(), pool) else {
+        return;
+    };
 
     let (dir, other_peer) = match backend.blocking_read().frq_for(key) {
         Some((dir, peer)) => (dir, peer.to_string()),
@@ -2352,7 +2415,13 @@ fn reject_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
 
     let rt = runtime();
     rt.spawn(async move {
-        let _ = sqlite::social::frq_set_status(&pool, &other_peer, &me_peer, sqlite::social::FRQ_REJECTED).await;
+        let _ = sqlite::social::frq_set_status(
+            &pool,
+            &other_peer,
+            &me_peer,
+            sqlite::social::FRQ_REJECTED,
+        )
+        .await;
         {
             let mut g = backend.write().await;
             g.remove_friend_request(key);

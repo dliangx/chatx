@@ -186,6 +186,18 @@ impl DataBackend {
         }
     }
 
+    /// Remove a conversation from the list by its UI key.
+    pub fn remove_chat(&mut self, key: i32) {
+        self.chats.retain(|r| r.key != key);
+        self.chat_key_to_id.remove(&key);
+    }
+
+    /// Remove a contact from the list by its UI key.
+    pub fn remove_contact(&mut self, key: i32) {
+        self.contact_key_to_id.remove(&key);
+        self.contacts.retain(|r| r.key != key);
+    }
+
 
     pub fn append_chat(&mut self, chat_id: String, title: String, is_group: bool, peer_id: String) -> i32 {
         let key = self.bump();
