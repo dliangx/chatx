@@ -205,37 +205,89 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         {
             return Ok(());
         }
-        if self.dial_suppressed(&peer_base58) {
-            return Ok(());
-        }
-        let rec = self
-            .dir
-            .resolve_device(peer_base58)
-            .map_err(|e| anyhow::anyhow!("device {peer_base58} not found in directory: {e}"))?;
-        let endpoint = rec
-            .endpoints
-            .iter()
-            .filter_map(|e| e.parse::<Multiaddr>().ok())
-            .find(|a| unroutable_reason(a).is_none());
-        let Some(endpoint) = endpoint else {
+        // Reach the peer by dialing every routable address it registered. A
+        // single endpoint is often stale (NAT mapping changed), so fail over
+        // across the candidates, and re-resolve the latest record between
+        // passes so a fresh heartbeat lands before we give up. Loopback and
+        // wildcard addresses are never dialed (`unroutable_reason`).
+        const PASSES: usize = 2;
+        const PER_ATTEMPT: std::time::Duration = std::time::Duration::from_millis(1500);
+        const PASS_GAP: std::time::Duration = std::time::Duration::from_millis(800);
+        const POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+        for pass in 0..PASSES {
+            if self.peer_connected(&pid) {
+                return Ok(());
+            }
+            let rec = match self.dir.resolve_device(peer_base58) {
+                Ok(rec) => rec,
+                Err(e) => {
+                    eprintln!("[dm] warm_dial resolve {peer_base58} failed: {e}");
+                    break;
+                }
+            };
+            let mut candidates: Vec<Multiaddr> = Vec::new();
+            for endpoint in &rec.endpoints {
+                let Ok(addr) = endpoint.parse::<Multiaddr>() else {
+                    continue;
+                };
+                if let Some(reason) = unroutable_reason(&addr) {
+                    eprintln!("[dm] warm_dial skip unroutable ({reason}): {addr}");
+                    continue;
+                }
+                if !candidates.iter().any(|a| a == &addr) {
+                    candidates.push(addr);
+                }
+            }
+            if candidates.is_empty() {
+                eprintln!("[dm] warm_dial skip {peer_base58}: no routable endpoints");
+                break;
+            }
             eprintln!(
-                "[dm] warm_dial skip {peer_base58}: only loopback/wildcard addrs registered"
+                "[dm] warm_dial {peer_base58} pass={pass} candidates={}",
+                candidates.len()
             );
-            return Ok(());
-        };
-        if self
-            .running
-            .cmd_tx
-            .send(Cmd::Connect {
-                peer: pid,
-                addr: endpoint.clone(),
-            })
-            .is_ok()
-        {
-            self.dial_attempted(&peer_base58);
-            eprintln!("[dm] warm_dial {peer_base58} -> {endpoint}");
+            for addr in &candidates {
+                if self.peer_connected(&pid) {
+                    return Ok(());
+                }
+                if self
+                    .running
+                    .cmd_tx
+                    .send(Cmd::Connect {
+                        peer: pid.clone(),
+                        addr: addr.clone(),
+                    })
+                    .is_err()
+                {
+                    continue;
+                }
+                eprintln!("[dm] warm_dial {peer_base58} -> {addr}");
+                let deadline = std::time::Instant::now() + PER_ATTEMPT;
+                while std::time::Instant::now() < deadline {
+                    if self.peer_connected(&pid) {
+                        eprintln!("[dm] warm_dial {peer_base58} connected via {addr}");
+                        return Ok(());
+                    }
+                    std::thread::sleep(POLL);
+                }
+            }
+            if pass + 1 < PASSES {
+                std::thread::sleep(PASS_GAP);
+            }
         }
         Ok(())
+    }
+
+    fn peer_connected(&self, peer: &PeerId) -> bool {
+        self.running
+            .connected
+            .lock()
+            .unwrap()
+            .get(peer)
+            .copied()
+            .unwrap_or(0)
+            > 0
     }
 
     pub fn disconnect_from_group(&self, group_id: &str) {

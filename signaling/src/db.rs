@@ -354,6 +354,167 @@ pub async fn delete_group_key_slot(
     Ok(removed)
 }
 
+// --- read helpers (every request reads straight from the db) ----------------
+
+pub async fn get_user_exact(db: &Sdb, user_id: &str) -> anyhow::Result<Option<UserRecord>> {
+    let row: Option<UserRow> = sqlx::query_as::<_, UserRow>("SELECT * FROM users WHERE user_id = ?1")
+        .bind(user_id)
+        .fetch_optional(db)
+        .await?;
+    Ok(row.map(UserRow::into_record))
+}
+
+pub async fn resolve_user_db(db: &Sdb, user_id: &str) -> anyhow::Result<UserRecord> {
+    if let Some(r) = get_user_exact(db, user_id).await? {
+        return Ok(r);
+    }
+    let rows: Vec<UserRow> = sqlx::query_as::<_, UserRow>(
+        "SELECT * FROM users WHERE user_id LIKE ?1 || '%'",
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await?;
+    let rows: Vec<UserRecord> = rows.into_iter().map(UserRow::into_record).collect();
+    match rows.len() {
+        1 => Ok(rows.into_iter().next().unwrap()),
+        _ => anyhow::bail!("user {user_id} not found or ambiguous"),
+    }
+}
+
+pub async fn resolve_device_db(db: &Sdb, peer_id: &str) -> anyhow::Result<DeviceRecord> {
+    #[derive(sqlx::FromRow)]
+    struct Exact {
+        peer_id: String,
+    }
+    let exact: Option<Exact> = sqlx::query_as::<_, Exact>("SELECT peer_id FROM devices WHERE peer_id = ?1")
+        .bind(peer_id)
+        .fetch_optional(db)
+        .await?;
+    if exact.is_some() {
+        let row: DevRow =
+            sqlx::query_as::<_, DevRow>("SELECT * FROM devices WHERE peer_id = ?1")
+                .bind(peer_id)
+                .fetch_one(db)
+                .await?;
+        return Ok(row.into_record());
+    }
+    let rows: Vec<DevRow> = sqlx::query_as::<_, DevRow>(
+        "SELECT * FROM devices WHERE peer_id LIKE ?1 || '%'",
+    )
+    .bind(peer_id)
+    .fetch_all(db)
+    .await?;
+    let rows: Vec<DeviceRecord> = rows.into_iter().map(DevRow::into_record).collect();
+    match rows.len() {
+        1 => Ok(rows.into_iter().next().unwrap()),
+        _ => anyhow::bail!("device {peer_id} not found or ambiguous"),
+    }
+}
+
+pub async fn list_user_devices_db(db: &Sdb, user_id: &str) -> anyhow::Result<Vec<DeviceRecord>> {
+    let mut out: Vec<DeviceRecord> = Vec::new();
+    let rows: Vec<DevRow> =
+        sqlx::query_as::<_, DevRow>("SELECT * FROM devices WHERE user_id = ?1 ORDER BY peer_id")
+            .bind(user_id)
+            .fetch_all(db)
+            .await?;
+    for r in rows {
+        out.push(r.into_record());
+    }
+    Ok(out)
+}
+
+/// A user + their best online APPROVED device (newest `seen` <= TTL), or `None`
+/// if the user has no such device.
+pub async fn best_online_for_user(
+    db: &Sdb,
+    user_id: &str,
+    exclude_peer: &str,
+    now: u64,
+) -> anyhow::Result<Option<DeviceRecord>> {
+    let rows = list_user_devices_db(db, user_id).await?;
+    use chatx_core::signal::ONLINE_TTL_MS;
+    let mut best: Option<&DeviceRecord> = None;
+    for d in &rows {
+        if d.status != DeviceStatus::Approved {
+            continue;
+        }
+        if now.saturating_sub(d.seen) > ONLINE_TTL_MS {
+            continue;
+        }
+        if !exclude_peer.is_empty() && d.peer_id == exclude_peer {
+            continue;
+        }
+        match best {
+            None => best = Some(d),
+            Some(b) if d.seen > b.seen => best = Some(d),
+            _ => {}
+        }
+    }
+    Ok(best.cloned())
+}
+
+pub async fn list_users(db: &Sdb) -> anyhow::Result<Vec<UserRecord>> {
+    let mut out: Vec<UserRecord> = Vec::new();
+    let rows: Vec<UserRow> = sqlx::query_as::<_, UserRow>("SELECT * FROM users")
+        .fetch_all(db)
+        .await?;
+    for r in rows {
+        out.push(r.into_record());
+    }
+    Ok(out)
+}
+
+pub async fn get_group_db(db: &Sdb, group_id: &str) -> anyhow::Result<Option<GroupPublic>> {
+    let row: Option<GrpRow> =
+        sqlx::query_as::<_, GrpRow>("SELECT * FROM groups WHERE group_id = ?1")
+            .bind(group_id)
+            .fetch_optional(db)
+            .await?;
+    Ok(row.map(GrpRow::into_record))
+}
+
+pub async fn list_groups_db(db: &Sdb) -> anyhow::Result<Vec<GroupPublic>> {
+    let mut out: Vec<GroupPublic> = Vec::new();
+    let rows: Vec<GrpRow> = sqlx::query_as::<_, GrpRow>("SELECT * FROM groups")
+        .fetch_all(db)
+        .await?;
+    for r in rows {
+        out.push(r.into_record());
+    }
+    Ok(out)
+}
+
+/// Update a device's `seen` timestamp and (optionally) its endpoints. Returns
+/// `true` if the device existed. Presence is ephemeral, so this only touches
+/// the volatile columns.
+pub async fn update_device_presence(
+    db: &Sdb,
+    peer_id: &str,
+    seen: u64,
+    endpoints: Option<Vec<String>>,
+) -> anyhow::Result<bool> {
+    let endpoints_json = match &endpoints {
+        Some(ep) => Some(serde_json::to_string(ep)?),
+        None => None,
+    };
+    let n = if let Some(eps) = &endpoints_json {
+        sqlx::query("UPDATE devices SET seen = ?1, endpoints = ?2 WHERE peer_id = ?3")
+            .bind(seen as i64)
+            .bind(eps)
+            .bind(peer_id)
+            .execute(db)
+            .await?
+    } else {
+        sqlx::query("UPDATE devices SET seen = ?1 WHERE peer_id = ?2")
+            .bind(seen as i64)
+            .bind(peer_id)
+            .execute(db)
+            .await?
+    };
+    Ok(n.rows_affected() > 0)
+}
+
 pub async fn load_all(
     db: &Sdb,
 ) -> anyhow::Result<(
@@ -406,7 +567,7 @@ impl UserRow {
             user_id: self.user_id,
             e2e_public: self.e2e_public,
             sign_pk: self.sign_pk,
-            seen: 0,
+            seen: self.seen as u64,
         }
     }
 }
@@ -444,7 +605,7 @@ impl DevRow {
                 .attestation
                 .as_deref()
                 .and_then(|s| serde_json::from_str::<Attestation>(s).ok()),
-            seen: 0,
+            seen: self.seen as u64,
             approved_at: self.approved_at as u64,
         }
     }
