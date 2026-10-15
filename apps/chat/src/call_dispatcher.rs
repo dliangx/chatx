@@ -26,9 +26,19 @@ static CALL_SCR: OnceLock<Mutex<Option<Arc<media::VidSource>>>> = OnceLock::new(
 static CALL_CAM_PREVIEW: OnceLock<Mutex<
     Option<Box<dyn Fn(&[u8], u32, u32) + Send + Sync + 'static>>,
 >> = OnceLock::new();
+/// Local screen preview sink (UI-side). Mirrors [`CALL_CAM_PREVIEW`] for
+/// screen share, so the A slot can show *my* screen while sharing.
+static CALL_SCR_PREVIEW: OnceLock<Mutex<
+    Option<Box<dyn Fn(&[u8], u32, u32) + Send + Sync + 'static>>,
+>> = OnceLock::new();
 /// Throttle so the preview callback isn't flooded (webrtc encoder caps at
 /// ~60fps; the UI preview doesn't need more than ~15fps).
 static PREVIEW_LAST_MS: AtomicU64 = AtomicU64::new(0);
+/// Independent throttle for the *screen* preview sink. Screen frames are huge
+/// (full desktop resolution); forwarding each one to the UI event loop at the
+/// capture rate (up to 60fps) starves the UI thread and locks the app. Cap
+/// the local "me" screen preview to a steady ~10fps.
+static SCR_PREVIEW_LAST_MS: AtomicU64 = AtomicU64::new(0);
 
 fn call_cam_slot() -> &'static Mutex<Option<Arc<media::VidSource>>> {
     CALL_CAM.get_or_init(|| Mutex::new(None))
@@ -41,6 +51,11 @@ fn call_cam_preview_slot() -> &'static Mutex<
 > {
     CALL_CAM_PREVIEW.get_or_init(|| Mutex::new(None))
 }
+fn call_scr_preview_slot() -> &'static Mutex<
+    Option<Box<dyn Fn(&[u8], u32, u32) + Send + Sync + 'static>>,
+> {
+    CALL_SCR_PREVIEW.get_or_init(|| Mutex::new(None))
+}
 
 /// Install the currently-active camera-side `VidSource` (or `None` on teardown).
 pub fn set_cam_source(src: Option<Arc<media::VidSource>>) {
@@ -48,6 +63,16 @@ pub fn set_cam_source(src: Option<Arc<media::VidSource>>) {
 }
 pub fn set_scr_source(src: Option<Arc<media::VidSource>>) {
     *call_scr_slot().lock().unwrap() = src;
+}
+
+/// Read-and-clear the currently-registered cam source. Used by `bootstrap_media`
+/// to reuse the pre-registered source (the one the app started its capture
+/// device for) instead of allocating a new one.
+pub fn take_cam_source() -> Option<Arc<media::VidSource>> {
+    call_cam_slot().lock().unwrap().take()
+}
+pub fn take_scr_source() -> Option<Arc<media::VidSource>> {
+    call_scr_slot().lock().unwrap().take()
 }
 
 /// Active call's `AudSource`. Registered when a call starts (see
@@ -71,18 +96,35 @@ pub fn on_audio_frame(s16le: &[u8], rate: u32) {
     if s16le.is_empty() || rate == 0 {
         return;
     }
-    if let Some(src) = call_aud_slot().lock().unwrap().clone() {
-        src.push(s16le, rate);
+    let src = call_aud_slot().lock().unwrap().clone();
+    if let Some(src) = src {
+        // Normalise to 8 kHz mono (PCMU track rate). The Android shell
+        // delivers 16 kHz; pushing the native rate directly would stretch
+        // the peer-side audio.
+        if rate == 8_000 {
+            src.push(s16le, rate);
+        } else {
+            let pcm8 = audio::resample_s16le(s16le, rate, 1, 8_000, 1);
+            if !pcm8.is_empty() {
+                src.push(&pcm8, 8_000);
+            }
+        }
     }
 }
 /// Install / clear the local camera preview sink (runs on the camera thread).
 pub fn set_cam_preview(cb: Option<Box<dyn Fn(&[u8], u32, u32) + Send + Sync + 'static>>) {
     *call_cam_preview_slot().lock().unwrap() = cb;
 }
+/// Install / clear the local screen preview sink (UI-side, runs on the
+/// screen-capture thread).
+pub fn set_scr_preview(cb: Option<Box<dyn Fn(&[u8], u32, u32) + Send + Sync + 'static>>) {
+    *call_scr_preview_slot().lock().unwrap() = cb;
+}
 pub fn teardown_sources() {
     *call_cam_slot().lock().unwrap() = None;
     *call_scr_slot().lock().unwrap() = None;
     *call_cam_preview_slot().lock().unwrap() = None;
+    *call_scr_preview_slot().lock().unwrap() = None;
     *call_aud_slot().lock().unwrap() = None;
 }
 
@@ -158,9 +200,28 @@ pub fn on_screen_frame(bytes: Vec<u8>, w: u32, h: u32, fmt: u32) {
     if w == 0 || h == 0 {
         return;
     }
-    let rgba = to_rgba8(&bytes, w, h, fmt);
+    // Fast path: the desktop `screen` crate + bridges deliver RGBA8888
+    // (fmt==1) directly — reuse the incoming buffer instead of doing a second
+    // full-resolution copy (2560x1440 = ~14.7 MB per frame).
+    let rgba = if fmt == 1 { bytes } else { to_rgba8(&bytes, w, h, fmt) };
+    // 1) forward to the active call's `VidSource` (if any).
     if let Some(src) = call_scr_slot().lock().unwrap().clone() {
         src.push(&rgba, w, h);
+    }
+    // 2) UI preview sink (if installed by `call::install_local_scr_preview`).
+    //    Throttled: full-resolution screen frames are large, and the capture
+    //    thread can run them at 30–60fps. Unthrottled, each frame does a
+    //    multi-MB copy + an `invoke_from_event_loop`, which starves the Slint
+    //    UI thread and locks the app. Cap the local "me" screen preview to
+    //    a steady ~10fps; the peer-facing `VidSource` push above is *not*
+    //    throttled (it is just the latest-frame-wins slot the encoder drains).
+    let now = frame_ms();
+    let last = SCR_PREVIEW_LAST_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= 100 {
+        SCR_PREVIEW_LAST_MS.store(now, Ordering::Relaxed);
+        if let Some(cb) = call_scr_preview_slot().lock().unwrap().as_ref() {
+            cb(&rgba, w, h);
+        }
     }
 }
 

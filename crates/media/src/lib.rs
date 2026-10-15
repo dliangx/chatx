@@ -31,8 +31,32 @@ pub use config::Config;
 pub use error::{Error, Result};
 pub use media_source::{AudSource, VidSource};
 pub use session::{PeerCall, PeerEvent};
-pub use signal::{SignalFrame, SignalKind};
+pub use signal::{CallMode, SignalFrame, SignalKind, VKind};
 pub use transport::SignalTransport;
+
+/// Global hook the app registers to observe the *peer's* camera / screen
+/// on-off control signals (`SignalKind::Cam` / `Screen`). The app uses it to
+/// flip its remote-video UI state (has-remote-cam / has-remote-scr).
+static VIDEO_SIGNAL_CB: std::sync::OnceLock<
+    std::sync::Mutex<Option<std::sync::Arc<dyn Fn(VKind, bool) + Send + Sync>>>,
+> = std::sync::OnceLock::new();
+
+/// Register (or clear with `None`) the peer camera / screen signal hook.
+pub fn set_video_signal_cb(cb: Option<std::sync::Arc<dyn Fn(VKind, bool) + Send + Sync>>) {
+    *VIDEO_SIGNAL_CB
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap() = cb;
+}
+
+/// Internal: fire the registered hook when the peer toggles their cam/screen.
+pub fn fire_video_signal(kind: VKind, on: bool) {
+    if let Some(slot) = VIDEO_SIGNAL_CB.get() {
+        if let Some(cb) = slot.lock().unwrap().as_ref() {
+            cb(kind, on);
+        }
+    }
+}
 
 /// Re-export the webrtc types callers commonly touch so `media::webrtc::...`
 /// reads naturally.

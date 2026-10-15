@@ -28,9 +28,7 @@ export { NoteState } from "discovery/note.slint";
 import { ScanView } from "global/scan.slint";
 import { ImageViewer } from "global/image.slint";
 import { QrCodeView } from "global/qrcode.slint";
-import { VideoView } from "global/video.slint";
-import { ScreenShareView } from "global/screen.slint";
-import { AudioCallView, CallState } from "global/call.slint";
+import { CallView, CallState } from "global/call.slint";
 export { CallState } from "global/call.slint";
 import { ErrorView } from "global/error.slint";
 import { AddMenuView } from "global/add.slint";
@@ -219,9 +217,9 @@ export component MainWindow inherits Window {
     }
     if AppState.nav-state.global-overlay == GlobalOverlayType.ImageViewer: ImageViewer { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.QrScanner: ScanView { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.AudioCall: AudioCallView { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.VideoCall: VideoView { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.ScreenShare: ScreenShareView { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.AudioCall
+        || AppState.nav-state.global-overlay == GlobalOverlayType.VideoCall
+        || AppState.nav-state.global-overlay == GlobalOverlayType.ScreenShare: CallView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.QrCode: QrCodeView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu: AddMenuView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.Error: ErrorView { }

@@ -1,112 +1,351 @@
 /// Single source of truth for the active call (audio / video / screen).
 /// One active call per device.
+///
+/// Two video surfaces:
+///   * **A** — the small picture (top-left), tap to swap with B.
+///   * **B** — the full-screen surface.
+/// By default A shows *me* and B shows *the peer*; tapping A flips them.
+/// The four device buttons (MUTE / AUDIO / CAMERA / SCREEN) always show and
+/// each control a *local* device, tinted green when active, gray otherwise.
 export global CallState {
     in property <string> peer-base58: "";
     in property <string> peer-name: "";
     in property <string> status: "正在呼叫…";
     in property <string> error-message: "";
     in property <bool> active: false;
-    in property <bool> muted: false;
-    /// Latest decoded peer camera frame (H.264 → RGBA8888), or empty.
-    in property <image> remote-camera;
-    /// Latest decoded peer screen frame (H.264 → RGBA8888), or empty.
-    in property <image> remote-screen;
-    /// Local camera preview (RGBA8888, mirror of "me"), or empty.
-    in property <image> local-camera;
-    /// Whether we have a local camera to preview (gates the PIP).
-    in property <bool> has-local-camera: false;
-    /// Start a call to the given contact key (the same `ContactRow.id`).
-    callback start-call(int);
-    /// Hang up the active call.
+    /// True while the call is minimized into the top-right widget.
+    in property <bool> minimized: false;
+
+    // ── device state (local) ──────────────────────────────────────
+    in property <bool> muted: false;      // my mic muted
+    in property <bool> audio-muted: false; // my speaker muted (remote audio off)
+    in property <bool> cam-on: false;     // my camera on
+    in property <bool> scr-on: false;     // my screen on
+
+    // ── four image sources (Rust sets these directly) ─────────────
+    in property <image> my-cam;
+    in property <image> my-scr;
+    in property <image> remote-cam;
+    in property <image> remote-scr;
+    in property <bool> has-my-cam: false;
+    in property <bool> has-my-scr: false;
+    in property <bool> has-remote-cam: false;
+    in property <bool> has-remote-scr: false;
+    /// A↔B orientation. false → A=me, B=peer. true → A=peer, B=me.
+    in property <bool> swapped: false;
+
+    // ── callbacks ─────────────────────────────────────────────────
     callback end-call();
-    /// Toggle local mic mute.
     callback toggle-mute();
+    callback toggle-audio();
+    callback toggle-cam();
+    callback toggle-scr();
+    callback swap-ab();
+    callback toggle-minimize();
 }
 
-export component AudioCallView inherits Rectangle {
+/// A round call-control button. `on` → green, else gray.
+export component CallBtn inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> on: false;
+    callback clicked();
 
-    background: #0b0e14;
+    width: 58px;
+    height: 58px;
+    border-radius: 29px;
+    background: root.on ? #22c55e : #2a3340;
+    clip: true;
 
-    VerticalLayout {
-        alignment: center;
-        spacing: 12px;
-        padding-top: 72px;
-        padding-bottom: 72px;
+    Text {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        text: root.label;
+        color: #ffffff;
+        font-size: 11px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: word-wrap;
+    }
 
-        Rectangle {
-            width: 96px;
-            height: 96px;
-            border-radius: 48px;
-            background: #1e2530;
-            Text {
-                text: CallState.peer-name;
-                font-size: 28px;
-                color: #cfd8e3;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                overflow: elide;
-                width: 100%;
-                height: 100%;
-            }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+/// Unified call overlay: A (small, top-left, tap to swap) + B (full screen),
+/// the four always-on device buttons (MUTE / AUDIO / CAMERA / SCREEN), END,
+/// and the minimize → maximize widget.
+export component CallView inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    clip: true;
+    background: CallState.minimized ? #00000000 : #0b0e14;
+
+    // Which image each slot shows.
+    function _my() -> image {
+        return CallState.has-my-scr ? CallState.my-scr : CallState.my-cam;
+    }
+    function _peer() -> image {
+        return CallState.has-remote-scr ? CallState.remote-scr : CallState.remote-cam;
+    }
+    function _me_present() -> bool {
+        return CallState.has_my_cam || CallState.has_my_scr;
+    }
+    function _peer_present() -> bool {
+        return CallState.has_remote_cam || CallState.has_remote_scr;
+    }
+
+    // A = small (top-left), B = full screen. When not swapped A=me / B=peer.
+    property <bool> a-is-me: !CallState.swapped;
+
+    // ── B : full screen ────────────────────────────────────────────
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        clip: true;
+        background: #0b0e14;
+        Image {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 100%;
+            image-fit: cover;
+            source: root.a-is-me ? _peer() : _my();
         }
+    }
+
+    // ── A : small, top-left, tap to swap ───────────────────────────
+    Rectangle {
+        x: 18px;
+        y: 96px;
+        width: 150px;
+        height: 94px;
+        border-radius: 10px;
+        background: #141821;
+        clip: true;
+        visible: !CallState.minimized && (root.a-is-me ? _me_present() : _peer_present());
+        Image {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 100%;
+            image-fit: cover;
+            source: root.a-is-me ? _my() : _peer();
+        }
+        TouchArea {
+            clicked => { CallState.swap-ab(); }
+        }
+    }
+
+    // ── HEADER ─────────────────────────────────────────────────────
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 92px;
+        visible: !CallState.minimized;
 
         Text {
+            x: 0px;
+            y: 26px;
+            width: 100%;
             text: CallState.peer-name;
-            font-size: 22px;
-            color: #f0f3f7;
             horizontal-alignment: center;
+            font-size: 22px;
+            font-weight: 600;
+            color: #f0f3f7;
             wrap: word-wrap;
-            max-width: 240px;
+            max-width: 300px;
         }
 
         Text {
+            x: 0px;
+            y: 56px;
+            width: 100%;
             text: CallState.status;
+            horizontal-alignment: center;
             font-size: 13px;
             color: #8b95a3;
-            horizontal-alignment: center;
         }
 
-        Text {
-            text: "语音通话";
-            font-size: 12px;
-            color: #556070;
-            horizontal-alignment: center;
-        }
-
-        Text {
-            text: CallState.peer-base58;
-            font-size: 10px;
-            color: #4a5568;
-            horizontal-alignment: center;
-            wrap: word-wrap;
-            max-width: 240px;
-        }
-
+        // MINIMIZE (top-right)
         Rectangle {
-            width: 72px;
-            height: 72px;
-            border-radius: 36px;
-            background: #ff4545;
+            x: parent.width - 58px;
+            y: 22px;
+            width: 44px;
+            height: 44px;
+            border-radius: 22px;
+            background: #2a3340;
             Text {
-                text: "挂断";
-                color: #ffffff;
-                font-size: 15px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+                x: 0px;
+                y: 0px;
                 width: 100%;
                 height: 100%;
+                text: "–";
+                color: #eaeef3;
+                font-size: 24px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
             }
+            TouchArea {
+                clicked => { CallState.toggle-minimize(); }
+            }
+        }
+    }
 
+    // ── CONTROL BAR ────────────────────────────────────────────────
+    Rectangle {
+        x: 0px;
+        y: parent.height - 218px;
+        width: 100%;
+        height: 190px;
+        visible: !CallState.minimized;
+
+        // Four always-on device buttons.
+        HorizontalLayout {
+            y: 6px;
+            alignment: center;
+            spacing: 10px;
+
+            CallBtn {
+                label: "MUTE";
+                on: CallState.muted;
+                clicked => { CallState.toggle-mute(); }
+            }
+            CallBtn {
+                label: "AUDIO";
+                on: !CallState.audio-muted;
+                clicked => { CallState.toggle-audio(); }
+            }
+            CallBtn {
+                label: "CAMERA";
+                on: CallState.cam-on;
+                clicked => { CallState.toggle-cam(); }
+            }
+            CallBtn {
+                label: "SCREEN";
+                on: CallState.scr-on;
+                clicked => { CallState.toggle-scr(); }
+            }
+        }
+
+        // END.
+        Rectangle {
+            x: (parent.width - 76px) / 2;
+            y: 72px;
+            width: 76px;
+            height: 76px;
+            border-radius: 38px;
+            background: #ff4545;
+            Text {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 100%;
+                text: "END";
+                color: #ffffff;
+                font-size: 15px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
             TouchArea {
                 clicked => { CallState.end-call(); }
             }
         }
+    }
+
+    // ── ERROR ──────────────────────────────────────────────────────
+    Text {
+        x: 12px;
+        y: 96px;
+        width: parent.width - 24px;
+        visible: CallState.error-message != "";
+        text: CallState.error-message;
+        horizontal-alignment: center;
+        font-size: 11px;
+        color: #ff8080;
+    }
+
+    // ── MINIMIZED WIDGET (top-right) ───────────────────────────────
+    Rectangle {
+        x: parent.width - 168px;
+        y: 16px;
+        width: 152px;
+        height: 96px;
+        border-radius: 16px;
+        background: #2a3340;
+        clip: true;
+        visible: CallState.minimized;
+
+        Rectangle {
+            x: 8px;
+            y: 8px;
+            width: 88px;
+            height: 80px;
+            border-radius: 8px;
+            background: #0b0e14;
+            clip: true;
+            Image {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 100%;
+                image-fit: cover;
+                source: _peer();
+            }
+        }
 
         Text {
-            text: CallState.error-message;
-            font-size: 11px;
-            color: #6b7280;
-            horizontal-alignment: center;
+            x: 96px;
+            y: 8px;
+            width: 52px;
+            text: CallState.peer-name;
+            color: #f0f3f7;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+
+        // MAXIMIZE (restore)
+        Rectangle {
+            x: 96px;
+            y: 44px;
+            width: 30px;
+            height: 30px;
+            border-radius: 15px;
+            background: #3a4452;
+            Text {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 100%;
+                text: "+";
+                color: #eaeef3;
+                font-size: 20px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            TouchArea {
+                clicked => { CallState.toggle-minimize(); }
+            }
+        }
+
+        // END (while minimized)
+        Rectangle {
+            x: 130px;
+            y: 44px;
+            width: 30px;
+            height: 30px;
+            border-radius: 15px;
+            background: #ff4545;
+            TouchArea {
+                clicked => { CallState.end-call(); }
+            }
         }
     }
 }

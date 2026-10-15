@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use chatx_core::Client;
 use chatx_core::signal::HttpDirectory;
 use media::{
-    AudSource, Config as MediaConfig, PeerCall, SignalFrame, SignalKind, SignalTransport,
+    AudSource, CallMode, Config as MediaConfig, PeerCall, SignalFrame, SignalKind, SignalTransport,
     VidSource,
 };
 pub use crate::call_dispatcher;
@@ -103,7 +103,19 @@ fn fire_ui_end() {
                 let cs = ui.global::<CallState>();
                 cs.set_active(false);
                 cs.set_muted(false);
-                cs.set_has_local_camera(false);
+                cs.set_audio_muted(false);
+                cs.set_cam_on(false);
+                cs.set_scr_on(false);
+                cs.set_my_cam(slint::Image::default());
+                cs.set_my_scr(slint::Image::default());
+                cs.set_remote_cam(slint::Image::default());
+                cs.set_remote_scr(slint::Image::default());
+                cs.set_has_my_cam(false);
+                cs.set_has_my_scr(false);
+                cs.set_has_remote_cam(false);
+                cs.set_has_remote_scr(false);
+                cs.set_swapped(false);
+                cs.set_minimized(false);
                 let state = ui.global::<crate::AppState>();
                 let mut nav = state.get_nav_state();
                 nav.global_overlay = crate::GlobalOverlayType::None;
@@ -183,6 +195,17 @@ pub fn start_call(
     }
     .map_err(|e| anyhow::anyhow!("PeerCall::offer: {e}"))?;
 
+    // Tag the initial offer with our call intent so the answerer can mirror
+    // it (a video-offer and screen-offer are otherwise identical in SDP).
+    let mode = if opts.include_cam {
+        CallMode::Video
+    } else if opts.include_scr {
+        CallMode::Screen
+    } else {
+        CallMode::Audio
+    };
+    let offer = offer.with_mode(mode);
+
     // `PeerCall::offer` returns the offer SDP frame; we are responsible for
     // sending it to the peer over the transport. (The media crate doesn't
     // auto-transmit; `Lp2pSignal::send` is invoked per frame.)
@@ -192,6 +215,9 @@ pub fn start_call(
 
     if opts.include_cam {
         install_local_cam_preview();
+    }
+    if opts.include_scr {
+        install_local_scr_preview();
     }
     spawn_event_drain(call.clone());
 
@@ -251,7 +277,7 @@ pub fn answer_offer(
             .await
         })
     }
-    .map_err(|e| anyhow::anyhow!("PeerCall::answer: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("PeerCall::answer: {e}"))?; // keep (answerer path)
 
     // Send our answer SDP back to the peer.
     transport.send(&answer).map_err(|e| anyhow::anyhow!("transport send: {e}"))?;
@@ -260,6 +286,9 @@ pub fn answer_offer(
 
     if opts.include_cam {
         install_local_cam_preview();
+    }
+    if opts.include_scr {
+        install_local_scr_preview();
     }
     spawn_event_drain(call.clone());
 
@@ -294,10 +323,33 @@ pub fn handle_signal_offer(client: Arc<ChatxClient>, peer: libp2p::PeerId, json:
     match &frame.kind {
         SignalKind::Offer(_) => {
             if is_active() {
-                tracing::warn!("[call] got Offer while active — dropping");
+                if frame.upgrade_kind.is_some() {
+                    // Mid-call upgrade (e.g. an audio → video / audio → screen
+                    // answerer receiving the offer, or a screen recipient that
+                    // has just decided to also open their own camera). Route
+                    // to the answerer upgrade path.
+                    apply_incoming_upgrade(&frame);
+                    return;
+                }
+                tracing::warn!("[call] got Offer while active — dropping (not an upgrade)");
                 return;
             }
-            let opts = CallOptions { include_cam: true, include_scr: true };
+            // Initial answer. Mirror the offerer's call intent (audio → 1
+            // m-line, video → audio+cam, screen → audio but no local share).
+            let opts = match frame.mode {
+                Some(CallMode::Video) => CallOptions {
+                    include_cam: true,
+                    include_scr: false,
+                },
+                Some(CallMode::Screen) => CallOptions {
+                    include_cam: false,
+                    include_scr: false,
+                }, // recipient doesn't share; sharer is the offerer
+                Some(CallMode::Audio) | None => CallOptions {
+                    include_cam: false,
+                    include_scr: false,
+                },
+            };
             if let Err(e) = answer_offer(client, peer, &frame, opts) {
                 eprintln!("[call] answer_offer: {e}");
             }
@@ -326,22 +378,21 @@ pub fn stop_call() {
     });
     audio::clear_input_sink();
     call_dispatcher::teardown_sources();
+    // Close the local capture device(s). `Camera` is a process-wide singleton
+    // so we release it here regardless of which path started it (`start_call`
+    // → `bootstrap_media`, a mid-call upgrade, or the in-chat scanner).
+    // `stop_screen_capture` below only tears down the screen capture when we
+    // are in the event loop (where the dispatcher is registered from the UI
+    // side). For Android / iOS the bridge requests the shell to stop.
+    crate::stop_local_media_capture();
+    // Reset per-call UI flags so the next call starts clean.
+    REMOTE_MUTE.store(false, std::sync::atomic::Ordering::Relaxed);
     #[cfg(target_os = "android")]
     {
         // Release the shell's `AudioRecord`. The shell is already holding
         // the mic while we've been active; once this returns, the loop
         // terminates and the next `startMic()` call will start a fresh one.
         bridge::request_mic_stop();
-    }
-    // Clear the local camera preview on the UI thread.
-    if let Some(weak) = weak_window() {
-        let _ = slint::invoke_from_event_loop(move || {
-            if let Some(ui) = weak.upgrade() {
-                let cs = ui.global::<CallState>();
-                cs.set_local_camera(slint::Image::default());
-                cs.set_has_local_camera(false);
-            }
-        });
     }
     eprintln!("[call] stopped");
 }
@@ -354,9 +405,112 @@ pub fn mute_mic(on: bool) {
     });
 }
 
-// ── media bootstrap (mic out, cam/scr out, speaker in) ────────────────────
+/// Mute / unmute one of the caller's local video sources (peer side freezes
+/// on the last frame). The kind is `Cam` for the local camera, `Scr` for the
+/// local screen share. No-ops if that source wasn't in this call.
+pub fn set_video_mute(kind: media::VKind, on: bool) {
+    if let Some(call) = active_call() {
+        call.set_video_mute(kind, on);
+    }
+}
 
-fn bootstrap_media(opts: CallOptions) -> anyhow::Result<(
+/// Process-global "remote audio muted" gate. The UI's SPEAKER ON/OFF button
+/// toggles this. When set, `wire_remote_sinks` drops decoded remote audio
+/// frames (so nothing is written to the speaker), but we still receive them
+/// over the wire — the peer is unaffected.
+pub(crate) static REMOTE_MUTE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_remote_mute(on: bool) {
+    REMOTE_MUTE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_remote_muted() -> bool {
+    REMOTE_MUTE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// ── mid-call video upgrades ────────────────────────────────────────────────
+
+/// Offerer path: I want to add a local video track (`kind`) to the current
+/// call (audio → video, audio → screen, or — less common — me adding a cam
+/// during a screen share). The caller is responsible for:
+///   1. Starting the local capture device (camera / screen) — see
+///      `crate::start_local_cam` / `crate::start_local_screen` in `lib.rs`.
+///   2. Building a `VidSource::new(kind)`.
+///   3. Registering it in `call_dispatcher` via `set_cam_source` /
+///      `set_scr_source` so camera frames flow in.
+/// Then call this to attach the track, re-offer, and emit the upgrade offer
+/// over the transport (peer will answer automatically).
+pub fn upgrade_outgoing(kind: media::VKind, both_sides: bool, src: Arc<VidSource>) -> anyhow::Result<()> {
+    let call = active_call().ok_or_else(|| anyhow::anyhow!("no active call"))?;
+    media_rt()
+        .block_on(call.upgrade_offer(src, kind, both_sides))
+        .map_err(|e| anyhow::anyhow!("upgrade_offer: {e}"))?;
+    Ok(())
+}
+
+/// Answerer path: the peer has sent an upgrade offer. If their
+/// `both_sides` is `true` (e.g. audio→video, both sides send cam), we attach
+/// our own local source too (caller pre-owns it via `start_local_capture`
+/// in `lib.rs`); otherwise we just apply their remote track and answer.
+pub fn apply_incoming_upgrade(frame: &SignalFrame) {
+    let kind = frame.upgrade_kind.unwrap_or(media::VKind::Cam);
+    let is_scr = matches!(kind, media::VKind::Scr);
+    let own_src = if frame.both_sides == Some(true) {
+        let kind = match frame.upgrade_kind {
+            Some(k) => k,
+            None => {
+                eprintln!("[call] upgrade frame missing kind");
+                return;
+            }
+        };
+        match crate::start_local_capture(kind) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("[call] start_local_capture: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let call = match active_call() {
+        Some(c) => c,
+        None => {
+            eprintln!("[call] apply_incoming_upgrade: no active call");
+            return;
+        }
+    };
+    if let Err(e) = media_rt().block_on(call.upgrade_answer(frame, own_src)) {
+        eprintln!("[call] upgrade_answer: {e}");
+    }
+    // Surface the new remote video presence on the UI (B image slot starts
+    // rendering + the has-remote-* flag flips green on the peer-side state).
+    if let Some(weak) = weak_window() {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                let cs = ui.global::<CallState>();
+                if is_scr {
+                    cs.set_has_remote_scr(true);
+                } else {
+                    cs.set_has_remote_cam(true);
+                }
+            }
+        });
+    }
+}
+
+// ── media bootstrap (mic out, cam/scr out, speaker in) ────────────────────
+//
+// `opts` gates which local sources to attach. When a cam/scr source is
+// needed, we call `crate::start_local_capture(kind)` ourselves — it
+// ensures the device is running, the dispatcher is wired, and a fresh
+// `VidSource` is registered into the dispatcher slot. That way there's a
+// single source that both receives camera frames AND is attached to the
+// webrtc track.
+fn bootstrap_media(
+    opts: CallOptions,
+) -> anyhow::Result<(
     audio::Audio,
     Arc<Mutex<std::collections::VecDeque<u8>>>,
     Arc<AudSource>,
@@ -380,15 +534,23 @@ fn bootstrap_media(opts: CallOptions) -> anyhow::Result<(
     #[cfg(not(target_os = "android"))]
     {
         let mic = Arc::clone(&aud_src);
-        audio::set_input_sink(move |bytes: &[u8], rate: u32, _ch: u32| {
-            if !bytes.is_empty() {
-                mic.push(bytes, rate);
+        // The PCMU track is fixed at 8 kHz mono, but cpal delivers the mic at
+        // the device's native rate (typically 48 kHz stereo). Resample here
+        // (audio thread; cheap O(n) linear) before pushing into the track, or
+        // the peer hears 6× pitch / wrong-duration garbage.
+        audio::set_input_sink(move |bytes: &[u8], rate: u32, ch: u32| {
+            if bytes.is_empty() {
+                return;
+            }
+            let pcm8 = audio::resample_s16le(bytes, rate, ch, 8_000, 1);
+            if !pcm8.is_empty() {
+                mic.push(&pcm8, 8_000);
             }
         });
         let (rate, ch) = audio
             .start_input()
             .map_err(|e| anyhow::anyhow!("start mic: {e}"))?;
-        tracing::info!("[call] mic cpal @ {rate} Hz / {ch} ch");
+        tracing::info!("[call] mic cpal @ {rate} Hz / {ch} ch (→ 8 kHz PCMU)");
     }
     #[cfg(target_os = "android")]
     {
@@ -414,18 +576,17 @@ fn bootstrap_media(opts: CallOptions) -> anyhow::Result<(
         .map_err(|e| anyhow::anyhow!("start speaker: {e}"))?;
     let queue = audio.output_queue().clone();
 
-    // Camera / screen local sources.
+    // Camera / screen local sources. `start_local_capture` guarantees a
+    // single registered `VidSource` (which the camera / screen sinks push
+    // into) AND starts the underlying device — no need to duplicate that
+    // work on the caller side.
     let cam_src = if opts.include_cam {
-        Some(Arc::new(
-            VidSource::new().map_err(|e| anyhow::anyhow!("VidSource::cam: {e}"))?,
-        ))
+        Some(crate::start_local_capture(media::VKind::Cam)?)
     } else {
         None
     };
     let scr_src = if opts.include_scr {
-        Some(Arc::new(
-            VidSource::new().map_err(|e| anyhow::anyhow!("VidSource::scr: {e}"))?,
-        ))
+        Some(crate::start_local_capture(media::VKind::Scr)?)
     } else {
         None
     };
@@ -461,6 +622,12 @@ fn wire_remote_sinks(
         if s16le.is_empty() {
             return;
         }
+        // SPEAKER OFF: drop the frame locally (peer is unaffected). Keeps the
+        // pipeline alive (decoding still happens) so flipping the toggle back
+        // ON is instant — no re-negotiation needed.
+        if REMOTE_MUTE.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let pcm = audio::resample_s16le(s16le, r, c, out_rate, out_ch);
         let mut q = q.lock().unwrap();
         q.extend(pcm.iter().copied());
@@ -470,25 +637,29 @@ fn wire_remote_sinks(
         }
     });
 
-    // Remote camera (webrtc read thread) → Slint event loop → CallState.remote-camera.
+    // Remote camera (webrtc read thread) → Slint event loop → CallState.remote-cam.
     call.set_remote_camera_sink(move |rgba: Vec<u8>, w: u32, h: u32| {
         if let Some(weak) = weak_window() {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     let img = rgba_to_slint(&rgba, w, h);
-                    ui.global::<CallState>().set_remote_camera(img);
+                    let cs = ui.global::<CallState>();
+                    cs.set_remote_cam(img);
+                    cs.set_has_remote_cam(true);
                 }
             });
         }
     });
 
-    // Remote screen (webrtc read thread) → Slint event loop → CallState.remote-screen.
+    // Remote screen (webrtc read thread) → Slint event loop → CallState.remote-scr.
     call.set_remote_screen_sink(move |rgba: Vec<u8>, w: u32, h: u32| {
         if let Some(weak) = weak_window() {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     let img = rgba_to_slint(&rgba, w, h);
-                    ui.global::<CallState>().set_remote_screen(img);
+                    let cs = ui.global::<CallState>();
+                    cs.set_remote_scr(img);
+                    cs.set_has_remote_scr(true);
                 }
             });
         }
@@ -496,8 +667,9 @@ fn wire_remote_sinks(
 }
 
 /// Install the local camera preview sink so the UI shows a PIP of "me" in
-/// parallel with the webrtc `VidSource` that the camera frames feed.
-fn install_local_cam_preview() {
+/// parallel with the webrtc `VidSource` that the camera frames feed. Marks
+/// `has-my-cam` so the A image slot renders my camera immediately.
+pub(crate) fn install_local_cam_preview() {
     call_dispatcher::set_cam_preview(Some(Box::new(move |rgba: &[u8], w: u32, h: u32| {
         if let Some(weak) = weak_window() {
             // Copy + horizontal mirror so the "me" preview reads as a mirror.
@@ -507,12 +679,81 @@ fn install_local_cam_preview() {
                 if let Some(ui) = weak.upgrade() {
                     let img = rgba_to_slint(&local, w, h);
                     let cs = ui.global::<CallState>();
-                    cs.set_local_camera(img);
-                    cs.set_has_local_camera(true);
+                    cs.set_my_cam(img);
+                    cs.set_has_my_cam(true);
                 }
             });
         }
     })));
+}
+
+/// Install the local screen preview sink so the UI shows *my* screen in the
+/// A slot even before the peer starts receiving frames. The `call_dispatcher`
+/// forwards each screen frame to this hook in parallel with the outgoing
+/// `VidSource`. No mirror — the screen is not a mirror feed.
+pub(crate) fn install_local_scr_preview() {
+    // The A slot is tiny (~150x94). Ship a downscaled local screen to the UI
+    // instead of the full-resolution desktop frame (2560x1440 = ~14.7 MB each)
+    // — the full-res encode for the peer happens via the `VidSource`, not here.
+    call_dispatcher::set_scr_preview(Some(Box::new(move |rgba: &[u8], w: u32, h: u32| {
+        if let Some(weak) = weak_window() {
+            let (dw, dh) = fit_within(w, h, SCR_PREVIEW_MAX_W);
+            let local = if dw == w && dh == h {
+                rgba.to_vec()
+            } else {
+                downscale_rgba(rgba, w, h, dw, dh)
+            };
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    let img = rgba_to_slint(&local, dw, dh);
+                    let cs = ui.global::<CallState>();
+                    cs.set_my_scr(img);
+                    cs.set_has_my_scr(true);
+                }
+            });
+        }
+    })));
+}
+
+/// Max width for the *local* screen preview shipped to the UI (the A slot is a
+/// small PIP). The outgoing `VidSource` for the peer is unaffected (full-res).
+const SCR_PREVIEW_MAX_W: u32 = 640;
+
+/// Fit `w`x`h` inside `max_w` (preserving aspect), never upscaling.
+fn fit_within(w: u32, h: u32, max_w: u32) -> (u32, u32) {
+    if w <= max_w || w == 0 || h == 0 {
+        return (w, h);
+    }
+    let scale = max_w as f32 / w as f32;
+    let dw = max_w;
+    let dh = (h as f32 * scale).round().max(1.0) as u32;
+    (dw, dh)
+}
+
+/// Nearest-neighbour downscale of an RGBA8888 buffer to exact `dw`x`dh`.
+fn downscale_rgba(rgba: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    if dw == 0 || dh == 0 || sw == 0 || sh == 0 || rgba.is_empty() {
+        return Vec::new();
+    }
+    let src_w = sw as usize;
+    let mut out = vec![0u8; (dw as usize) * (dh as usize) * 4];
+    let mut j = 0usize;
+    while (j as u32) < dw {
+        let sx = ((j as u32) * sw / dw).min(sw - 1) as usize;
+        let mut i = 0usize;
+        while (i as u32) < dh {
+            let sy = ((i as u32) * sh / dh).min(sh - 1) as usize;
+            let s = sy * src_w + sx;
+            let d = (i * (dw as usize) + j) * 4;
+            out[d] = rgba[s * 4];
+            out[d + 1] = rgba[s * 4 + 1];
+            out[d + 2] = rgba[s * 4 + 2];
+            out[d + 3] = rgba[s * 4 + 3];
+            i += 1;
+        }
+        j += 1;
+    }
+    out
 }
 
 /// Watch the `PeerCall` lifecycle events. When the peer ends the call

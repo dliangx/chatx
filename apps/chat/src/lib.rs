@@ -124,6 +124,36 @@ pub fn run_app() {
     let state = ui.global::<AppState>();
     let weak = ui.as_weak();
     call::set_weak_window(weak.clone());
+
+    // Observe the *peer's* camera / screen on-off control signals. The media
+    // crate fires this hook when it receives a `SignalKind::Cam`/`Screen` on
+    // an active call; we flip the matching `has-remote-*` flag so the A/B
+    // surfaces + buttons update.
+    {
+        let wk_outer = weak.clone();
+        media::set_video_signal_cb(Some(std::sync::Arc::new(move |kind, on| {
+            let wk = wk_outer.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = wk.upgrade() {
+                    let cs = ui.global::<CallState>();
+                    match kind {
+                        media::VKind::Cam => {
+                            cs.set_has_remote_cam(on);
+                            if !on {
+                                cs.set_remote_cam(slint::Image::default());
+                            }
+                        }
+                        media::VKind::Scr => {
+                            cs.set_has_remote_scr(on);
+                            if !on {
+                                cs.set_remote_scr(slint::Image::default());
+                            }
+                        }
+                    }
+                }
+            });
+        })));
+    }
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
@@ -510,12 +540,6 @@ pub fn run_app() {
 
     {
         let weak = weak.clone();
-        ui.global::<CallState>().on_start_call(move |key| {
-            begin_voice_call(weak.clone(), key);
-        });
-    }
-    {
-        let weak = weak.clone();
         ui.global::<CallState>().on_end_call(move || {
             end_voice_call(weak.clone());
         });
@@ -529,6 +553,56 @@ pub fn run_app() {
                     let new = !st.get_muted();
                     st.set_muted(new);
                     call::mute_mic(new);
+                    if let Some(c) = call::active_call() {
+                        c.send_control(media::SignalKind::MuteMic(new));
+                    }
+                }
+                None => {}
+            });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<CallState>()
+            .on_toggle_audio(move || match weak.upgrade() {
+                Some(ui) => {
+                    let st = ui.global::<CallState>();
+                    let new = !st.get_audio_muted();
+                    st.set_audio_muted(new);
+                    call::set_remote_mute(new);
+                }
+                None => {}
+            });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<CallState>().on_toggle_cam(move || {
+            toggle_my_video(weak.clone(), media::VKind::Cam);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<CallState>().on_toggle_scr(move || {
+            toggle_my_video(weak.clone(), media::VKind::Scr);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<CallState>()
+            .on_swap_ab(move || match weak.upgrade() {
+                Some(ui) => {
+                    let st = ui.global::<CallState>();
+                    st.set_swapped(!st.get_swapped());
+                }
+                None => {}
+            });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<CallState>()
+            .on_toggle_minimize(move || match weak.upgrade() {
+                Some(ui) => {
+                    let st = ui.global::<CallState>();
+                    st.set_minimized(!st.get_minimized());
                 }
                 None => {}
             });
@@ -2567,6 +2641,7 @@ fn show_call_overlay(weak: slint::Weak<MainWindow>, overlay: GlobalOverlayType) 
     });
 }
 
+/// Reset `CallState` to a clean active / inactive baseline.
 fn publish_call_state(
     weak: slint::Weak<MainWindow>,
     peer_base58: Option<String>,
@@ -2577,6 +2652,24 @@ fn publish_call_state(
         if let Some(ui) = weak.upgrade() {
             let cs = ui.global::<CallState>();
             cs.set_active(active);
+            cs.set_muted(false);
+            cs.set_audio_muted(call::is_remote_muted());
+            // Reset device state — callers set these again after a
+            // successful `start_call` + `toggle_my_video` (for video).
+            cs.set_cam_on(false);
+            cs.set_scr_on(false);
+            // Reset local image sources + "has-*" flags so the surfaces and
+            // device buttons start gray; they come back on when each local
+            // camera / screen frame is pushed + `has_my_*` is set.
+            cs.set_my_cam(slint::Image::default());
+            cs.set_my_scr(slint::Image::default());
+            cs.set_has_my_cam(false);
+            cs.set_has_my_scr(false);
+            cs.set_has_remote_cam(false);
+            cs.set_has_remote_scr(false);
+            cs.set_swapped(false);
+            cs.set_minimized(false);
+            cs.set_error_message(SharedString::new());
             if let Some(p) = peer_base58 {
                 cs.set_peer_base58(SharedString::from(p));
             }
@@ -2666,20 +2759,6 @@ fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
         (pid, name)
     };
 
-    CAMERA.with(|slot| {
-        if slot.borrow().is_none() {
-            *slot.borrow_mut() = Some(camera::Camera::new());
-        }
-        let mut guard = slot.borrow_mut();
-        let cam = guard.as_mut().expect("camera inited");
-        if !cam.is_running() {
-            cam.set_frame_sink(call_dispatcher::on_camera_frame);
-            if let Err(e) = cam.start() {
-                eprintln!("[video.call] cam.start: {e}");
-            }
-        }
-    });
-
     if let Err(e) = call::start_call(
         Arc::clone(&client),
         &peer_base58,
@@ -2692,6 +2771,13 @@ fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
         return;
     }
     publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
+    // Cam is on for this call (it was attached in the initial offer).
+    let wk = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = wk.upgrade() {
+            ui.global::<CallState>().set_cam_on(true);
+        }
+    });
     show_call_overlay(weak, GlobalOverlayType::VideoCall);
 }
 
@@ -2742,33 +2828,9 @@ fn begin_screen_share(weak: slint::Weak<MainWindow>, key: i32) {
         (pid, name)
     };
 
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    {
-        SCREEN.with(|slot| {
-            if slot.borrow().is_none() {
-                *slot.borrow_mut() = Some(Screen::new());
-            }
-            let mut guard = slot.borrow_mut();
-            let scr = guard.as_mut().expect("screen inited");
-            if !scr.is_running() {
-                scr.set_sink(screen_sink_adapter);
-                if let Err(err) = scr.start() {
-                    eprintln!("[screen] start failed: {err}");
-                }
-            }
-        });
-    }
-    #[cfg(target_os = "android")]
-    {
-        eprintln!("[screen] requesting MediaProjection from Java shell");
-        bridge::request_screen_share_start();
-    }
-    #[cfg(target_os = "ios")]
-    {
-        eprintln!("[screen] requesting RPScreenRecorder from ObjC shim");
-        bridge::request_screen_share_start();
-    }
-
+    // `start_call` → `bootstrap_media` → `start_local_capture(Scr)` starts
+    // the capture device (xcap / MediaProjection / ReplayKit) and wires the
+    // dispatcher. We don't start it here.
     if let Err(e) = call::start_call(
         Arc::clone(&client),
         &peer_base58,
@@ -2781,28 +2843,288 @@ fn begin_screen_share(weak: slint::Weak<MainWindow>, key: i32) {
         return;
     }
     publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
+    let wk = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = wk.upgrade() {
+            ui.global::<CallState>().set_scr_on(true);
+        }
+    });
     show_call_overlay(weak, GlobalOverlayType::ScreenShare);
 }
 
-fn end_screen_share(weak: slint::Weak<MainWindow>) {
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    {
-        SCREEN.with(|slot| {
-            if let Some(s) = slot.borrow_mut().as_mut() {
-                s.stop();
+/// Handle a mid-call CAMERA / SCREEN on-off toggle (one of the four always-
+/// on UI buttons). Enforces mutual exclusivity (CAMERA and SCREEN cannot
+/// both be on at once — the new button the user tapped wins, and the other
+/// device is stopped first). Also:
+///   * On-attach: starts the local device, builds a `VidSource`, attaches it
+///     to the active call via `PeerCall::upgrade_offer`, sends a
+///     `Cam(true)` / `Screen(true)` control signal so the *peer* updates
+///     their UI, and installs the UI preview sink.
+///   * On-detach: stops the local device, mutes the `VidSource` (last frame
+///     stays on the peer's side), sends `Cam(false)` / `Screen(false)`,
+///     clears the local preview sink, and resets the local "has-my-*" flag.
+fn toggle_my_video(weak: slint::Weak<MainWindow>, kind: media::VKind) {
+    // Read the target state from the UI.
+    let target_on = match weak.upgrade() {
+        Some(ui) => {
+            let st = ui.global::<CallState>();
+            if kind == media::VKind::Cam {
+                !st.get_cam_on()
+            } else {
+                !st.get_scr_on()
+            }
+        }
+        None => return,
+    };
+
+    if target_on {
+        // Enforce exclusivity: if the *other* local device is on, stop it
+        // first so we never have two local video tracks attached.
+        let other = if kind == media::VKind::Cam {
+            media::VKind::Scr
+        } else {
+            media::VKind::Cam
+        };
+        let other_on = match weak.upgrade() {
+            Some(ui) => {
+                let st = ui.global::<CallState>();
+                if other == media::VKind::Scr {
+                    st.get_scr_on()
+                } else {
+                    st.get_cam_on()
+                }
+            }
+            None => return,
+        };
+        if other_on {
+            // Detach the other one first (mute source, stop device, no
+            // control signal — this is internal state reconciliation).
+            stop_local_device(other);
+            if let Some(c) = call::active_call() {
+                c.set_video_mute(other, true);
+            }
+            match other {
+                media::VKind::Cam => call_dispatcher::set_cam_source(None),
+                media::VKind::Scr => call_dispatcher::set_scr_source(None),
+            }
+            match weak.upgrade() {
+                Some(ui) => {
+                    let st = ui.global::<CallState>();
+                    if other == media::VKind::Cam {
+                        st.set_cam_on(false);
+                        st.set_my_cam(slint::Image::default());
+                        st.set_has_my_cam(false);
+                    } else {
+                        st.set_scr_on(false);
+                        st.set_my_scr(slint::Image::default());
+                        st.set_has_my_scr(false);
+                    }
+                }
+                None => return,
+            }
+        }
+
+        // Attach the new source.
+        start_local_device(kind);
+        let src = match capture_source(kind) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[call] toggle_video: capture_source({:?}): {e}", kind);
+                return;
+            }
+        };
+        if let Err(e) = call::upgrade_outgoing(kind, false, src) {
+            eprintln!("[call] toggle_video: upgrade_outgoing({:?}): {e}", kind);
+            match kind {
+                media::VKind::Cam => call_dispatcher::set_cam_source(None),
+                media::VKind::Scr => call_dispatcher::set_scr_source(None),
+            }
+            return;
+        }
+        // Tell the peer that our cam / screen is now ON (so their UI flips
+        // `has-remote-cam`/`has-remote-scr`).
+        if let Some(c) = call::active_call() {
+            c.send_control(match kind {
+                media::VKind::Cam => media::SignalKind::Cam(true),
+                media::VKind::Scr => media::SignalKind::Screen(true),
+            });
+        }
+        // Install the local preview sink so the A slot shows *me*.
+        match kind {
+            media::VKind::Cam => call::install_local_cam_preview(),
+            media::VKind::Scr => call::install_local_scr_preview(),
+        }
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                let st = ui.global::<CallState>();
+                if kind == media::VKind::Cam {
+                    st.set_cam_on(true);
+                } else {
+                    st.set_scr_on(true);
+                }
+            }
+        });
+    } else {
+        // Detach: stop the device, mute the source, tell the peer.
+        stop_local_device(kind);
+        if let Some(c) = call::active_call() {
+            c.set_video_mute(kind, true);
+            c.send_control(match kind {
+                media::VKind::Cam => media::SignalKind::Cam(false),
+                media::VKind::Scr => media::SignalKind::Screen(false),
+            });
+        }
+        match kind {
+            media::VKind::Cam => call_dispatcher::set_cam_source(None),
+            media::VKind::Scr => call_dispatcher::set_scr_source(None),
+        }
+        // Stop forwarding frames to the UI preview sink.
+        match kind {
+            media::VKind::Cam => call_dispatcher::set_cam_preview(None),
+            media::VKind::Scr => call_dispatcher::set_scr_preview(None),
+        }
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                let st = ui.global::<CallState>();
+                if kind == media::VKind::Cam {
+                    st.set_cam_on(false);
+                    st.set_my_cam(slint::Image::default());
+                    st.set_has_my_cam(false);
+                } else {
+                    st.set_scr_on(false);
+                    st.set_my_scr(slint::Image::default());
+                    st.set_has_my_scr(false);
+                }
             }
         });
     }
-    #[cfg(target_os = "android")]
-    {
-        eprintln!("[screen] stopping MediaProjection capture");
-        bridge::request_screen_share_stop();
+}
+
+/// Start the local hardware capture device (`VKind`) **only**. Does NOT
+/// create a `VidSource` or register it in the dispatcher — call
+/// [`capture_source`] separately once you need an outbound track. Idempotent.
+/// Must be called on the UI thread (it mutates the `CAMERA` / `SCREEN`
+/// thread_locals).
+pub(crate) fn start_local_device(kind: media::VKind) {
+    match kind {
+        media::VKind::Cam => {
+            CAMERA.with(|slot| {
+                if slot.borrow().is_none() {
+                    *slot.borrow_mut() = Some(Camera::new());
+                }
+                let mut guard = slot.borrow_mut();
+                let cam = guard.as_mut().expect("camera inited");
+                if !cam.is_running() {
+                    cam.set_frame_sink(call_dispatcher::on_camera_frame);
+                    if let Err(e) = cam.start() {
+                        eprintln!("[video.call] cam.start: {e}");
+                    }
+                }
+            });
+        }
+        media::VKind::Scr => {
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            {
+                SCREEN.with(|slot| {
+                    if slot.borrow().is_none() {
+                        *slot.borrow_mut() = Some(Screen::new());
+                    }
+                    let mut guard = slot.borrow_mut();
+                    let scr = guard.as_mut().expect("screen inited");
+                    if !scr.is_running() {
+                        scr.set_sink(screen_sink_adapter);
+                        if let Err(e) = scr.start() {
+                            eprintln!("[screen] start failed: {e}");
+                        }
+                    }
+                });
+            }
+            #[cfg(target_os = "android")]
+            {
+                eprintln!("[screen] requesting MediaProjection from Java shell");
+                bridge::request_screen_share_start();
+            }
+            #[cfg(target_os = "ios")]
+            {
+                eprintln!("[screen] requesting RPScreenRecorder from ObjC shim");
+                bridge::request_screen_share_start();
+            }
+        }
     }
-    #[cfg(target_os = "ios")]
-    {
-        eprintln!("[screen] stopping RPScreenRecorder capture");
-        bridge::request_screen_share_stop();
+}
+
+/// Build a fresh outbound `VidSource` for `VKind` and register it in the
+/// call dispatcher (so the platform capture sink's frames flow into it).
+/// Callers then attach the returned source to their active `PeerCall`
+/// (either via `PeerCall::upgrade_offer` / `upgrade_answer` during a
+/// mid-call upgrade, or via `PeerCall::offer`/`answer` when starting one).
+pub(crate) fn capture_source(
+    kind: media::VKind,
+) -> anyhow::Result<std::sync::Arc<media::VidSource>> {
+    let src = std::sync::Arc::new(
+        media::VidSource::new(kind).map_err(|e| anyhow::anyhow!("VidSource::new: {e}"))?,
+    );
+    match kind {
+        media::VKind::Cam => call_dispatcher::set_cam_source(Some(std::sync::Arc::clone(&src))),
+        media::VKind::Scr => call_dispatcher::set_scr_source(Some(std::sync::Arc::clone(&src))),
     }
+    Ok(src)
+}
+
+/// Convenience: start the device AND its matching `VidSource` in one call.
+/// Reused by `begin_video_call`-style bootstrap AND mid-call upgrades.
+pub(crate) fn start_local_capture(
+    kind: media::VKind,
+) -> anyhow::Result<std::sync::Arc<media::VidSource>> {
+    start_local_device(kind);
+    capture_source(kind)
+}
+
+/// Stop just one local capture device (`Cam` or `Scr`). Used by the
+/// mid-call CAMERA / SCREEN button to release the hardware without touching
+/// the other device.
+pub(crate) fn stop_local_device(kind: media::VKind) {
+    match kind {
+        media::VKind::Cam => {
+            CAMERA.with(|slot| {
+                if let Some(cam) = slot.borrow_mut().as_mut() {
+                    if cam.is_running() {
+                        cam.stop();
+                    }
+                }
+            });
+        }
+        media::VKind::Scr => {
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            {
+                SCREEN.with(|slot| {
+                    if let Some(s) = slot.borrow_mut().as_mut() {
+                        if s.is_running() {
+                            s.stop();
+                        }
+                    }
+                });
+            }
+            #[cfg(target_os = "android")]
+            {
+                bridge::request_screen_share_stop();
+            }
+            #[cfg(target_os = "ios")]
+            {
+                bridge::request_screen_share_stop();
+            }
+        }
+    }
+}
+
+/// Release both local capture devices. Called on `stop_call`.
+pub(crate) fn stop_local_media_capture() {
+    stop_local_device(media::VKind::Cam);
+    stop_local_device(media::VKind::Scr);
+}
+
+fn end_screen_share(weak: slint::Weak<MainWindow>) {
+    stop_local_media_capture();
     show_call_overlay(weak, GlobalOverlayType::None);
 }
 

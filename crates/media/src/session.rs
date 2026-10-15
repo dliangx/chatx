@@ -18,7 +18,7 @@ use webrtc_rs::track::track_remote::TrackRemote;
 use crate::config::Config;
 use crate::error::Result;
 use crate::media_source::{AudSource, VidSource, make_media_engine};
-use crate::signal::{SignalFrame, SignalKind};
+use crate::signal::{SignalFrame, SignalKind, VKind};
 use crate::transport::SignalTransport;
 use webrtc_rs::api::API;
 use webrtc_rs::peer_connection::configuration::RTCConfiguration;
@@ -62,6 +62,21 @@ struct Inner {
     remote_audio: Mutex<Option<Box<dyn Fn(&[u8], u32, u32) + Send + Sync + 'static>>>,
     remote_cam: Mutex<Option<Box<dyn Fn(Vec<u8>, u32, u32) + Send + Sync + 'static>>>,
     remote_scr: Mutex<Option<Box<dyn Fn(Vec<u8>, u32, u32) + Send + Sync + 'static>>>,
+}
+
+impl Inner {
+    pub fn upsert_video(&self, kind: VKind, src: Arc<VidSource>) {
+        match kind {
+            VKind::Cam => *self.cam.lock().unwrap() = Some(src),
+            VKind::Scr => *self.scr.lock().unwrap() = Some(src),
+        }
+    }
+    pub fn has_video(&self, kind: VKind) -> bool {
+        match kind {
+            VKind::Cam => self.cam.lock().unwrap().is_some(),
+            VKind::Scr => self.scr.lock().unwrap().is_some(),
+        }
+    }
 }
 
 impl PeerCall {
@@ -136,6 +151,79 @@ impl PeerCall {
         ))
     }
 
+    /// Offerer side of a *mid-call* video upgrade. The caller pre-creates
+    /// [`VidSource`] (so it can register it with their local capture
+    /// dispatcher before this returns) and hands it over; we attach it to a
+    /// new track and renegotiate on the same `RTCPeerConnection`. The
+    /// generated `Offer` frame is emitted through the transport internally.
+    pub async fn upgrade_offer(
+        &self,
+        src: Arc<VidSource>,
+        kind: VKind,
+        both_sides: bool,
+    ) -> Result<()> {
+        self.inner.upsert_video(kind, Arc::clone(&src));
+        self.pc().add_track(src.track()).await?;
+
+        let offer = self.pc().create_offer(None).await?;
+        self.pc()
+            .set_local_description(offer.clone())
+            .await?;
+        let _ = self.pc().gathering_complete_promise().await;
+
+        self.emit(
+            SignalFrame::new(
+                self.call_id().to_string(),
+                SignalKind::Offer(offer.sdp.clone()),
+            )
+            .with_upgrade(kind, both_sides),
+        );
+        Ok(())
+    }
+
+    /// Answerer side of a *mid-call* video upgrade. Applies the remote offer
+    /// and (only if the peer asked us to also send our own track — i.e.
+    /// `both_sides = true`) attaches the caller-supplied local track. The
+    /// caller pre-creates the [`VidSource`] and registers it with their
+    /// local capture dispatcher before calling this.
+    pub async fn upgrade_answer(
+        &self,
+        offer: &SignalFrame,
+        own_src: Option<Arc<VidSource>>,
+    ) -> Result<()> {
+        let (kind, both) = match (offer.upgrade_kind, offer.both_sides) {
+            (Some(k), Some(b)) => (k, b),
+            _ => return Err(crate::error::Error::other("upgrade_answer: missing upgrade fields")),
+        };
+        if let Some(src) = own_src {
+            // Only attach if we don't already have this kind (e.g. screen
+            // recipient re-upgrading their camera is a no-op).
+            if !self.inner.has_video(kind) {
+                self.inner.upsert_video(kind, Arc::clone(&src));
+                self.pc().add_track(src.track()).await?;
+            }
+        }
+        let desc = RTCSessionDescription::offer(match &offer.kind {
+            SignalKind::Offer(s) => s.clone(),
+            _ => return Err(crate::error::Error::other("upgrade_answer: expected Offer")),
+        })?;
+        self.pc().set_remote_description(desc).await?;
+        let answer = self.pc().create_answer(None).await?;
+        self.pc()
+            .set_local_description(answer.clone())
+            .await?;
+        let _ = self.pc().gathering_complete_promise().await;
+
+        self.emit(
+            SignalFrame::new(
+                offer.call_id.clone(),
+                SignalKind::Answer(answer.sdp.clone()),
+            )
+            .with_upgrade(kind, both),
+        );
+        Ok(())
+    }
+
     /// Answerer: apply the `Offer`, create + apply the local SDP.
     pub async fn answer(
         offer: &SignalFrame,
@@ -187,6 +275,29 @@ impl PeerCall {
         *self.inner.aud.lock().unwrap() = aud;
         *self.inner.cam.lock().unwrap() = cam;
         *self.inner.scr.lock().unwrap() = scr;
+    }
+
+    /// Whether a local video track of this kind is currently attached.
+    pub fn has_video(&self, kind: VKind) -> bool {
+        self.inner.has_video(kind)
+    }
+
+    /// Mute / unmute a local video source (applied on this peer).
+    pub fn set_video_mute(&self, kind: VKind, on: bool) {
+        let src = match kind {
+            VKind::Cam => self.inner.cam.lock().unwrap().clone(),
+            VKind::Scr => self.inner.scr.lock().unwrap().clone(),
+        };
+        if let Some(src) = src {
+            src.mute(on);
+        }
+    }
+
+    /// Build + transmit a simple control signal (`Cam` / `Screen` on-off, or
+    /// `MuteMic`) to the peer. The peer's `handle_inbound` observes it and
+    /// updates its remote-video state. Non-Signaling: doesn't renegotiate.
+    pub fn send_control(&self, kind: SignalKind) {
+        self.emit(SignalFrame::new(self.call_id().to_string(), kind));
     }
 
     async fn add_local_tracks(&self) -> Result<()> {
@@ -278,8 +389,14 @@ impl PeerCall {
                 }
                 Ok(())
             }
-            SignalKind::Cam(on) | SignalKind::Screen(on) => {
-                tracing::trace!(?on, "video toggled");
+            SignalKind::Cam(on) => {
+                tracing::trace!(?on, "peer cam toggled");
+                crate::fire_video_signal(VKind::Cam, *on);
+                Ok(())
+            }
+            SignalKind::Screen(on) => {
+                tracing::trace!(?on, "peer screen toggled");
+                crate::fire_video_signal(VKind::Scr, *on);
                 Ok(())
             }
             SignalKind::Bye => self.close(),

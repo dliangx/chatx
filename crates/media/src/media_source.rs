@@ -20,8 +20,19 @@ use webrtc_rs::track::track_local::track_local_static_sample::TrackLocalStaticSa
 use webrtc_rs::track::track_local::TrackLocal;
 
 use crate::error::Result;
+use crate::signal::VKind;
 
 pub type TrackArc = Arc<TrackLocalStaticSample>;
+
+/// Local id / stream-id used in the SDP so the *remote* peer's `on_track`
+/// handler can tell a camera track apart from a screen track.
+fn vid_identity(kind: VKind) -> (String, String) {
+    let s = match kind {
+        VKind::Cam => "chatx-cam",
+        VKind::Scr => "chatx-scr",
+    };
+    (s.to_owned(), s.to_owned())
+}
 
 fn audio_codec_cap() -> RTCRtpCodecCapability {
     RTCRtpCodecCapability {
@@ -145,6 +156,7 @@ impl AudSource {
 pub struct VidSource {
     track: TrackArc,
     latest: Arc<std::sync::Mutex<Option<Frame>>>,
+    muted: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -155,11 +167,12 @@ pub struct Frame {
 }
 
 impl VidSource {
-    pub fn new() -> Result<Self> {
+    pub fn new(kind: VKind) -> Result<Self> {
+        let (id, stream_id) = vid_identity(kind);
         let track = TrackArc::new(TrackLocalStaticSample::new(
             video_codec_cap(),
-            "chatx-vid".into(),
-            "chatx-vid".into(),
+            id,
+            stream_id,
         ));
         let latest = Arc::new(std::sync::Mutex::new(None));
         let enc = openh264::encoder::Encoder::new()?;
@@ -169,14 +182,32 @@ impl VidSource {
             .name("chatx-venc".into())
             .spawn(move || encode_loop(enc, track2, latest2))
             .map_err(|e| crate::error::Error::other(format!("spawn venc: {e}")))?;
-        Ok(Self { track, latest })
+        Ok(Self {
+            track,
+            latest,
+            muted: Arc::new(AtomicBool::new(false)),
+        })
     }
 
+    /// Push one RGBA8888 frame. When muted, the frame is dropped and no RTP
+    /// packet is emitted (the peer freezes on the last frame).
     pub fn push(&self, rgba: &[u8], w: u32, h: u32) {
         if rgba.is_empty() || w == 0 || h == 0 {
             return;
         }
+        if self.muted.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         *self.latest.lock().unwrap() = Some(Frame { rgba: rgba.to_vec(), w, h });
+    }
+
+    pub fn mute(&self, on: bool) {
+        self.muted.store(on, std::sync::atomic::Ordering::Relaxed);
+        tracing::trace!(?on, "vid muted");
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn track(&self) -> Arc<dyn TrackLocal + Send + Sync> {
