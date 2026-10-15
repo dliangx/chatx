@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS users (
     user_id      TEXT PRIMARY KEY,
     e2e_public   TEXT NOT NULL,
     sign_pk      TEXT NOT NULL,
-    seen         INTEGER NOT NULL DEFAULT 0   -- last heartbeat; ephemeral, zeroed on reload
+    seen         INTEGER NOT NULL DEFAULT 0   -- last heartbeat
 );
 
 -- Devices (one row per device sub-PeerId; authorization chain is durable)
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS devices (
     approved_at    INTEGER NOT NULL DEFAULT 0,
     attestation    TEXT,                                -- Attestation JSON, NULL when absent
     endpoints      TEXT NOT NULL DEFAULT '[]',          -- JSON array of multiaddrs
-    seen           INTEGER NOT NULL DEFAULT 0           -- last presence; ephemeral, zeroed on reload
+    seen           INTEGER NOT NULL DEFAULT 0           -- last presence
 );
 
 CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);

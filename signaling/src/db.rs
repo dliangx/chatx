@@ -382,15 +382,13 @@ pub async fn resolve_user_db(db: &Sdb, user_id: &str) -> anyhow::Result<UserReco
 }
 
 pub async fn resolve_device_db(db: &Sdb, peer_id: &str) -> anyhow::Result<DeviceRecord> {
-    #[derive(sqlx::FromRow)]
-    struct Exact {
-        peer_id: String,
-    }
-    let exact: Option<Exact> = sqlx::query_as::<_, Exact>("SELECT peer_id FROM devices WHERE peer_id = ?1")
-        .bind(peer_id)
-        .fetch_optional(db)
-        .await?;
-    if exact.is_some() {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM devices WHERE peer_id = ?1",
+    )
+    .bind(peer_id)
+    .fetch_one(db)
+    .await?;
+    if n > 0 {
         let row: DevRow =
             sqlx::query_as::<_, DevRow>("SELECT * FROM devices WHERE peer_id = ?1")
                 .bind(peer_id)
@@ -422,6 +420,29 @@ pub async fn list_user_devices_db(db: &Sdb, user_id: &str) -> anyhow::Result<Vec
         out.push(r.into_record());
     }
     Ok(out)
+}
+
+/// True if `approver` is an APPROVED device of the same account (`user_id`),
+/// distinct from `self_peer`.
+pub async fn approver_is_trusted(
+    db: &Sdb,
+    user_id: &str,
+    approver: &str,
+    self_peer: &str,
+) -> anyhow::Result<bool> {
+    let Ok(Some(a)) = get_device_exact(db, approver).await else {
+        return Ok(false);
+    };
+    Ok(a.status == DeviceStatus::Approved && a.user_id == user_id && approver != self_peer)
+}
+
+pub async fn get_device_exact(db: &Sdb, peer_id: &str) -> anyhow::Result<Option<DeviceRecord>> {
+    let row: Option<DevRow> =
+        sqlx::query_as::<_, DevRow>("SELECT * FROM devices WHERE peer_id = ?1")
+            .bind(peer_id)
+            .fetch_optional(db)
+            .await?;
+    Ok(row.map(DevRow::into_record))
 }
 
 /// A user + their best online APPROVED device (newest `seen` <= TTL), or `None`
@@ -486,8 +507,7 @@ pub async fn list_groups_db(db: &Sdb) -> anyhow::Result<Vec<GroupPublic>> {
 }
 
 /// Update a device's `seen` timestamp and (optionally) its endpoints. Returns
-/// `true` if the device existed. Presence is ephemeral, so this only touches
-/// the volatile columns.
+/// `true` if the device existed.
 pub async fn update_device_presence(
     db: &Sdb,
     peer_id: &str,
@@ -739,7 +759,7 @@ mod tests {
         let u = &users["alice"];
         assert_eq!(u.e2e_public, "E2E_ALICE");
         assert_eq!(u.sign_pk, "SIGN_ALICE");
-        assert_eq!(u.seen, 0, "seen must be reset cold");
+        assert_eq!(u.seen, 1234, "last heartbeat is restored from the db");
 
         assert_eq!(devices.len(), 2);
         let d1 = &devices["QmDev1"];
@@ -752,8 +772,8 @@ mod tests {
             "last-known endpoints are restored for reconnection"
         );
         assert_eq!(
-            d1.seen, 0,
-            "seen must be reset cold (online state re-earned)"
+            d1.seen, 2000,
+            "last presence is restored from the db"
         );
         let a = d1.attestation.as_ref().expect("attestation restored");
         assert_eq!(a.device, "QmDev1");

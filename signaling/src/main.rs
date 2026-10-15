@@ -1,6 +1,5 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Path, Query, State};
@@ -10,7 +9,7 @@ use axum::routing::{get, post, put};
 use chatx_core::account::{AttestationAction, DeviceRecord, DeviceStatus, UserRecord};
 use chatx_core::group::GroupPublic;
 use chatx_core::message::now_ms;
-use chatx_core::signal::{ONLINE_TTL_MS, UserResolve};
+use chatx_core::signal::UserResolve;
 use serde::{Deserialize, Serialize};
 
 mod db;
@@ -18,9 +17,6 @@ mod relay;
 
 #[derive(Clone)]
 struct App {
-    users: Arc<Mutex<HashMap<String, UserRecord>>>,
-    devices: Arc<Mutex<HashMap<String, DeviceRecord>>>,
-    groups: Arc<Mutex<HashMap<String, GroupPublic>>>,
     db: Arc<db::Sdb>,
 }
 
@@ -47,37 +43,8 @@ fn ok_json<T: serde::Serialize + ?Sized>(v: &T) -> Response {
         .into_response()
 }
 
-fn best_device(
-    devices: &HashMap<String, DeviceRecord>,
-    user_id: &str,
-    exclude_peer: &str,
-) -> Option<DeviceRecord> {
-    let now = now_ms();
-    let mut best: Option<&DeviceRecord> = None;
-    for d in devices.values() {
-        if d.user_id != user_id {
-            continue;
-        }
-        if d.status != DeviceStatus::Approved {
-            continue;
-        }
-        if now.saturating_sub(d.seen) > ONLINE_TTL_MS {
-            continue;
-        }
-        if !exclude_peer.is_empty() && d.peer_id == exclude_peer {
-            continue;
-        }
-        match best {
-            None => best = Some(d),
-            Some(b) if d.seen > b.seen => best = Some(d),
-            _ => {}
-        }
-    }
-    best.cloned()
-}
-
 async fn upsert_user(
-    State(App { users, db, .. }): State<App>,
+    State(App { db, .. }): State<App>,
     Path(user_id): Path<String>,
     body: String,
 ) -> ApiResult {
@@ -91,69 +58,54 @@ async fn upsert_user(
         tracing::warn!(%e, "persisting user failed");
         return Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
     }
-    users.lock().unwrap().insert(rec.user_id.clone(), rec);
     Ok(ok_json(&"ok"))
 }
 
 async fn resolve_user(
-    State(App { users, .. }): State<App>,
+    State(App { db, .. }): State<App>,
     Path(user_id): Path<String>,
 ) -> ApiResult {
-    let g = users.lock().unwrap();
-    if let Some(r) = g.get(&user_id) {
-        return Ok(ok_json(r));
+    match db::resolve_user_db(db.as_ref(), &user_id).await {
+        Ok(r) => Ok(ok_json(&r)),
+        Err(_) => Err(bad(
+            StatusCode::NOT_FOUND,
+            format!("user {user_id} not found or ambiguous"),
+        )),
     }
-    let pref: Vec<&UserRecord> = g
-        .values()
-        .filter(|r| r.user_id.starts_with(&user_id))
-        .collect();
-    if pref.len() == 1 {
-        return Ok(ok_json(pref[0]));
-    }
-    Err(bad(
-        StatusCode::NOT_FOUND,
-        format!("user {user_id} not found or ambiguous"),
-    ))
 }
 
 async fn resolve_and_device(
-    State(App { users, devices, .. }): State<App>,
+    State(App { db, .. }): State<App>,
     Path(user_id): Path<String>,
 ) -> ApiResult {
-    let user = {
-        let g = users.lock().unwrap();
-        g.get(&user_id)
-            .cloned()
-            .or_else(|| {
-                let pref: Vec<&UserRecord> = g
-                    .values()
-                    .filter(|r| r.user_id.starts_with(&user_id))
-                    .collect();
-                if pref.len() == 1 {
-                    Some(pref[0].clone())
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| bad(StatusCode::NOT_FOUND, format!("user {user_id} not found")))?
+    let user = match db::resolve_user_db(db.as_ref(), &user_id).await {
+        Ok(u) => u,
+        Err(_) => {
+            return Err(bad(
+                StatusCode::NOT_FOUND,
+                format!("user {user_id} not found"),
+            ))
+        }
     };
-    let devices = devices.lock().unwrap();
-    let device = best_device(&devices, &user.user_id, "")
-        .ok_or_else(|| bad(StatusCode::NOT_FOUND, "no online APPROVED device"))?;
-    Ok(ok_json(&UserResolve { user, device }))
+    let Some(device) = db::best_online_for_user(db.as_ref(), &user.user_id, "", now_ms())
+        .await
+        .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    else {
+        return Err(bad(StatusCode::NOT_FOUND, "no online APPROVED device"));
+    };
+    let out = UserResolve { user, device };
+    Ok(ok_json(&out))
 }
 
 async fn list_user_devices(
-    State(App { devices, .. }): State<App>,
+    State(App { db, .. }): State<App>,
     Path(user_id): Path<String>,
     Query(q): Query<IdQuery>,
 ) -> ApiResult {
-    let g = devices.lock().unwrap();
-    let mut out: Vec<DeviceRecord> = g
-        .values()
-        .filter(|d| d.user_id == user_id)
-        .cloned()
-        .collect();
+    let mut out: Vec<DeviceRecord> =
+        db::list_user_devices_db(db.as_ref(), &user_id)
+            .await
+            .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let Some(status) = q.status {
         let want = match status.as_str() {
             "pending" => DeviceStatus::Pending,
@@ -168,15 +120,21 @@ async fn list_user_devices(
 }
 
 async fn list_users(
-    State(App { users, devices, .. }): State<App>,
+    State(App { db, .. }): State<App>,
     Query(q): Query<IdQuery>,
 ) -> ApiResult {
-    let users = users.lock().unwrap();
-    let devices = devices.lock().unwrap();
+    let users =
+        db::list_users(db.as_ref())
+            .await
+            .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let exclude = q.exclude.as_deref().unwrap_or_default();
+    let now = now_ms();
     let mut out: Vec<UserResolve> = Vec::new();
-    for user in users.values() {
-        if let Some(device) = best_device(&devices, &user.user_id, exclude) {
+    for user in users {
+        if let Some(device) = db::best_online_for_user(db.as_ref(), &user.user_id, exclude, now)
+            .await
+            .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
             out.push(UserResolve {
                 user: user.clone(),
                 device,
@@ -189,20 +147,19 @@ async fn list_users(
 /// True if `approver` is an APPROVED device of the same account (`user_id`),
 /// distinct from the target device. An account can only approve/attest via
 /// one of its already-trusted devices.
-fn approver_is_trusted(
-    devices: &HashMap<String, DeviceRecord>,
+async fn approver_is_trusted(
+    db: &db::Sdb,
     user_id: &str,
     approver: &str,
     self_peer: &str,
-) -> bool {
-    let Some(a) = devices.get(approver) else {
-        return false;
-    };
-    a.status == DeviceStatus::Approved && a.user_id == user_id && approver != self_peer
+) -> Result<bool, String> {
+    db::approver_is_trusted(db, user_id, approver, self_peer)
+        .await
+        .map_err(|e| e.to_string())
 }
 
-fn validate_device_update(
-    devices: &HashMap<String, DeviceRecord>,
+async fn validate_device_update(
+    db: &db::Sdb,
     existing: Option<&DeviceRecord>,
     incoming: &DeviceRecord,
 ) -> Result<(), String> {
@@ -272,7 +229,9 @@ fn validate_device_update(
                 att.action, expected, incoming.status
             ));
         }
-        if !approver_is_trusted(devices, &incoming.user_id, &att.approver, &incoming.peer_id) {
+        if !approver_is_trusted(db, &incoming.user_id, &att.approver, &incoming.peer_id)
+            .await?
+        {
             return Err("approver is not an approved device of this account".into());
         }
         return Ok(());
@@ -289,7 +248,7 @@ fn validate_device_update(
 }
 
 async fn upsert_device(
-    State(App { devices, db, .. }): State<App>,
+    State(App { db, .. }): State<App>,
     Path(peer_id): Path<String>,
     body: String,
 ) -> ApiResult {
@@ -306,55 +265,44 @@ async fn upsert_device(
     rec.seen = now_ms();
     tracing::info!(peer_id = %rec.peer_id, user = %rec.user_id, status = ?rec.status, "device upsert");
 
-    // Snapshot the current directory under the lock, then validate the
-    // transition without holding the guard (the approver check reads the map).
-    let (snapshot, existing) = {
-        let g = devices.lock().unwrap().clone();
-        let ex = g.get(&rec.peer_id).cloned();
-        (g, ex)
-    };
-    if let Err(e) = validate_device_update(&snapshot, existing.as_ref(), &rec) {
-        tracing::warn!(peer_id = %rec.peer_id, status = ?rec.status, %e, "device upsert rejected");
-        return Err(bad(StatusCode::FORBIDDEN, e));
+    let existing = db::get_device_exact(db.as_ref(), &rec.peer_id)
+        .await
+        .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match validate_device_update(db.as_ref(), existing.as_ref(), &rec).await {
+        Ok(()) => {}
+        Err(e) => {
+            tracing::warn!(peer_id = %rec.peer_id, status = ?rec.status, %e, "device upsert rejected");
+            return Err(bad(StatusCode::FORBIDDEN, e));
+        }
     }
 
     if let Err(e) = db::upsert_device(db.as_ref(), &rec).await {
         tracing::warn!(%e, "persisting device failed");
         return Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
     }
-    devices.lock().unwrap().insert(rec.peer_id.clone(), rec);
     Ok(ok_json(&"ok"))
 }
 
 async fn resolve_device(
-    State(App { devices, .. }): State<App>,
+    State(App { db, .. }): State<App>,
     Path(peer_id): Path<String>,
 ) -> ApiResult {
-    let g = devices.lock().unwrap();
-    if let Some(r) = g.get(&peer_id) {
-        return Ok(ok_json(r));
+    match db::resolve_device_db(db.as_ref(), &peer_id).await {
+        Ok(r) => Ok(ok_json(&r)),
+        Err(_) => Err(bad(
+            StatusCode::NOT_FOUND,
+            format!("device {peer_id} not found or ambiguous"),
+        )),
     }
-    let pref: Vec<&DeviceRecord> = g
-        .values()
-        .filter(|d| d.peer_id.starts_with(&peer_id))
-        .collect();
-    if pref.len() == 1 {
-        return Ok(ok_json(pref[0]));
-    }
-    Err(bad(
-        StatusCode::NOT_FOUND,
-        format!("device {peer_id} not found or ambiguous"),
-    ))
 }
 
 async fn delete_device(
-    State(App { devices, db, .. }): State<App>,
+    State(App { db, .. }): State<App>,
     Path(peer_id): Path<String>,
 ) -> ApiResult {
-    let removed = devices.lock().unwrap().remove(&peer_id).is_some();
     match db::delete_device(db.as_ref(), &peer_id).await {
-        Ok(_) if removed => Ok(StatusCode::NO_CONTENT.into_response()),
-        Ok(_) => Err(bad(StatusCode::NOT_FOUND, "not found")),
+        Ok(true) => Ok(StatusCode::NO_CONTENT.into_response()),
+        Ok(false) => Err(bad(StatusCode::NOT_FOUND, "not found")),
         Err(e) => {
             tracing::warn!(%e, "deleting device failed");
             Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"))
@@ -369,7 +317,7 @@ struct Presence {
 }
 
 async fn device_presence(
-    State(App { devices, .. }): State<App>,
+    State(App { db, .. }): State<App>,
     Path(peer_id): Path<String>,
     body: String,
 ) -> ApiResult {
@@ -377,21 +325,14 @@ async fn device_presence(
         Ok(b) => b,
         Err(e) => return Err(bad(StatusCode::BAD_REQUEST, format!("bad Presence: {e}"))),
     };
-    let mut g = devices.lock().unwrap();
-    match g.get_mut(&peer_id) {
-        Some(d) => {
-            d.seen = body.seen.unwrap_or_else(now_ms);
-            if let Some(ep) = body.endpoints {
-                d.endpoints = ep;
-            }
-            tracing::debug!(peer_id = %d.peer_id, "device presence touch");
-        }
-        None => {
-            return Err(bad(
-                StatusCode::NOT_FOUND,
-                format!("device {peer_id} not found"),
-            ));
-        }
+    let updated = db::update_device_presence(db.as_ref(), &peer_id, body.seen.unwrap_or_else(now_ms), body.endpoints)
+        .await
+        .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !updated {
+        return Err(bad(
+            StatusCode::NOT_FOUND,
+            format!("device {peer_id} not found"),
+        ));
     }
     Ok(ok_json(&"ok"))
 }
@@ -401,7 +342,7 @@ async fn health() -> ApiResult {
 }
 
 async fn upsert_group(
-    State(App { groups, db, .. }): State<App>,
+    State(App { db, .. }): State<App>,
     Path(group_id): Path<String>,
     body: String,
 ) -> ApiResult {
@@ -419,25 +360,30 @@ async fn upsert_group(
         tracing::warn!(%e, "persisting group failed");
         return Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
     }
-    groups.lock().unwrap().insert(g.group_id.clone(), g);
     Ok(ok_json(&"ok"))
 }
 
 async fn resolve_group(
-    State(App { groups, .. }): State<App>,
+    State(App { db, .. }): State<App>,
     Path(group_id): Path<String>,
 ) -> ApiResult {
-    let g = groups
-        .lock()
-        .unwrap()
-        .get(&group_id)
-        .cloned()
-        .ok_or_else(|| bad(StatusCode::NOT_FOUND, format!("group {group_id} not found")))?;
-    Ok(ok_json(&g))
+    let group = db::get_group_db(db.as_ref(), &group_id)
+        .await
+        .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match group {
+        Some(g) => Ok(ok_json(&g)),
+        None => Err(bad(
+            StatusCode::NOT_FOUND,
+            format!("group {group_id} not found"),
+        )),
+    }
 }
 
-async fn list_groups(State(App { groups, .. }): State<App>) -> ApiResult {
-    let mut out: Vec<GroupPublic> = groups.lock().unwrap().values().cloned().collect();
+async fn list_groups(State(App { db, .. }): State<App>) -> ApiResult {
+    let mut out: Vec<GroupPublic> =
+        db::list_groups_db(db.as_ref())
+            .await
+            .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     out.sort_by_key(|g| g.group_id.clone());
     Ok(ok_json(&out))
 }
@@ -449,7 +395,7 @@ struct GroupMsgBody {
 }
 
 async fn post_group_message(
-    State(App { groups, db, .. }): State<App>,
+    State(App { db, .. }): State<App>,
     Path(group_id): Path<String>,
     body: String,
 ) -> ApiResult {
@@ -458,10 +404,11 @@ async fn post_group_message(
         Err(e) => return Err(bad(StatusCode::BAD_REQUEST, format!("bad body: {e}"))),
     };
 
-    let is_member = groups
-        .lock()
-        .unwrap()
-        .get(&group_id)
+    let group = db::get_group_db(db.as_ref(), &group_id)
+        .await
+        .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let is_member = group
+        .as_ref()
         .map(|g| g.owner == b.from || g.members.values().any(|m| m.peer_id == b.from))
         .unwrap_or(false);
     if !is_member {
@@ -523,16 +470,18 @@ struct KeySlotBody {
 }
 
 async fn put_group_key_slot(
-    State(App { groups, db, .. }): State<App>,
+    State(App { db, .. }): State<App>,
     Path((group_id, peer_id)): Path<(String, String)>,
     body: String,
 ) -> ApiResult {
-    let owner = groups
-        .lock()
-        .unwrap()
-        .get(&group_id)
-        .map(|g| g.owner.clone())
-        .ok_or_else(|| bad(StatusCode::NOT_FOUND, format!("group {group_id} not found")))?;
+    let owner = db::get_group_db(db.as_ref(), &group_id)
+        .await
+        .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(|g| g.owner)
+        .ok_or_else(|| bad(
+            StatusCode::NOT_FOUND,
+            format!("group {group_id} not found"),
+        ))?;
     let b: KeySlotBody = match serde_json::from_str(&body) {
         Ok(r) => r,
         Err(e) => return Err(bad(StatusCode::BAD_REQUEST, format!("bad body: {e}"))),
@@ -649,12 +598,7 @@ async fn main() {
         "directory restored"
     );
 
-    let app = App {
-        users: Arc::new(Mutex::new(users)),
-        devices: Arc::new(Mutex::new(devices)),
-        groups: Arc::new(Mutex::new(groups)),
-        db,
-    };
+    let app = App { db };
 
     let router = make_router(app.clone());
 
@@ -711,12 +655,7 @@ mod http_tests {
                     .unwrap();
                 rt.block_on(async move {
                     let db = Arc::new(db::open(&path).await.unwrap());
-                    let app = App {
-                        users: Arc::new(Mutex::new(HashMap::new())),
-                        devices: Arc::new(Mutex::new(HashMap::new())),
-                        groups: Arc::new(Mutex::new(HashMap::new())),
-                        db: db.clone(),
-                    };
+                    let app = App { db: db.clone() };
                     // Seed one server-mode group: owner "owner" + member "member-a".
                     let mut members = std::collections::BTreeMap::new();
                     for (pid, sign, e2e) in
@@ -739,7 +678,6 @@ mod http_tests {
                         mode: GroupMode::Server,
                     };
                     db::upsert_group(app.db.as_ref(), &grp).await.unwrap();
-                    app.groups.lock().unwrap().insert("grp-it".into(), grp);
 
                     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                     let addr = listener.local_addr().unwrap();
