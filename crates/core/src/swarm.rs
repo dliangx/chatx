@@ -350,6 +350,17 @@ async fn swarm_loop(
                         // stale self endpoint in the directory) — skip.
                         eprintln!("[swarm] DIAL SKIPPED own addr={addr} peer={peer}");
                     } else {
+                        // Fresh endpoint comes from the directory (i.e. the peer
+                        // just reported a possibly-changed NAT mapping). Reset
+                        // our local dial backoff so we actually try — otherwise
+                        // a stale `dial_backoff` entry pins us off the peer
+                        // forever, which is the "A/B disconnect and can never
+                        // reconnect" bug.
+                        running
+                            .dial_backoff
+                            .lock()
+                            .unwrap()
+                            .remove(&peer.to_base58());
                         swarm.add_peer_address(peer, addr.clone());
                         let _ = swarm.dial(peer);
                     }

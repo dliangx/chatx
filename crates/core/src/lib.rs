@@ -552,9 +552,15 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         };
         self.dir.upsert_user(&user_rec);
 
-        let touched = self.dir.touch_presence(self.device.peer_base58(), &ep);
-        if !touched {
-            self.fallback_register();
+        match self.dir.resolve_device(self.device.peer_base58()) {
+            Ok(mut rec) => {
+                rec.endpoints = ep;
+                rec.seen = message::now_ms();
+                self.dir.upsert_device(&rec);
+            }
+            Err(_) => {
+                self.fallback_register();
+            }
         }
     }
 
