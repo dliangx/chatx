@@ -5,6 +5,7 @@ import {
     GlobalOverlayType,
     AppState,
 } from "../components/app_state.slint";
+import { ProfileState } from "../contacts/profile.slint";
 
 component MenuRow inherits Rectangle {
     in property <Glyph> icon;
@@ -139,13 +140,23 @@ export component AddMenuView inherits Rectangle {
             MenuRow {
                 icon: Glyph.video;
                 label: "音/视频通话";
-                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.VideoCall; }
+                clicked => {
+                    AppState.nav-state.global-overlay = GlobalOverlayType.None;
+                    if AppState.current-chat-peer-key != -1 {
+                        ProfileState.start-video-call(AppState.current-chat-peer-key);
+                    }
+                }
             }
             if  AppState.add-menu-type == 1:
             MenuRow {
                 icon: Glyph.meeting;
                 label: "桌面共享";
-                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.ScreenShare; }
+                clicked => {
+                    AppState.nav-state.global-overlay = GlobalOverlayType.None;
+                    if AppState.current-chat-peer-key != -1 {
+                        ProfileState.start-screen-share(AppState.current-chat-peer-key);
+                    }
+                }
             }
         }
     }

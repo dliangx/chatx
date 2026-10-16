@@ -199,6 +199,14 @@ pub fn run_app() {
         state.on_push_sub(move |page, payload| {
             if page == SubPageType::ChatRoom {
                 load_chat_messages(w2.clone(), payload);
+                // Keep `current-chat-peer-key` in sync so the chat add-menu's
+                // "音/视频通话" / "桌面共享" can route through the same
+                // ProfileState callbacks the profile page uses.
+                let k = chat_key_to_contact_key(payload);
+                if let Some(ui) = w.upgrade() {
+                    let s = ui.global::<AppState>();
+                    s.set_current_chat_peer_key(k);
+                }
             }
             if page == SubPageType::MyNote {
                 refresh_my_notes(w2.clone());
@@ -2678,6 +2686,35 @@ fn publish_call_state(
             }
         }
     });
+}
+
+/// Resolve a 1:1 chat row key to its peer's contact-list key (or -1 for
+/// group chats / unknown peers). The key is what `ProfileState.start-*`
+/// callbacks consume.
+fn chat_key_to_contact_key(chat_key: i32) -> i32 {
+    let backend = BACKEND.lock().unwrap().clone();
+    let Some(backend) = backend else {
+        return -1;
+    };
+    let me_peer = CLIENT.lock().unwrap().as_ref().map(|c| c.peer_base58().to_string());
+    let g = backend.blocking_read();
+    let Some(row) = g.chats.iter().find(|r| r.key == chat_key) else {
+        return -1;
+    };
+    if row.is_group || row.peer_id.is_empty() {
+        return -1;
+    }
+    let peer_id = row.peer_id.clone();
+    drop(g);
+    let g = backend.blocking_read();
+    g.contacts
+        .iter()
+        .find(|c| {
+            c.peer_id == peer_id
+                && me_peer.as_deref().map(|m| m != c.peer_id).unwrap_or(true)
+        })
+        .map(|c| c.key)
+        .unwrap_or(-1)
 }
 
 fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
