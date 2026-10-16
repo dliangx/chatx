@@ -27,8 +27,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use chatx_core::Client;
 use chatx_core::signal::HttpDirectory;
 use media::{
-    AudSource, CallMode, Config as MediaConfig, PeerCall, SignalFrame, SignalKind, SignalTransport,
-    VidSource,
+    AudSource, CallMode, Config as MediaConfig, PeerCall, PeerEvent, SignalFrame, SignalKind,
+    SignalTransport, VidSource,
 };
 pub use crate::call_dispatcher;
 use crate::{CallState, MainWindow};
@@ -102,6 +102,7 @@ fn fire_ui_end() {
             if let Some(ui) = weak.upgrade() {
                 let cs = ui.global::<CallState>();
                 cs.set_active(false);
+                cs.set_connected(false);
                 cs.set_muted(false);
                 cs.set_audio_muted(false);
                 cs.set_cam_on(false);
@@ -776,7 +777,20 @@ fn spawn_event_drain(call: PeerCall) {
     media_rt().spawn(async move {
         while let Ok(ev) = rx.recv().await {
             tracing::info!(?ev, "[call] event");
-            if ev.is_ended() {
+            let connected = ev == PeerEvent::Connected;
+            let ended = ev.is_ended();
+            if !ended && connected {
+                // Mark the call connected so the UI only auto-hides the
+                // controls after the peer has actually answered.
+                if let Some(weak) = weak_window() {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.global::<CallState>().set_connected(true);
+                        }
+                    });
+                }
+            }
+            if ended {
                 fire_ui_end();
                 break;
             }

@@ -2660,6 +2660,7 @@ fn publish_call_state(
         if let Some(ui) = weak.upgrade() {
             let cs = ui.global::<CallState>();
             cs.set_active(active);
+            cs.set_connected(false);
             cs.set_muted(false);
             cs.set_audio_muted(call::is_remote_muted());
             // Reset device state — callers set these again after a

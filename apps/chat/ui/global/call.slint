@@ -5,6 +5,10 @@ export global CallState {
     in property <string> status: "正在呼叫…";
     in property <string> error-message: "";
     in property <bool> active: false;
+    /// True once the peer has actually answered (WebRTC `Connected`). Before
+    /// this the call is still "正在呼叫…" — controls must stay visible so the
+    /// caller can hang up.
+    in property <bool> connected: false;
     /// True while the call is minimized into the top-right widget.
     in property <bool> minimized: false;
 
@@ -133,31 +137,35 @@ export component CallView inherits Rectangle {
     property <length> min-origin-x: 0px;
     property <length> min-origin-y: 0px;
     property <bool> pending-hide: false;
-    property <bool> was-active: false;
+    property <bool> was-connected: false;
 
+    // Reveal the bar + arm the 3s auto-hide once the call is CONNECTED
+    // (peer answered). Stays visible while still calling (not connected).
     Timer {
         interval: 16ms;
-        running: CallState.active && !root.was-active;
+        running: CallState.connected && !root.was-connected;
         triggered => {
-            root.was-active = true;
+            root.was-connected = true;
             CallState.controls-hidden = false;
             root.pending-hide = true;
         }
     }
 
+    // Reset when the call ends.
     Timer {
         interval: 16ms;
         running: !CallState.active;
         triggered => {
-            root.was-active = false;
+            root.was-connected = false;
             root.pending-hide = false;
             CallState.controls-hidden = false;
         }
     }
 
+    // 3s countdown → hide. Only counts while connected.
     Timer {
         interval: 3000ms;
-        running: root.pending-hide && CallState.active && !CallState.minimized;
+        running: root.pending-hide && CallState.connected && !CallState.minimized;
         triggered => {
             root.pending-hide = false;
             CallState.controls-hidden = true;
@@ -203,7 +211,7 @@ export component CallView inherits Rectangle {
                 } else if (e.kind == PointerEventKind.up
                     || e.kind == PointerEventKind.cancel) {
                     CallState.controls-hidden = false;
-                    if (CallState.active && !CallState.minimized) {
+                    if (CallState.connected && !CallState.minimized) {
                         root.pending-hide = true;
                     }
                 }
