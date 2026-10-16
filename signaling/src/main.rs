@@ -263,7 +263,7 @@ async fn upsert_device(
     };
     rec.peer_id = peer_id.clone();
     rec.seen = now_ms();
-    tracing::info!(peer_id = %rec.peer_id, user = %rec.user_id, status = ?rec.status, "device upsert");
+    tracing::info!(peer_id = %rec.peer_id, user = %rec.user_id, status = ?rec.status, endpoints = ?rec.endpoints, "device upsert");
 
     let existing = db::get_device_exact(db.as_ref(), &rec.peer_id)
         .await
@@ -325,6 +325,7 @@ async fn device_presence(
         Ok(b) => b,
         Err(e) => return Err(bad(StatusCode::BAD_REQUEST, format!("bad Presence: {e}"))),
     };
+    tracing::info!(peer_id = %peer_id, endpoints = ?body.endpoints, seen = ?body.seen, "device presence");
     let updated = db::update_device_presence(db.as_ref(), &peer_id, body.seen.unwrap_or_else(now_ms), body.endpoints)
         .await
         .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
