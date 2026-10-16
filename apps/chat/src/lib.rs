@@ -2935,16 +2935,18 @@ fn toggle_my_video(weak: slint::Weak<MainWindow>, kind: media::VKind) {
             None => return,
         };
         if other_on {
-            // Detach the other one first (mute source, stop device, no
-            // control signal — this is internal state reconciliation).
+            // Detach the other one first (stop device, mute source — no
+            // control signal; internal state reconciliation). Keep the other
+            // source alive for reuse (don't stop its encoder); just detach it
+            // from the webrtc slot and release its last frame.
             stop_local_device(other);
             if let Some(c) = call::active_call() {
                 c.set_video_mute(other, true);
+                if let Some(s) = c.local_source(other) {
+                    s.clear();
+                }
             }
-            match other {
-                media::VKind::Cam => call_dispatcher::set_cam_source(None),
-                media::VKind::Scr => call_dispatcher::set_scr_source(None),
-            }
+            detach_video_source_kept(other);
             match weak.upgrade() {
                 Some(ui) => {
                     let st = ui.global::<CallState>();
@@ -2962,21 +2964,39 @@ fn toggle_my_video(weak: slint::Weak<MainWindow>, kind: media::VKind) {
             }
         }
 
-        // Attach the new source.
+        // Attach the new source. Reuse this call's existing source for the
+        // kind if we already have one (the `Arc` is pinned in
+        // `PeerCall.inner.cam/scr`); only allocate a fresh `VidSource` on the
+        // first attach. Reusing keeps the number of live sources bounded (one
+        // per kind) instead of leaking a new one (openh264 encoder + full-res
+        // frame + webrtc track binding) on every toggle.
         start_local_device(kind);
-        let src = match capture_source(kind) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[call] toggle_video: capture_source({:?}): {e}", kind);
-                return;
-            }
+        let src = match call::active_call().and_then(|c| c.local_source(kind)) {
+            Some(s) => s,
+            None => match capture_source(kind) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[call] toggle_video: capture_source({:?}): {e}", kind);
+                    return;
+                }
+            },
         };
+        // Make sure the capture dispatcher forwards frames to this source.
+        match kind {
+            media::VKind::Cam => call_dispatcher::set_cam_source(Some(std::sync::Arc::clone(&src))),
+            media::VKind::Scr => call_dispatcher::set_scr_source(Some(std::sync::Arc::clone(&src))),
+        }
+        // Re-enabling a kind that was previously muted (on its last detach)
+        // — unmute the reused source so frames actually encode/transmit again.
+        if let Some(c) = call::active_call() {
+            c.set_video_mute(kind, false);
+        }
         if let Err(e) = call::upgrade_outgoing(kind, false, src) {
             eprintln!("[call] toggle_video: upgrade_outgoing({:?}): {e}", kind);
-            match kind {
-                media::VKind::Cam => call_dispatcher::set_cam_source(None),
-                media::VKind::Scr => call_dispatcher::set_scr_source(None),
-            }
+            // `upgrade_outgoing` moved/recorded `src` into `PeerCall.inner`;
+            // just detach the dispatcher slot. Keep the source alive (no
+            // stop) so a retry can reuse it.
+            detach_video_source_kept(kind);
             return;
         }
         // Tell the peer that our cam / screen is now ON (so their UI flips
@@ -3003,19 +3023,25 @@ fn toggle_my_video(weak: slint::Weak<MainWindow>, kind: media::VKind) {
             }
         });
     } else {
-        // Detach: stop the device, mute the source, tell the peer.
+        // Detach: stop the device, mute the source, tell the peer, release
+        // the last frame. The `VidSource` itself stays alive (its
+        // `Arc` is in `PeerCall.inner.{cam,scr}`) so it can be reused on the
+        // next attach — no new encoder / track binding allocated.
         stop_local_device(kind);
         if let Some(c) = call::active_call() {
             c.set_video_mute(kind, true);
+            if let Some(s) = c.local_source(kind) {
+                s.clear();
+            }
             c.send_control(match kind {
                 media::VKind::Cam => media::SignalKind::Cam(false),
                 media::VKind::Scr => media::SignalKind::Screen(false),
             });
         }
-        match kind {
-            media::VKind::Cam => call_dispatcher::set_cam_source(None),
-            media::VKind::Scr => call_dispatcher::set_scr_source(None),
-        }
+        // Detach the dispatcher slot (device is already stopped, so no more
+        // frames will arrive). Do NOT stop the encoder: we want to reuse
+        // this source later.
+        detach_video_source_kept(kind);
         // Stop forwarding frames to the UI preview sink.
         match kind {
             media::VKind::Cam => call_dispatcher::set_cam_preview(None),
@@ -3107,6 +3133,27 @@ pub(crate) fn capture_source(
         media::VKind::Scr => call_dispatcher::set_scr_source(Some(std::sync::Arc::clone(&src))),
     }
     Ok(src)
+}
+
+/// Detach a `VidSource` from the webrtc dispatcher slot WITHOUT stopping it,
+/// so the source (encoder thread + last frame + track binding) can be
+/// reused on the next attach. The `Arc` stays alive via
+/// `PeerCall.inner.cam/scr` (and `CallInner`), so nothing is dropped.
+///
+/// This is what mid-call toggles use: switching between cam/scr must not
+/// allocate a fresh `VidSource` each time — old ones would accumulate
+/// (openh264 native encoders, full-res frames, webrtc track bindings), which
+/// is the source of the memory climb. `stop()` (encoder exit) still happens
+/// on hangup via `PeerCall::close` / end-call.
+fn detach_video_source_kept(kind: media::VKind) {
+    match kind {
+        media::VKind::Cam => {
+            let _ = call_dispatcher::take_cam_source();
+        }
+        media::VKind::Scr => {
+            let _ = call_dispatcher::take_scr_source();
+        }
+    }
 }
 
 /// Convenience: start the device AND its matching `VidSource` in one call.

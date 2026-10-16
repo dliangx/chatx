@@ -11,6 +11,35 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+/// Connection gate. Set to `true` once the `PeerConnection` reaches the
+/// `Connected` state (in [`crate::session`]); reset to `false` on any
+/// `Failed` / `Disconnected` / `Hangup` / `close` event.
+///
+/// Local media encoders (audio `push`, video `encode_loop`) check this before
+/// doing the (relatively) expensive encode + `write_sample` into the webrtc
+/// track. Reason: before the peer answers, every encoded / packetized frame
+/// just accumulates in webrtc-rs's send pipeline (or, worse, with
+/// `has_sent()==false` keeps the previous `VidSource` track binding alive).
+/// Gating means:
+///   * before connect: audio/video frames are dropped locally (the UI still
+///     previews via `install_local_cam_preview`, which is a different
+///     sink) — no CPU, no webrtc send-queue growth;
+///   * after connect: normal send;
+///   * after disconnect/hangup: everything stops cleanly.
+static SEND_GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Enable / disable the send path for the active call. Called from
+/// [`crate::session::PeerCall`] when the `PeerConnection` transitions into /
+/// out of the connected state.
+pub(crate) fn set_send_gate(on: bool) {
+    SEND_GATE.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// True when local media should be encoded + written to the webrtc track.
+pub(crate) fn should_send() -> bool {
+    SEND_GATE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 use bytes::Bytes;
 use webrtc_rs::api::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_PCMU};
 use webrtc_rs::rtp_transceiver::rtp_codec::{
@@ -82,26 +111,59 @@ fn as_track(t: &TrackArc) -> Arc<dyn TrackLocal + Send + Sync> {
 // ── AudSource ───────────────────────────────────────────────────────────────
 
 /// Outbound G.711 PCMU audio. Push s16le PCM with [`AudSource::push`].
+///
+/// Audio arrives on the cpal audio thread at the device's native rate
+/// (~48 kHz) → thousands of `push` calls per second. Each frame is encoded
+/// to μ-law and handed to a **single** drain task that writes into the
+/// webrtc track. The channel is **bounded** so that if the webrtc send
+/// pipeline stalls (e.g. the peer never answers / is unreachable and the
+/// SRTP writer isn't being drained), audio is dropped from the tail
+/// instead of leaking memory on every push.
 pub struct AudSource {
-    track: TrackArc,
     muted: Arc<AtomicBool>,
+    tx: tokio::sync::mpsc::Sender<webrtc_rs::media::Sample>,
+    /// `track` is kept so callers can attach it to a `PeerCall`
+    /// (via `track()`); the same `TrackArc` is also held by the drain task.
+    track: TrackArc,
 }
 
 impl AudSource {
     pub fn new() -> Self {
+        let track = TrackArc::new(TrackLocalStaticSample::new(
+            audio_codec_cap(),
+            "chatx-aud".into(),
+            "chatx-aud".into(),
+        ));
+
+        // Bounded: a few seconds of 8 kHz μ-law audio (1 byte/sample).
+        // `try_send` drops once full, so if the webrtc writer stalls (peer
+        // unreachable / SRTP not drained) audio is dropped from the tail
+        // instead of leaking memory per push. Normal calls drain well under
+        // this ceiling.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<webrtc_rs::media::Sample>(8000);
+        let drain_track = track.clone();
+        let rt = crate::session::shared_runtime();
+        let _ = rt.spawn(async move {
+            while let Some(sample) = rx.recv().await {
+                if let Err(e) = drain_track.write_sample(&sample).await {
+                    tracing::warn!(err = %e, "aud write_sample");
+                    break;
+                }
+            }
+        });
+
         Self {
-            track: TrackArc::new(TrackLocalStaticSample::new(
-                audio_codec_cap(),
-                "chatx-aud".into(),
-                "chatx-aud".into(),
-            )),
             muted: Arc::new(AtomicBool::new(false)),
+            tx,
+            track,
         }
     }
 
     /// Push one s16le PCM block. `rate` is in Hz (callers push at the
     /// negotiated device rate — we don't resample). Safe to call from the
-    /// cpal audio thread (it spawns on tokio or spins a brief runtime).
+    /// cpal audio thread: this is a non-blocking channel send (or a drop,
+    /// once the drain is backlogged / stopped), so no per-call runtime build
+    /// and no unbounded task accumulation.
     ///
     /// When [`AudSource::mute`](Self::mute) is `true`, the frame is dropped
     /// (no RTP packet is emitted). The remote peer hears silence.
@@ -110,6 +172,14 @@ impl AudSource {
             return;
         }
         if self.muted.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        // Connection gate: don't mulaw-encode / packetize / enqueue RTP
+        // before the peer is answering (peer may never arrive). The local
+        // audio path is unaffected — the cpal callback already decodes /
+        // resamples and forwards to `set_input_sink`, only the *outbound*
+        // webrtc push is skipped.
+        if !should_send() {
             return;
         }
         let data = mulaw_encode(s16le);
@@ -123,18 +193,10 @@ impl AudSource {
             prev_dropped_packets: 0,
             prev_padding_packets: 0,
         };
-        let track = self.track.clone();
-        match tokio::runtime::Handle::try_current() {
-            Ok(h) => {
-                let _ = h.spawn(async move { let _ = track.write_sample(&sample).await; });
-            }
-            Err(_) => {
-                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
-                if let Ok(rt) = rt {
-                    let _ = rt.block_on(track.write_sample(&sample));
-                }
-            }
-        }
+        // Non-blocking: if the drain task is backlogged (peer-side stall) we
+        // drop the current sample rather than growing memory or blocking the
+        // audio callback thread.
+        let _ = self.tx.try_send(sample);
     }
 
     pub fn track(&self) -> Arc<dyn TrackLocal + Send + Sync> {
@@ -201,6 +263,19 @@ impl VidSource {
     /// video-off) without waiting for the source to be dropped.
     pub fn stop(&self) {
         self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        *self.latest.lock().unwrap() = None;
+    }
+
+    /// Release the retained full-resolution frame WITHOUT stopping the encoder
+    /// thread. Used when a video kind is switched OFF mid-call but the source
+    /// is being REUSED: the device is stopped (no more `push`), so clearing
+    /// `latest` both frees the last frame (screen 1440p ≈ 14MB, cam 8MP ≈
+    /// 64MB) and lets the (still-alive) encoder idle — `encode_loop` skips
+    /// when `latest` is `None`. Re-`push` on the next attach resumes it.
+    /// Keeps the source's encoder + webrtc track binding alive for reuse,
+    /// bounded to one per kind.
+    pub fn clear(&self) {
+        *self.latest.lock().unwrap() = None;
     }
 
     /// Push one RGBA8888 frame. When muted, the frame is dropped and no RTP
@@ -210,6 +285,12 @@ impl VidSource {
             return;
         }
         if self.muted.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        // Connection gate: don't copy the full-res frame before the peer is
+        // answering — the encoder loop skips it anyway, so holding it only
+        // wastes RAM (up to ~14MB for a desktop screen).
+        if !should_send() {
             return;
         }
         *self.latest.lock().unwrap() = Some(Frame { rgba: rgba.to_vec(), w, h });
@@ -251,12 +332,21 @@ fn encode_loop(
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("venc rt");
     loop {
         if stopped.load(std::sync::atomic::Ordering::SeqCst) {
-            tracing::trace!("[media] venc: stopped — exiting encoder thread");
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(16)); // ~60 fps cap
         let frame = latest.lock().unwrap().clone();
         let Some(frame) = frame else { continue };
+
+        // Connection gate: before the peer answers (and after it hangs up /
+        // disconnects) we must NOT feed the webrtc track — encoded frames only
+        // pile up in the send pipeline. Skip the encode entirely (cheapest CPU
+        // win: no openh264 work, no `write_sample`) and drop the retained
+        // full-res frame so it isn't pinned while we're not sending.
+        if !should_send() {
+            *latest.lock().unwrap() = None;
+            continue;
+        }
 
         let src = RgbaSliceU8::new(&frame.rgba, (frame.w as usize, frame.h as usize));
         let yuv = YUVBuffer::from_rgb_source(src);

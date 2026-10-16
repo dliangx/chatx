@@ -13,6 +13,7 @@ use webrtc_rs::peer_connection::RTCPeerConnection;
 use webrtc_rs::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc_rs::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc_rs::rtp_transceiver::rtp_codec::RTPCodecType;
+use webrtc_rs::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
 use webrtc_rs::track::track_remote::TrackRemote;
 
 use crate::config::Config;
@@ -151,24 +152,60 @@ impl PeerCall {
         ))
     }
 
-    /// Offerer side of a *mid-call* video upgrade. The caller pre-creates
-    /// [`VidSource`] (so it can register it with their local capture
-    /// dispatcher before this returns) and hands it over; we attach it to a
-    /// new track and renegotiate on the same `RTCPeerConnection`. The
-    /// generated `Offer` frame is emitted through the transport internally.
+    /// Offerer side of a *mid-call* video upgrade. The caller pre-creates a
+    /// [`VidSource`], hands it over; we attach it to a video transceiver and
+    /// renegotiate on the same `RTCPeerConnection`, emitting the resulting
+    /// `Offer` frame over the transport.
+    ///
+    /// We reuse the existing video-kind transceiver (via
+    /// `sender.replace_track`) if one is already present — webrtc-rs `add_track`
+    /// otherwise *adds* a brand-new transceiver every time the track id
+    /// doesn't perfectly match an idle existing transceiver, which is what
+    /// happens when alternating between cam (`chatx-cam`) and scr
+    /// (`chatx-scr`). Unbounded transceiver growth would accumulate
+    /// senders/SRTP writers per toggle.
     pub async fn upgrade_offer(
         &self,
         src: Arc<VidSource>,
         kind: VKind,
         both_sides: bool,
     ) -> Result<()> {
+        // NOTE: we intentionally do NOT stop the other local source here. The
+        // app reuses one `VidSource` per kind for the whole call (see
+        // `local_source`), so stopping on every toggle would kill a source we
+        // still want. Muting + stopping the capture device (done by the
+        // caller) is enough to pause a kind.
         self.inner.upsert_video(kind, Arc::clone(&src));
-        self.pc().add_track(src.track()).await?;
+
+        // Reuse the existing video transceiver if present; if not (first
+        // upgrade on an audio-only call, or a call that started with the
+        // *other* kind), fall back to a new transceiver.
+        {
+            let pc = self.pc();
+            let video_track = src.track();
+            let mut reused = false;
+            let transceivers = pc.get_transceivers().await;
+            for t in &transceivers {
+                if t.kind() != RTPCodecType::Video {
+                    continue;
+                }
+                let sender = t.sender().await;
+                // It doesn't matter whether the sender currently has a track
+                // attached; replace it. Restore sendrecv direction so the new
+                // track actually transmits.
+                if sender.replace_track(Some(video_track.clone())).await.is_ok() {
+                    let _ = t.set_direction(RTCRtpTransceiverDirection::Sendrecv).await;
+                    reused = true;
+                    break;
+                }
+            }
+            if !reused {
+                pc.add_track(video_track).await?;
+            }
+        }
 
         let offer = self.pc().create_offer(None).await?;
-        self.pc()
-            .set_local_description(offer.clone())
-            .await?;
+        self.pc().set_local_description(offer.clone()).await?;
         let _ = self.pc().gathering_complete_promise().await;
 
         self.emit(
@@ -193,14 +230,51 @@ impl PeerCall {
     ) -> Result<()> {
         let (kind, both) = match (offer.upgrade_kind, offer.both_sides) {
             (Some(k), Some(b)) => (k, b),
-            _ => return Err(crate::error::Error::other("upgrade_answer: missing upgrade fields")),
+            _ => {
+                return Err(crate::error::Error::other(
+                    "upgrade_answer: missing upgrade fields",
+                ));
+            }
         };
         if let Some(src) = own_src {
             // Only attach if we don't already have this kind (e.g. screen
             // recipient re-upgrading their camera is a no-op).
             if !self.inner.has_video(kind) {
+                // Stop any *other* local video source so its encoder thread
+                // doesn't outlive the toggle.
+                if let Some(o) = self.inner.cam.lock().unwrap().clone() {
+                    o.stop();
+                }
+                if let Some(o) = self.inner.scr.lock().unwrap().clone() {
+                    o.stop();
+                }
+
                 self.inner.upsert_video(kind, Arc::clone(&src));
-                self.pc().add_track(src.track()).await?;
+
+                // Reuse the existing video transceiver (via
+                // `sender.replace_track`) if one is already present — avoids
+                // accumulating transceivers across toggles.
+                let pc = self.pc();
+                let video_track = src.track();
+                let mut reused = false;
+                for t in pc.get_transceivers().await {
+                    if t.kind() != RTPCodecType::Video {
+                        continue;
+                    }
+                    let sender = t.sender().await;
+                    if sender
+                        .replace_track(Some(video_track.clone()))
+                        .await
+                        .is_ok()
+                    {
+                        let _ = t.set_direction(RTCRtpTransceiverDirection::Sendrecv).await;
+                        reused = true;
+                        break;
+                    }
+                }
+                if !reused {
+                    pc.add_track(video_track).await?;
+                }
             }
         }
         let desc = RTCSessionDescription::offer(match &offer.kind {
@@ -209,9 +283,7 @@ impl PeerCall {
         })?;
         self.pc().set_remote_description(desc).await?;
         let answer = self.pc().create_answer(None).await?;
-        self.pc()
-            .set_local_description(answer.clone())
-            .await?;
+        self.pc().set_local_description(answer.clone()).await?;
         let _ = self.pc().gathering_complete_promise().await;
 
         self.emit(
@@ -290,6 +362,21 @@ impl PeerCall {
         };
         if let Some(src) = src {
             src.mute(on);
+        }
+    }
+
+    /// Returns the [`VidSource`] the caller handed in for `kind` during
+    /// `offer`/`answer`/`upgrade_offer` (or `None` if this call never
+    /// attached a local video source of that kind). Use this instead of
+    /// allocating a fresh source on every toggle — the source's `Arc` is
+    /// pinned in `PeerCall.inner` for the call's life, creating new ones per
+    /// toggle leaks the previous ones (encoder threads, last frames,
+    /// webrtc-rs track bindings, especially when the peer never answers and
+    /// `has_sent()==false` so `replace_track` skips `unbind`).
+    pub fn local_source(&self, kind: VKind) -> Option<Arc<VidSource>> {
+        match kind {
+            VKind::Cam => self.inner.cam.lock().unwrap().clone(),
+            VKind::Scr => self.inner.scr.lock().unwrap().clone(),
         }
     }
 
@@ -424,6 +511,18 @@ impl PeerCall {
     }
 
     pub fn close(&self) -> Result<()> {
+        // Connection gate off: nothing more may reach the webrtc track.
+        crate::media_source::set_send_gate(false);
+        // Stop the local video encoders (their dedicated `chatx-venc` threads
+        // own an openh264 encoder + tokio runtime + last full-res frame).
+        // Even if the caller has already stopped them (mid-call toggle),
+        // `stop()` is idempotent.
+        if let Some(s) = self.inner.cam.lock().unwrap().clone() {
+            s.stop();
+        }
+        if let Some(s) = self.inner.scr.lock().unwrap().clone() {
+            s.stop();
+        }
         let pc = self.pc();
         runtime().spawn(async move {
             if let Err(e) = pc.close().await {
@@ -451,6 +550,10 @@ impl PeerCall {
                     RTCPeerConnectionState::Disconnected => PeerEvent::Disconnected,
                     _ => PeerEvent::Hangup,
                 };
+                // Connection gate: only let local media reach the webrtc track
+                // once we're actually connected; stop again on any failure /
+                // disconnect so nothing accumulates in the send pipeline.
+                crate::media_source::set_send_gate(ev == PeerEvent::Connected);
                 let _ = tx.try_broadcast(ev);
                 Box::pin(async {})
             }));
@@ -603,6 +706,18 @@ fn decode_h264(nal: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 // ─── runtime ────────────────────────────────────────────────────────────────
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+/// Crate-shared tokio runtime. Reused by hot paths (e.g. `AudSource::push`)
+/// instead of building a fresh runtime per call, which would burn CPU on the
+/// audio thread (~48kHz).
+pub(crate) fn shared_runtime() -> &'static tokio::runtime::Runtime {
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("media rt")
+    })
+}
 
 fn runtime() -> &'static tokio::runtime::Runtime {
     RT.get_or_init(|| {
