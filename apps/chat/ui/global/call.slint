@@ -7,6 +7,7 @@
 /// By default A shows *me* and B shows *the peer*; tapping A flips them.
 /// The four device buttons (MUTE / AUDIO / CAMERA / SCREEN) always show and
 /// each control a *local* device, tinted green when active, gray otherwise.
+import { Icon, Glyph } from "../components/icon.slint";
 export global CallState {
     in property <string> peer-base58: "";
     in property <string> peer-name: "";
@@ -34,6 +35,13 @@ export global CallState {
     /// A↔B orientation. false → A=me, B=peer. true → A=peer, B=me.
     in property <bool> swapped: false;
 
+    // ── minimized floating widget position (draggable) ─────────────
+    /// Stored position of the minimized widget once the user has dragged it.
+    in-out property <length> min-x: 16px;
+    in-out property <length> min-y: 16px;
+    /// False until first drag → the widget sits at the default top-right spot.
+    in-out property <bool> min-pos-set: false;
+
     // ── callbacks ─────────────────────────────────────────────────
     callback end-call();
     callback toggle-mute();
@@ -44,29 +52,56 @@ export global CallState {
     callback toggle-minimize();
 }
 
-/// A round call-control button. `on` → green, else gray.
+/// A round call-control button: an `Icon` above a short text `label`.
+/// `on` → green tint, else gray tint.
+///
+/// Icon: use `glyph` for a single icon in both states, or `glyph-on` /
+/// `glyph-off` to show different icons per state (e.g. voice / voice-close).
 export component CallBtn inherits Rectangle {
     in property <string> label: "";
     in property <bool> on: false;
+    in property <Glyph> glyph: Glyph.none;
+    in property <Glyph> glyph-on: Glyph.none;
+    in property <Glyph> glyph-off: Glyph.none;
+    in property <brush> on-tint: #22c55e;
+    in property <brush> off-tint: #eef1f5;
+    in property <brush> bg: #2a3340;
+    in property <brush> bg-on: #2a3340;
     callback clicked();
+
+    function _glyph() -> Glyph {
+        if (root.on) {
+            if (root.glyph-on != Glyph.none) { return root.glyph-on; }
+            return root.glyph;
+        }
+        if (root.glyph-off != Glyph.none) { return root.glyph-off; }
+        return root.glyph;
+    }
 
     width: 58px;
     height: 58px;
     border-radius: 29px;
-    background: root.on ? #22c55e : #2a3340;
+    background: root.on ? root.bg-on : root.bg;
     clip: true;
 
+    if root._glyph() != Glyph.none: Icon {
+        x: 16px;
+        y: 5px;
+        size: 26px;
+        glyph: root._glyph();
+        tint: root.on ? root.on-tint : root.off-tint;
+    }
     Text {
         x: 0px;
-        y: 0px;
+        y: 36px;
         width: 100%;
         height: 100%;
         text: root.label;
-        color: #ffffff;
-        font-size: 11px;
+        color: root.on ? root.on-tint : root.off-tint;
+        font-size: 9px;
         font-weight: 600;
         horizontal-alignment: center;
-        vertical-alignment: center;
+        vertical-alignment: top;
         wrap: word-wrap;
     }
 
@@ -101,6 +136,23 @@ export component CallView inherits Rectangle {
     // A = small (top-left), B = full screen. When not swapped A=me / B=peer.
     property <bool> a-is-me: !CallState.swapped;
 
+    // Internal drag tracking for the minimized floating widget.
+    property <bool> min-drag: false;
+    property <length> min-origin-x: 0px;
+    property <length> min-origin-y: 0px;
+
+    // Helper: the minimized widget's effective top-left. Default is the
+    // top-right corner (computed against the window's physical width) until
+    // the user drags it — then we use the stored CallState position.
+    function _minx() -> length {
+        if (CallState.min-pos-set) { return CallState.min-x; }
+        return root.width - 172px - 16px;
+    }
+    function _miny() -> length {
+        if (CallState.min-pos-set) { return CallState.min-y; }
+        return 16px;
+    }
+
     // ── B : full screen ────────────────────────────────────────────
     Rectangle {
         x: 0px;
@@ -108,6 +160,7 @@ export component CallView inherits Rectangle {
         width: 100%;
         height: 100%;
         clip: true;
+        visible: !CallState.minimized;
         background: #0b0e14;
         Image {
             x: 0px;
@@ -137,6 +190,7 @@ export component CallView inherits Rectangle {
             image-fit: cover;
             source: root.a-is-me ? _my() : _peer();
         }
+
         TouchArea {
             clicked => { CallState.swap-ab(); }
         }
@@ -181,17 +235,14 @@ export component CallView inherits Rectangle {
             height: 44px;
             border-radius: 22px;
             background: #2a3340;
-            Text {
-                x: 0px;
-                y: 0px;
-                width: 100%;
-                height: 100%;
-                text: "–";
-                color: #eaeef3;
-                font-size: 24px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Icon {
+                x: 10px;
+                y: 10px;
+                size: 24px;
+                glyph: Glyph.minimize;
+                tint: #eaeef3;
             }
+
             TouchArea {
                 clicked => { CallState.toggle-minimize(); }
             }
@@ -213,23 +264,32 @@ export component CallView inherits Rectangle {
             spacing: 10px;
 
             CallBtn {
-                label: "MUTE";
-                on: CallState.muted;
+                label: "VOICE";
+                on: !CallState.muted;
+                glyph-on: Glyph.voice;
+                glyph-off: Glyph.voice-close;
                 clicked => { CallState.toggle-mute(); }
             }
+
             CallBtn {
                 label: "AUDIO";
                 on: !CallState.audio-muted;
+                glyph-on: Glyph.volume;
+                glyph-off: Glyph.volume-close;
                 clicked => { CallState.toggle-audio(); }
             }
+
             CallBtn {
                 label: "CAMERA";
                 on: CallState.cam-on;
+                glyph: Glyph.video;
                 clicked => { CallState.toggle-cam(); }
             }
+
             CallBtn {
                 label: "SCREEN";
                 on: CallState.scr-on;
+                glyph: Glyph.meeting;
                 clicked => { CallState.toggle-scr(); }
             }
         }
@@ -254,6 +314,7 @@ export component CallView inherits Rectangle {
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
+
             TouchArea {
                 clicked => { CallState.end-call(); }
             }
@@ -272,22 +333,27 @@ export component CallView inherits Rectangle {
         color: #ff8080;
     }
 
-    // ── MINIMIZED WIDGET (top-right) ───────────────────────────────
+    // ── MINIMIZED WIDGET (draggable, floating over the main UI) ─────
+    // A compact card: video thumbnail (left) + peer name (top-right) and
+    // MAXIMIZE / END stacked vertically (bottom-right). Drag the card body
+    // to reposition; MAXIMIZE restores the full overlay, END hangs up.
     Rectangle {
-        x: parent.width - 168px;
-        y: 16px;
-        width: 152px;
-        height: 96px;
+        x: _minx();
+        y: _miny();
+        width: 172px;
+        height: 112px;
         border-radius: 16px;
         background: #2a3340;
         clip: true;
+        z: 5;
         visible: CallState.minimized;
 
+        // Video thumbnail (peer) — also the drag handle.
         Rectangle {
             x: 8px;
             y: 8px;
-            width: 88px;
-            height: 80px;
+            width: 120px;
+            height: 96px;
             border-radius: 8px;
             background: #0b0e14;
             clip: true;
@@ -299,46 +365,72 @@ export component CallView inherits Rectangle {
                 image-fit: cover;
                 source: _peer();
             }
+
+            min-drag-ta := TouchArea {
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) {
+                        root.min-drag = true;
+                        if (CallState.min-pos-set) {
+                            root.min-origin-x = CallState.min-x;
+                            root.min-origin-y = CallState.min-y;
+                        } else {
+                            // Fall back to the default top-right corner so
+                            // the very first drag still anchors correctly.
+                            root.min-origin-x = root.width - 172px - 16px;
+                            root.min-origin-y = 16px;
+                        }
+                    } else if (e.kind == PointerEventKind.move) {
+                        if (root.min-drag) {
+                            CallState.min-pos-set = true;
+                            CallState.min-x =
+                                root.min-origin-x + (min-drag-ta.mouse-x - min-drag-ta.pressed-x);
+                            CallState.min-y =
+                                root.min-origin-y + (min-drag-ta.mouse-y - min-drag-ta.pressed-y);
+                        }
+                    } else if (e.kind == PointerEventKind.up
+                        || e.kind == PointerEventKind.cancel) {
+                        root.min-drag = false;
+                    }
+                }
+            }
         }
 
         Text {
-            x: 96px;
+            x: 132px;
             y: 8px;
-            width: 52px;
+            width: 34px;
             text: CallState.peer-name;
             color: #f0f3f7;
-            font-size: 12px;
+            font-size: 10px;
             wrap: word-wrap;
+            max-width: 34px;
         }
 
-        // MAXIMIZE (restore)
+        // MAXIMIZE (restore) — top of the right-hand column.
         Rectangle {
-            x: 96px;
-            y: 44px;
+            x: 134px;
+            y: 34px;
             width: 30px;
             height: 30px;
             border-radius: 15px;
             background: #3a4452;
-            Text {
-                x: 0px;
-                y: 0px;
-                width: 100%;
-                height: 100%;
-                text: "+";
-                color: #eaeef3;
-                font-size: 20px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Icon {
+                x: 6px;
+                y: 6px;
+                size: 18px;
+                glyph: Glyph.fullscreen;
+                tint: #eaeef3;
             }
+
             TouchArea {
                 clicked => { CallState.toggle-minimize(); }
             }
         }
 
-        // END (while minimized)
+        // END (close call) — bottom of the right-hand column (directly under MAXIMIZE).
         Rectangle {
-            x: 130px;
-            y: 44px;
+            x: 134px;
+            y: 68px;
             width: 30px;
             height: 30px;
             border-radius: 15px;
