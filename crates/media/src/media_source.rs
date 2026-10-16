@@ -157,6 +157,10 @@ pub struct VidSource {
     track: TrackArc,
     latest: Arc<std::sync::Mutex<Option<Frame>>>,
     muted: Arc<AtomicBool>,
+    /// Shared with the encode thread. Set on drop so the (detached) encoder
+    /// thread wakes on its next tick and exits — releasing the openh264
+    /// encoder, its tokio runtime, and the `latest` frame it otherwise pins.
+    stopped: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -175,18 +179,28 @@ impl VidSource {
             stream_id,
         ));
         let latest = Arc::new(std::sync::Mutex::new(None));
+        let stopped = Arc::new(AtomicBool::new(false));
         let enc = openh264::encoder::Encoder::new()?;
         let track2 = track.clone();
         let latest2 = latest.clone();
+        let stopped2 = stopped.clone();
         std::thread::Builder::new()
             .name("chatx-venc".into())
-            .spawn(move || encode_loop(enc, track2, latest2))
+            .spawn(move || encode_loop(enc, track2, latest2, stopped2))
             .map_err(|e| crate::error::Error::other(format!("spawn venc: {e}")))?;
         Ok(Self {
             track,
             latest,
             muted: Arc::new(AtomicBool::new(false)),
+            stopped,
         })
+    }
+
+    /// Explicitly stop the encoder thread. Also called from [`Drop`]; exposed
+    /// so callers can tear down deterministically (e.g. on hangup / mid-call
+    /// video-off) without waiting for the source to be dropped.
+    pub fn stop(&self) {
+        self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Push one RGBA8888 frame. When muted, the frame is dropped and no RTP
@@ -215,14 +229,31 @@ impl VidSource {
     }
 }
 
+impl Drop for VidSource {
+    fn drop(&mut self) {
+        // Release the encoder (and its native buffers) + tokio runtime by
+        // signalling the loop to exit. We do NOT join: the loop does
+        // `rt.block_on(...)` on the track we also own, so a blocking join
+        // here could self-deadlock. The stop flag alone is enough to reclaim
+        // the openh264 encoder / frame / runtime (the thread exits on its
+        // next ~16ms tick and drops everything it owned).
+        self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 fn encode_loop(
     mut enc: openh264::encoder::Encoder,
     track: TrackArc,
     latest: Arc<std::sync::Mutex<Option<Frame>>>,
+    stopped: Arc<AtomicBool>,
 ) {
     use openh264::formats::{RgbaSliceU8, YUVBuffer};
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("venc rt");
     loop {
+        if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::trace!("[media] venc: stopped — exiting encoder thread");
+            return;
+        }
         std::thread::sleep(std::time::Duration::from_millis(16)); // ~60 fps cap
         let frame = latest.lock().unwrap().clone();
         let Some(frame) = frame else { continue };

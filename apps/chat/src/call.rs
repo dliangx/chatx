@@ -372,6 +372,17 @@ pub fn stop_call() {
     }
     CALL.with(|slot| {
         if let Some(inner) = slot.borrow_mut().take() {
+            // Stop the video encoders NOW (deterministically). Their threads
+            // own an openh264 encoder + tokio runtime + a full-res frame
+            // buffer; signalling stop here means teardown doesn't depend on
+            // the async `pc.close()` finishing and the per-track consumer
+            // tasks exiting before `Stop` would otherwise fire via `Drop`.
+            if let Some(src) = inner.cam_src.as_ref() {
+                src.stop();
+            }
+            if let Some(src) = inner.scr_src.as_ref() {
+                src.stop();
+            }
             inner.audio.stop_input();
             inner.audio.stop_output();
         }
