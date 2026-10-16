@@ -1,12 +1,3 @@
-/// Single source of truth for the active call (audio / video / screen).
-/// One active call per device.
-///
-/// Two video surfaces:
-///   * **A** — the small picture (top-left), tap to swap with B.
-///   * **B** — the full-screen surface.
-/// By default A shows *me* and B shows *the peer*; tapping A flips them.
-/// The four device buttons (MUTE / AUDIO / CAMERA / SCREEN) always show and
-/// each control a *local* device, tinted green when active, gray otherwise.
 import { Icon, Glyph } from "../components/icon.slint";
 export global CallState {
     in property <string> peer-base58: "";
@@ -42,6 +33,12 @@ export global CallState {
     /// False until first drag → the widget sits at the default top-right spot.
     in-out property <bool> min-pos-set: false;
 
+    // ── bottom-control auto-hide ───────────────────────────────────
+    /// True once the bottom control row has auto-hidden (3s after connect, or
+    /// 3s after releasing image B). Holding image B (pointer down) keeps the
+    /// row shown; a tap/hold on image B sets this false again to reveal it.
+    in-out property <bool> controls-hidden: false;
+
     // ── callbacks ─────────────────────────────────────────────────
     callback end-call();
     callback toggle-mute();
@@ -52,11 +49,6 @@ export global CallState {
     callback toggle-minimize();
 }
 
-/// A round call-control button: an `Icon` above a short text `label`.
-/// `on` → green tint, else gray tint.
-///
-/// Icon: use `glyph` for a single icon in both states, or `glyph-on` /
-/// `glyph-off` to show different icons per state (e.g. voice / voice-close).
 export component CallBtn inherits Rectangle {
     in property <string> label: "";
     in property <bool> on: false;
@@ -140,6 +132,37 @@ export component CallView inherits Rectangle {
     property <bool> min-drag: false;
     property <length> min-origin-x: 0px;
     property <length> min-origin-y: 0px;
+    property <bool> pending-hide: false;
+    property <bool> was-active: false;
+
+    Timer {
+        interval: 16ms;
+        running: CallState.active && !root.was-active;
+        triggered => {
+            root.was-active = true;
+            CallState.controls-hidden = false;
+            root.pending-hide = true;
+        }
+    }
+
+    Timer {
+        interval: 16ms;
+        running: !CallState.active;
+        triggered => {
+            root.was-active = false;
+            root.pending-hide = false;
+            CallState.controls-hidden = false;
+        }
+    }
+
+    Timer {
+        interval: 3000ms;
+        running: root.pending-hide && CallState.active && !CallState.minimized;
+        triggered => {
+            root.pending-hide = false;
+            CallState.controls-hidden = true;
+        }
+    }
 
     // Helper: the minimized widget's effective top-left. Default is the
     // top-right corner (computed against the window's physical width) until
@@ -169,6 +192,22 @@ export component CallView inherits Rectangle {
             height: 100%;
             image-fit: cover;
             source: root.a-is-me ? _peer() : _my();
+        }
+        // Holding this surface reveals the bottom control row; on release
+        // the 3s auto-hide timer re-arms.
+        TouchArea {
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down) {
+                    CallState.controls-hidden = false;
+                    root.pending-hide = false;
+                } else if (e.kind == PointerEventKind.up
+                    || e.kind == PointerEventKind.cancel) {
+                    CallState.controls-hidden = false;
+                    if (CallState.active && !CallState.minimized) {
+                        root.pending-hide = true;
+                    }
+                }
+            }
         }
     }
 
@@ -255,7 +294,7 @@ export component CallView inherits Rectangle {
         y: parent.height - 218px;
         width: 100%;
         height: 190px;
-        visible: !CallState.minimized;
+        visible: !CallState.minimized && !CallState.controls-hidden;
 
         // Four always-on device buttons.
         HorizontalLayout {
