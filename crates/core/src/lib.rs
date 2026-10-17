@@ -210,8 +210,15 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         // across the candidates, and re-resolve the latest record between
         // passes so a fresh heartbeat lands before we give up. Loopback and
         // wildcard addresses are never dialed (`unroutable_reason`).
-        const PASSES: usize = 2;
-        const PER_ATTEMPT: std::time::Duration = std::time::Duration::from_millis(1500);
+        // `swarm.dial` runs its own multi-addr failover with a ~5s default
+        // timeout. Each dial attempt must outlive that, or we abandon an
+        // in-flight dial and the "Timeout" fires before the handshake lands —
+        // the exact A↔B startup failure: cross-subnet TCP+Noise didn't finish
+        // within the old 1500ms window. Likewise keep more passes so we cover
+        // the window where the peer is still booting and its fresh port hasn't
+        // been heartbeated into the directory yet (we re-resolve each pass).
+        const PASSES: usize = 3;
+        const PER_ATTEMPT: std::time::Duration = std::time::Duration::from_millis(6000);
         const PASS_GAP: std::time::Duration = std::time::Duration::from_millis(800);
         const POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
