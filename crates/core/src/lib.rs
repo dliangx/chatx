@@ -188,21 +188,28 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     pub fn warm_dial_peer(&self, peer_base58: &str) -> Result<(), anyhow::Error> {
         let me = self.peer_base58();
         if peer_base58 == me {
+            eprintln!("[dm] warm_dial skip: target is self");
             return Ok(());
         }
         let Ok(pid) = peer_base58.parse::<PeerId>() else {
+            eprintln!("[dm] warm_dial skip: bad peer id {peer_base58}");
             return Ok(());
         };
-        if self
+        let conn_count = self
             .running
             .connected
             .lock()
             .unwrap()
             .get(&pid)
             .copied()
-            .unwrap_or(0)
-            > 0
-        {
+            .unwrap_or(0);
+        if conn_count > 0 {
+            // Stale `connected` count would silently skip every future dial —
+            // log loudly so it's diagnosable. This is the "B stops trying to
+            // reconnect A after a disconnect" bug: the counter leaked to >0.
+            eprintln!(
+                "[dm] warm_dial skip {peer_base58}: already considered connected (count={conn_count})"
+            );
             return Ok(());
         }
         // Reach the peer by dialing every routable address it registered. A

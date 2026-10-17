@@ -1415,6 +1415,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
         g.chat_id_for(chat_key).map(|s| s.to_string())
     };
     let Some(chat_id) = chat_id else {
+        eprintln!("[chat] load_chat_messages{chat_key}: chat_id_for returned None");
         return;
     };
     set_current_chat_id(&chat_id);
@@ -1440,12 +1441,19 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 }
             })
         };
-        if let Some(peer) = peer {
-            let client = client.clone();
-            std::thread::spawn(move || {
-                let _ = client.warm_dial_peer(&peer);
-            });
+        match peer {
+            Some(p) => {
+                let client = client.clone();
+                std::thread::spawn(move || {
+                    let _ = client.warm_dial_peer(&p);
+                });
+            }
+            None => eprintln!(
+                "[chat] load_chat_messages{chat_key}: no peer id resolved (chat_id={chat_id})"
+            ),
         }
+    } else {
+        eprintln!("[chat] load_chat_messages{chat_key}: group chat, skipping dm warm_dial (chat_id={chat_id})");
     }
     let me_peer = client.peer_base58().to_string();
     let me = client.user_id().to_string();
