@@ -825,6 +825,7 @@ fn on_scan_success(weak: slint::Weak<MainWindow>, text: String) {
 
         st.invoke_scanner_stop();
         st.set_scan_found(false);
+        st.set_search_results(slint::ModelRc::new(slint::VecModel::from(vec![])));
 
         let mut nav = st.get_nav_state();
         nav.global_overlay = GlobalOverlayType::None;

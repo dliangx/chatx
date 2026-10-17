@@ -29,7 +29,7 @@ export component ScanView inherits Rectangle {
         width: 100%;
         height: 100%;
         source: AppState.scan-preview;
-        image-fit: preserve;
+        image-fit: cover;
     }
 
     in-out property <length> scan-line-pos: 6px;
@@ -176,5 +176,4 @@ export component ScanView inherits Rectangle {
         color: #ffffffcc;
         horizontal-alignment: center;
     }
-
 }
