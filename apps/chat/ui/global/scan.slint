@@ -1,4 +1,3 @@
-import { Theme } from "../theme.slint";
 import { GlobalOverlayType, AppState } from "../components/app_state.slint";
 import { Icon, Glyph } from "../components/icon.slint";
 
@@ -30,7 +29,7 @@ export component ScanView inherits Rectangle {
         width: 100%;
         height: 100%;
         source: AppState.scan-preview;
-        image-fit: cover;
+        image-fit: preserve;
     }
 
     in-out property <length> scan-line-pos: 6px;
@@ -178,100 +177,4 @@ export component ScanView inherits Rectangle {
         horizontal-alignment: center;
     }
 
-    if AppState.scan-found:
-    Rectangle {
-        x: (parent.width - 320px) / 2;
-        y: (parent.height - 360px) / 2;
-        width: 320px;
-        height: 320px;
-        border-radius: 12px;
-        background: #f6f6f6;
-        clip: true;
-
-        Text {
-            x: 16px;
-            y: 12px;
-            width: parent.width - 32px;
-            text: "识别结果";
-            font-size: 16px;
-            font-weight: 600;
-            color: Theme.fg;
-            horizontal-alignment: center;
-        }
-
-        Text {
-            x: 16px;
-            y: 44px;
-            width: parent.width - 32px;
-            height: 208px;
-            text: AppState.scan-result;
-            font-size: 14px;
-            color: Theme.fg;
-            wrap: word-wrap;
-        }
-
-        Rectangle {
-            x: 16px;
-            y: parent.height - 72px;
-            width: parent.width / 2 - 24px;
-            height: 32px;
-            border-radius: 16px;
-            background: #ffffff;
-            border-width: 1px;
-            border-color: #cccccc;
-
-            Text {
-                x: 0px;
-                y: 0px;
-                width: 100%;
-                height: 100%;
-                text: "继续扫描";
-                font-size: 13px;
-                color: Theme.fg;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-
-            TouchArea {
-                width: 100%;
-                height: 100%;
-                clicked => {
-                    AppState.scan-found = false;
-                    AppState.scan-result = "";
-                    AppState.scanner-start();
-                }
-            }
-        }
-
-        Rectangle {
-            x: parent.width / 2 + 8px;
-            y: parent.height - 72px;
-            width: parent.width / 2 - 24px;
-            height: 32px;
-            border-radius: 16px;
-            background: Theme.brand;
-
-            Text {
-                x: 0px;
-                y: 0px;
-                width: 100%;
-                height: 100%;
-                text: "去添加";
-                font-size: 13px;
-                color: white;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-
-            TouchArea {
-                width: 100%;
-                height: 100%;
-                clicked => {
-                    AppState.scanner-stop();
-                    AppState.nav-state.global-overlay = GlobalOverlayType.None;
-                    AppState.search-users(AppState.scan-result);
-                }
-            }
-        }
-    }
 }

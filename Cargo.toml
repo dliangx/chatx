@@ -19,7 +19,6 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 chatx-core = { path = "crates/core" }
-chatx-render = { path = "crates/render" }
 
 slint = "^1.18"
 slint-build = "^1.18"
@@ -44,7 +43,6 @@ libp2p = { version = "0.56", features = [
     "ping",
 ] }
 libp2p-identity = "0.2"
-libp2p-core = "0.43"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 axum = { version = "0.8", features = ["macros", "http1"] }
@@ -54,7 +52,6 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-rusqlite = { version = "0.31", features = ["bundled"] }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlite",

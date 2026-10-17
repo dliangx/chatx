@@ -10,10 +10,10 @@
 //!   `appleshim.rs`. iOS additionally exposes [`authorization_status`] to
 //!   query the camera grant state without prompting (see `ios.rs`).
 //! - **Windows / Linux**: [`nokhwa`](https://docs.rs/nokhwa) opens the camera
-//!   and streams frames; each frame is greyscaled and handed to `rqrr` for
+//!   and streams frames; each frame is greyscaled and handed to `rxing` for
 //!   QR decode. See `desktop.rs`.
 //! - **Android**: the Java shell captures via Camera1 and delivers frames
-//!   through the `bridge` JNI consumer; we decode them with `rqrr`. See
+//!   through the `bridge` JNI consumer; we decode them with `rxing`. See
 //!   `android.rs`.
 //!
 //! Anything else (e.g. wasm) gets a no-op [`Camera`] whose `start()` reports
@@ -21,7 +21,13 @@
 
 #![allow(deprecated, non_snake_case, unsafe_op_in_unsafe_fn)]
 
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
+#[cfg(any(
+    target_os = "windows",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+))]
 pub mod scan;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]

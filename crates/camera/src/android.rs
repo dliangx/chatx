@@ -1,5 +1,5 @@
 //! Android camera capture — consumes frames from the Java shell via the
-//! stable `bridge` C-ABI (JNI) and QR-decodes each frame with `rqrr`.
+//! stable `bridge` C-ABI (JNI) and QR-decodes each frame with `rxing`.
 //!
 //! The Java side (Camera2 + `ImageReader`) is started by the Activity host
 //! on `onCreate` and never stops — it is the persistent capture surface for
@@ -13,6 +13,7 @@
 //! - `RGB_565` (0x13) — legacy `Capture.java` from before the Camera2
 //!   upgrade; still handled so we don't break older builds.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::scan;
@@ -45,8 +46,14 @@ fn notify_frame(bytes: &[u8], w: u32, h: u32, fmt: u32) {
     }
 }
 
+/// Log once to distinguish "no frames" from "decode failing".
+static FRAME_SEEN: AtomicBool = AtomicBool::new(false);
+
 /// Callback installed into the bridge. Runs on the JNI caller thread.
 fn on_bridge_frame(bytes: &[u8], w: u32, h: u32, fmt: u32) {
+    if !FRAME_SEEN.swap(true, Ordering::SeqCst) {
+        eprintln!("[camera] android: first frame {}x{} fmt={} {}B", w, h, fmt, bytes.len());
+    }
     match PixelFormat::from_i32(fmt as i32) {
         PixelFormat::Gray8 => {
             // QR decode runs first — the preview sink sees the same bytes
@@ -69,7 +76,7 @@ fn on_bridge_frame(bytes: &[u8], w: u32, h: u32, fmt: u32) {
         // the shell contract today is: *either* send GRAY8 with a Y-plane
         // payload, *or* keep the legacy RGB565. Adding more means more
         // per-format code on the Rust side — punt until a real need.
-        _ => {}
+        _ => eprintln!("[camera] android: unsupported pixel format {} ({}x{} {}B) — dropped", fmt, w, h, bytes.len()),
     }
 }
 

@@ -9,6 +9,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use crate::scan;
+
 /// Global sink, installed via [`Camera::set_sink`], called from the
 /// `_chatx_rust_qr` trampoline (which runs on the Swift metadata delegate
 /// queue) with every decoded QR payload.
@@ -50,6 +52,7 @@ pub unsafe extern "C" fn _chatx_rust_qr(payload: *const u8, len: i32) {
     if s.trim().is_empty() {
         return;
     }
+    eprintln!("[camera] apple: QR detected = \"{}\"", s);
     if let Some(slot) = SINK.get() {
         if let Ok(g) = slot.lock() {
             (g)(s);
@@ -60,16 +63,28 @@ pub unsafe extern "C" fn _chatx_rust_qr(payload: *const u8, len: i32) {
 /// One preview frame. `data` is `len` bytes in the layout implied by `fmt`
 /// (4 B/px for RGBA8888, 1 B/px for Gray8). `w` / `h` are the image
 /// dimensions; `fmt` is one of the `bridge::types::PixelFormat` values.
+///
+/// Also run the shared rxing decoder on each frame (a fallback for codes
+/// AVFoundation misses); the QR sink is only fed when installed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _chatx_rust_frame(data: *const u8, len: i32, w: u32, h: u32, fmt: u32) {
     if data.is_null() || len <= 0 || w == 0 || h == 0 {
         return;
     }
     let slice = unsafe { std::slice::from_raw_parts(data, len as usize) };
-    if let Some(slot) = FRAME_SINK.get() {
-        if let Ok(g) = slot.lock() {
+
+    if SINK.get().is_some() {
+        scan::scan_frame(slice, w, h, fmt, &|text| {
+            if let Some(slot) = SINK.get()
+                && let Ok(g) = slot.lock() {
+                    (g)(text);
+            }
+        });
+    }
+
+    if let Some(slot) = FRAME_SINK.get()
+        && let Ok(g) = slot.lock() {
             (g)(slice, w, h, fmt);
-        }
     }
 }
 

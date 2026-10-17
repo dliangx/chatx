@@ -15,24 +15,35 @@ path = "src/lib.rs"
 [build-dependencies]
 # (none — `build.rs` shells out to `swiftc` / `clang` directly)
 
-# Windows + Linux: nokhwa for capture, rqrr (pure Rust) for QR decoding.
+# Windows + Linux: nokhwa for capture.
 #   `input-native`    — picks the platform backend (Media Foundation / V4L2)
 #   `output-threaded` — callback-style Camera (our `callback` per frame)
-# default-features=false keeps the `image` codec stack (mozjpeg/avif/…) out,
-# so cross-compiling needs no C toolchain for those. We read raw YUYV/GRAY
-# directly, so no decoding feature is required.
+# default-features=false keeps the `image` codec stack out; we read raw
+# YUYV/GRAY directly, so no decoding feature is required.
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 nokhwa = { version = "0.10.11", default-features = false, features = [
     "input-native",
     "output-threaded",
 ] }
-# default-features=false turns off the `img` feature (which would pull in the
-# `image` crate). We feed raw greyscale frames via `prepare_from_greyscale`.
-rqrr = { version = "0.11", default-features = false }
 
-# Android: capture already runs in the Java shell (Camera1) and reaches us
-# through the `bridge` JNI consumer; we only depend on rqrr to decode the
-# frames it delivers. Pure Rust, so no native library or NDK package is needed.
+# Shared decoder + image loading across all scan targets.
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios"))'.dependencies]
+rxing = { version = "0.9.3", default-features = false, features = [
+    "decoders",
+    "qrcode",
+    "oned",
+    "datamatrix",
+    "pdf417",
+    "maxicode",
+    "aztec",
+    "encoding_rs",
+] }
+# Image loading for `scan::decode_local_photo` (jpeg/png only, no C toolchain).
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+] }
+
+# Android: capture runs in the Java shell and reaches us via the bridge.
 [target.'cfg(target_os = "android")'.dependencies]
-rqrr = { version = "0.11", default-features = false }
 bridge = { path = "../bridge" }

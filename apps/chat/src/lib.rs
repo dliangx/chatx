@@ -43,6 +43,9 @@ thread_local! {
     static DEVICE_APPROVED: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
 
+/// Set once a scanned QR is resolved, so late frames don't re-fire it.
+static SCAN_RESOLVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn device_is_approved() -> bool {
     DEVICE_APPROVED.with(|c| c.get())
 }
@@ -123,39 +126,10 @@ pub fn run_app() {
     let ui = MainWindow::new().expect("window init failed");
     let state = ui.global::<AppState>();
     let weak = ui.as_weak();
-    call::set_weak_window(weak.clone());
 
-    // Observe the *peer's* camera / screen on-off control signals. The media
-    // crate fires this hook when it receives a `SignalKind::Cam`/`Screen` on
-    // an active call; we flip the matching `has-remote-*` flag so the A/B
-    // surfaces + buttons update.
-    {
-        let wk_outer = weak.clone();
-        media::set_video_signal_cb(Some(std::sync::Arc::new(move |kind, on| {
-            let wk = wk_outer.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = wk.upgrade() {
-                    let cs = ui.global::<CallState>();
-                    match kind {
-                        media::VKind::Cam => {
-                            cs.set_has_remote_cam(on);
-                            if !on {
-                                cs.set_remote_cam(slint::Image::default());
-                            }
-                        }
-                        media::VKind::Scr => {
-                            cs.set_has_remote_scr(on);
-                            if !on {
-                                cs.set_remote_scr(slint::Image::default());
-                            }
-                        }
-                    }
-                }
-            });
-        })));
-    }
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
+    state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
@@ -520,6 +494,36 @@ pub fn run_app() {
                 open_conversation_with_contact(weak.clone(), key);
             });
     }
+    call::set_weak_window(weak.clone());
+    // Observe the *peer's* camera / screen on-off control signals. The media
+    // crate fires this hook when it receives a `SignalKind::Cam`/`Screen` on
+    // an active call; we flip the matching `has-remote-*` flag so the A/B
+    // surfaces + buttons update.
+    {
+        let wk_outer = weak.clone();
+        media::set_video_signal_cb(Some(std::sync::Arc::new(move |kind, on| {
+            let wk = wk_outer.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = wk.upgrade() {
+                    let cs = ui.global::<CallState>();
+                    match kind {
+                        media::VKind::Cam => {
+                            cs.set_has_remote_cam(on);
+                            if !on {
+                                cs.set_remote_cam(slint::Image::default());
+                            }
+                        }
+                        media::VKind::Scr => {
+                            cs.set_has_remote_scr(on);
+                            if !on {
+                                cs.set_remote_scr(slint::Image::default());
+                            }
+                        }
+                    }
+                }
+            });
+        })));
+    }
     {
         let weak = weak.clone();
         ui.global::<ProfileState>().on_start_audio_call(move |key| {
@@ -684,8 +688,8 @@ pub fn run_app() {
                 return;
             };
             let state = ui.global::<AppState>();
+            SCAN_RESOLVED.store(false, std::sync::atomic::Ordering::SeqCst);
             state.set_scan_found(false);
-            state.set_scan_result(SharedString::new());
             state.set_scan_status(SharedString::from("摄像头已启动，请对准二维码…"));
             start_camera_scanner(w.clone(), state);
         });
@@ -808,6 +812,34 @@ fn clear_sub_history(app: &AppState) {
     app.set_nav_state(nav);
 }
 
+/// Resolve a scanned QR: stop the camera, close the scan overlay, open the
+/// AddContact subpage on the current tab, then run `search_users` so the
+/// peer shows up in `add_contact.slint`.
+fn on_scan_success(weak: slint::Weak<MainWindow>, text: String) {
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let st = ui.global::<AppState>();
+
+        st.invoke_scanner_stop();
+        st.set_scan_found(false);
+
+        let mut nav = st.get_nav_state();
+        nav.global_overlay = GlobalOverlayType::None;
+        st.set_nav_state(nav);
+        push_sub_history(
+            &st,
+            SubPageEntry {
+                page: SubPageType::AddContact,
+                payload: 0,
+            },
+        );
+
+        search_users_by_peer_id(weak.clone(), text);
+    });
+}
+
 fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
     CAMERA.with(|slot| {
         if slot.borrow().is_none() {
@@ -826,18 +858,25 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
                 let wsink = weak.clone();
                 let wsink2 = weak.clone();
                 cam.set_sink(move |text: String| {
-                    let wk = wsink.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = wk.upgrade() {
-                            let st = ui.global::<AppState>();
-                            st.set_scan_found(true);
-                            st.set_scan_result(SharedString::from(text));
-                        }
-                    });
+                    if SCAN_RESOLVED
+                        .compare_exchange(
+                            false,
+                            true,
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                        )
+                        .is_err()
+                    {
+                        return;
+                    }
+                    eprintln!(
+                        "[scan] resolved: \"{}\" — stopping camera + opening add contact",
+                        text
+                    );
+                    on_scan_success(wsink.clone(), text);
                 });
 
                 let latest_seen = std::sync::atomic::AtomicU64::new(0);
-                let frame_n = std::sync::atomic::AtomicU64::new(0);
                 call_dispatcher::install_qr_hook(move |bytes, w, h, fmt| {
                     const GATE_MS: u64 = 30;
                     let now = std::time::SystemTime::now()
@@ -858,13 +897,6 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
                             Ok(_) => break,
                             Err(_) => continue,
                         }
-                    }
-                    let n = frame_n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if n < 3 {
-                        eprintln!(
-                            "[scan.preview] app sink #{n}: {w}x{h} fmt={fmt} bytes={}",
-                            bytes.len()
-                        );
                     }
                     let data = bytes.to_vec();
                     let wk = wsink2.clone();
@@ -1453,7 +1485,9 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             ),
         }
     } else {
-        eprintln!("[chat] load_chat_messages{chat_key}: group chat, skipping dm warm_dial (chat_id={chat_id})");
+        eprintln!(
+            "[chat] load_chat_messages{chat_key}: group chat, skipping dm warm_dial (chat_id={chat_id})"
+        );
     }
     let me_peer = client.peer_base58().to_string();
     let me = client.user_id().to_string();
@@ -2231,6 +2265,38 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
                     });
                     return;
                 }
+
+                eprintln!("[search] NOT FOUND: {q2}");
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.global::<AppState>().set_add_status(SharedString::from(format!("找不到用户: {q2}")));
+                    }
+                });
+            });
+        }
+        _ => {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.global::<AppState>()
+                        .set_add_status(SharedString::from("尚未登录或后端未就绪"));
+                }
+            });
+        }
+    }
+}
+
+fn search_users_by_peer_id(weak: slint::Weak<MainWindow>, q_raw: String) {
+    let q: String = q_raw.chars().filter(|c| !c.is_whitespace()).collect();
+    if q.is_empty() {
+        return;
+    }
+
+    let client = CLIENT.lock().unwrap().clone();
+    match client {
+        Some(client) => {
+            let rt = runtime();
+            let q2 = q.clone();
+            rt.spawn(async move {
                 let dev = client.dir().resolve_device(&q);
                 match &dev {
                     Ok(dev) => eprintln!("[search] resolve_device OK: user_id={} peer_id={} label={} endpoints={:?} status={:?}",
@@ -2739,7 +2805,11 @@ fn chat_key_to_contact_key(chat_key: i32) -> i32 {
     let Some(backend) = backend else {
         return -1;
     };
-    let me_peer = CLIENT.lock().unwrap().as_ref().map(|c| c.peer_base58().to_string());
+    let me_peer = CLIENT
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.peer_base58().to_string());
     let g = backend.blocking_read();
     let Some(row) = g.chats.iter().find(|r| r.key == chat_key) else {
         return -1;
@@ -2753,8 +2823,7 @@ fn chat_key_to_contact_key(chat_key: i32) -> i32 {
     g.contacts
         .iter()
         .find(|c| {
-            c.peer_id == peer_id
-                && me_peer.as_deref().map(|m| m != c.peer_id).unwrap_or(true)
+            c.peer_id == peer_id && me_peer.as_deref().map(|m| m != c.peer_id).unwrap_or(true)
         })
         .map(|c| c.key)
         .unwrap_or(-1)
