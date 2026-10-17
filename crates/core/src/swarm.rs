@@ -191,7 +191,12 @@ fn is_own_address(addr: &Multiaddr, running: &Running) -> bool {
             _ => {}
         }
     }
-    running.listen_addrs.lock().unwrap().iter().any(|a| a == addr)
+    running
+        .listen_addrs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|a| a == addr)
 }
 
 pub fn split_relay_addr(full: &Multiaddr) -> Option<(PeerId, Multiaddr)> {
@@ -350,6 +355,7 @@ async fn swarm_loop(
                         // stale self endpoint in the directory) — skip.
                         eprintln!("[swarm] DIAL SKIPPED own addr={addr} peer={peer}");
                     } else {
+                        eprintln!("[swarm] DIAL peer={peer} addr={addr}");
                         // Fresh endpoint comes from the directory (i.e. the peer
                         // just reported a possibly-changed NAT mapping). Reset
                         // our local dial backoff so we actually try — otherwise
@@ -497,6 +503,14 @@ async fn swarm_loop(
                 None => return,
             },
             Some(item) = swarm.next() => match item {
+                SwarmEvent::IncomingConnection { local_addr, .. } => {
+                    // Liveness probe for the accept path: if this stops
+                    // appearing after a disconnect, the libp2p acceptor task
+                    // itself has stopped (the rest of the runtime is alive
+                    // because the loop still spins and we still see other
+                    // events).
+                    eprintln!("[swarm] INCOMING conn on {local_addr:?}");
+                }
                 SwarmEvent::NewListenAddr { address, .. } => {
                     running.listen_addrs.lock().unwrap().push(address.clone());
                     let _ = ev.send(ChatEvent::Listening(address));
@@ -528,10 +542,20 @@ async fn swarm_loop(
                 }
                 SwarmEvent::ConnectionClosed { peer_id, .. } => {
                     eprintln!("[swarm] DISCONNECTED from {peer_id}");
-                    if let Some(n) = running.connected.lock().unwrap().get_mut(&peer_id) {
-                        *n = n.saturating_sub(1);
-                        if *n == 0 {
-                            running.connected.lock().unwrap().remove(&peer_id);
+                    // Hold the `connected` guard ONCE. Re-locking the same
+                    // std::sync::Mutex while the `if let` guard is still alive
+                    // is a self-deadlock (Mutex is not re-entrant): it used to
+                    // fire here the moment a peer's connection count dropped to
+                    // 0, permanently freezing the whole swarm loop (no more
+                    // heartbeats, dead acceptor) — the root cause of the
+                    // "A can never reconnect to B" bug.
+                    {
+                        let mut m = running.connected.lock().unwrap();
+                        if let Some(n) = m.get_mut(&peer_id) {
+                            *n = n.saturating_sub(1);
+                            if *n == 0 {
+                                m.remove(&peer_id);
+                            }
                         }
                     }
                     let _ = ev.send(ChatEvent::Disconnected(peer_id));
