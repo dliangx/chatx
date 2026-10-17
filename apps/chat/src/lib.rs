@@ -2018,12 +2018,46 @@ fn delete_contact(weak: slint::Weak<MainWindow>, key: i32) {
 
 fn delete_chat(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.lock().unwrap().clone();
-    let Some(backend) = backend else {
+    let pool = POOL.lock().unwrap().clone();
+    let (Some(pool), Some(backend)) = (pool, backend) else {
         return;
+    };
+    // Capture the string chat id before the in-memory row is dropped — it is the
+    // key that ties the UI row to its sqlite `conversations` record.
+    let chat_id = {
+        let g = backend.blocking_read();
+        g.chat_id_for(key).map(|s| s.to_string())
     };
     {
         let mut g = backend.blocking_write();
         g.remove_chat(key);
+    }
+    if let Some(chat_id) = chat_id {
+        let rt = runtime();
+        rt.spawn(async move {
+            match sqlite::conversations::resolve_id(&pool, &chat_id).await {
+                Ok(Some(conv_id)) => {
+                    // Messages reference the conversation (FK, no CASCADE), so
+                    // clear them before removing the parent row.
+                    let _ = sqlx::query("DELETE FROM messages WHERE conversation_id = ?1")
+                        .bind(conv_id)
+                        .execute(&*pool)
+                        .await;
+                    let _ = sqlite::conversations::delete(&pool, conv_id).await;
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("[delete_chat] resolve conversation failed: {e}"),
+            }
+            // Groups live in `groups`/`group_members` too; the chat id is
+            // `grp-<id>`, so clean up that row as well (idempotent for DMs).
+            if let Some(num) = chat_id.strip_prefix("grp-") {
+                if let Ok(id) = num.parse::<i64>() {
+                    if let Err(e) = sqlite::groups::delete(&pool, id).await {
+                        eprintln!("[delete_chat] delete group failed: {e}");
+                    }
+                }
+            }
+        });
     }
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
