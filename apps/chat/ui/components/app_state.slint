@@ -128,9 +128,9 @@ export global AppState {
     in-out property <string> nickname: "";
     in-out property <string> peer-id: "";
 
-    in property <string> add-status: "";
-    in property <[SearchUser]> search-results: [];
-    in property <[int]> group-picked: [];
+    in-out property <string> add-status: "";
+    in-out property <[SearchUser]> search-results: [];
+    in-out property <[int]> group-picked: [];
     callback search-users(string);
     callback add-contact(string, string);
 

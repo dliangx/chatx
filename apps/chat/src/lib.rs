@@ -690,6 +690,7 @@ pub fn run_app() {
             let state = ui.global::<AppState>();
             SCAN_RESOLVED.store(false, std::sync::atomic::Ordering::SeqCst);
             state.set_scan_found(false);
+            state.set_scan_preview(slint::Image::default());
             state.set_scan_status(SharedString::from("摄像头已启动，请对准二维码…"));
             start_camera_scanner(w.clone(), state);
         });
@@ -898,9 +899,15 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
                             Err(_) => continue,
                         }
                     }
+                    if SCAN_RESOLVED.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
                     let data = bytes.to_vec();
                     let wk = wsink2.clone();
                     let _ = slint::invoke_from_event_loop(move || {
+                        if SCAN_RESOLVED.load(std::sync::atomic::Ordering::SeqCst) {
+                            return;
+                        }
                         let Some(ui) = wk.upgrade() else {
                             return;
                         };

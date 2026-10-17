@@ -116,13 +116,22 @@ export component AddMenuView inherits Rectangle {
             MenuRow {
                 icon: Glyph.friends-add;
                 label: "添加朋友";
-                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddContact, 0); }
+                clicked => {
+                    AppState.nav-state.global-overlay = GlobalOverlayType.None;
+                    AppState.push-sub(SubPageType.AddContact, 0);
+                    AppState.add-status = "";
+                    AppState.search-results = [];
+                }
             }
             if AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2:
             MenuRow {
                 icon: Glyph.add-circle;
                 label: "新建群聊";
-                clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddGroup, 0); }
+                clicked => {
+                    AppState.nav-state.global-overlay = GlobalOverlayType.None;
+                    AppState.push-sub(SubPageType.AddGroup, 0);
+                    AppState.group-picked = [];
+                }
             }
             if  AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2:
             MenuRow {
