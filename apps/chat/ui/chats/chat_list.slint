@@ -1,4 +1,4 @@
-// 会话列表：1:1 会话 + 群，聚合自 Rust 侧。
+// Chat list: 1:1 threads + groups, aggregated on the Rust side.
 import { ConversationRow } from "../components/app_state.slint";
 import { SubPageType, AppState } from "../components/app_state.slint";
 import { ChatListItem } from "../components/item.slint";
@@ -37,7 +37,7 @@ export component ChatListView inherits Rectangle {
     Text {
         y: 180px;
         width: parent.width;
-        text: "暂无会话，发消息后会出现在这里";
+        text: "No conversations yet. Messages will appear here.";
         color: #9aa0b4;
         font-size: 14px;
         horizontal-alignment: center;

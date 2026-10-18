@@ -8,7 +8,7 @@ import { MomentState } from "../discovery/moment.slint";
 ///   `MomentState.media` (so it shows up in the publish page) and the
 ///   camera overlay can be dismissed via `close()`.
 /// - `close()` — stops the camera + dismisses the overlay + clears the draft
-///   (`MomentState` resets so a 取消 here doesn't leak into the next open).
+///   (`MomentState` resets so a cancel here doesn't leak into the next open).
 ///
 /// `captured` is the last saved still path (informational; the actual list
 /// lives on `MomentState.media`).
@@ -94,7 +94,7 @@ export component CameraView inherits Rectangle {
             height: parent.height;
             text: CameraState.status != ""
                 ? CameraState.status
-                : (CameraState.capturing ? "拍照中…" : "拍照");
+                : (CameraState.capturing ? "Capturing…" : "Photo");
             font-size: 17px;
             font-weight: 600;
             color: #ffffff;
@@ -103,7 +103,7 @@ export component CameraView inherits Rectangle {
             overflow: elide;
         }
 
-        // 完成 (right) — closes the overlay + pushes the publish page. Only
+        // Finish (right) — closes the overlay + pushes the publish page. Only
         // enabled when at least one photo has been captured.
         Rectangle {
             x: parent.width - 52px;

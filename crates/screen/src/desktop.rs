@@ -80,34 +80,34 @@ impl Screen {
         if self.running.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let monitors = Monitor::all().map_err(|e| format!("列出显示器: {e}"))?;
+        let monitors = Monitor::all().map_err(|e| format!("List displays: {e}"))?;
         let Some(primary) = monitors
             .iter()
             .find(|m| m.is_primary().unwrap_or(false))
             .or_else(|| monitors.first())
         else {
-            return Err("未找到任何显示器".to_string());
+            return Err("No displays found".to_string());
         };
         let (w, h) = (
             primary
                 .width()
-                .map_err(|e| format!("主显示器宽度: {e}"))?,
+                .map_err(|e| format!("Primary display width: {e}"))?,
             primary
                 .height()
-                .map_err(|e| format!("主显示器高度: {e}"))?,
+                .map_err(|e| format!("Primary display height: {e}"))?,
         );
         let (recorder, rx) = primary
             .video_recorder()
-            .map_err(|e| format!("创建屏幕录制流: {e}"))?;
+            .map_err(|e| format!("Create screen capture stream: {e}"))?;
 
         let pump = std::thread::Builder::new()
             .name("chatx.screen".into())
             .spawn(move || pump_frames(rx))
-            .map_err(|e| format!("启动屏幕采集线程: {e}"))?;
+            .map_err(|e| format!("Start capture thread: {e}"))?;
 
         recorder
             .start()
-            .map_err(|e| format!("启动屏幕采集: {e}"))?;
+            .map_err(|e| format!("Start screen capture: {e}"))?;
 
         self.recorder = Some(recorder);
         self.pump = Some(pump);

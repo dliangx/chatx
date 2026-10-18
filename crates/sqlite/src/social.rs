@@ -275,7 +275,7 @@ pub async fn frq_inbox(pool: &Pool, recipient: &str) -> anyhow::Result<Vec<PeerF
 }
 
 /// Pending outgoing requests *from* `requester` the local device sent, newest
-/// first — surfaced in the add-contact flow as "已发送，等待对方通过".
+/// first — surfaced in the add-contact flow as "Sent, awaiting approval".
 pub async fn frq_sent(pool: &Pool, requester: &str) -> anyhow::Result<Vec<PeerFriendRequest>> {
     let rows =
         sqlx::query_as::<_, PeerFriendRequest>(

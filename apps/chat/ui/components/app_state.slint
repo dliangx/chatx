@@ -186,7 +186,7 @@ export global AppState {
     callback stop-screen-share();
     callback start-meeting();
     // Contact-list key of the peer behind the currently open 1:1 chat; used
-    // by the chat add-menu (type 1) so "音/视频通话" / "桌面共享" can reuse the
+    // by the chat add-menu (type 1) so the audio / video call and screen-share entries can reuse the
     // ProfileState call callbacks. -1 when the peer is not a known contact.
     in-out property <int> current-chat-peer-key: -1;
     callback pick-group-member(int);

@@ -30,7 +30,7 @@ export component DiscoverView inherits Rectangle {
     if root.cards.length == 0:
     Text {
         y: 180px;
-        text: "暂无内容";
+        text: "Nothing here yet";
         horizontal-alignment: center;
         font-size: 14px;
         color: Theme.fg-muted;
@@ -44,14 +44,14 @@ export component DiscoverView inherits Rectangle {
         content-height: root.viewport-h;
         interactive: true;
 
-        // 触底懒加载：距底部不足一张卡片高度时，把下一批帖子纳入显示范围，
-        // 直到全部加载完。未显示的帖子不解码封面，省内存。
+        // Lazy-load: request the next batch within one card-height of the
+        // bottom until every row is shown. Keeps off-screen covers out of memory.
         Timer {
             interval: 60ms;
             running: AppState.discover-has-more
                 && fk.interactive
                 && fk.content-height > fk.height
-                && (fk.content-height - fk.height - fk.content-y) < root.card-h;
+                && (fk.content-height - fk.height + fk.content-y) < root.card-h;
             triggered => {
                 AppState.discover-load-more();
             }

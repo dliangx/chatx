@@ -105,7 +105,7 @@ export component DiscoverDetailView inherits Rectangle {
         y: parent.height - root.input-h;
         width: parent.width;
         height: root.input-h;
-        placeholder-text: "写下你的评论…";
+        placeholder-text: "Write a comment…";
         sent(t) => { PostDetailState.add-comment(root.key, t); }
     }
 
@@ -183,7 +183,7 @@ export component DiscoverDetailView inherits Rectangle {
             y: root.like-y;
             width: 140px;
             height: 22px;
-            text: PostDetailState.comments + " 条评论";
+            text: PostDetailState.comments + " comments";
             font-size: 13px;
             horizontal-alignment: right;
             vertical-alignment: center;
@@ -224,7 +224,7 @@ export component DiscoverDetailView inherits Rectangle {
             y: root.like-y + 31px + root.like-by-h;
             width: parent.width - 32px;
             height: 26px;
-            text: PostDetailState.comment-list.length > 0 ? ("共 " + PostDetailState.comment-list.length + " 条评论") : "评论";
+            text: PostDetailState.comment-list.length > 0 ? ("Total " + PostDetailState.comment-list.length + " comments") : "Comments";
             font-size: 14px;
             font-weight: 600;
             vertical-alignment: center;
@@ -237,7 +237,7 @@ export component DiscoverDetailView inherits Rectangle {
             y: root.top-h + 16px;
             width: parent.width;
             height: 28px;
-            text: "还没有评论，快写下第一条吧";
+            text: "No comments yet. Write the first one.";
             font-size: 13px;
             horizontal-alignment: center;
             color: Theme.fg-muted;

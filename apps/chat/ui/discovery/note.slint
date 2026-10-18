@@ -89,7 +89,7 @@ export component AddNoteView inherits Rectangle {
                 TouchArea {
                     width: 100%;
                     height: 100%;
-                    clicked => { /* 后端待接：打开语音识别 */ }
+                    clicked => { /* TODO: open voice recognition (backend pending) */ }
                 }
             }
 
@@ -98,7 +98,7 @@ export component AddNoteView inherits Rectangle {
                 y: 0px;
                 width: parent.width - 190px;
                 height: parent.height;
-                text: NoteState.draft != "" ? "已输入内容" : "输入标题和正文…";
+                text: NoteState.draft != "" ? "Content entered" : "Enter title and body…";
                 font-size: 13px;
                 color: Theme.fg-muted;
                 vertical-alignment: center;
@@ -115,7 +115,7 @@ export component AddNoteView inherits Rectangle {
                 Text {
                     width: 100%;
                     height: 100%;
-                    text: "保存";
+                    text: "Save";
                     font-size: 14px;
                     color: #ffffff;
                     horizontal-alignment: center;

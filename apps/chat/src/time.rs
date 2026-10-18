@@ -1,6 +1,6 @@
 pub fn time_label(ms: i64) -> String {
     if ms <= 0 {
-        return "刚刚".into();
+        return "just now".into();
     }
     let secs = (ms / 1000) as i64;
     let day_start = (secs / 86_400) * 86_400;
@@ -19,15 +19,15 @@ pub fn fmt_time(ms: i64) -> String {
         .unwrap_or(0);
     let diff = now.saturating_sub(ms);
     if diff < 60_000 {
-        "刚刚".into()
+        "just now".into()
     } else if diff < 3_600_000 {
-        format!("{}分钟前", diff / 60_000)
+        format!("{} min ago", diff / 60_000)
     } else if diff < 86_400_000 {
-        format!("{}小时前", diff / 3_600_000)
+        format!("{} hours ago", diff / 3_600_000)
     } else if diff < 86_400_000 * 365 {
-        format!("{}天前", diff / 86_400_000)
+        format!("{} days ago", diff / 86_400_000)
     } else {
-        format!("{}年前", diff / 86_400_000 / 365)
+        format!("{} years ago", diff / 86_400_000 / 365)
     }
 }
 

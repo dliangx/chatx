@@ -100,7 +100,7 @@ export component AuthView inherits Rectangle {
         }
 
         Text {
-            text: root.is-register ? "注册新账户" : "登录";
+            text: root.is-register ? "Create a new account" : "Sign in";
             font-size: 16px;
             color: Theme.fg-muted;
             width: 100%;
@@ -111,7 +111,7 @@ export component AuthView inherits Rectangle {
             alignment: center;
             AuthInput {
                 width: min(parent.width, 420px);
-                placeholder: "用户";
+                placeholder: "User";
                 text <=> root.uid;
                 accepted => { root.submit(); }
             }
@@ -121,7 +121,7 @@ export component AuthView inherits Rectangle {
             alignment: center;
             AuthInput {
                 width: min(parent.width, 420px);
-                placeholder: "密码";
+                placeholder: "Password";
                 text <=> root.pass;
                 accepted => { root.submit(); }
             }
@@ -140,7 +140,7 @@ export component AuthView inherits Rectangle {
             alignment: center;
             BrandButton {
                 width: min(parent.width, 420px);
-            text: AppState.auth-busy ? "处理中…" : (root.is-register ? "注册" : "登录");
+            text: AppState.auth-busy ? "Please wait…" : (root.is-register ? "Sign up" : "Sign in");
             enabled: !AppState.auth-busy;
                 clicked => { root.submit(); }
             }
@@ -155,7 +155,7 @@ export component AuthView inherits Rectangle {
                 Text {
                     width: 100%;
                     height: 100%;
-                    text: root.is-register ? "已有账户？去登录" : "没有账户？去注册";
+                    text: root.is-register ? "Have an account? Sign in" : "No account? Sign up";
                     color: Theme.brand;
                     font-size: 14px;
                     horizontal-alignment: center;
@@ -175,22 +175,22 @@ export component AuthView inherits Rectangle {
         root.auth-error = "";
         if (root.is-register) {
             if (root.uid == "") {
-                root.auth-error = "请输入用户名";
+                root.auth-error = "Enter your username";
                 return;
             }
             if (root.pass == "") {
-                root.auth-error = "请输入口令";
+                root.auth-error = "Enter your password";
                 return;
             }
             AppState.register(root.uid, root.pass);
             return;
         }
         if (root.uid == "") {
-            root.auth-error = "请输入用户名";
+            root.auth-error = "Enter your username";
             return;
         }
         if (root.pass == "") {
-            root.auth-error = "请输入口令";
+            root.auth-error = "Enter your password";
             return;
         }
         AppState.login(root.uid, root.pass);

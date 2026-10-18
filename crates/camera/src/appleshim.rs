@@ -196,7 +196,7 @@ impl Camera {
             let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
             let msg = String::from_utf8_lossy(&buf[..len]).to_string();
             Err(if msg.is_empty() {
-                "启动摄像头失败（原因未知）".to_string()
+                "Failed to start camera (unknown reason)".to_string()
             } else {
                 msg
             })
@@ -208,10 +208,10 @@ impl Camera {
     /// [`Camera::set_capture_sink`].
     pub fn capture(&mut self) -> Result<(), String> {
         if !self.is_running() {
-            return Err("摄像头未启动".to_string());
+            return Err("Camera not started".to_string());
         }
         if unsafe { chatx_camera_capture() } != 0 {
-            return Err("触发拍摄失败（会话未就绪）".to_string());
+            return Err("Failed to trigger capture (session not ready)".to_string());
         }
         Ok(())
     }

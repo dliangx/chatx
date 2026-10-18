@@ -160,7 +160,7 @@ impl Camera {
         };
         let cam =
             CallbackCamera::new(CameraIndex::Index(0), requested, cb).map_err(|e| {
-                format!("无法启动摄像头: {e} (请确认已授权摄像头权限)")
+                format!("Failed to start camera: {e} (please confirm camera permission is granted)")
             })?;
         self.stream = Some(cam);
         RUNNING.store(true, Ordering::SeqCst);

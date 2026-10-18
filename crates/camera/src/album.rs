@@ -10,7 +10,7 @@
 //!   background thread; parse stdout for the chosen paths and deliver to the
 //!   installed sink. No new deps (`std::process::Command` only).
 //! - **Fallback** — no-op; `pick_photos` returns `Err` so the UI can show a
-//!   "暂不支持相册选图" message and still let the user use the camera flow.
+//!   "album picker not supported" error and still let the user use the camera flow.
 //!
 //! Public surface (free functions under `camera::album`) is identical
 //! across all targets:
@@ -74,7 +74,7 @@ mod apple {
     }
     pub fn pick_photos(max: u32) -> Result<(), String> {
         let r = unsafe { chatx_photos_pick(max as i32) };
-        if r == 0 { Ok(()) } else { Err("无法打开系统相册（请检查相册权限 / Info.plist）".to_string()) }
+        if r == 0 { Ok(()) } else { Err("Failed to open system album (check album permission / Info.plist)".to_string()) }
     }
     pub fn cancel() {
         unsafe { chatx_photos_pick_cancel() }
@@ -108,9 +108,9 @@ mod desktop {
                 else if std::path::Path::new("/usr/bin/kdialog").exists() { "/usr/bin/kdialog" }
                 else { "/usr/bin/zenity" };
             let args: Vec<String> = if bin.ends_with("zenity") {
-                vec!["--file-selection".into(), "--multiple".into(), "--title=选择照片".into()]
+                vec!["--file-selection".into(), "--multiple".into(), "--title=Select photos".into()]
             } else {
-                vec!["--getopenfile".into(), "*".into(), "--multiple".into(), "--title=选择照片".into()]
+                vec!["--getopenfile".into(), "*".into(), "--multiple".into(), "--title=Select photos".into()]
             };
             (bin, args)
         } else {
@@ -119,7 +119,7 @@ mod desktop {
                 vec![
                     "-NoProfile".into(),
                     "-Command".into(),
-                    "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Multiselect = $true; $f.Filter = '图片 (*.jpg;*.jpeg;*.png;*.heic;*.webp)|*.jpg;*.jpeg;*.png;*.heic;*.webp'; if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $f.FileNames | ForEach-Object { Write-Output $_ } }".into(),
+                    "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Multiselect = $true; $f.Filter = 'Images (*.jpg;*.jpeg;*.png;*.heic;*.webp)|*.jpg;*.jpeg;*.png;*.heic;*.webp'; if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $f.FileNames | ForEach-Object { Write-Output $_ } }".into(),
                 ],
             )
         };
@@ -128,7 +128,7 @@ mod desktop {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map_err(|e| format!("无法启动选图程序: {e}"))?;
+            .map_err(|e| format!("Failed to launch image picker: {e}"))?;
         std::thread::spawn(move || {
             match child.wait_with_output() {
                 Ok(o) => {
@@ -168,7 +168,7 @@ use stub as backend;
 mod stub {
     pub fn set_photos_sink<F: Fn(Vec<String>) + Send + 'static>(_sink: F) {}
     pub fn pick_photos(_max: u32) -> Result<(), String> {
-        Err("当前平台暂不支持相册选图，请使用拍照".to_string())
+        Err("Album image picking is not supported on this platform; use the camera instead".to_string())
     }
     pub fn cancel() {}
 }

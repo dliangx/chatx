@@ -94,7 +94,7 @@ pub struct DataBackend {
     pub contacts: Vec<ContactRow>,
     pub friend_requests: Vec<FriendRequestData>,
     pub discover: Vec<DiscoverRow>,
-    /// My personal notes ("我的笔记"), newest first.
+    /// My personal notes, newest first.
     pub notes: Vec<NoteRowData>,
     chat_key_to_id: HashMap<i32, String>,
     contact_key_to_id: HashMap<i32, i64>,
@@ -364,7 +364,7 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
         // be trusted for groups. Fall back to it for legacy rows.
         let is_group = chat_key.starts_with("grp-") || c.type_ == 1;
         let title = if is_group {
-            "群聊".to_string()
+            "Group".to_string()
         } else {
             c.peer_nickname
                 .clone()
@@ -480,7 +480,7 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
         // already set a friendly title, so a generic one suffices here.
         let is_group = chat_id.starts_with("grp-");
         let title = if is_group {
-            "群聊".to_string()
+            "Group".to_string()
         } else {
             chat_id.to_string()
         };
@@ -505,7 +505,7 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
         // first message landed) but no in-memory row yet: materialize it now.
         let is_group = chat_id.starts_with("grp-") || src.type_ == 1;
         let title = if is_group {
-            "群聊".to_string()
+            "Group".to_string()
         } else {
             src.peer_nickname
                 .clone()
@@ -545,7 +545,7 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
         // Group messages are stored as ciphertext; a generic label is what the
         // receiving side has (the creator's `append_chat` already set a real
         // title for their own copy).
-        "群聊".to_string()
+        "Group".to_string()
     } else {
         src.peer_nickname
             .clone()

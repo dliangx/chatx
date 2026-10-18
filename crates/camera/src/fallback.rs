@@ -26,7 +26,7 @@ impl Camera {
     }
 
     pub fn start(&mut self) -> Result<(), String> {
-        Err("当前平台不支持摄像头扫描".to_string())
+        Err("Camera scan is not supported on this platform".to_string())
     }
 
     pub fn stop(&mut self) {

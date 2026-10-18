@@ -49,7 +49,7 @@ export component ChatView inherits Rectangle {
             width: 32px;
             height: 32px;
             size: 18px;
-            glyph: Glyph.share;
+            glyph: Glyph.call;
             tint: Theme.fg;
             TouchArea {
                 width: 48px;
@@ -166,7 +166,7 @@ export component ChatView inherits Rectangle {
             }
 
             if msg.selected: Button {
-                text: "复制";
+                text: "Copy";
                 x: msg.is-self ? parent.width - msg.width - 6px - 64px : 6px + msg.width + 8px;
                 y: 0px;
                 width: 56px;

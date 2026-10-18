@@ -27,7 +27,7 @@ impl Screen {
     }
 
     pub fn start(&mut self) -> Result<(), String> {
-        Err("此平台屏幕共享由原生采集（iOS ReplayKit / Android MediaProjection）提供".to_string())
+        Err("Screen sharing on this platform is provided by native capture (iOS ReplayKit / Android MediaProjection)".to_string())
     }
 
     pub fn stop(&mut self) {

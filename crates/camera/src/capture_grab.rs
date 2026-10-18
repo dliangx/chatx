@@ -39,7 +39,7 @@ pub(crate) fn set_sink<F: Fn(CaptureResult) + Send + 'static>(sink: F) {
 /// `Camera::is_running()` so callers can fail fast with a readable error.
 pub(crate) fn arm(running: bool) -> Result<(), String> {
     if !running {
-        return Err("摄像头未启动".to_string());
+        return Err("Camera not started".to_string());
     }
     if SINK.get().is_none() {
         // Defensive: app didn't install a sink — install a no-op so the

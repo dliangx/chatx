@@ -24,7 +24,7 @@
 //! saved on-disk path (or an error) to the sink installed earlier.
 //!
 //! All targets also expose the photo-album picker (`set_photos_sink` +
-//! `pick_photos` + `cancel`) for the "分析此刻" page — see `album.rs`.
+//! `pick_photos` + `cancel`) for the moment page — see `album.rs`.
 
 #![allow(deprecated, non_snake_case, unsafe_op_in_unsafe_fn)]
 

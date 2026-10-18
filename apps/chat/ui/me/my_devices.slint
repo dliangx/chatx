@@ -73,7 +73,7 @@ component DeviceRow inherits Rectangle {
         Text {
             width: 100%;
             height: 20px;
-            text: root.d.label + (root.d.self_device ? " (本机)" : "");
+            text: root.d.label + (root.d.self_device ? " (this device)" : "");
             font-size: 15px;
             font-weight: 800;
             color: Theme.fg;
@@ -92,7 +92,7 @@ component DeviceRow inherits Rectangle {
         Text {
             width: 100%;
             height: 18px;
-            text: (root.d.approved ? "已批准" : "待审批") + " · " + (root.d.online ? "在线" : "离线");
+            text: (root.d.approved ? "Approved" : "Pending approval") + " · " + (root.d.online ? "Online" : "Offline");
             font-size: 12px;
             color: (!root.d.approved) ? #d97706 : Theme.fg-muted;
         }
@@ -110,7 +110,7 @@ component DeviceRow inherits Rectangle {
     ActionButton {
         x: parent.width - 60px;
         y: 26px;
-        text: "批准";
+        text: "Approve";
         bg: Theme.brand;
         peer_id: root.d.peer_id;
         is_approve: true;
@@ -120,7 +120,7 @@ component DeviceRow inherits Rectangle {
     ActionButton {
         x: parent.width - 60px;
         y: 26px;
-        text: "撤销";
+        text: "Revoke";
         bg: #ef4444;
         peer_id: root.d.peer_id;
         is_approve: false;
@@ -139,14 +139,14 @@ export component MyDevicesView inherits Rectangle {
     }
 
     Header {
-        name: "我的设备";
+        name: "My devices";
     }
 
     Text {
         x: 16px;
         y: 56px;
         width: parent.width - 32px;
-        text: "账号下的所有设备。新的设备需要你（在任一已批准设备上）批准后才能使用。";
+        text: "All devices under this account. A new device must be approved (from any approved device) before use.";
         font-size: 12px;
         color: Theme.fg-muted;
     }
@@ -162,7 +162,7 @@ export component MyDevicesView inherits Rectangle {
             y: 8px;
             width: parent.width - 32px;
             height: 28px;
-            text: "设备";
+            text: "Device";
             font-size: 12px;
             font-weight: 700;
             color: Theme.fg-muted;
@@ -183,7 +183,7 @@ export component MyDevicesView inherits Rectangle {
             x: 16px;
             y: 0px;
             width: parent.width - 32px;
-            text: "（无设备记录）";
+            text: "(no device records)";
             font-size: 13px;
             color: Theme.fg-muted;
         }

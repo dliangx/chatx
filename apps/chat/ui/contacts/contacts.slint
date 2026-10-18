@@ -63,7 +63,7 @@ component FriendRequestRowView inherits Rectangle {
         x: 56px;
         y: 30px;
         width: parent.width - 56px - 168px;
-        text: "新的添加请求 · " + root.time-label;
+        text: "New add request · " + root.time-label;
         font-size: 11px;
         color: Theme.fg-muted;
         overflow: elide;
@@ -85,7 +85,7 @@ component FriendRequestRowView inherits Rectangle {
             y: 0px;
             width: parent.width;
             height: parent.height;
-            text: "拒绝";
+            text: "Decline";
             font-size: 12px;
             color: Theme.fg-muted;
             horizontal-alignment: center;
@@ -112,7 +112,7 @@ component FriendRequestRowView inherits Rectangle {
             y: 0px;
             width: parent.width;
             height: parent.height;
-            text: "接收";
+            text: "Accept";
             font-size: 12px;
             color: white;
             horizontal-alignment: center;
@@ -160,7 +160,7 @@ export component ContactListView inherits Rectangle {
     Text {
         x: 12px;
         y: root.list-top - 2px;
-        text: "添加请求";
+        text: "Add request";
         font-size: 12px;
         font-weight: 800;
         color: Theme.fg-muted;
@@ -181,7 +181,7 @@ export component ContactListView inherits Rectangle {
     Text {
         y: 180px;
         width: parent.width;
-        text: "暂无联系人，添加后会出现在这里";
+        text: "No contacts yet. They'll appear here once added.";
         color: #9aa0b4;
         font-size: 14px;
         horizontal-alignment: center;

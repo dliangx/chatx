@@ -2,11 +2,11 @@ import { Icon, Glyph } from "../components/icon.slint";
 export global CallState {
     in property <string> peer-base58: "";
     in property <string> peer-name: "";
-    in property <string> status: "正在呼叫…";
+    in property <string> status: "Calling…";
     in property <string> error-message: "";
     in property <bool> active: false;
     /// True once the peer has actually answered (WebRTC `Connected`). Before
-    /// this the call is still "正在呼叫…" — controls must stay visible so the
+    /// this the call is still in the ringing state — controls must stay visible so the
     /// caller can hang up.
     in property <bool> connected: false;
     /// True while the call is minimized into the top-right widget.

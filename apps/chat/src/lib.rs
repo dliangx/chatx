@@ -46,7 +46,7 @@ thread_local! {
 /// Set once a scanned QR is resolved, so late frames don't re-fire it.
 static SCAN_RESOLVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Ordered on-disk photo paths selected for the "分享/发布此刻" draft.
+/// Ordered on-disk photo paths selected for the share / publish draft.
 /// The UI thumbnails (`MomentState.media`) are kept in sync from this list:
 /// `add` / `remove` / `publish` all read & mutate it, then republish the
 /// `[image]` model. The single source of truth so `publish` can build the
@@ -182,7 +182,7 @@ pub fn run_app() {
             if page == SubPageType::ChatRoom {
                 load_chat_messages(w2.clone(), payload);
                 // Keep `current-chat-peer-key` in sync so the chat add-menu's
-                // "音/视频通话" / "桌面共享" can route through the same
+                // Voice / video call and screen share can route through the same
                 // ProfileState callbacks the profile page uses.
                 let k = chat_key_to_contact_key(payload);
                 if let Some(ui) = w.upgrade() {
@@ -714,7 +714,7 @@ pub fn run_app() {
         });
     }
 
-    // ── "分享此刻" camera overlay (start / capture / close) ────────────────
+    // ── Share-now camera overlay (start / capture / close) ────────────────
     {
         let weak = weak.clone();
         ui.global::<CameraState>().on_start(move || {
@@ -740,7 +740,7 @@ pub fn run_app() {
         });
     }
 
-    // ── "发布此刻" publish page (pick / remove / publish) ──────────────────
+    // ── Publish page (pick / remove / publish) ─────────────────────────────
     {
         let weak = weak.clone();
         ui.global::<MomentState>().on_pick_photos(move || {
@@ -758,7 +758,7 @@ pub fn run_app() {
                 eprintln!("[moment] pick photos failed: {e}");
                 if let Some(ui) = weak.upgrade() {
                     let st = ui.global::<MomentState>();
-                    st.set_status(SharedString::from(format!("相册选图失败：{e}")));
+                    st.set_status(SharedString::from(format!("Failed to pick image: {e}")));
                 }
             }
         });
@@ -786,7 +786,7 @@ pub fn run_app() {
             SCAN_RESOLVED.store(false, std::sync::atomic::Ordering::SeqCst);
             state.set_scan_found(false);
             state.set_scan_preview(slint::Image::default());
-            state.set_scan_status(SharedString::from("摄像头已启动，请对准二维码…"));
+            state.set_scan_status(SharedString::from("Camera on. Point it at the QR code…"));
             start_camera_scanner(w.clone(), state);
         });
     }
@@ -1061,7 +1061,7 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
                 cam.set_frame_sink(call_dispatcher::on_camera_frame);
             }
             Err(err) => {
-                state.set_scan_status(SharedString::from(format!("无法启动摄像头: {err}")));
+                state.set_scan_status(SharedString::from(format!("Failed to start camera: {err}")));
             }
         }
     });
@@ -1287,7 +1287,7 @@ async fn handle_inbound_friendq(weak: slint::Weak<MainWindow>, from_peer: &str, 
                 if let Some(ui) = weak.upgrade() {
                     let state = ui.global::<AppState>();
                     publish_to_views(&state, backend.clone());
-                    state.set_notice_text(SharedString::from("你的添加请求已被接受"));
+                    state.set_notice_text(SharedString::from("Your add request was accepted"));
                 }
             });
         }
@@ -1317,7 +1317,7 @@ async fn handle_inbound_friendq(weak: slint::Weak<MainWindow>, from_peer: &str, 
                     if let Some(ui) = weak.upgrade() {
                         let state = ui.global::<AppState>();
                         publish_to_views(&state, backend.clone());
-                        state.set_notice_text(SharedString::from("对方拒绝了你的添加请求"));
+                        state.set_notice_text(SharedString::from("The other party declined your add request"));
                     }
                 });
             }
@@ -1453,14 +1453,15 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
     state.set_data_status(SharedString::new());
 }
 
-/// 触底懒加载：初始只解码/展示 `DISCOVER_INITIAL` 条封面，滚到底部附近时再
-/// 把下一批 `DISCOVER_STEP` 条纳入可显示范围，直到全部加载完成。未进入显示
-/// 范围的帖子不做封面位图解码，避免一次性把整屏外的图都吃进内存。
+/// Bottom-lazy loading: decode and surface only the first `DISCOVER_INITIAL`
+/// covers on demand, then pull in the next `DISCOVER_STEP` rows when the user
+/// scrolls near the bottom until every row is shown. Off-screen posts never get
+/// their cover bitmap decoded, keeping memory bounded.
 const DISCOVER_INITIAL: i32 = 8;
 const DISCOVER_STEP: i32 = 2;
 
-/// 发布当前已到达的区段(0..discover-shown)。列表行仍全部保留在 backend
-/// 里，只是没被解码成 `DiscoverCard` 的封面位图。
+/// Publish the slice we have reached so far (rows 0..discover-shown). All
+/// rows stay in the backend; the not-yet-shown ones just lack a decoded cover.
 fn publish_discover(state: &AppState, backend: &ArcBackend) {
     let snapshot = backend.blocking_read();
     let total = snapshot.discover.len() as i32;
@@ -1483,7 +1484,7 @@ fn publish_discover(state: &AppState, backend: &ArcBackend) {
     state.set_discover_has_more(visible < total);
 }
 
-/// discover 触底加载下一批。
+/// Fetch the next discover batch when the user scrolls to the trigger area.
 fn discover_load_more(weak: slint::Weak<MainWindow>) {
     let backend = BACKEND.lock().unwrap().clone();
     let Some(backend) = backend else {
@@ -1661,7 +1662,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             .map(|r| r.title.clone())
             .unwrap_or_else(|| {
                 if is_group_chat {
-                    "群聊".into()
+                    "Group".into()
                 } else {
                     chat_id.clone()
                 }
@@ -1690,7 +1691,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak.upgrade() {
                         ui.global::<ChatSession>()
-                            .set_send_status(SharedString::from(format!("加载消息失败: {e}")));
+                            .set_send_status(SharedString::from(format!("Failed to load messages: {e}")));
                     }
                 });
                 return;
@@ -1841,7 +1842,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     if is_group {
         if let Some(ui) = weak.upgrade() {
             ui.global::<ChatSession>()
-                .set_send_status(SharedString::from("发送中…"));
+                .set_send_status(SharedString::from("Sending…"));
         }
         let rt = runtime();
         let weak2 = weak.clone();
@@ -1866,7 +1867,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
                             ui.global::<ChatSession>()
-                                .set_send_status(SharedString::from(format!("发送失败: {msg}")));
+                                .set_send_status(SharedString::from(format!("Send failed: {msg}")));
                         }
                     });
                 }
@@ -1877,7 +1878,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
 
     if let Some(ui) = weak.upgrade() {
         ui.global::<ChatSession>()
-            .set_send_status(SharedString::from("发送中…"));
+            .set_send_status(SharedString::from("Sending…"));
     }
     let row_peer: String = {
         backend
@@ -1912,7 +1913,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     eprintln!("[send] dm candidates: {me_peers:?}, me={my_peer}");
     rt.spawn(async move {
         let mut last_err: String = if me_peers.is_empty() {
-            "无法确定对端（会话缺少 peer id）".to_string()
+            "Cannot determine peer (conversation missing peer id)".to_string()
         } else {
             String::new()
         };
@@ -1938,7 +1939,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         }
         if !sent {
             let msg = if last_err.trim().is_empty() {
-                "对端不在线".to_string()
+                "Peer is offline".to_string()
             } else {
                 last_err
             };
@@ -1946,7 +1947,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<ChatSession>()
-                        .set_send_status(SharedString::from(format!("发送失败: {msg}")));
+                        .set_send_status(SharedString::from(format!("Send failed: {msg}")));
                 }
             });
             return;
@@ -2136,14 +2137,14 @@ fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
         let me_id = match sqlite::users::get_by_username(&pool, &me).await {
             Ok(Some(u)) => u.id,
             Ok(None) | Err(_) => {
-                show_app_error(weak.clone(), String::from("笔记保存失败"));
+                show_app_error(weak.clone(), String::from("Failed to save note"));
                 return;
             }
         };
         let created = match sqlite::notes::create_note(&pool, me_id, &content).await {
             Ok(n) => n,
             Err(_) => {
-                show_app_error(weak.clone(), String::from("笔记保存失败"));
+                show_app_error(weak.clone(), String::from("Failed to save note"));
                 return;
             }
         };
@@ -2165,7 +2166,7 @@ fn save_my_note(weak: slint::Weak<MainWindow>, content: String) {
             if let Some(ui) = weak.upgrade() {
                 publish_my_notes(&ui.global::<AppState>(), &backend);
             }
-            show_app_notice(weak, String::from("笔记保存完成"), true);
+            show_app_notice(weak, String::from("Note saved"), true);
         });
     });
 }
@@ -2195,7 +2196,7 @@ fn delete_my_note(weak: slint::Weak<MainWindow>, key: i32) {
     });
 }
 
-// ─────────────── "分享/发布此刻" moment helpers ──────────────────────────
+// ─────────────── Share / publish moment helpers ──────────────────────────
 
 /// Open + start the camera and pump preview frames into `CameraState.preview`.
 /// Idempotent: if the camera is already running, the sinks are simply
@@ -2208,7 +2209,7 @@ fn start_camera_capturer(weak: slint::Weak<MainWindow>) {
         st.set_capturing(false);
         st.set_last_captured(SharedString::new());
         st.set_preview(slint::Image::default());
-        st.set_status(SharedString::from("正在启动摄像头…"));
+        st.set_status(SharedString::from("Starting camera…"));
     }
 
     CAMERA.with(|slot| {
@@ -2233,7 +2234,7 @@ fn start_camera_capturer(weak: slint::Weak<MainWindow>) {
                     }
                     Err(err) => {
                         eprintln!("[cap] capture failed: {err}");
-                        set_cap_status(wk.clone(), format!("拍照失败：{err}"));
+                        set_cap_status(wk.clone(), format!("Failed to take photo: {err}"));
                         on_cap_done(wk2);
                     }
                 }
@@ -2259,7 +2260,7 @@ fn start_camera_capturer(weak: slint::Weak<MainWindow>) {
                     st.set_preview(make_preview_image(&data, w, h, fmt));
                     // First real frame means "camera is up" — clear the
                     // startup status only if it's still the initial value.
-                    if st.get_status() == "正在启动摄像头…" {
+                    if st.get_status() == "Starting camera…" {
                         st.set_status(SharedString::new());
                     }
                 });
@@ -2277,7 +2278,7 @@ fn start_camera_capturer(weak: slint::Weak<MainWindow>) {
             }
             Err(err) => {
                 eprintln!("[cap] start failed: {err}");
-                set_cap_status(weak, format!("无法启动摄像头：{err}"));
+                set_cap_status(weak, format!("Failed to start camera: {err}"));
             }
         }
         let _ = guard;
@@ -2321,11 +2322,11 @@ fn trigger_photo_capture(weak: slint::Weak<MainWindow>) {
         }
         Some(Err(e)) => {
             on_cap_done(weak.clone());
-            set_cap_status(weak, format!("无法拍照：{e}"));
+            set_cap_status(weak, format!("Failed to take photo: {e}"));
         }
         None => {
             on_cap_done(weak.clone());
-            set_cap_status(weak, "摄像头未启动".to_string());
+            set_cap_status(weak, "Camera not started".to_string());
         }
     }
 }
@@ -2356,7 +2357,7 @@ fn stop_camera_capturer(weak: slint::Weak<MainWindow>) {
     });
 }
 
-/// "完成" (top-right): close the camera overlay + push the publish page.
+/// Top-right "Finish": close the camera overlay + push the publish page.
 fn finish_camera_and_open_publish(weak: slint::Weak<MainWindow>) {
     // We stop the camera session (preview stops), but keep MOMENT_MEDIA
     // populated so the publish page sees the draft.
@@ -2459,12 +2460,12 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
     let pool = POOL.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
     let (Some(pool), Some(backend)) = (pool, backend) else {
-        set_moment_status(weak.clone(), "尚未登录或后端未就绪".to_string());
+        set_moment_status(weak.clone(), "Not signed in or backend not ready".to_string());
         return;
     };
     let me = current_me();
     if me.is_empty() {
-        set_moment_status(weak.clone(), "尚未登录".to_string());
+        set_moment_status(weak.clone(), "Not signed in".to_string());
         return;
     }
     // Read the draft (copy out before async work).
@@ -2486,11 +2487,11 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
     if title.trim().is_empty() && content.trim().is_empty() && media_paths.is_empty() {
         set_moment_status(
             weak.clone(),
-            "至少需要填写标题、正文或添加一张照片".to_string(),
+            "Add at least a title, body, or a photo".to_string(),
         );
         return;
     }
-    set_moment_status(weak.clone(), "发布中…".to_string());
+    set_moment_status(weak.clone(), "Publishing…".to_string());
     if let Some(ui) = weak.upgrade() {
         ui.global::<MomentState>().set_publishing(true);
     }
@@ -2502,7 +2503,7 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
         let me_id = match sqlite::users::get_by_username(&pool, &me).await {
             Ok(Some(u)) => u.id,
             _ => {
-                set_moment_status(weak2.clone(), "查找用户失败".to_string());
+                set_moment_status(weak2.clone(), "Failed to look up user".to_string());
                 if let Some(ui) = weak2.upgrade() {
                     ui.global::<MomentState>().set_publishing(false);
                 }
@@ -2533,7 +2534,7 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("[moment] create_post failed: {e}");
-                set_moment_status(weak2.clone(), "发布失败".to_string());
+                set_moment_status(weak2.clone(), "Publish failed".to_string());
                 if let Some(ui) = weak2.upgrade() {
                     ui.global::<MomentState>().set_publishing(false);
                 }
@@ -2565,7 +2566,7 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
                 publish_to_views(&ui.global::<AppState>(), backend.clone());
                 // Reset the draft state — otherwise `publishing` stays true and
                 // the next time the user opens the publish page it's stuck in
-                // "发布中…" with a disabled button.
+                // "Publishing..." with a disabled button.
                 let ms = ui.global::<MomentState>();
                 ms.set_title(SharedString::new());
                 ms.set_content(SharedString::new());
@@ -2700,7 +2701,7 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
                 .or_else(|| g.peer_id_for(*key).map(|s| s.to_string()))
             {
                 Some(u) => v.push(u),
-                None => failed.push(format!("#{key}(本地id失效)")),
+                None => failed.push(format!("#{key} (local id revoked)")),
             }
         }
         v
@@ -2722,11 +2723,11 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
     }
     if members.is_empty() && !failed.is_empty() {
         let msg = format!(
-            "无法解析用户设备：{}\n请确认对方账号已在目录注册。",
+            "Cannot resolve user device: {}\nMake sure their account is registered in the directory.",
             failed.join(", ")
         );
         eprintln!("[create_group_flow] {msg}");
-        show_app_error(weak.clone(), String::from("无法解析用户设备"));
+        show_app_error(weak.clone(), String::from("Cannot resolve user device"));
         return false;
     }
     if !failed.is_empty() {
@@ -2740,7 +2741,7 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
         tracing::warn!(
             count = members.len(),
             max = chatx_core::GROUP_P2P_MAX,
-            "群成员达到 P2P 群上限（成员对数 O(N²)，可达性风险显著上升），启用 server 扇出方案 B"
+            "Group size hits the P2P cap (pair count O(N²); reachability risk rises sharply); enabling server fan-out plan B"
         );
     }
 
@@ -2751,7 +2752,7 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
             .map(|d| d.as_millis())
             .unwrap_or(0)
     );
-    let title = format!("群聊({})", members.len());
+    let title = format!("Group ({})", members.len());
     let use_b = should_use_server_fanout(members.len());
     let create_ok = if use_b {
         client.create_server_group(&group_id, members).map(|_| ())
@@ -2789,7 +2790,7 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
             true
         }
         Err(e) => {
-            let msg = "建群失败".to_string();
+            let msg = "Failed to create group".to_string();
             eprintln!("{e}");
             eprintln!("[create_group_flow] {msg}");
             show_app_error(weak.clone(), msg);
@@ -2838,7 +2839,7 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
                 eprintln!("[search] NOT FOUND: {q2}");
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
-                        ui.global::<AppState>().set_add_status(SharedString::from(format!("找不到用户: {q2}")));
+                        ui.global::<AppState>().set_add_status(SharedString::from(format!("User not found: {q2}")));
                     }
                 });
             });
@@ -2847,7 +2848,7 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<AppState>()
-                        .set_add_status(SharedString::from("尚未登录或后端未就绪"));
+                        .set_add_status(SharedString::from("Not signed in or backend not ready"));
                 }
             });
         }
@@ -2893,7 +2894,7 @@ fn search_users_by_peer_id(weak: slint::Weak<MainWindow>, q_raw: String) {
                 eprintln!("[search] NOT FOUND: {q2}");
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
-                        ui.global::<AppState>().set_add_status(SharedString::from(format!("找不到用户: {q2}")));
+                        ui.global::<AppState>().set_add_status(SharedString::from(format!("User not found: {q2}")));
                     }
                 });
             });
@@ -2902,7 +2903,7 @@ fn search_users_by_peer_id(weak: slint::Weak<MainWindow>, q_raw: String) {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<AppState>()
-                        .set_add_status(SharedString::from("尚未登录或后端未就绪"));
+                        .set_add_status(SharedString::from("Not signed in or backend not ready"));
                 }
             });
         }
@@ -2926,7 +2927,7 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.global::<AppState>()
-                    .set_add_status(SharedString::from("尚未登录或后端未就绪"));
+                    .set_add_status(SharedString::from("Not signed in or backend not ready"));
             }
         });
         return;
@@ -2939,7 +2940,7 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.global::<AppState>()
-                    .set_add_status(SharedString::from("不能添加自己"));
+                    .set_add_status(SharedString::from("Can't add yourself"));
             }
         });
         return;
@@ -2950,7 +2951,7 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.global::<AppState>()
-                    .set_add_status(SharedString::from("已在通讯录中"));
+                    .set_add_status(SharedString::from("Already in your contacts"));
             }
         });
         return;
@@ -2961,7 +2962,7 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.global::<AppState>()
-                    .set_add_status(SharedString::from("无法获取对方设备信息"));
+                    .set_add_status(SharedString::from("Cannot fetch the other party's device info"));
             }
         });
         return;
@@ -2977,7 +2978,7 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<AppState>()
-                        .set_add_status(SharedString::from(format!("发送失败: {e}")));
+                        .set_add_status(SharedString::from(format!("Send failed: {e}")));
                 }
             });
             return;
@@ -2998,7 +2999,7 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
             if let Some(ui) = weak.upgrade() {
                 let state = ui.global::<AppState>();
                 publish_to_views(&state, backend.clone());
-                state.set_add_status(SharedString::from("请求已发送，等待对方通过"));
+                state.set_add_status(SharedString::from("Request sent. Waiting for the other party to approve."));
             }
         });
     });
@@ -3037,7 +3038,7 @@ async fn do_add(
         }
     };
     if their_id == me_id {
-        anyhow::bail!("不能添加自己");
+        anyhow::bail!("Can't add yourself");
     }
     sqlite::social::add(pool, me_id, their_id).await?;
     if !their_peer.is_empty() {
@@ -3133,7 +3134,7 @@ fn accept_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
             if let Some(ui) = weak.upgrade() {
                 let state = ui.global::<AppState>();
                 publish_to_views(&state, backend.clone());
-                state.set_notice_text(SharedString::from(format!("{name} 已加入你的联系人")));
+                state.set_notice_text(SharedString::from(format!("{name} joined your contacts")));
             }
         });
     });
@@ -3230,7 +3231,7 @@ fn refresh_devices(weak: slint::Weak<MainWindow>) {
     let notice = if approved {
         String::new()
     } else {
-        "设备待审批 · 请让已批准设备批准后才能收发消息".to_string()
+        "Device pending approval · have an approved device approve it to send/receive".to_string()
     };
 
     let _ = slint::invoke_from_event_loop(move || {
@@ -3256,11 +3257,11 @@ fn approve_device(weak: slint::Weak<MainWindow>, peer: String) {
         Ok(_) => {
             eprintln!("[approve] device {peer} approved");
             refresh_devices(weak.clone());
-            show_app_notice(weak, "已批准该设备".to_string(), true);
+            show_app_notice(weak, "This device was approved".to_string(), true);
         }
         Err(e) => {
             eprintln!("[approve] device {peer} failed: {e}");
-            show_app_error(weak, format!("批准失败：{e}"));
+            show_app_error(weak, format!("Failed to approve: {e}"));
         }
     }
 }
@@ -3278,11 +3279,11 @@ fn revoke_device(weak: slint::Weak<MainWindow>, peer: String) {
         Ok(_) => {
             eprintln!("[revoke] device {peer} revoked");
             refresh_devices(weak.clone());
-            show_app_notice(weak, "已撤销该设备".to_string(), true);
+            show_app_notice(weak, "This device was revoked".to_string(), true);
         }
         Err(e) => {
             eprintln!("[revoke] device {peer} failed: {e}");
-            show_app_error(weak, format!("撤销失败：{e}"));
+            show_app_error(weak, format!("Failed to revoke: {e}"));
         }
     }
 }
@@ -3293,7 +3294,7 @@ fn require_approved(weak: slint::Weak<MainWindow>) -> bool {
     }
     show_app_error(
         weak,
-        "当前设备待审批，请先在已登录设备上批准该设备".to_string(),
+        "This device is pending approval. Approve it from an approved device first.".to_string(),
     );
     false
 }
@@ -3408,7 +3409,7 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
     let (Some(client), Some(backend)) = (client, backend) else {
         eprintln!("[audio.call] begin_voice_call: CLIENT or BACKEND not ready — abort");
         publish_call_state(weak.clone(), None, None, false);
-        show_app_error(weak, String::from("尚未登录或后端未就绪，无法发起通话"));
+        show_app_error(weak, String::from("Cannot start a call: not signed in or backend not ready"));
         return;
     };
     let client = Arc::new(client);
@@ -3417,7 +3418,7 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
         let g = backend.blocking_read();
         let Some(pid) = g.peer_id_for(key).map(|s| s.to_string()) else {
             eprintln!("[audio.call] begin_voice_call: no peer_id for key={key} — abort");
-            show_app_error(weak, format!("联系人已失效（key={key}），无法发起通话"));
+            show_app_error(weak, format!("Contact is invalid (key={key}); cannot start a call"));
             return;
         };
         let name = g
@@ -3446,7 +3447,7 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
         }
         Err(e) => {
             eprintln!("[audio.call] begin_voice_call: start_call FAILED: {e}");
-            show_app_error(weak, format!("通话开始失败: {e}"));
+            show_app_error(weak, format!("Failed to start call: {e}"));
         }
     }
 }
@@ -3485,7 +3486,7 @@ fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
             include_scr: false,
         },
     ) {
-        publish_call_error(weak, format!("视频通话开始失败: {e}"));
+        publish_call_error(weak, format!("Failed to start video call: {e}"));
         return;
     }
     publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
@@ -3557,7 +3558,7 @@ fn begin_screen_share(weak: slint::Weak<MainWindow>, key: i32) {
             include_scr: true,
         },
     ) {
-        publish_call_error(weak, format!("屏幕共享开始失败: {e}"));
+        publish_call_error(weak, format!("Failed to start screen share: {e}"));
         return;
     }
     publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
@@ -3907,11 +3908,11 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
     let (Some(backend), Some(pool)) = (backend, pool) else {
-        publish_profile_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
+        publish_profile_status(weak, key, SharedString::from("Not signed in or backend not ready"));
         return;
     };
     let Some(user_id) = backend.blocking_read().contact_id_for(key) else {
-        publish_profile_status(weak, key, SharedString::from("联系人已失效"));
+        publish_profile_status(weak, key, SharedString::from("Contact is no longer valid"));
         return;
     };
     let peer_id = backend
@@ -3931,7 +3932,7 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
             Ok(Some(u)) => u,
             Ok(None) => {
                 if PROFILE_LATEST.load(std::sync::atomic::Ordering::SeqCst) == seq {
-                    publish_profile_status(weak2, my_key, SharedString::from("该用户未在本机同步"));
+                    publish_profile_status(weak2, my_key, SharedString::from("This user is not synced on this device"));
                 }
                 return;
             }
@@ -3940,7 +3941,7 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
                     publish_profile_status(
                         weak2,
                         my_key,
-                        SharedString::from(format!("读取失败: {e}")),
+                        SharedString::from(format!("Read failed: {e}")),
                     );
                 }
                 return;
@@ -4009,7 +4010,7 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
         t0.elapsed().as_millis()
     );
     let (Some(client), Some(backend)) = (client, backend) else {
-        show_app_error(weak, format!("尚未登录或后端未就绪"));
+        show_app_error(weak, format!("Not signed in or backend not ready"));
         return;
     };
     let row_clone = {
@@ -4024,11 +4025,11 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
         row_clone.is_some()
     );
     let Some(c) = row_clone else {
-        show_app_error(weak, format!("联系人已失效"));
+        show_app_error(weak, format!("Contact is no longer valid"));
         return;
     };
     if c.peer_id.is_empty() {
-        show_app_error(weak, format!("联系人缺少 peer id，无法发起会话"));
+        show_app_error(weak, format!("Contact has no peer id; cannot start a conversation"));
         return;
     }
     let peer_id = c.peer_id;
@@ -4169,11 +4170,11 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
     let (Some(backend), Some(pool)) = (backend, pool) else {
-        publish_detail_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
+        publish_detail_status(weak, key, SharedString::from("Not signed in or backend not ready"));
         return;
     };
     let Some(post_id) = detail_key_post(&backend, key) else {
-        publish_detail_status(weak, key, SharedString::from("帖子已失效"));
+        publish_detail_status(weak, key, SharedString::from("Post is no longer available"));
         return;
     };
 
@@ -4197,7 +4198,7 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
             Ok(Some(p)) => p,
             _ => {
                 if POST_LATEST.load(std::sync::atomic::Ordering::SeqCst) == seq {
-                    publish_detail_status(weak2, key, SharedString::from("帖子不存在"));
+                    publish_detail_status(weak2, key, SharedString::from("Post does not exist"));
                 }
                 return;
             }
@@ -4232,9 +4233,9 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
         } else {
             let head = likers.join("、");
             if likers.len() > 5 {
-                format!("{} 等 {} 人觉得很赞", head, likers.len())
+                format!("{} and {} more liked this", head, likers.len())
             } else {
-                format!("{} 觉得很赞", head)
+                format!("{} liked this", head)
             }
         };
 
@@ -4245,7 +4246,7 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
                     publish_detail_status(
                         weak2,
                         key,
-                        SharedString::from(format!("读取评论失败: {e}")),
+                        SharedString::from(format!("Failed to read comments: {e}")),
                     );
                 }
                 return;
@@ -4300,7 +4301,7 @@ fn toggle_detail_like(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
     let (Some(backend), Some(pool)) = (backend, pool) else {
-        publish_detail_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
+        publish_detail_status(weak, key, SharedString::from("Not signed in or backend not ready"));
         return;
     };
     let post_id = detail_key_post(&backend, key);
@@ -4328,11 +4329,11 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
     let (Some(backend), Some(pool)) = (backend, pool) else {
-        publish_detail_status(weak, key, SharedString::from("尚未登录或后端未就绪"));
+        publish_detail_status(weak, key, SharedString::from("Not signed in or backend not ready"));
         return;
     };
     let Some(post_id) = detail_key_post(&backend, key) else {
-        publish_detail_status(weak, key, SharedString::from("帖子已失效"));
+        publish_detail_status(weak, key, SharedString::from("Post is no longer available"));
         return;
     };
     let me = CLIENT
@@ -4354,14 +4355,14 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         let me_id = match sqlite::users::get_by_username(&pool, &me).await {
             Ok(Some(u)) => u.id,
             Ok(None) => {
-                publish_detail_status(weak.clone(), key, SharedString::from("评论失败"));
+                publish_detail_status(weak.clone(), key, SharedString::from("Comment failed"));
                 return;
             }
             Err(e) => {
                 publish_detail_status(
                     weak.clone(),
                     key,
-                    SharedString::from(format!("评论失败: {e}")),
+                    SharedString::from(format!("Comment failed: {e}")),
                 );
                 return;
             }
@@ -4380,7 +4381,7 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                         name: SharedString::from(my_name),
                         text: SharedString::from(body),
                         is_mine: true,
-                        time_label: SharedString::from("刚刚"),
+                        time_label: SharedString::from("just now"),
                     };
                     list.insert(0, new);
                     ps.set_comment_list(slint::ModelRc::new(slint::VecModel::from(list)));
@@ -4389,7 +4390,7 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                 });
             }
             Err(e) => {
-                publish_detail_status(weak, key, SharedString::from(format!("评论失败: {e}")));
+                publish_detail_status(weak, key, SharedString::from(format!("Comment failed: {e}")));
             }
         }
     });
