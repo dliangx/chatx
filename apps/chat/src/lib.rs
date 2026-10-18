@@ -357,6 +357,14 @@ pub fn run_app() {
             let _ = slint::select_bundled_translation(&lang);
         }
         slint::update_all_translations();
+        // Persist for the next launch (read back from the `settings` table on startup).
+        let pool = POOL.lock().unwrap().clone();
+        if let Some(pool) = pool {
+            let lang = lang.clone();
+            runtime().spawn(async move {
+                let _ = sqlite::settings::set(&pool, "lang", &lang).await;
+            });
+        }
     });
 
     {
@@ -1111,6 +1119,30 @@ fn apply_result(
             if let Some(pool) = pool {
                 let pool = Arc::new(pool);
                 *POOL.lock().unwrap() = Some(pool.clone());
+                // Restore the persisted UI language (stored in the `settings`
+                // table) so it takes effect for the whole session, including the
+                // auth screen. Reading the DB is async; Slint calls must run on
+                // the event-loop thread, so hop onto it via invoke_from_event_loop.
+                {
+                    let lang_pool = pool.clone();
+                    let lang_weak = weak.clone();
+                    runtime().spawn(async move {
+                        let Some(lang) = sqlite::settings::get(&lang_pool, "lang").await.ok().flatten() else {
+                            return;
+                        };
+                        if lang.is_empty() {
+                            return;
+                        }
+                        let lang2 = lang.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let _ = slint::select_bundled_translation(&lang2);
+                            if let Some(ui) = lang_weak.upgrade() {
+                                ui.global::<AppState>().set_lang(SharedString::from(lang2.clone()));
+                            }
+                            slint::update_all_translations();
+                        });
+                    });
+                }
                 let rt = runtime();
                 let weak = weak.clone();
                 let me = user_id.clone();
