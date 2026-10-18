@@ -1,0 +1,276 @@
+msgid ""
+msgstr ""
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid " (this device)"
+msgstr " (هذا الجهاز)"
+
+msgid " · {} likes"
+msgstr "· {} إعجاب"
+
+msgid "(no device records)"
+msgstr "(لا توجد سجلات للأجهزة)"
+
+msgid "Accept"
+msgstr "قبول"
+
+msgid "Add"
+msgstr "إضافة"
+
+msgid "Add Group"
+msgstr "إضافة مجموعة"
+
+msgid "Add Member"
+msgstr "إضافة عضو"
+
+msgid "Add friend"
+msgstr "إضافة صديق"
+
+msgid "Add request"
+msgstr "طلب إضافة"
+
+msgid "Add to contacts"
+msgstr "إضافة إلى جهات الاتصال"
+
+msgid "Add via QR scan"
+msgstr "الإضافة عبر مسح رمز QR"
+
+msgid "All devices under this account. A new device must be approved (from any approved device) before use."
+msgstr "جميع الأجهزة لهذه الحساب. يجب موافقة أي جهاز جديد (من جهاز معتمد) قبل الاستخدام."
+
+msgid "Approve"
+msgstr "الموافقة"
+
+msgid "Approved"
+msgstr "مقبول"
+
+msgid "Audio Call"
+msgstr "اتصال صوتي"
+
+msgid "Audio/video call"
+msgstr "اتصال صوتي/فيديو"
+
+msgid "Capturing…"
+msgstr "التقاط…"
+
+msgid "Chats"
+msgstr "الدردشات"
+
+msgid "Comments"
+msgstr "التعليقات"
+
+msgid "Contacts"
+msgstr "جهات الاتصال"
+
+msgid "Content entered"
+msgstr "تم إدخال المحتوى"
+
+msgid "Copy"
+msgstr "نسخ"
+
+msgid "Create a new account"
+msgstr "إنشاء حساب جديد"
+
+msgid "Create group"
+msgstr "إنشاء مجموعة"
+
+msgid "Decline"
+msgstr "رفض"
+
+msgid "Delete"
+msgstr "حذف"
+
+msgid "Device"
+msgstr "الجهاز"
+
+msgid "Device pending approval · have an approved device approve it to send/receive"
+msgstr "الجهاز بانتظار الموافقة · اطلب من جهاز معتمد الموافقة عليه للإرسال/الاستلام"
+
+msgid "Discover"
+msgstr "اكتشف"
+
+msgid "END"
+msgstr "إنهاء"
+
+msgid "Enter a username or a scanned Peer ID to look up a user on the server"
+msgstr "أدخل اسم المستخدم أو معرّف Peer الممسوح للبحث عن مستخدم"
+
+msgid "Enter title and body…"
+msgstr "أدخل العنوان والمحتوى…"
+
+msgid "Enter your password"
+msgstr "أدخل كلمة المرور"
+
+msgid "Enter your username"
+msgstr "أدخل اسم المستخدم"
+
+msgid "Have an account? Sign in"
+msgstr "لديك حساب؟ سجّل الدخول"
+
+msgid "Join date not synced"
+msgstr "تاريخ الانضمام غير متزامن"
+
+msgid "Joined {}"
+msgstr "انضم في {}"
+
+msgid "Language"
+msgstr "اللغة"
+
+msgid "Me"
+msgstr "أنا"
+
+msgid "Members selected"
+msgstr "تم اختيار الأعضاء"
+
+msgid "Messages"
+msgstr "الرسائل"
+
+msgid "Moment"
+msgstr "لحظة"
+
+msgid "My QR code"
+msgstr "رمزي QR"
+
+msgid "My devices"
+msgstr "أجهزتي"
+
+msgid "My notes"
+msgstr "ملاحظاتي"
+
+msgid "New add request · {}"
+msgstr "طلب إضافة جديد · {}"
+
+msgid "New group"
+msgstr "مجموعة جديدة"
+
+msgid "No account? Sign up"
+msgstr "لا تملك حساباً؟ سجّل الآن"
+
+msgid "No comments yet. Write the first one."
+msgstr "لا توجد تعليقات بعد. اكتب الأولى."
+
+msgid "No contacts yet. Add some before creating a group."
+msgstr "لا توجد جهات اتصال بعد. أضفها قبل إنشاء مجموعة."
+
+msgid "No contacts yet. They'll appear here once added."
+msgstr "لا توجد جهات اتصال بعد. ستظهر هنا بعد الإضافة."
+
+msgid "No conversations yet. Messages will appear here."
+msgstr "لا توجد محادثات بعد. ستظهر الرسائل هنا."
+
+msgid "No members selected yet"
+msgstr "لم يتم اختيار أعضاء بعد"
+
+msgid "No notes yet"
+msgstr "لا توجد ملاحظات بعد"
+
+msgid "Note"
+msgstr "ملاحظة"
+
+msgid "Nothing here yet"
+msgstr "لا شيء هنا بعد"
+
+msgid "Offline"
+msgstr "غير متصل"
+
+msgid "Online"
+msgstr "متصل"
+
+msgid "Password"
+msgstr "كلمة المرور"
+
+msgid "Pending approval"
+msgstr "بانتظار الموافقة"
+
+msgid "Photo"
+msgstr "صورة"
+
+msgid "Please wait…"
+msgstr "الرجاء الانتظار…"
+
+msgid "Publish"
+msgstr "نشر"
+
+msgid "Publishing…"
+msgstr "جارٍ النشر…"
+
+msgid "Revoke"
+msgstr "إلغاء"
+
+msgid "Save"
+msgstr "حفظ"
+
+msgid "Scan"
+msgstr "امسح"
+
+msgid "Screen Share"
+msgstr "مشاركة الشاشة"
+
+msgid "Screen sharing"
+msgstr "مشاركة الشاشة"
+
+msgid "Select group members (multiple allowed)"
+msgstr "حدد أعضاء المجموعة (يمكن تحديد أكثر من واحد)"
+
+msgid "Send"
+msgstr "إرسال"
+
+msgid "Settings"
+msgstr "الإعدادات"
+
+msgid "Share a moment"
+msgstr "شارك لحظة"
+
+msgid "Sign in"
+msgstr "تسجيل الدخول"
+
+msgid "Sign out"
+msgstr "تسجيل الخروج"
+
+msgid "Sign up"
+msgstr "إنشاء حساب"
+
+msgid "Start Meeting"
+msgstr "بدء الاجتماع"
+
+msgid "Total {} comments"
+msgstr "إجمالي {} تعليقات"
+
+msgid "User"
+msgstr "المستخدم"
+
+msgid "Video Call"
+msgstr "مكالمة فيديو"
+
+msgid "Video meeting"
+msgstr "اجتماع فيديو"
+
+msgid "Write a comment…"
+msgstr "اكتب تعليقاً…"
+
+msgid "You haven't posted a moment yet"
+msgstr "لم تشارك لحظة بعد"
+
+msgid "Your thoughts on this moment…"
+msgstr "أفكارك حول هذه اللحظة…"
+
+msgid "chat"
+msgstr "الدردشة"
+
+msgid "discover"
+msgstr "اكتشف"
+
+msgid "note"
+msgstr "ملاحظة"
+
+msgid "profile"
+msgstr "الملف الشخصي"
+
+msgid "setting"
+msgstr "الإعدادات"
+
+msgid "{} comments"
+msgstr "{} تعليقًا"
+

@@ -102,20 +102,20 @@ export component AddGroupView inherits Rectangle {
 
     if group-type == 0:
     Header {
-        name: "Add Group";
+        name: @tr("Add Group");
     }
     if group-type == 1:
     Header {
-        name: "Start Meeting";
+        name: @tr("Start Meeting");
     }
     if group-type == 2:
     Header {
-        name: "Screen Share";
+        name: @tr("Screen Share");
     }
     Text {
         x: 16px;
         y: 58px;
-        text: "Select group members (multiple allowed)";
+        text: @tr("Select group members (multiple allowed)");
         font-size: 13px;
         color: Theme.fg-muted;
     }
@@ -125,7 +125,7 @@ export component AddGroupView inherits Rectangle {
         x: 0px;
         y: 240px;
         width: parent.width;
-        text: "No contacts yet. Add some before creating a group.";
+        text: @tr("No contacts yet. Add some before creating a group.");
         color: #9aa0b4;
         font-size: 14px;
         horizontal-alignment: center;
@@ -204,7 +204,7 @@ export component AddGroupView inherits Rectangle {
             y: 0px;
             width: parent.width - 160px;
             height: 100%;
-            text: root.has-selection ? "Members selected" : "No members selected yet";
+            text: root.has-selection ? @tr("Members selected") : @tr("No members selected yet");
             font-size: 14px;
             color: Theme.fg-muted;
             vertical-alignment: center;
@@ -224,9 +224,9 @@ export component AddGroupView inherits Rectangle {
                 width: 100%;
                 height: 100%;
 
-                text: group-type == 0 ? "Create group"
-                    : (group-type == 1 ? "Video meeting"
-                    : (group-type == 2 ? "Screen sharing" : ""));
+                text: group-type == 0 ? @tr("Create group")
+                    : (group-type == 1 ? @tr("Video meeting")
+                    : (group-type == 2 ? @tr("Screen sharing") : ""));
                 font-size: 14px;
                 color: white;
                 horizontal-alignment: center;

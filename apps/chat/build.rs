@@ -16,7 +16,10 @@ fn main() {
         res.compile().expect("failed to compile Windows resources");
     }
 
-    slint_build::compile("ui/main.slint").unwrap();
+    let config = slint_build::CompilerConfiguration::new()
+        .with_bundled_translations(concat!(env!("CARGO_MANIFEST_DIR"), "/lang/"))
+        .with_default_translation_context(slint_build::DefaultTranslationContext::None);
+    slint_build::compile_with_config("ui/main.slint", config).unwrap();
 
     // iOS screen-share shim: when the Xcode build script compiles
     // `apps/platform/ios/Sources/ChatxScreenCapture.m` to a `.o` and points

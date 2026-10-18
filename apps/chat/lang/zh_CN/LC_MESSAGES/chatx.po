@@ -1,0 +1,276 @@
+msgid ""
+msgstr ""
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid " (this device)"
+msgstr "（本机）"
+
+msgid " · {} likes"
+msgstr " · {} 个赞"
+
+msgid "(no device records)"
+msgstr "（无设备记录）"
+
+msgid "Accept"
+msgstr "接受"
+
+msgid "Add"
+msgstr "添加"
+
+msgid "Add Group"
+msgstr "添加群组"
+
+msgid "Add Member"
+msgstr "添加成员"
+
+msgid "Add friend"
+msgstr "添加朋友"
+
+msgid "Add request"
+msgstr "添加请求"
+
+msgid "Add to contacts"
+msgstr "添加到通讯录"
+
+msgid "Add via QR scan"
+msgstr "通过扫码添加"
+
+msgid "All devices under this account. A new device must be approved (from any approved device) before use."
+msgstr "账号下的所有设备。新的设备需要你（在任一已批准设备上）批准后才能使用。"
+
+msgid "Approve"
+msgstr "批准"
+
+msgid "Approved"
+msgstr "已批准"
+
+msgid "Audio Call"
+msgstr "语音通话"
+
+msgid "Audio/video call"
+msgstr "音视频通话"
+
+msgid "Capturing…"
+msgstr "拍摄中…"
+
+msgid "Chats"
+msgstr "聊天"
+
+msgid "Comments"
+msgstr "评论"
+
+msgid "Contacts"
+msgstr "联系人"
+
+msgid "Content entered"
+msgstr "已输入内容"
+
+msgid "Copy"
+msgstr "复制"
+
+msgid "Create a new account"
+msgstr "注册新账户"
+
+msgid "Create group"
+msgstr "创建群组"
+
+msgid "Decline"
+msgstr "拒绝"
+
+msgid "Delete"
+msgstr "删除"
+
+msgid "Device"
+msgstr "设备"
+
+msgid "Device pending approval · have an approved device approve it to send/receive"
+msgstr "设备待审批 · 请让已批准设备批准后才能收发消息"
+
+msgid "Discover"
+msgstr "发现"
+
+msgid "END"
+msgstr "结束"
+
+msgid "Enter a username or a scanned Peer ID to look up a user on the server"
+msgstr "输入用户名或扫码得到的 Peer ID 查找服务器上的用户"
+
+msgid "Enter title and body…"
+msgstr "输入标题和正文…"
+
+msgid "Enter your password"
+msgstr "请输入口令"
+
+msgid "Enter your username"
+msgstr "请输入用户名"
+
+msgid "Have an account? Sign in"
+msgstr "已有账户？去登录"
+
+msgid "Join date not synced"
+msgstr "加入日期未同步"
+
+msgid "Joined {}"
+msgstr "加入于 {}"
+
+msgid "Language"
+msgstr "语言"
+
+msgid "Me"
+msgstr "我的"
+
+msgid "Members selected"
+msgstr "已选择成员"
+
+msgid "Messages"
+msgstr "消息"
+
+msgid "Moment"
+msgstr "时刻"
+
+msgid "My QR code"
+msgstr "我的二维码"
+
+msgid "My devices"
+msgstr "我的设备"
+
+msgid "My notes"
+msgstr "我的笔记"
+
+msgid "New add request · {}"
+msgstr "新的添加请求 · {}"
+
+msgid "New group"
+msgstr "新建群组"
+
+msgid "No account? Sign up"
+msgstr "没有账户？去注册"
+
+msgid "No comments yet. Write the first one."
+msgstr "还没有评论，快写下第一条吧"
+
+msgid "No contacts yet. Add some before creating a group."
+msgstr "暂无联系人，先添加联系人再建群"
+
+msgid "No contacts yet. They'll appear here once added."
+msgstr "暂无联系人，添加后会出现在这里"
+
+msgid "No conversations yet. Messages will appear here."
+msgstr "暂无会话，发消息后会出现在这里"
+
+msgid "No members selected yet"
+msgstr "尚未选择成员"
+
+msgid "No notes yet"
+msgstr "暂无笔记"
+
+msgid "Note"
+msgstr "笔记"
+
+msgid "Nothing here yet"
+msgstr "暂无内容"
+
+msgid "Offline"
+msgstr "离线"
+
+msgid "Online"
+msgstr "在线"
+
+msgid "Password"
+msgstr "密码"
+
+msgid "Pending approval"
+msgstr "待审批"
+
+msgid "Photo"
+msgstr "拍照"
+
+msgid "Please wait…"
+msgstr "处理中…"
+
+msgid "Publish"
+msgstr "发布"
+
+msgid "Publishing…"
+msgstr "发布中…"
+
+msgid "Revoke"
+msgstr "撤销"
+
+msgid "Save"
+msgstr "保存"
+
+msgid "Scan"
+msgstr "扫描"
+
+msgid "Screen Share"
+msgstr "屏幕共享"
+
+msgid "Screen sharing"
+msgstr "屏幕共享"
+
+msgid "Select group members (multiple allowed)"
+msgstr "选择群成员(可多选)"
+
+msgid "Send"
+msgstr "发送"
+
+msgid "Settings"
+msgstr "设置"
+
+msgid "Share a moment"
+msgstr "分享此刻"
+
+msgid "Sign in"
+msgstr "登录"
+
+msgid "Sign out"
+msgstr "退出登录"
+
+msgid "Sign up"
+msgstr "注册"
+
+msgid "Start Meeting"
+msgstr "开始会议"
+
+msgid "Total {} comments"
+msgstr "共 {} 条评论"
+
+msgid "User"
+msgstr "用户"
+
+msgid "Video Call"
+msgstr "视频通话"
+
+msgid "Video meeting"
+msgstr "视频会议"
+
+msgid "Write a comment…"
+msgstr "写下你的评论…"
+
+msgid "You haven't posted a moment yet"
+msgstr "还没有发表 Moment"
+
+msgid "Your thoughts on this moment…"
+msgstr "这一刻的想法…"
+
+msgid "chat"
+msgstr "聊天"
+
+msgid "discover"
+msgstr "发现"
+
+msgid "note"
+msgstr "笔记"
+
+msgid "profile"
+msgstr "资料"
+
+msgid "setting"
+msgstr "设置"
+
+msgid "{} comments"
+msgstr "{} 条评论"
+

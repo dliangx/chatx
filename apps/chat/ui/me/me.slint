@@ -28,7 +28,7 @@ export component MeView inherits Rectangle {
                 width: 100%;
                 id: 1;
                 icon: Glyph.notes;
-                title: "My notes";
+                title: @tr("My notes");
                 selected: root.selected-key == 1;
                 clicked => { root.selected-key = 1; AppState.push-sub(SubPageType.MyNote, 0); }
             }
@@ -37,7 +37,7 @@ export component MeView inherits Rectangle {
                 width: 100%;
                 id: 5;
                 icon: Glyph.device;
-                title: "My devices";
+                title: @tr("My devices");
                 selected: root.selected-key == 5;
                 clicked => { root.selected-key = 5; AppState.push-sub(SubPageType.MyDevices, 0); }
             }
@@ -46,7 +46,7 @@ export component MeView inherits Rectangle {
                 width: 100%;
                 id: 4;
                 icon: Glyph.setting;
-                title: "Settings";
+                title: @tr("Settings");
                 selected: root.selected-key == 4;
                 clicked => { root.selected-key = 4; AppState.push-sub(SubPageType.Settings, 0); }
             }

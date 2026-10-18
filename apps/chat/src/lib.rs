@@ -135,6 +135,10 @@ pub fn run_app() {
     let state = ui.global::<AppState>();
     let weak = ui.as_weak();
 
+    // Default language is English. Bundled translations become active once a
+    // component exists (created above), so we can select the initial language now.
+    let _ = slint::select_bundled_translation(&state.get_lang());
+
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
     // state.set_is_mobile(true);
@@ -342,6 +346,18 @@ pub fn run_app() {
             discover_load_more(weak.clone());
         });
     }
+
+    ui.global::<AppState>().on_select_language(move |lang| {
+        let lang = lang.to_string();
+        // Switch the bundled translation, then force every component to re-render
+        // so reactive bindings pick up the newly selected catalog.
+        if lang.is_empty() || lang == "en" {
+            let _ = slint::select_bundled_translation("");
+        } else {
+            let _ = slint::select_bundled_translation(&lang);
+        }
+        slint::update_all_translations();
+    });
 
     {
         let weak = weak.clone();

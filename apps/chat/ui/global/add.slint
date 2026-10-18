@@ -122,20 +122,20 @@ export component AddMenuView inherits Rectangle {
             if AppState.is-mobile && AppState.add-menu-type == 0:
             MenuRow {
                 icon: Glyph.scan;
-                label: "Scan";
+                label: @tr("Scan");
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.QrScanner; }
             }
 
             if AppState.add-menu-type == 0 && AppState.nav-state.active-tab == 2:
             MenuRow {
                 icon: Glyph.fill;
-                label: "Note";
+                label: @tr("Note");
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddNote, 0); }
             }
             if AppState.add-menu-type == 0 && AppState.nav-state.active-tab == 2:
             MenuRow {
                 icon: Glyph.picture;
-                label: "Share a moment";
+                label: @tr("Share a moment");
                 long-press: true;
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.Camera; }
                 long-pressed => {
@@ -146,7 +146,7 @@ export component AddMenuView inherits Rectangle {
             if AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2:
             MenuRow {
                 icon: Glyph.friends-add;
-                label: "Add friend";
+                label: @tr("Add friend");
                 clicked => {
                     AppState.nav-state.global-overlay = GlobalOverlayType.None;
                     AppState.push-sub(SubPageType.AddContact, 0);
@@ -157,7 +157,7 @@ export component AddMenuView inherits Rectangle {
             if AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2:
             MenuRow {
                 icon: Glyph.add-circle;
-                label: "New group";
+                label: @tr("New group");
                 clicked => {
                     AppState.nav-state.global-overlay = GlobalOverlayType.None;
                     AppState.push-sub(SubPageType.AddGroup, 0);
@@ -167,19 +167,19 @@ export component AddMenuView inherits Rectangle {
             if  AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2:
             MenuRow {
                 icon: Glyph.video;
-                label: "Audio/video meeting";
+                label: @tr("Video meeting");
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddGroup, 1); }
             }
             if  AppState.add-menu-type == 0 && AppState.nav-state.active-tab < 2:
             MenuRow {
                 icon: Glyph.meeting;
-                label: "Screen sharing";
+                label: @tr("Screen sharing");
                 clicked => { AppState.nav-state.global-overlay = GlobalOverlayType.None; AppState.push-sub(SubPageType.AddGroup, 2); }
             }
             if  AppState.add-menu-type == 1:
             MenuRow {
                 icon: Glyph.video;
-                label: "Audio/video call";
+                label: @tr("Audio/video call");
                 clicked => {
                     AppState.nav-state.global-overlay = GlobalOverlayType.None;
                     if AppState.current-chat-peer-key != -1 {
@@ -190,7 +190,7 @@ export component AddMenuView inherits Rectangle {
             if  AppState.add-menu-type == 1:
             MenuRow {
                 icon: Glyph.meeting;
-                label: "Screen sharing";
+                label: @tr("Screen sharing");
                 clicked => {
                     AppState.nav-state.global-overlay = GlobalOverlayType.None;
                     if AppState.current-chat-peer-key != -1 {

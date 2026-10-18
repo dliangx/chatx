@@ -75,7 +75,7 @@ export component DiscoverDetailView inherits Rectangle {
     }
 
     Header {
-        name: "discover";
+        name: @tr("discover");
         back-vis: back-vis();
     }
 
@@ -105,7 +105,7 @@ export component DiscoverDetailView inherits Rectangle {
         y: parent.height - root.input-h;
         width: parent.width;
         height: root.input-h;
-        placeholder-text: "Write a comment…";
+        placeholder-text: @tr("Write a comment…");
         sent(t) => { PostDetailState.add-comment(root.key, t); }
     }
 
@@ -183,7 +183,7 @@ export component DiscoverDetailView inherits Rectangle {
             y: root.like-y;
             width: 140px;
             height: 22px;
-            text: PostDetailState.comments + " comments";
+            text: @tr("{} comments", PostDetailState.comments);
             font-size: 13px;
             horizontal-alignment: right;
             vertical-alignment: center;
@@ -224,7 +224,7 @@ export component DiscoverDetailView inherits Rectangle {
             y: root.like-y + 31px + root.like-by-h;
             width: parent.width - 32px;
             height: 26px;
-            text: PostDetailState.comment-list.length > 0 ? ("Total " + PostDetailState.comment-list.length + " comments") : "Comments";
+            text: PostDetailState.comment-list.length > 0 ? @tr("Total {} comments", PostDetailState.comment-list.length) : @tr("Comments");
             font-size: 14px;
             font-weight: 600;
             vertical-alignment: center;
@@ -237,7 +237,7 @@ export component DiscoverDetailView inherits Rectangle {
             y: root.top-h + 16px;
             width: parent.width;
             height: 28px;
-            text: "No comments yet. Write the first one.";
+            text: @tr("No comments yet. Write the first one.");
             font-size: 13px;
             horizontal-alignment: center;
             color: Theme.fg-muted;

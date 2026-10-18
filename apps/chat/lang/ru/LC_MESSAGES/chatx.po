@@ -1,0 +1,276 @@
+msgid ""
+msgstr ""
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid " (this device)"
+msgstr " (это устройство)"
+
+msgid " · {} likes"
+msgstr " · {} лайков"
+
+msgid "(no device records)"
+msgstr "(нет записей об устройствах)"
+
+msgid "Accept"
+msgstr "Принять"
+
+msgid "Add"
+msgstr "Добавить"
+
+msgid "Add Group"
+msgstr "Добавить группу"
+
+msgid "Add Member"
+msgstr "Добавить участника"
+
+msgid "Add friend"
+msgstr "Добавить друга"
+
+msgid "Add request"
+msgstr "Запрос на добавление"
+
+msgid "Add to contacts"
+msgstr "Добавить в контакты"
+
+msgid "Add via QR scan"
+msgstr "Добавить по QR-коду"
+
+msgid "All devices under this account. A new device must be approved (from any approved device) before use."
+msgstr "Все устройства аккаунта. Новое устройство должно быть одобрено (с одобренного устройства) перед использованием."
+
+msgid "Approve"
+msgstr "Одобрить"
+
+msgid "Approved"
+msgstr "Одобрено"
+
+msgid "Audio Call"
+msgstr "Аудиозвонок"
+
+msgid "Audio/video call"
+msgstr "Аудио/видеозвонок"
+
+msgid "Capturing…"
+msgstr "Съёмка…"
+
+msgid "Chats"
+msgstr "Чаты"
+
+msgid "Comments"
+msgstr "Комментарии"
+
+msgid "Contacts"
+msgstr "Контакты"
+
+msgid "Content entered"
+msgstr "Контент введён"
+
+msgid "Copy"
+msgstr "Копировать"
+
+msgid "Create a new account"
+msgstr "Создать новый аккаунт"
+
+msgid "Create group"
+msgstr "Создать группу"
+
+msgid "Decline"
+msgstr "Отклонить"
+
+msgid "Delete"
+msgstr "Удалить"
+
+msgid "Device"
+msgstr "Устройство"
+
+msgid "Device pending approval · have an approved device approve it to send/receive"
+msgstr "Устройство ожидает одобрения · одобрите его на одобренном устройстве, чтобы отправлять/получать"
+
+msgid "Discover"
+msgstr "Обзор"
+
+msgid "END"
+msgstr "Завершить"
+
+msgid "Enter a username or a scanned Peer ID to look up a user on the server"
+msgstr "Введите имя пользователя или отсканированный Peer ID, чтобы найти пользователя"
+
+msgid "Enter title and body…"
+msgstr "Введите заголовок и текст…"
+
+msgid "Enter your password"
+msgstr "Введите пароль"
+
+msgid "Enter your username"
+msgstr "Введите имя пользователя"
+
+msgid "Have an account? Sign in"
+msgstr "Уже есть аккаунт? Войти"
+
+msgid "Join date not synced"
+msgstr "Дата добавления не синхронизирована"
+
+msgid "Joined {}"
+msgstr "Присоединился {}"
+
+msgid "Language"
+msgstr "Язык"
+
+msgid "Me"
+msgstr "Я"
+
+msgid "Members selected"
+msgstr "Участники выбраны"
+
+msgid "Messages"
+msgstr "Сообщения"
+
+msgid "Moment"
+msgstr "Момент"
+
+msgid "My QR code"
+msgstr "Мой QR-код"
+
+msgid "My devices"
+msgstr "Мои устройства"
+
+msgid "My notes"
+msgstr "Мои заметки"
+
+msgid "New add request · {}"
+msgstr "Новый запрос на добавление · {}"
+
+msgid "New group"
+msgstr "Новая группа"
+
+msgid "No account? Sign up"
+msgstr "Нет аккаунта? Регистрация"
+
+msgid "No comments yet. Write the first one."
+msgstr "Комментариев пока нет. Напишите первый."
+
+msgid "No contacts yet. Add some before creating a group."
+msgstr "Контактов пока нет. Добавьте их перед созданием группы."
+
+msgid "No contacts yet. They'll appear here once added."
+msgstr "Контактов пока нет. Они появятся здесь после добавления."
+
+msgid "No conversations yet. Messages will appear here."
+msgstr "Разговоров пока нет. Сообщения появятся здесь."
+
+msgid "No members selected yet"
+msgstr "Участники ещё не выбраны"
+
+msgid "No notes yet"
+msgstr "Заметок пока нет"
+
+msgid "Note"
+msgstr "Заметка"
+
+msgid "Nothing here yet"
+msgstr "Пока здесь ничего нет"
+
+msgid "Offline"
+msgstr "Не в сети"
+
+msgid "Online"
+msgstr "В сети"
+
+msgid "Password"
+msgstr "Пароль"
+
+msgid "Pending approval"
+msgstr "Ожидает одобрения"
+
+msgid "Photo"
+msgstr "Фото"
+
+msgid "Please wait…"
+msgstr "Пожалуйста, подождите…"
+
+msgid "Publish"
+msgstr "Опубликовать"
+
+msgid "Publishing…"
+msgstr "Публикация…"
+
+msgid "Revoke"
+msgstr "Отозвать"
+
+msgid "Save"
+msgstr "Сохранить"
+
+msgid "Scan"
+msgstr "Сканировать"
+
+msgid "Screen Share"
+msgstr "Видеотрансляция экрана"
+
+msgid "Screen sharing"
+msgstr "Видеотрансляция экрана"
+
+msgid "Select group members (multiple allowed)"
+msgstr "Выберите участников (можно несколько)"
+
+msgid "Send"
+msgstr "Отправить"
+
+msgid "Settings"
+msgstr "Настройки"
+
+msgid "Share a moment"
+msgstr "Поделиться моментом"
+
+msgid "Sign in"
+msgstr "Войти"
+
+msgid "Sign out"
+msgstr "Выйти"
+
+msgid "Sign up"
+msgstr "Зарегистрироваться"
+
+msgid "Start Meeting"
+msgstr "Начать встречу"
+
+msgid "Total {} comments"
+msgstr "Всего {} комментариев"
+
+msgid "User"
+msgstr "Пользователь"
+
+msgid "Video Call"
+msgstr "Видеозвонок"
+
+msgid "Video meeting"
+msgstr "Видеовстреча"
+
+msgid "Write a comment…"
+msgstr "Написать комментарий…"
+
+msgid "You haven't posted a moment yet"
+msgstr "Вы ещё не поделились моментом"
+
+msgid "Your thoughts on this moment…"
+msgstr "Ваши мысли об этом моменте…"
+
+msgid "chat"
+msgstr "Чаты"
+
+msgid "discover"
+msgstr "Обзор"
+
+msgid "note"
+msgstr "Заметка"
+
+msgid "profile"
+msgstr "Профиль"
+
+msgid "setting"
+msgstr "Настройки"
+
+msgid "{} comments"
+msgstr "{} комментариев"
+

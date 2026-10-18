@@ -1,0 +1,276 @@
+msgid ""
+msgstr ""
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid " (this device)"
+msgstr " (este dispositivo)"
+
+msgid " · {} likes"
+msgstr " · {} me gusta"
+
+msgid "(no device records)"
+msgstr "(sin registros de dispositivos)"
+
+msgid "Accept"
+msgstr "Aceptar"
+
+msgid "Add"
+msgstr "Añadir"
+
+msgid "Add Group"
+msgstr "Añadir grupo"
+
+msgid "Add Member"
+msgstr "Añadir miembro"
+
+msgid "Add friend"
+msgstr "Añadir amigo"
+
+msgid "Add request"
+msgstr "Solicitud de agregado"
+
+msgid "Add to contacts"
+msgstr "Añadir a contactos"
+
+msgid "Add via QR scan"
+msgstr "Añadir mediante código QR"
+
+msgid "All devices under this account. A new device must be approved (from any approved device) before use."
+msgstr "Todos los dispositivos de esta cuenta. Un dispositivo nuevo debe aprobarse (desde un dispositivo aprobado) antes de usarlo."
+
+msgid "Approve"
+msgstr "Aprobar"
+
+msgid "Approved"
+msgstr "Aprobado"
+
+msgid "Audio Call"
+msgstr "Llamada de audio"
+
+msgid "Audio/video call"
+msgstr "Llamada de audio/vídeo"
+
+msgid "Capturing…"
+msgstr "Capturando…"
+
+msgid "Chats"
+msgstr "Chats"
+
+msgid "Comments"
+msgstr "Comentarios"
+
+msgid "Contacts"
+msgstr "Contactos"
+
+msgid "Content entered"
+msgstr "Contenido introducido"
+
+msgid "Copy"
+msgstr "Copiar"
+
+msgid "Create a new account"
+msgstr "Crear una nueva cuenta"
+
+msgid "Create group"
+msgstr "Crear grupo"
+
+msgid "Decline"
+msgstr "Rechazar"
+
+msgid "Delete"
+msgstr "Eliminar"
+
+msgid "Device"
+msgstr "Dispositivo"
+
+msgid "Device pending approval · have an approved device approve it to send/receive"
+msgstr "Dispositivo pendiente de aprobación · apruébelo desde un dispositivo aprobado para enviar/recibir"
+
+msgid "Discover"
+msgstr "Descubrir"
+
+msgid "END"
+msgstr "FIN"
+
+msgid "Enter a username or a scanned Peer ID to look up a user on the server"
+msgstr "Introduzca un nombre de usuario o un Peer ID escaneado para buscar un usuario"
+
+msgid "Enter title and body…"
+msgstr "Introducir título y contenido…"
+
+msgid "Enter your password"
+msgstr "Introduzca su contraseña"
+
+msgid "Enter your username"
+msgstr "Introduzca su nombre de usuario"
+
+msgid "Have an account? Sign in"
+msgstr "¿Tienes cuenta? Inicia sesión"
+
+msgid "Join date not synced"
+msgstr "Fecha de alta no sincronizada"
+
+msgid "Joined {}"
+msgstr "Alta el {}"
+
+msgid "Language"
+msgstr "Idioma"
+
+msgid "Me"
+msgstr "Yo"
+
+msgid "Members selected"
+msgstr "Miembros seleccionados"
+
+msgid "Messages"
+msgstr "Mensajes"
+
+msgid "Moment"
+msgstr "Momento"
+
+msgid "My QR code"
+msgstr "Mi código QR"
+
+msgid "My devices"
+msgstr "Mis dispositivos"
+
+msgid "My notes"
+msgstr "Mis notas"
+
+msgid "New add request · {}"
+msgstr "Nueva solicitud de agregado · {}"
+
+msgid "New group"
+msgstr "Nuevo grupo"
+
+msgid "No account? Sign up"
+msgstr "¿No tienes cuenta? Regístrate"
+
+msgid "No comments yet. Write the first one."
+msgstr "Aún no hay comentarios. Escribe el primero."
+
+msgid "No contacts yet. Add some before creating a group."
+msgstr "Aún no hay contactos. Añádalos antes de crear un grupo."
+
+msgid "No contacts yet. They'll appear here once added."
+msgstr "Aún no hay contactos. Aparecerán aquí una vez añadidos."
+
+msgid "No conversations yet. Messages will appear here."
+msgstr "Aún no hay conversaciones. Los mensajes aparecerán aquí."
+
+msgid "No members selected yet"
+msgstr "Aún no se seleccionó ningún miembro"
+
+msgid "No notes yet"
+msgstr "Aún no hay notas"
+
+msgid "Note"
+msgstr "Nota"
+
+msgid "Nothing here yet"
+msgstr "Aún no hay nada"
+
+msgid "Offline"
+msgstr "Desconectado"
+
+msgid "Online"
+msgstr "Conectado"
+
+msgid "Password"
+msgstr "Contraseña"
+
+msgid "Pending approval"
+msgstr "Pendiente de aprobación"
+
+msgid "Photo"
+msgstr "Foto"
+
+msgid "Please wait…"
+msgstr "Por favor, espere…"
+
+msgid "Publish"
+msgstr "Publicar"
+
+msgid "Publishing…"
+msgstr "Publicando…"
+
+msgid "Revoke"
+msgstr "Revocar"
+
+msgid "Save"
+msgstr "Guardar"
+
+msgid "Scan"
+msgstr "Escanear"
+
+msgid "Screen Share"
+msgstr "Compartir pantalla"
+
+msgid "Screen sharing"
+msgstr "Compartir pantalla"
+
+msgid "Select group members (multiple allowed)"
+msgstr "Seleccionar miembros (se permiten varios)"
+
+msgid "Send"
+msgstr "Enviar"
+
+msgid "Settings"
+msgstr "Ajustes"
+
+msgid "Share a moment"
+msgstr "Compartir un momento"
+
+msgid "Sign in"
+msgstr "Iniciar sesión"
+
+msgid "Sign out"
+msgstr "Cerrar sesión"
+
+msgid "Sign up"
+msgstr "Registrarse"
+
+msgid "Start Meeting"
+msgstr "Iniciar reunión"
+
+msgid "Total {} comments"
+msgstr "Total {} comentarios"
+
+msgid "User"
+msgstr "Usuario"
+
+msgid "Video Call"
+msgstr "Llamada de vídeo"
+
+msgid "Video meeting"
+msgstr "Reunión de vídeo"
+
+msgid "Write a comment…"
+msgstr "Escribe un comentario…"
+
+msgid "You haven't posted a moment yet"
+msgstr "Aún no has publicado un momento"
+
+msgid "Your thoughts on this moment…"
+msgstr "Tus pensamientos sobre este momento…"
+
+msgid "chat"
+msgstr "Chats"
+
+msgid "discover"
+msgstr "Descubrir"
+
+msgid "note"
+msgstr "Nota"
+
+msgid "profile"
+msgstr "Perfil"
+
+msgid "setting"
+msgstr "Ajustes"
+
+msgid "{} comments"
+msgstr "{} comentarios"
+

@@ -65,7 +65,7 @@ export component BottomNavBar inherits Rectangle {
             height: 100%;
             index: 0;
             glyph: Glyph.chat;
-            label: "Chats";
+            label: @tr("Chats");
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
         }
@@ -75,7 +75,7 @@ export component BottomNavBar inherits Rectangle {
             height: 100%;
             index: 1;
             glyph: Glyph.contact;
-            label: "Contacts";
+            label: @tr("Contacts");
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
         }
@@ -85,7 +85,7 @@ export component BottomNavBar inherits Rectangle {
             height: 100%;
             index: 2;
             glyph: Glyph.app;
-            label: "Discover";
+            label: @tr("Discover");
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
         }
@@ -95,7 +95,7 @@ export component BottomNavBar inherits Rectangle {
             height: 100%;
             index: 3;
             glyph: Glyph.me;
-            label: "Me";
+            label: @tr("Me");
             active-tab: root.active-tab;
             clicked(idx) => { root.tab-clicked(idx); }
         }

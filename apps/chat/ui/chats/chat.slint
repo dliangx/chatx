@@ -43,7 +43,7 @@ export component ChatView inherits Rectangle {
     out property <length> status-h: ChatSession.send-status != "" ? 20px : 0px;
     out property <length> _bottom: root.status-h + root.input-h;
     Header {
-        name: "chat";
+        name: @tr("chat");
 
         Icon {
             width: 32px;
@@ -166,7 +166,7 @@ export component ChatView inherits Rectangle {
             }
 
             if msg.selected: Button {
-                text: "Copy";
+                text: @tr("Copy");
                 x: msg.is-self ? parent.width - msg.width - 6px - 64px : 6px + msg.width + 8px;
                 y: 0px;
                 width: 56px;

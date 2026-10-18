@@ -138,9 +138,10 @@ export global AppState {
     in-out property <[FriendRequestRow]> friend-requests: [];
     callback accept-friend-request(int);
     callback reject-friend-request(int);
+    callback select-language(string);
     in property <image> qr-image;
     in property <string> qr-target-id: "";
-    in property <string> lang: "cn";
+    in-out property <string> lang: "en";
     in property <string> font;
     in property <int> font-size: 16;
     in property <string> theme: "light";

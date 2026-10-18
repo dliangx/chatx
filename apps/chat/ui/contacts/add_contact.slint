@@ -23,7 +23,7 @@ component ResultRow inherits Rectangle {
         width: parent.width;
         height: 100px;
         name: root.name;
-        nickname: root.is_local ? "Add via QR scan" : root.username;
+        nickname: root.is_local ? @tr("Add via QR scan") : root.username;
         peer-id: root.peer_id;
         show-qr(peer) => { AppState.show-qr-code(peer); }
     }
@@ -41,7 +41,7 @@ component ResultRow inherits Rectangle {
         y: 100px;
         width: parent.width - 120px;
         height: 32px;
-        text: "Add to contacts";
+        text: @tr("Add to contacts");
         font-size: 14px;
         color: Theme.fg-muted;
         vertical-alignment: center;
@@ -60,7 +60,7 @@ component ResultRow inherits Rectangle {
             y: 0px;
             width: parent.width;
             height: parent.height;
-            text: "Add";
+            text: @tr("Add");
             font-size: 13px;
             color: white;
             horizontal-alignment: center;
@@ -81,7 +81,7 @@ export component AddContactView inherits Rectangle {
     background: Theme.bg;
 
     Header {
-        name: "Add Member";
+        name: @tr("Add Member");
     }
 
     Rectangle {
@@ -125,7 +125,7 @@ export component AddContactView inherits Rectangle {
         x: 16px;
         y: 110px;
         width: parent.width - 32px;
-        text: "Enter a username or a scanned Peer ID to look up a user on the server";
+        text: @tr("Enter a username or a scanned Peer ID to look up a user on the server");
         font-size: 13px;
         color: Theme.fg-muted;
     }

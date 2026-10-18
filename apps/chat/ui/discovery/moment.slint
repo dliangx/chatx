@@ -49,7 +49,7 @@ export component AddMomentView inherits Rectangle {
         spacing: 8px;
 
         Header {
-            name: "Share a moment";
+            name: @tr("Share a moment");
             back-vis: true;
         }
 
@@ -168,7 +168,7 @@ export component AddMomentView inherits Rectangle {
                             y: 12px;
                             width: parent.width - 24px;
                             visible: MomentState.content == "";
-                            text: "Your thoughts on this moment…";
+                            text: @tr("Your thoughts on this moment…");
                             font-size: 15px;
                             color: Theme.fg-muted;
                             vertical-alignment: top;
@@ -226,7 +226,7 @@ export component AddMomentView inherits Rectangle {
                 Text {
                     width: 100%;
                     height: 100%;
-                    text: MomentState.publishing ? "Publishing…" : "Publish";
+                    text: MomentState.publishing ? @tr("Publishing…") : @tr("Publish");
                     font-size: 14px;
                     color: #ffffff;
                     horizontal-alignment: center;

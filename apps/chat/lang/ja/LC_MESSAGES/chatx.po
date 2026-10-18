@@ -1,0 +1,276 @@
+msgid ""
+msgstr ""
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid " (this device)"
+msgstr "（この端末）"
+
+msgid " · {} likes"
+msgstr " · {} いいね"
+
+msgid "(no device records)"
+msgstr "（端末記録なし）"
+
+msgid "Accept"
+msgstr "承認"
+
+msgid "Add"
+msgstr "追加"
+
+msgid "Add Group"
+msgstr "グループ追加"
+
+msgid "Add Member"
+msgstr "メンバー追加"
+
+msgid "Add friend"
+msgstr "友達追加"
+
+msgid "Add request"
+msgstr "追加招待"
+
+msgid "Add to contacts"
+msgstr "連絡先に追加"
+
+msgid "Add via QR scan"
+msgstr "QRコードで追加"
+
+msgid "All devices under this account. A new device must be approved (from any approved device) before use."
+msgstr "このアカウント配下のすべての端末。新しい端末は（承認済み端末から）承認してからお使いいただけます。"
+
+msgid "Approve"
+msgstr "承認"
+
+msgid "Approved"
+msgstr "承認済み"
+
+msgid "Audio Call"
+msgstr "音声通話"
+
+msgid "Audio/video call"
+msgstr "音声/ビデオ通話"
+
+msgid "Capturing…"
+msgstr "撮影中…"
+
+msgid "Chats"
+msgstr "チャット"
+
+msgid "Comments"
+msgstr "コメント"
+
+msgid "Contacts"
+msgstr "連絡先"
+
+msgid "Content entered"
+msgstr "内容を記入"
+
+msgid "Copy"
+msgstr "コピー"
+
+msgid "Create a new account"
+msgstr "新規アカウント作成"
+
+msgid "Create group"
+msgstr "グループ作成"
+
+msgid "Decline"
+msgstr "拒否"
+
+msgid "Delete"
+msgstr "削除"
+
+msgid "Device"
+msgstr "端末"
+
+msgid "Device pending approval · have an approved device approve it to send/receive"
+msgstr "端末の承認待ち · 承認済み端末から承認して送受信してください"
+
+msgid "Discover"
+msgstr "発見"
+
+msgid "END"
+msgstr "終了"
+
+msgid "Enter a username or a scanned Peer ID to look up a user on the server"
+msgstr "ユーザー名またはスキャンした Peer ID を入力してユーザーを検索"
+
+msgid "Enter title and body…"
+msgstr "タイトルと本文を入力…"
+
+msgid "Enter your password"
+msgstr "パスワードを入力"
+
+msgid "Enter your username"
+msgstr "ユーザー名を入力"
+
+msgid "Have an account? Sign in"
+msgstr "アカウントをお持ちですか？ログイン"
+
+msgid "Join date not synced"
+msgstr "参加日未同期"
+
+msgid "Joined {}"
+msgstr "{} 参加"
+
+msgid "Language"
+msgstr "言語"
+
+msgid "Me"
+msgstr "マイページ"
+
+msgid "Members selected"
+msgstr "メンバー選択済み"
+
+msgid "Messages"
+msgstr "メッセージ"
+
+msgid "Moment"
+msgstr "モーメント"
+
+msgid "My QR code"
+msgstr "マイQRコード"
+
+msgid "My devices"
+msgstr "マイ端末"
+
+msgid "My notes"
+msgstr "マイノート"
+
+msgid "New add request · {}"
+msgstr "新しい追加招待 · {}"
+
+msgid "New group"
+msgstr "新規グループ"
+
+msgid "No account? Sign up"
+msgstr "アカウント無し？新規登録"
+
+msgid "No comments yet. Write the first one."
+msgstr "まだコメントがありません。最初のコメントを書いてください。"
+
+msgid "No contacts yet. Add some before creating a group."
+msgstr "連絡先がありません。グループ作成の前に追加してください。"
+
+msgid "No contacts yet. They'll appear here once added."
+msgstr "連絡先はまだありません。追加するとここに表示されます。"
+
+msgid "No conversations yet. Messages will appear here."
+msgstr "トークはありません。メッセージがここに表示されます。"
+
+msgid "No members selected yet"
+msgstr "メンバーが選択されていません"
+
+msgid "No notes yet"
+msgstr "ノートがありません"
+
+msgid "Note"
+msgstr "ノートを追加"
+
+msgid "Nothing here yet"
+msgstr "まだありません"
+
+msgid "Offline"
+msgstr "オフライン"
+
+msgid "Online"
+msgstr "オンライン"
+
+msgid "Password"
+msgstr "パスワード"
+
+msgid "Pending approval"
+msgstr "承認待ち"
+
+msgid "Photo"
+msgstr "撮影"
+
+msgid "Please wait…"
+msgstr "お待ちください…"
+
+msgid "Publish"
+msgstr "公開"
+
+msgid "Publishing…"
+msgstr "公開中…"
+
+msgid "Revoke"
+msgstr "取り消し"
+
+msgid "Save"
+msgstr "保存"
+
+msgid "Scan"
+msgstr "スキャン"
+
+msgid "Screen Share"
+msgstr "画面共有"
+
+msgid "Screen sharing"
+msgstr "画面共有"
+
+msgid "Select group members (multiple allowed)"
+msgstr "メンバーを選択（複数可）"
+
+msgid "Send"
+msgstr "送信"
+
+msgid "Settings"
+msgstr "設定"
+
+msgid "Share a moment"
+msgstr "今をシェア"
+
+msgid "Sign in"
+msgstr "ログイン"
+
+msgid "Sign out"
+msgstr "ログアウト"
+
+msgid "Sign up"
+msgstr "新規登録"
+
+msgid "Start Meeting"
+msgstr "会議を開始"
+
+msgid "Total {} comments"
+msgstr "コメント 全 {} 件"
+
+msgid "User"
+msgstr "ユーザー"
+
+msgid "Video Call"
+msgstr "ビデオ通話"
+
+msgid "Video meeting"
+msgstr "ビデオ会議"
+
+msgid "Write a comment…"
+msgstr "コメントを書く…"
+
+msgid "You haven't posted a moment yet"
+msgstr "まだモーメントを投稿していません"
+
+msgid "Your thoughts on this moment…"
+msgstr "この瞬間の思い…"
+
+msgid "chat"
+msgstr "チャット"
+
+msgid "discover"
+msgstr "発見"
+
+msgid "note"
+msgstr "ノート"
+
+msgid "profile"
+msgstr "プロフィール"
+
+msgid "setting"
+msgstr "設定"
+
+msgid "{} comments"
+msgstr "{} 件のコメント"
+

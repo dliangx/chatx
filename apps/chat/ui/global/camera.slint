@@ -94,7 +94,7 @@ export component CameraView inherits Rectangle {
             height: parent.height;
             text: CameraState.status != ""
                 ? CameraState.status
-                : (CameraState.capturing ? "Capturing…" : "Photo");
+                : (CameraState.capturing ? @tr("Capturing…") : @tr("Photo"));
             font-size: 17px;
             font-weight: 600;
             color: #ffffff;

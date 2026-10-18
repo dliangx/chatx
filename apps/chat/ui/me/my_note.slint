@@ -28,13 +28,13 @@ export component MyNoteView inherits Rectangle {
     }
 
     Header {
-        name: "My notes";
+        name: @tr("My notes");
     }
 
     if root.notes.length == 0:
     Text {
         y: 180px;
-        text: "No notes yet";
+        text: @tr("No notes yet");
         horizontal-alignment: center;
         font-size: 14px;
         color: Theme.fg-muted;
@@ -132,7 +132,7 @@ export component MyNoteView inherits Rectangle {
                     x: (parent.width - 26px) / 2 + 14px;
                     width: 60px;
                     height: parent.height;
-                    text: "Delete";
+                    text: @tr("Delete");
                     font-size: 14px;
                     vertical-alignment: center;
                     color: #e11d3a;

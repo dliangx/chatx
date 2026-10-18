@@ -9,15 +9,24 @@ export component SettingView inherits Rectangle {
     background: #f5f5f5;
 
     Header {
-        name: "setting";
+        name: @tr("setting");
     }
 
     SettingItem {
         y: 49px;
         width: 100%;
+        id: 2;
+        icon: Glyph.configuration;
+        title: @tr("Language");
+        clicked => { AppState.push-sub(SubPageType.LanguagePicker, 0); }
+    }
+
+    SettingItem {
+        y: 97px;
+        width: 100%;
         id: 1;
         icon: Glyph.close-circle;
-        title: "Sign out";
+        title: @tr("Sign out");
         clicked => { AppState.logout(); }
     }
 }
