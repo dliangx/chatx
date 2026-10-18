@@ -8,20 +8,44 @@ use render::canvas::Image;
 pub(crate) static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> =
     std::sync::OnceLock::new();
 
+/// Bound the cache so pixel buffers for off-screen / old covers and avatars get
+/// reclaimed when the user navigates away (otherwise each `SlintImage` clone
+/// keeps the decoded bitmap alive forever). 256 entries is plenty for the feed
+/// + a few contact-list pages, and is small compared to a full-screen cover
+/// bitmap.
+const IMAGE_CACHE_MAX: usize = 256;
+
 thread_local! {
-    static IMAGE_CACHE: std::cell::RefCell<std::collections::HashMap<String, SlintImage>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+    static IMAGE_CACHE: std::cell::RefCell<(
+        std::collections::HashMap<String, SlintImage>,
+        std::vec::Vec<String>,
+    )> = std::cell::RefCell::new((std::collections::HashMap::new(), std::vec::Vec::new()));
 }
 
 pub fn load_image_cached(path: &str) -> SlintImage {
     let key = path.to_string();
-    let cached = IMAGE_CACHE.with(|c| c.borrow().get(&key).cloned());
-    if let Some(img) = cached {
-        return img;
-    }
-    let img = SlintImage::load_from_path(std::path::Path::new(&key)).unwrap_or_default();
-    IMAGE_CACHE.with(|c| c.borrow_mut().insert(key, img.clone()));
-    img
+    IMAGE_CACHE.with(|cell| {
+        let (map, order) = &mut *cell.borrow_mut();
+        if let Some(img) = map.get(&key).cloned() {
+            if let Some(pos) = order.iter().position(|k| *k == key) {
+                order.remove(pos);
+            }
+            order.push(key.clone());
+            return img;
+        }
+        let img = SlintImage::load_from_path(std::path::Path::new(&key)).unwrap_or_default();
+        while order.len() >= IMAGE_CACHE_MAX {
+            if let Some(oldest) = order.first().cloned() {
+                order.remove(0);
+                map.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        order.push(key.clone());
+        map.insert(key, img.clone());
+        img
+    })
 }
 
 const FONT_LATIN: &[u8] = include_bytes!("../fonts/NotoSans.ttf");

@@ -13,6 +13,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use crate::capture_grab;
 use crate::scan;
 use nokhwa::Buffer;
 use nokhwa::threaded::CallbackCamera;
@@ -58,13 +59,12 @@ fn handle_frame(buf: Buffer) {
     // pipeline below we already know the format — pull the Y planes and
     // push a greyscale `w` × `h` buffer to the `FRAME_SINK` for convenience.
     let gray = yuyv_to_gray(&raw, w);
-    if let Some(slot) = FRAME_SINK.get() {
-        if let Ok(g) = slot.lock() {
-            if let Some(cb) = g.as_ref() {
-                cb(&gray, w, h, 8); // PixelFormat::Gray8
-            }
-        }
-    }
+
+    // Maybe-save the captured still (next frame) *after* the preview has
+    // been delivered, so the user sees the preview even mid-capture.
+    notify_frame(&gray, w, h, 8); // PixelFormat::Gray8
+    capture_grab::grab(&gray, w, h);
+
     scan::scan_gray(&gray, w, h, &|text| notify(text));
 }
 
@@ -125,6 +125,20 @@ impl Camera {
         } else {
             let _ = FRAME_SINK.set(Mutex::new(Some(Box::new(sink))));
         }
+    }
+
+    /// Install the sink used for photo-capture results. On this target a
+    /// "capture" saves the *next* preview frame as a JPEG; the sink fires
+    /// with the on-disk path (or an error message).
+    pub fn set_capture_sink<F: Fn(crate::CaptureResult) + Send + 'static>(&self, sink: F) {
+        capture_grab::set_sink(sink);
+    }
+
+    /// Trigger a still-photo capture: the next preview frame is saved as a
+    /// JPEG and the path delivered to the sink installed via
+    /// [`Camera::set_capture_sink`].
+    pub fn capture(&mut self) -> Result<(), String> {
+        capture_grab::arm(self.is_running())
     }
 
     /// Open the default camera (index 0) and pump frames through the QR

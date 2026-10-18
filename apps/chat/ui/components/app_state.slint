@@ -19,8 +19,6 @@ export enum SubPageType {
     PomegranateSeed,
     Settings,
     MyNote,
-    MyCollect,
-    MyShare,
     MyDevices,
     LanguagePicker,
 }
@@ -29,6 +27,7 @@ export enum GlobalOverlayType {
     None,
     ImageViewer,
     QrScanner,
+    Camera,
     AudioCall,
     VideoCall,
     ScreenShare,
@@ -79,6 +78,7 @@ export struct DiscoverCard {
     user: string,
     likes: int,
     liked: bool,
+    image: image,
 }
 
 export struct NoteRow {
@@ -159,8 +159,6 @@ export global AppState {
     in property <[ContactRow]> contacts: [];
     in property <[LetterEntry]> contact-letters: [];
     in property <[DiscoverCard]> discover: [];
-    in property <[DiscoverCard]> my_collect: [];
-    in property <[DiscoverCard]> my_share: [];
     in property <[NoteRow]> my_notes: [];
     in-out property <int> my-notes-content-h: 0;
     in-out property <int> my-notes-w: 0;

@@ -87,7 +87,8 @@ pub fn set_weak_window(weak: slint::Weak<MainWindow>) {
     let _ = WINDOW.set(weak);
 }
 
-fn weak_window() -> Option<slint::Weak<MainWindow>> {
+/// Return the installed weak window handle (or `None` if not yet set).
+pub fn weak_window() -> Option<slint::Weak<MainWindow>> {
     WINDOW.get().cloned()
 }
 

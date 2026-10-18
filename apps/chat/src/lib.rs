@@ -46,6 +46,14 @@ thread_local! {
 /// Set once a scanned QR is resolved, so late frames don't re-fire it.
 static SCAN_RESOLVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Ordered on-disk photo paths selected for the "分享/发布此刻" draft.
+/// The UI thumbnails (`MomentState.media`) are kept in sync from this list:
+/// `add` / `remove` / `publish` all read & mutate it, then republish the
+/// `[image]` model. The single source of truth so `publish` can build the
+/// `media_urls` JSON array to persist.
+static MOMENT_MEDIA: std::sync::LazyLock<std::sync::Mutex<Vec<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
 fn device_is_approved() -> bool {
     DEVICE_APPROVED.with(|c| c.get())
 }
@@ -129,7 +137,7 @@ pub fn run_app() {
 
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
-    state.set_is_mobile(true);
+    // state.set_is_mobile(true);
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
@@ -195,10 +203,21 @@ pub fn run_app() {
         let w = weak.clone();
         state.on_pop_sub(move || {
             if let Some(ui) = w.upgrade() {
-                pop_sub_history(&ui.global::<AppState>());
+                if let Some(popped) = pop_sub_history(&ui.global::<AppState>()) {
+                    release_popped_page(&ui, popped.page);
+                }
             }
         });
     }
+    {
+        let w = weak.clone();
+        state.on_clear(move || {
+            if let Some(ui) = w.upgrade() {
+                clear_sub_history(&ui.global::<AppState>());
+            }
+        });
+    }
+
     {
         let w = weak.clone();
         state.on_clear(move || {
@@ -292,14 +311,6 @@ pub fn run_app() {
                 Vec::<LetterEntry>::new(),
             )));
             st.set_discover(slint::ModelRc::new(slint::VecModel::from(Vec::<
-                DiscoverCard,
-            >::new(
-            ))));
-            st.set_my_collect(slint::ModelRc::new(slint::VecModel::from(Vec::<
-                DiscoverCard,
-            >::new(
-            ))));
-            st.set_my_share(slint::ModelRc::new(slint::VecModel::from(Vec::<
                 DiscoverCard,
             >::new(
             ))));
@@ -659,6 +670,15 @@ pub fn run_app() {
     {
         let weak = weak.clone();
         ui.global::<PostDetailState>().on_request_load(move |key| {
+            // Release the previous post's full-resolution images before we go
+            // off to load the new one; holding both at once doubles the bitmap
+            // memory in a brief window and pins the old buffer past the point
+            // the user has moved on.
+            if let Some(ui) = weak.upgrade() {
+                let empty: Vec<SlintImage> = Vec::new();
+                ui.global::<PostDetailState>()
+                    .set_media(slint::ModelRc::new(slint::VecModel::from(empty)));
+            }
             load_post_detail(weak.clone(), key);
         });
     }
@@ -678,6 +698,74 @@ pub fn run_app() {
                 }
                 add_post_comment(weak.clone(), key, b);
             });
+    }
+
+    // ── install the album-photo sink (shared with all picker callbacks) ────
+    {
+        camera::album::set_photos_sink(move |paths: Vec<String>| {
+            on_moment_photos_selected(paths);
+        });
+    }
+
+    // ── "分享此刻" camera overlay (start / capture / close) ────────────────
+    {
+        let weak = weak.clone();
+        ui.global::<CameraState>().on_start(move || {
+            start_camera_capturer(weak.clone());
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<CameraState>().on_capture(move || {
+            trigger_photo_capture(weak.clone());
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<CameraState>().on_close(move || {
+            stop_camera_capturer(weak.clone());
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<CameraState>().on_finish(move || {
+            finish_camera_and_open_publish(weak.clone());
+        });
+    }
+
+    // ── "发布此刻" publish page (pick / remove / publish) ──────────────────
+    {
+        let weak = weak.clone();
+        ui.global::<MomentState>().on_pick_photos(move || {
+            let n = {
+                let Some(ui) = weak.upgrade() else { return };
+                let m = ui.global::<MomentState>().get_media();
+                use slint::Model;
+                m.row_count()
+            };
+            if n >= 9 {
+                eprintln!("[moment] photo cap reached (9); ignoring pick");
+                return;
+            }
+            if let Err(e) = camera::album::pick_photos(9) {
+                eprintln!("[moment] pick photos failed: {e}");
+                if let Some(ui) = weak.upgrade() {
+                    let st = ui.global::<MomentState>();
+                    st.set_status(SharedString::from(format!("相册选图失败：{e}")));
+                }
+            }
+        });
+    }
+    {
+        ui.global::<MomentState>().on_remove_photo(move |i| {
+            moment_remove_photo(i as i32);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<MomentState>().on_publish(move || {
+            publish_moment(weak.clone());
+        });
     }
 
     {
@@ -777,7 +865,10 @@ fn push_sub_history(app: &AppState, entry: SubPageEntry) {
     app.set_nav_state(nav);
 }
 
-fn pop_sub_history(app: &AppState) {
+/// Pop the top of the current tab's subpage stack. Returns the popped entry
+/// (if any) so the caller can release page-scoped resources (loaded images,
+/// in-flight drafts, etc.) while still on the UI thread.
+fn pop_sub_history(app: &AppState) -> Option<SubPageEntry> {
     let mut nav = app.get_nav_state();
     let active = nav.active_tab as usize;
     use slint::Model;
@@ -785,9 +876,19 @@ fn pop_sub_history(app: &AppState) {
         .filter_map(|i| nav.tabs.row_data(i))
         .collect();
     if active >= v.len() {
-        return;
+        return None;
     }
     let tab = v.get_mut(active).unwrap();
+    let popped = if tab.sub_top >= 0 {
+        let h = tab.sub_history.clone();
+        (0..h.row_count())
+            .filter_map(|i| h.row_data(i))
+            .collect::<Vec<_>>()
+            .get(tab.sub_top as usize)
+            .cloned()
+    } else {
+        None
+    };
     let next_top = tab.sub_top - 1;
     if next_top < 0 {
         tab.sub_history = slint::ModelRc::new(slint::VecModel::from(Vec::<SubPageEntry>::new()));
@@ -797,6 +898,40 @@ fn pop_sub_history(app: &AppState) {
     }
     nav.tabs = slint::ModelRc::new(slint::VecModel::from(v));
     app.set_nav_state(nav);
+    popped
+}
+
+/// Release page-scoped image buffers + draft state when the given page is
+/// popped. Held otherwise, each post's full-resolution bitmaps / moment draft
+/// thumbnails would stay alive until the *next* page of the same type is
+/// loaded — leaving the memory pinned across tab switches, back navigations,
+/// and idle time.
+fn release_popped_page(ui: &MainWindow, page: SubPageType) {
+    match page {
+        SubPageType::DiscoverDetail => {
+            let ps = ui.global::<PostDetailState>();
+            let empty: Vec<SlintImage> = Vec::new();
+            ps.set_media(slint::ModelRc::new(slint::VecModel::from(empty)));
+            let empty: Vec<CommentRow> = Vec::new();
+            ps.set_comment_list(slint::ModelRc::new(slint::VecModel::from(empty)));
+            ps.set_key(-1);
+            ps.set_title(SharedString::new());
+            ps.set_author(SharedString::new());
+            ps.set_liked_by(SharedString::new());
+            ps.set_time(SharedString::new());
+            ps.set_status(SharedString::new());
+        }
+        SubPageType::AddMoment => {
+            let ms = ui.global::<MomentState>();
+            let empty: Vec<SlintImage> = Vec::new();
+            ms.set_media(slint::ModelRc::new(slint::VecModel::from(empty)));
+            ms.set_title(SharedString::new());
+            ms.set_content(SharedString::new());
+            ms.set_status(SharedString::new());
+            reset_moment_draft();
+        }
+        _ => {}
+    }
 }
 
 fn clear_sub_history(app: &AppState) {
@@ -1314,35 +1449,10 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
             user: SharedString::from(r.author.clone()),
             likes: r.likes as i32,
             liked: r.liked,
+            image: load_image_cached(&r.cover),
         })
         .collect();
     state.set_discover(slint::ModelRc::new(slint::VecModel::from(discover)));
-
-    let my_collect: Vec<DiscoverCard> = snapshot
-        .my_collect
-        .iter()
-        .map(|r| DiscoverCard {
-            id: r.key,
-            title: SharedString::from(r.title.clone()),
-            user: SharedString::from(r.author.clone()),
-            likes: r.likes as i32,
-            liked: r.liked,
-        })
-        .collect();
-    state.set_my_collect(slint::ModelRc::new(slint::VecModel::from(my_collect)));
-
-    let my_share: Vec<DiscoverCard> = snapshot
-        .my_share
-        .iter()
-        .map(|r| DiscoverCard {
-            id: r.key,
-            title: SharedString::from(r.title.clone()),
-            user: SharedString::from(r.author.clone()),
-            likes: r.likes as i32,
-            liked: r.liked,
-        })
-        .collect();
-    state.set_my_share(slint::ModelRc::new(slint::VecModel::from(my_share)));
 
     state.set_data_status(SharedString::new());
 }
@@ -2040,6 +2150,414 @@ fn delete_my_note(weak: slint::Weak<MainWindow>, key: i32) {
             publish_my_notes(&ui.global::<AppState>(), &backend);
         }
     });
+}
+
+// ─────────────── "分享/发布此刻" moment helpers ──────────────────────────
+
+/// Open + start the camera and pump preview frames into `CameraState.preview`.
+/// Idempotent: if the camera is already running, the sinks are simply
+/// re-installed. Runs on the UI thread (same as the QR scanner); Apple's
+/// TCC prompt is a system modal, so a brief UI pause matches platform
+/// convention.
+fn start_camera_capturer(weak: slint::Weak<MainWindow>) {
+    if let Some(ui) = weak.upgrade() {
+        let st = ui.global::<CameraState>();
+        st.set_capturing(false);
+        st.set_last_captured(SharedString::new());
+        st.set_preview(slint::Image::default());
+        st.set_status(SharedString::from("正在启动摄像头…"));
+    }
+
+    CAMERA.with(|slot| {
+        if slot.borrow().is_none() {
+            *slot.borrow_mut() = Some(Camera::new());
+        }
+        let mut guard = slot.borrow_mut();
+        let cam = guard.as_mut().expect("cap camera inited");
+
+        // Install the photo-capture sink (result delivered async via the
+        // platform shim after `capture()`).
+        {
+            let weak = weak.clone();
+            cam.set_capture_sink(move |res: camera::CaptureResult| {
+                let wk = weak.clone();
+                let wk2 = weak.clone();
+                match res {
+                    Ok(path) => {
+                        eprintln!("[cap] capture saved → {path}");
+                        append_moment_media(wk.clone(), path);
+                        on_cap_done(wk2);
+                    }
+                    Err(err) => {
+                        eprintln!("[cap] capture failed: {err}");
+                        set_cap_status(wk.clone(), format!("拍照失败：{err}"));
+                        on_cap_done(wk2);
+                    }
+                }
+            });
+        }
+
+        // Install the preview-frame sink (fires on every frame; build the
+        // Slint image inside the event-loop hop since `SlintImage` is not
+        // Send).
+        {
+            let weak3 = weak.clone();
+            cam.set_frame_sink(move |bytes: &[u8], w: u32, h: u32, fmt: u32| {
+                if w == 0 || h == 0 {
+                    return;
+                }
+                let data = bytes.to_vec();
+                let wk = weak3.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = wk.upgrade() else {
+                        return;
+                    };
+                    let st = ui.global::<CameraState>();
+                    st.set_preview(make_preview_image(&data, w, h, fmt));
+                    // First real frame means "camera is up" — clear the
+                    // startup status only if it's still the initial value.
+                    if st.get_status() == "正在启动摄像头…" {
+                        st.set_status(SharedString::new());
+                    }
+                });
+            });
+        }
+
+        match cam.start() {
+            Ok(()) => {
+                eprintln!("[cap] camera running");
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.global::<CameraState>().set_status(SharedString::new());
+                    }
+                });
+            }
+            Err(err) => {
+                eprintln!("[cap] start failed: {err}");
+                set_cap_status(weak, format!("无法启动摄像头：{err}"));
+            }
+        }
+        let _ = guard;
+    });
+}
+
+fn set_cap_status(weak: slint::Weak<MainWindow>, msg: String) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<CameraState>()
+                .set_status(SharedString::from(msg));
+        }
+    });
+}
+
+fn on_cap_done(weak: slint::Weak<MainWindow>) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<CameraState>().set_capturing(false);
+        }
+    });
+}
+
+/// Trigger a still capture (the camera session is expected to already be
+/// running). Re-entry is gated in the UI by `CameraState.capturing`
+/// (the shutter TouchArea checks `!capturing`), which is set true here and
+/// cleared again by [`on_cap_done`] when the async result lands.
+fn trigger_photo_capture(weak: slint::Weak<MainWindow>) {
+    if let Some(ui) = weak.upgrade() {
+        ui.global::<CameraState>().set_capturing(true);
+    }
+    let res: Option<Result<(), String>> = CAMERA.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(c) => Some(c.capture()),
+        None => None,
+    });
+    match res {
+        Some(Ok(())) => {
+            // Result arrives asynchronously: Apple via the Swift shim, desktop
+            // on the next preview frame. Both land in the capture sink, which
+            // calls `on_cap_done` to clear `capturing`.
+        }
+        Some(Err(e)) => {
+            on_cap_done(weak.clone());
+            set_cap_status(weak, format!("无法拍照：{e}"));
+        }
+        None => {
+            on_cap_done(weak.clone());
+            set_cap_status(weak, "摄像头未启动".to_string());
+        }
+    }
+}
+
+fn stop_camera_capturer(weak: slint::Weak<MainWindow>) {
+    // Stop the camera session + close overlay + clear the draft.
+    CAMERA.with(|slot| {
+        if let Some(cam) = slot.borrow_mut().as_mut() {
+            cam.stop();
+        }
+    });
+    reset_moment_draft();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            let st = ui.global::<AppState>();
+            let mut nav = st.get_nav_state();
+            nav.global_overlay = GlobalOverlayType::None;
+            st.set_nav_state(nav);
+            let ms = ui.global::<MomentState>();
+            ms.set_title(SharedString::new());
+            ms.set_content(SharedString::new());
+            ms.set_status(SharedString::new());
+            ms.set_publishing(false);
+            ms.set_media(slint::ModelRc::new(slint::VecModel::from(
+                Vec::<SlintImage>::new(),
+            )));
+        }
+    });
+}
+
+/// "完成" (top-right): close the camera overlay + push the publish page.
+fn finish_camera_and_open_publish(weak: slint::Weak<MainWindow>) {
+    // We stop the camera session (preview stops), but keep MOMENT_MEDIA
+    // populated so the publish page sees the draft.
+    CAMERA.with(|slot| {
+        if let Some(cam) = slot.borrow_mut().as_mut() {
+            cam.stop();
+        }
+    });
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            let st = ui.global::<AppState>();
+            let mut nav = st.get_nav_state();
+            nav.global_overlay = GlobalOverlayType::None;
+            st.set_nav_state(nav);
+            push_sub_history(
+                &st,
+                SubPageEntry {
+                    page: SubPageType::AddMoment,
+                    payload: 0,
+                },
+            );
+        }
+    });
+}
+
+/// Append a saved photo path to the draft + refresh the UI thumbnails.
+fn append_moment_media(weak: slint::Weak<MainWindow>, path: String) {
+    {
+        let mut m = MOMENT_MEDIA.lock().unwrap();
+        if m.len() >= 9 {
+            // Cap; drop the newest (we keep the first 9).
+            eprintln!("[moment] draft already has 9 photos; ignoring {path}");
+        } else {
+            m.push(path.clone());
+        }
+    }
+    refresh_moment_media_ui(weak);
+}
+
+fn remove_moment_media(weak: slint::Weak<MainWindow>, i: i32) {
+    {
+        let mut m = MOMENT_MEDIA.lock().unwrap();
+        if i < 0 || (i as usize) >= m.len() {
+            return;
+        }
+        m.remove(i as usize);
+    }
+    refresh_moment_media_ui(weak);
+}
+
+fn reset_moment_draft() {
+    MOMENT_MEDIA.lock().unwrap().clear();
+}
+
+/// Republish `MOMENT_MEDIA` as a `[image]` model on `MomentState.media`.
+/// The Slint `Image` objects are not `Send`, so each is loaded inside the
+/// event-loop hop.
+fn refresh_moment_media_ui(weak: slint::Weak<MainWindow>) {
+    let paths = MOMENT_MEDIA.lock().unwrap().clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let imgs: Vec<SlintImage> = paths
+            .iter()
+            .filter_map(|p| SlintImage::load_from_path(std::path::Path::new(p)).ok())
+            .collect();
+        ui.global::<MomentState>()
+            .set_media(slint::ModelRc::new(slint::VecModel::from(imgs)));
+    });
+}
+
+/// Called by the `album` backend (from whatever thread the picker
+/// finished on) with the list of photo paths the user selected. Empty ⇒
+/// cancel / nothing picked.
+fn on_moment_photos_selected(paths: Vec<String>) {
+    if paths.is_empty() {
+        eprintln!("[moment] empty selection (cancelled)");
+        return;
+    }
+    {
+        let mut m = MOMENT_MEDIA.lock().unwrap();
+        for p in paths {
+            if m.len() >= 9 {
+                break;
+            }
+            m.push(p);
+        }
+    }
+    let weak = match call::weak_window() {
+        Some(w) => w,
+        None => return,
+    };
+    refresh_moment_media_ui(weak);
+}
+
+/// Called by MomentState on_publish. Validates the draft, persists the post
+/// to sqlite (creating a `social_posts` row), then pops the subpage.
+fn publish_moment(weak: slint::Weak<MainWindow>) {
+    let pool = POOL.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
+    let (Some(pool), Some(backend)) = (pool, backend) else {
+        set_moment_status(weak.clone(), "尚未登录或后端未就绪".to_string());
+        return;
+    };
+    let me = current_me();
+    if me.is_empty() {
+        set_moment_status(weak.clone(), "尚未登录".to_string());
+        return;
+    }
+    // Read the draft (copy out before async work).
+    let title = {
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<MomentState>().get_title().to_string()
+        } else {
+            String::new()
+        }
+    };
+    let content = {
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<MomentState>().get_content().to_string()
+        } else {
+            String::new()
+        }
+    };
+    let media_paths: Vec<String> = MOMENT_MEDIA.lock().unwrap().clone();
+    if title.trim().is_empty() && content.trim().is_empty() && media_paths.is_empty() {
+        set_moment_status(
+            weak.clone(),
+            "至少需要填写标题、正文或添加一张照片".to_string(),
+        );
+        return;
+    }
+    set_moment_status(weak.clone(), "发布中…".to_string());
+    if let Some(ui) = weak.upgrade() {
+        ui.global::<MomentState>().set_publishing(true);
+    }
+
+    let rt = runtime();
+    let weak2 = weak.clone();
+    rt.spawn(async move {
+        // Resolve me_id
+        let me_id = match sqlite::users::get_by_username(&pool, &me).await {
+            Ok(Some(u)) => u.id,
+            _ => {
+                set_moment_status(weak2.clone(), "查找用户失败".to_string());
+                if let Some(ui) = weak2.upgrade() {
+                    ui.global::<MomentState>().set_publishing(false);
+                }
+                return;
+            }
+        };
+        // Compose the body: title + content.
+        let mut body = String::new();
+        if !title.trim().is_empty() {
+            body.push_str(title.trim());
+            if !content.trim().is_empty() {
+                body.push('\n');
+            }
+        }
+        if !content.trim().is_empty() {
+            body.push_str(content.trim());
+        }
+        let media_json = serde_json::to_string(&media_paths).unwrap_or_default();
+        let created = match sqlite::social_feed::create_post(
+            &pool,
+            me_id,
+            Some(body.as_str()),
+            Some(media_json.as_str()),
+            0,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[moment] create_post failed: {e}");
+                set_moment_status(weak2.clone(), "发布失败".to_string());
+                if let Some(ui) = weak2.upgrade() {
+                    ui.global::<MomentState>().set_publishing(false);
+                }
+                return;
+            }
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            // Insert the new row at the front of discover.
+            let my_nickname = if let Some(ui) = weak2.upgrade() {
+                ui.global::<AppState>().get_nickname().to_string()
+            } else {
+                String::new()
+            };
+            {
+                let mut g = backend.blocking_write();
+                let key = g.key_for_post(created.id);
+                let row = data::DiscoverRow {
+                    key,
+                    post_id: created.id,
+                    title: body,
+                    author: my_nickname,
+                    likes: 0,
+                    liked: false,
+                    cover: media_paths.first().cloned().unwrap_or_default(),
+                };
+                g.discover.insert(0, row);
+            }
+            if let Some(ui) = weak2.upgrade() {
+                publish_to_views(&ui.global::<AppState>(), backend.clone());
+                // Reset the draft state — otherwise `publishing` stays true and
+                // the next time the user opens the publish page it's stuck in
+                // "发布中…" with a disabled button.
+                let ms = ui.global::<MomentState>();
+                ms.set_title(SharedString::new());
+                ms.set_content(SharedString::new());
+                ms.set_status(SharedString::new());
+                ms.set_publishing(false);
+                let empty: Vec<SlintImage> = Vec::new();
+                ms.set_media(slint::ModelRc::new(slint::VecModel::from(empty)));
+                // Pop the publish subpage.
+                let st = ui.global::<AppState>();
+                pop_sub_history(&st);
+            }
+            reset_moment_draft();
+        });
+    });
+}
+
+fn set_moment_status(weak: slint::Weak<MainWindow>, msg: String) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<MomentState>()
+                .set_status(SharedString::from(msg));
+        }
+    });
+}
+
+fn moment_remove_photo(i: i32) {
+    // `MOMENT_MEDIA` is the source of truth; the UI refresh needs a window.
+    // Reuse the static `MainWindow` weak handle that `call.rs` already
+    // installs at app start (so we don't have to thread `weak` through
+    // the TouchArea callback).
+    let weak = match call::weak_window() {
+        Some(w) => w,
+        None => return,
+    };
+    remove_moment_media(weak, i);
 }
 
 fn delete_contact(weak: slint::Weak<MainWindow>, key: i32) {

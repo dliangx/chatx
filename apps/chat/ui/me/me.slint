@@ -35,24 +35,6 @@ export component MeView inherits Rectangle {
 
             SettingItem {
                 width: 100%;
-                id: 2;
-                icon: Glyph.collection;
-                title: "我的收藏";
-                selected: root.selected-key == 2;
-                clicked => { root.selected-key = 2; AppState.push-sub(SubPageType.MyCollect, 0); }
-            }
-
-            SettingItem {
-                width: 100%;
-                id: 3;
-                icon: Glyph.share;
-                title: "我的分享";
-                selected: root.selected-key == 3;
-                clicked => { root.selected-key = 3; AppState.push-sub(SubPageType.MyShare, 0); }
-            }
-
-            SettingItem {
-                width: 100%;
                 id: 5;
                 icon: Glyph.device;
                 title: "我的设备";

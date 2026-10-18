@@ -8,11 +8,9 @@ import { AddContactView } from "contacts/add_contact.slint";
 import { AddGroupView } from "contacts/add_group.slint";
 import { DiscoverDetailView } from "discovery/discover_detail.slint";
 import { PomegranateSeedView } from "discovery/pomegranate_seed.slint";
-import { MyCollectView } from "me/my_collect.slint";
 import { AddMomentView } from "discovery/moment.slint";
 import { AddNoteView } from "discovery/note.slint";
 import { MyNoteView } from "me/my_note.slint";
-import { MyShareView } from "me/my_share.slint";
 import { MyDevicesView } from "me/my_devices.slint";
 
 export component SubPageView inherits Rectangle {
@@ -79,14 +77,6 @@ export component SubPageView inherits Rectangle {
     if root.page == SubPageType.Settings: SettingView { }
     if root.page == SubPageType.MyNote: MyNoteView {
         notes: AppState.my_notes;
-    }
-    if root.page == SubPageType.MyCollect: MyCollectView {
-        cards: AppState.my_collect;
-        like-toggled(id) => { AppState.toggle-like(id); }
-    }
-    if root.page == SubPageType.MyShare: MyShareView {
-        cards: AppState.my_share;
-        like-toggled(id) => { AppState.toggle-like(id); }
     }
     if root.page == SubPageType.MyDevices: MyDevicesView { }
     if root.page == SubPageType.AddContact: AddContactView { }

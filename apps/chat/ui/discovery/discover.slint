@@ -53,6 +53,7 @@ export component DiscoverView inherits Rectangle {
             is-liked: card.liked;
             likes: card.likes;
             id: card.id;
+            image: card.image;
             clicked(id) => { AppState.push-sub(SubPageType.DiscoverDetail, id); }
             like-toggled => { root.like-toggled(card.id); }
         }

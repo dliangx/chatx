@@ -26,8 +26,7 @@ static FRAME_SINK: OnceLock<Mutex<FrameSinkFn>> = OnceLock::new();
 /// Global sink, installed via [`Camera::set_capture_sink`], called from
 /// `_chatx_rust_capture_done` with the saved file path (or error) when a
 /// `Camera::capture` finishes.
-pub type CaptureResult = Result<String, String>;
-static CAPTURE_SINK: OnceLock<Mutex<Box<dyn Fn(CaptureResult) + Send>>> = OnceLock::new();
+static CAPTURE_SINK: OnceLock<Mutex<Box<dyn Fn(crate::CaptureResult) + Send>>> = OnceLock::new();
 
 /// `1` if the camera session is currently running (per the Swift shim);
 /// tracked on the Rust side in case the shim is not yet running.
@@ -172,7 +171,7 @@ impl Camera {
     }
 
     /// Install the sink used for photo-capture results.
-    pub fn set_capture_sink<F: Fn(CaptureResult) + Send + 'static>(&self, sink: F) {
+    pub fn set_capture_sink<F: Fn(crate::CaptureResult) + Send + 'static>(&self, sink: F) {
         if let Some(slot) = CAPTURE_SINK.get() {
             if let Ok(mut g) = slot.lock() {
                 *g = Box::new(sink);

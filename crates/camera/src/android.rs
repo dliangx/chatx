@@ -16,6 +16,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use crate::capture_grab;
 use crate::scan;
 use bridge::types::PixelFormat;
 
@@ -54,30 +55,32 @@ fn on_bridge_frame(bytes: &[u8], w: u32, h: u32, fmt: u32) {
     if !FRAME_SEEN.swap(true, Ordering::SeqCst) {
         eprintln!("[camera] android: first frame {}x{} fmt={} {}B", w, h, fmt, bytes.len());
     }
-    match PixelFormat::from_i32(fmt as i32) {
-        PixelFormat::Gray8 => {
-            // QR decode runs first — the preview sink sees the same bytes
-            // (so no extra copy), and the order lets QR win the CPU if the
-            // preview consumer is slow.
-            scan::scan_gray(bytes, w, h, &|text| notify(text));
-            notify_frame(bytes, w, h, PixelFormat::Gray8.as_i32() as u32);
+    // Reduce every frame to the grey Y-plane the QR decoder, preview sink,
+    // and still-capture grabber all consume. GRAY8 is already that plane
+    // (no copy); RGB565 is converted to an owned buffer.
+    let gray: std::borrow::Cow<'_, [u8]> = match PixelFormat::from_i32(fmt as i32) {
+        PixelFormat::Gray8 => std::borrow::Cow::Borrowed(bytes),
+        PixelFormat::Rgb565 => match rgb565_to_greyscale(bytes, w, h) {
+            Some(v) => std::borrow::Cow::Owned(v),
+            None => return,
+        },
+        _ => {
+            eprintln!(
+                "[camera] android: unsupported pixel format {} ({}x{} {}B) — dropped",
+                fmt, w, h, bytes.len()
+            );
+            return;
         }
-        // Legacy Camera1 (RGB_565) path. Kept so old builds keep working
-        // during the Camera2 migration.
-        PixelFormat::Rgb565 => {
-            let Some(gray) = rgb565_to_greyscale(bytes, w, h) else {
-                return;
-            };
-            scan::scan_gray(&gray, w, h, &|text| notify(text));
-            notify_frame(&gray, w, h, PixelFormat::Gray8.as_i32() as u32);
-        }
-        // All other formats (NV12, I420, RGBA8888...) not yet supported in
-        // this build. We could add a Y-plane extractor per format here, but
-        // the shell contract today is: *either* send GRAY8 with a Y-plane
-        // payload, *or* keep the legacy RGB565. Adding more means more
-        // per-format code on the Rust side — punt until a real need.
-        _ => eprintln!("[camera] android: unsupported pixel format {} ({}x{} {}B) — dropped", fmt, w, h, bytes.len()),
-    }
+    };
+    let g = gray.as_ref();
+
+    // QR decode first (gives the decoder priority over the preview copy if
+    // the consumer is slow), then the preview sink (GRAY8 — Slint
+    // `make_preview_image` decodes it), then the still-capture grabber
+    // (saves this frame if a capture is armed).
+    scan::scan_gray(g, w, h, &|text| notify(text));
+    notify_frame(g, w, h, PixelFormat::Gray8.as_i32() as u32);
+    capture_grab::grab(g, w, h);
 }
 
 /// `bytes` is a `w*h` u16-le (MSB-high) RGB565 stream. Produce `w*h` Y8.
@@ -154,6 +157,20 @@ impl Camera {
         bridge::set_camera_consumer(Box::new(on_bridge_frame));
         self.attached = true;
         Ok(())
+    }
+
+    /// Install the sink used for photo-capture results. A "capture" saves the
+    /// *next* preview frame as a JPEG and fires the sink with the on-disk
+    /// path (or an error). Shared with the desktop implementation via
+    /// [`crate::capture_grab`].
+    pub fn set_capture_sink<F: Fn(crate::CaptureResult) + Send + 'static>(&self, sink: F) {
+        capture_grab::set_sink(sink);
+    }
+
+    /// Trigger a still-photo capture. The next preview frame is saved and the
+    /// path delivered to the sink installed via [`Camera::set_capture_sink`].
+    pub fn capture(&mut self) -> Result<(), String> {
+        capture_grab::arm(self.is_running())
     }
 
     /// Detach our QR sink (other consumers, e.g. audio, keep working).

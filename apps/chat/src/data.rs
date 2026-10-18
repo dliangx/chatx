@@ -71,6 +71,9 @@ pub struct DiscoverRow {
     pub author: String,
     pub likes: i64,
     pub liked: bool,
+    /// First media file path (cover) for the discover card. Empty when the
+    /// post has no media.
+    pub cover: String,
 }
 
 #[derive(Debug, Clone)]
@@ -91,16 +94,11 @@ pub struct DataBackend {
     pub contacts: Vec<ContactRow>,
     pub friend_requests: Vec<FriendRequestData>,
     pub discover: Vec<DiscoverRow>,
-    /// Posts I have liked or commented on ("我的收藏").
-    pub my_collect: Vec<DiscoverRow>,
-    /// Posts I have authored/published ("我发布的").
-    pub my_share: Vec<DiscoverRow>,
     /// My personal notes ("我的笔记"), newest first.
     pub notes: Vec<NoteRowData>,
     chat_key_to_id: HashMap<i32, String>,
     contact_key_to_id: HashMap<i32, i64>,
-    /// Shared key <-> post_id maps so one post is one row key across all feed lists
-    /// (discover / my_collect / my_share reference the same post by the same key).
+    /// Shared key <-> post_id maps so one post is one row key across all feed lists.
     key_to_post: HashMap<i32, i64>,
     post_to_key: HashMap<i64, i32>,
     /// Stable key <-> note id maps (UI keys are 32-bit, note ids are 64-bit).
@@ -169,7 +167,7 @@ impl DataBackend {
     /// Returns the new liked state + count of the first row touched.
     pub fn toggle_like(&mut self, key: i32) -> (bool, i64) {
         let mut result = (false, 0);
-        for row in self.discover.iter_mut().chain(self.my_collect.iter_mut()).chain(self.my_share.iter_mut()) {
+        for row in self.discover.iter_mut() {
             if row.key == key {
                 row.liked = !row.liked;
                 row.likes += if row.liked { 1 } else { -1 };
@@ -437,39 +435,30 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
                 .unwrap_or_else(|| p.author_username.unwrap_or_default()),
             likes: p.like_count,
             liked: p.i_liked,
+            cover: first_media(&p.media_urls),
         });
     }
 
-    // ---- my collection (liked or commented) ----
-    let collected = sqlite::joins::posts_liked_or_commented_by(pool, me_id, 200, 0).await?;
-    for p in collected {
-        let key = b.key_for_post(p.id);
-        b.my_collect.push(DiscoverRow {
-            key,
-            post_id: p.id,
-            title: p.content.unwrap_or_default(),
-            author: p.author_nickname
-                .unwrap_or_else(|| p.author_username.unwrap_or_default()),
-            likes: p.like_count,
-            liked: p.i_liked,
-        });
-    }
-
-    // ---- my published (authored) ----
-    let published = sqlite::joins::author_feed(pool, me_id, 200, 0).await?;
-    for p in published {
-        let key = b.key_for_post(p.id);
-        b.my_share.push(DiscoverRow {
-            key,
-            post_id: p.id,
-            title: p.content.unwrap_or_default(),
-            author: p.author_nickname
-                .unwrap_or_else(|| p.author_username.unwrap_or_default()),
-            likes: p.like_count,
-            liked: p.i_liked,
-        });
-    }
     Ok((b, my_nickname))
+}
+
+/// First non-empty file path from a stored `media_urls` column (JSON array or
+/// bare path), for the discover card cover. Empty string when the post has
+/// no media.
+pub fn first_media(media_urls: &Option<String>) -> String {
+    let Some(s) = media_urls.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+        return String::new();
+    };
+    if let Ok(v) = serde_json::from_str::<Vec<String>>(s) {
+        if let Some(first) = v.into_iter().find(|x| !x.trim().is_empty()) {
+            return first;
+        }
+        return String::new();
+    }
+    if !s.starts_with('[') {
+        return s.to_string();
+    }
+    String::new()
 }
 
 pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, chat_id: &str) -> anyhow::Result<bool> {
@@ -676,6 +665,7 @@ mod tests {
             author: "a".into(),
             likes: 3,
             liked: false,
+            cover: String::new(),
         });
         let (liked, likes) = b.toggle_like(key);
         assert!(liked);
@@ -686,7 +676,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_populates_all_three_lists() {
+    async fn load_populates_discover() {
         let pool = sqlite::open_memory().await.unwrap();
         let me = "me";
         // seed a friend + a post

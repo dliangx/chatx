@@ -1,0 +1,168 @@
+import { GlobalOverlayType, AppState } from "../components/app_state.slint";
+import { Icon, Glyph } from "../components/icon.slint";
+import { MomentState } from "../discovery/moment.slint";
+
+/// Live camera state for the "share a moment" photo flow. Driven by Rust:
+/// - `start()` — opens the capture device + pumps preview frames.
+/// - `capture()` — grabs a still; on success the photo is appended to
+///   `MomentState.media` (so it shows up in the publish page) and the
+///   camera overlay can be dismissed via `close()`.
+/// - `close()` — stops the camera + dismisses the overlay + clears the draft
+///   (`MomentState` resets so a 取消 here doesn't leak into the next open).
+///
+/// `captured` is the last saved still path (informational; the actual list
+/// lives on `MomentState.media`).
+export global CameraState {
+    in property <image> preview;
+    in property <string> status: "";
+    in property <bool> capturing: false;
+    in property <string> last-captured: "";
+
+    callback start();
+    callback capture();
+    callback close();
+    callback finish();
+}
+
+export component CameraView inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: #000000;
+    clip: true;
+
+    in-out property <bool> bootstrapped: false;
+
+    // Fire once per component mount: `running` defaults to true, but the
+    // `!root.bootstrapped` gate immediately stops it on the first trigger
+    // (same pattern as the long-press Timer in `my_note.slint`). `CameraState
+    // .start` is idempotent on the Rust side, so this is doubly-safe.
+    Timer {
+        interval: 1ms;
+        running: !root.bootstrapped;
+        triggered => {
+            root.bootstrapped = true;
+            CameraState.start();
+        }
+    }
+
+    // Live camera preview (black background doubles as the "no camera" or
+    // error state — the top status line carries the message).
+    Image {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        source: CameraState.preview;
+        image-fit: cover;
+    }
+
+    // Top bar: cancel (left) + title + status.
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: 56px;
+        background: #00000055;
+
+        Rectangle {
+            x: 12px;
+            y: 12px;
+            width: 40px;
+            height: 40px;
+            border-radius: 20px;
+            background: #ffffff2a;
+
+            Icon {
+                x: (parent.width - self.size) / 2;
+                y: (parent.height - self.size) / 2;
+                glyph: Glyph.close-circle;
+                size: 20px;
+                tint: #ffffff;
+            }
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => { CameraState.close(); }
+            }
+        }
+
+        Text {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            text: CameraState.status != ""
+                ? CameraState.status
+                : (CameraState.capturing ? "拍照中…" : "拍照");
+            font-size: 17px;
+            font-weight: 600;
+            color: #ffffff;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        // 完成 (right) — closes the overlay + pushes the publish page. Only
+        // enabled when at least one photo has been captured.
+        Rectangle {
+            x: parent.width - 52px;
+            y: 12px;
+            width: 40px;
+            height: 40px;
+            border-radius: 20px;
+            background: MomentState.media.length > 0 ? #09bb07 : #ffffff2a;
+
+            Icon {
+                x: (parent.width - self.size) / 2;
+                y: (parent.height - self.size) / 2;
+                glyph: Glyph.finish;
+                size: 20px;
+                tint: #ffffff;
+            }
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => {
+                    if MomentState.media.length > 0 {
+                        CameraState.finish();
+                    }
+                }
+            }
+        }
+    }
+
+    // Bottom control bar: capture (center).
+    Rectangle {
+        x: 0px;
+        y: parent.height - 110px;
+        width: parent.width;
+        height: 110px;
+        background: #00000055;
+
+        Rectangle {
+
+            x: (parent.width - 76px) / 2;
+            y: (parent.height - 76px) / 2;
+            width: 76px;
+            height: 76px;
+            border-radius: 38px;
+            background: CameraState.capturing ? #7d54cd : #09bb07;
+
+            Icon {
+                x: (parent.width - self.size) / 2;
+                y: (parent.height - self.size) / 2;
+                glyph: Glyph.picture;
+                size: 30px;
+                tint: #ffffff;
+            }
+        }
+
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { if !CameraState.capturing { CameraState.capture(); } }
+        }
+    }
+}

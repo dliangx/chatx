@@ -18,8 +18,23 @@
 //!
 //! Anything else (e.g. wasm) gets a no-op [`Camera`] whose `start()` reports
 //! "unsupported" (`fallback.rs`).
+//!
+//! Every target also exposes `set_capture_sink` + `capture`, used by the
+//! "share a moment" photo flow: `capture` grabs a still and delivers the
+//! saved on-disk path (or an error) to the sink installed earlier.
+//!
+//! All targets also expose the photo-album picker (`set_photos_sink` +
+//! `pick_photos` + `cancel`) for the "分析此刻" page — see `album.rs`.
 
 #![allow(deprecated, non_snake_case, unsafe_op_in_unsafe_fn)]
+
+/// Outcome of a still-photo [`Camera::capture`]: either the saved file path or
+/// an error message.
+pub type CaptureResult = Result<String, String>;
+
+pub mod album;
+#[allow(dead_code)]
+mod capture_grab;
 
 #[cfg(any(
     target_os = "windows",
