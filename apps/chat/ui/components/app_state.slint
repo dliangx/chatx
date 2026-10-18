@@ -159,6 +159,12 @@ export global AppState {
     in property <[ContactRow]> contacts: [];
     in property <[LetterEntry]> contact-letters: [];
     in property <[DiscoverCard]> discover: [];
+    // How many discover rows are currently published to the view (pagination).
+    // Starts at the initial page; the discover view bumps this in batches of 2
+    // as the user scrolls toward the bottom, until all rows are shown.
+    in-out property <int> discover-shown: 8;
+    in-out property <bool> discover-has-more: false;
+    callback discover-load-more();
     in property <[NoteRow]> my_notes: [];
     in-out property <int> my-notes-content-h: 0;
     in-out property <int> my-notes-w: 0;

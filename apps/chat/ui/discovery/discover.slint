@@ -36,13 +36,26 @@ export component DiscoverView inherits Rectangle {
         color: Theme.fg-muted;
     }
 
-    Flickable {
+    fk := Flickable {
         x: 0px;
         y: 48px;
         width: parent.width;
         height: parent.height - 48px - (AppState.is-mobile ? 58px : 0px);
         content-height: root.viewport-h;
         interactive: true;
+
+        // 触底懒加载：距底部不足一张卡片高度时，把下一批帖子纳入显示范围，
+        // 直到全部加载完。未显示的帖子不解码封面，省内存。
+        Timer {
+            interval: 60ms;
+            running: AppState.discover-has-more
+                && fk.interactive
+                && fk.content-height > fk.height
+                && (fk.content-height - fk.height - fk.content-y) < root.card-h;
+            triggered => {
+                AppState.discover-load-more();
+            }
+        }
 
         for card[i] in root.cards: CardView {
             x: root.gap + (root.col-w + root.gap) * Math.mod(i, root.n-cols);

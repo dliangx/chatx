@@ -338,6 +338,13 @@ pub fn run_app() {
 
     {
         let weak = weak.clone();
+        ui.global::<AppState>().on_discover_load_more(move || {
+            discover_load_more(weak.clone());
+        });
+    }
+
+    {
+        let weak = weak.clone();
         ui.global::<NoteState>().on_note_saved(move |text| {
             save_my_note(weak.clone(), text.to_string());
         });
@@ -1105,6 +1112,7 @@ fn apply_result(
                                     state.set_peer_id(SharedString::from(peer.clone()));
                                     state.set_qr_image(qr_image(&peer));
                                     state.set_nickname(SharedString::from(nickname));
+                                    state.set_discover_shown(DISCOVER_INITIAL);
                                     publish_to_views(&state, backend);
                                 }
                             });
@@ -1440,9 +1448,27 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
         .collect();
     state.set_friend_requests(slint::ModelRc::new(slint::VecModel::from(friend_requests)));
 
+    publish_discover(state, &backend);
+
+    state.set_data_status(SharedString::new());
+}
+
+/// 触底懒加载：初始只解码/展示 `DISCOVER_INITIAL` 条封面，滚到底部附近时再
+/// 把下一批 `DISCOVER_STEP` 条纳入可显示范围，直到全部加载完成。未进入显示
+/// 范围的帖子不做封面位图解码，避免一次性把整屏外的图都吃进内存。
+const DISCOVER_INITIAL: i32 = 8;
+const DISCOVER_STEP: i32 = 2;
+
+/// 发布当前已到达的区段(0..discover-shown)。列表行仍全部保留在 backend
+/// 里，只是没被解码成 `DiscoverCard` 的封面位图。
+fn publish_discover(state: &AppState, backend: &ArcBackend) {
+    let snapshot = backend.blocking_read();
+    let total = snapshot.discover.len() as i32;
+    let visible = state.get_discover_shown().clamp(0, total);
     let discover: Vec<DiscoverCard> = snapshot
         .discover
         .iter()
+        .take(visible.max(0) as usize)
         .map(|r| DiscoverCard {
             id: r.key,
             title: SharedString::from(r.title.clone()),
@@ -1453,8 +1479,25 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
         })
         .collect();
     state.set_discover(slint::ModelRc::new(slint::VecModel::from(discover)));
+    state.set_discover_shown(visible);
+    state.set_discover_has_more(visible < total);
+}
 
-    state.set_data_status(SharedString::new());
+/// discover 触底加载下一批。
+fn discover_load_more(weak: slint::Weak<MainWindow>) {
+    let backend = BACKEND.lock().unwrap().clone();
+    let Some(backend) = backend else {
+        return;
+    };
+    let Some(ui) = weak.upgrade() else {
+        return;
+    };
+    let st = ui.global::<AppState>();
+    if !st.get_discover_has_more() {
+        return;
+    }
+    st.set_discover_shown(st.get_discover_shown() + DISCOVER_STEP);
+    publish_discover(&st, &backend);
 }
 
 fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
