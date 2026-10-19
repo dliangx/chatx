@@ -58,8 +58,8 @@ export component MyNoteView inherits Rectangle {
             height: note.card-h * 1px;
             border-radius: 12px;
             border-width: 1px;
-            border-color: (card.show-del) ? #ff2442 : Theme.border;
-            background: #ffffff;
+            border-color: (card.show-del) ? Theme.like : Theme.border;
+            background: Theme.surface;
             clip: true;
 
             Text {
@@ -118,14 +118,14 @@ export component MyNoteView inherits Rectangle {
                 y: parent.height - 48px;
                 width: parent.width;
                 height: 48px;
-                background: #fbeaea;
+                background: Theme.danger-soft;
 
                 Icon {
                     x: (parent.width - 26px) / 2 - 16px;
                     y: (parent.height - 26px) / 2;
                     size: 26px;
                     glyph: Glyph.delete;
-                    tint: #e11d3a;
+                    tint: Theme.danger;
                 }
 
                 Text {
@@ -135,7 +135,7 @@ export component MyNoteView inherits Rectangle {
                     text: @tr("Delete");
                     font-size: 14px;
                     vertical-alignment: center;
-                    color: #e11d3a;
+                    color: Theme.danger;
                 }
 
                 TouchArea {

@@ -33,6 +33,8 @@ msgstr "追加招待"
 
 msgid "Add to contacts"
 msgstr "連絡先に追加"
+msgid "Dark mode"
+msgstr "ダークモード"
 
 msgid "Add via QR scan"
 msgstr "QRコードで追加"

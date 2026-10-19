@@ -33,6 +33,8 @@ msgstr "添加请求"
 
 msgid "Add to contacts"
 msgstr "添加到通讯录"
+msgid "Dark mode"
+msgstr "深色"
 
 msgid "Add via QR scan"
 msgstr "通过扫码添加"

@@ -29,7 +29,7 @@ export component ChatInputView inherits Rectangle {
         y: root.pad + 1px;
         width: root.field-w;
         height: parent.height - 2 * root.pad - 1px;
-        background: #ffffff;
+        background: Theme.surface;
         border-radius: (parent.height - 2 * root.pad - 1px) / 2;
         border-width: 1px;
         border-color: Theme.border;
@@ -66,7 +66,7 @@ export component ChatInputView inherits Rectangle {
         y: 10px;
         width: root.btn-w;
         height: parent.height - 20px;
-        background: #7d54cd;
+        background: Theme.brand;
         border-radius: (parent.height - 20px) / 2;
 
         Text {
@@ -74,8 +74,8 @@ export component ChatInputView inherits Rectangle {
             y: 0px;
             width: parent.width;
             height: parent.height;
-            text: @tr("Send");
-            color: #ffffff;
+        text: @tr("Send");
+        color: Theme.fg-on-accent;
             font-size: 15px;
             horizontal-alignment: center;
             vertical-alignment: center;

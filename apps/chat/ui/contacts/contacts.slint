@@ -15,7 +15,7 @@ component FriendRequestRowView inherits Rectangle {
     in property <string> time-label: "";
     width: 100%;
     height: 56px;
-    background: #f7f8fa;
+    background: Theme.surface-3;
 
     Rectangle {
         x: 0px;
@@ -31,7 +31,7 @@ component FriendRequestRowView inherits Rectangle {
         width: 32px;
         height: 32px;
         border-radius: 16px;
-        background: #dfe3ee;
+        background: Theme.surface-2;
 
         Text {
             x: 0px;
@@ -77,8 +77,8 @@ component FriendRequestRowView inherits Rectangle {
         height: 22px;
         border-radius: 11px;
         border-width: 1px;
-        border-color: #d5d8e4;
-        background: #ffffff;
+        border-color: Theme.border;
+        background: Theme.surface;
 
         Text {
             x: 0px;
@@ -131,7 +131,7 @@ component FriendRequestRowView inherits Rectangle {
         y: root.height;
         width: 100%;
         height: 1px;
-        background: #ececec;
+        background: Theme.border;
     }
 }
 
@@ -182,7 +182,7 @@ export component ContactListView inherits Rectangle {
         y: 180px;
         width: parent.width;
         text: @tr("No contacts yet. They'll appear here once added.");
-        color: #9aa0b4;
+        color: Theme.fg-muted;
         font-size: 14px;
         horizontal-alignment: center;
         wrap: word-wrap;

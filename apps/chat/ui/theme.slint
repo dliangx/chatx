@@ -1,9 +1,47 @@
 
 export global Theme {
-    in property <brush> fg: #333333;
-    in property <brush> fg-muted: #9aa0b4;
+    in-out property <bool> dark: false;
+
+    // Primary text. `fg` is default body text, `fg-muted` is secondary,
+    // `fg-strong` is emphasized titles/labels.
+    in property <brush> fg:         dark ? #e8eaed : #333333;
+    in property <brush> fg-muted:   dark ? #8b95a3 : #9aa0b4;
+    in property <brush> fg-strong:  dark ? #f7f8fa : #141821;
+    in property <brush> fg-on-accent: #ffffff;
+
+    // Brand palette. `brand` is the primary brand color and never flips with
+    // scheme. `brand-soft` / `brand-tint` are pale-lavender shades used both as
+    // brand-tinted surfaces AND as light text on brand; they stay light so they
+    // read on the purple `brand` in either scheme.
     in property <brush> brand: #7d54cd;
     in property <brush> brand-soft: #f1ebfa;
-    in property <brush> bg: #f5f5f5;
-    in property <brush> border: #ececec;
+    in property <brush> brand-tint: #d8ccf0;
+
+    // Surfaces. `bg` is the app-wide page background, `surface` is cards /
+    // input fields / bubbles (non-self), `surface-2` is secondary panels,
+    // `surface-3` is hover/pressed states inside cards.
+    in property <brush> bg:         dark ? #0f1014 : #f5f5f5;
+    in property <brush> surface:    dark ? #2e3340 : #ffffff;
+    in property <brush> surface-2:  dark ? #3c4250 : #f2f2f5;
+    in property <brush> surface-3:  dark ? #464c5c : #f7f8fa;
+    in property <brush> border:     dark ? #464c5c : #ececec;
+    in property <brush> separator:  dark ? #4a5160 : #e4e4e4;
+
+    // State accents.
+    in property <brush> success:      dark ? #4ea86b : #22c55e;
+    in property <brush> success-deep: dark ? #22c55e : #1a7f37;
+    in property <brush> danger:       dark ? #ef4444 : #e03131;
+    in property <brush> danger-deep:  dark ? #dc2626 : #c44e4e;
+    in property <brush> danger-soft:  dark ? #dc262633 : #fff2f0;
+    in property <brush> like:         dark ? #ff4d4f : #ff2442;
+    in property <brush> warning:      dark ? #f59e0b : #d97706;
+    in property <brush> warning-bg:   dark ? #3b2e1a : #fff3cd;
+    in property <brush> warning-fg:   dark ? #f5c451 : #8a6d3b;
+    in property <brush> info:         dark ? #60a5fa : #1d6feb;
+    in property <brush> disabled:     dark ? #4b5563 : #c9c9c9;
+    in property <brush> mute:         dark ? #626a75 : #a0aec0;
+
+    // Full-screen overlays (modals, scrims).
+    in property <brush> overlay:       dark ? #000000cc : #000000aa;
+    in property <brush> overlay-faint: dark ? #00000066 : #00000055;
 }

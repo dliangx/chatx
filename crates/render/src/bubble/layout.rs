@@ -38,8 +38,20 @@ pub fn layout_content(
     for seg in bubble.segments {
         match seg {
             Segment::Text(s) => items.push(RichItem::Text(Span { text: s, color: style.color })),
-            Segment::Mention(s) => items.push(RichItem::Text(Span { text: s, color: theme.mention_color })),
-            Segment::Link(s) => items.push(RichItem::Text(Span { text: s, color: theme.link_color })),
+            Segment::Mention(s) => items.push(RichItem::Text(Span {
+                text: s,
+                color: match bubble.side {
+                    crate::bubble::Side::SelfSide => theme.mention_self,
+                    crate::bubble::Side::Other => theme.mention_other,
+                },
+            })),
+            Segment::Link(s) => items.push(RichItem::Text(Span {
+                text: s,
+                color: match bubble.side {
+                    crate::bubble::Side::SelfSide => theme.link_self,
+                    crate::bubble::Side::Other => theme.link_other,
+                },
+            })),
             Segment::Emoji(c) => items.push(RichItem::Emoji(*c)),
             Segment::Image(_) => {}
         }

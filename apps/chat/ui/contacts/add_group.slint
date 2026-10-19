@@ -23,7 +23,7 @@ component CRow inherits Rectangle {
     in-out property <bool> checked: false;
     callback toggled(bool);
 
-    background: #ffffff;
+    background: Theme.surface;
 
     Rectangle {
         x: 12px;
@@ -31,7 +31,7 @@ component CRow inherits Rectangle {
         width: 36px;
         height: 36px;
         border-radius: 8px;
-        background: #e4e4e4;
+        background: Theme.surface-2;
 
         Image {
             source: root.image;
@@ -56,9 +56,9 @@ component CRow inherits Rectangle {
         width: 22px;
         height: 22px;
         border-radius: 6px;
-        background: root.checked ? Theme.brand : #ffffff;
+        background: root.checked ? Theme.brand : Theme.surface;
         border-width: 1px;
-        border-color: root.checked ? Theme.brand : #c9c9c9;
+        border-color: root.checked ? Theme.brand : Theme.disabled;
 
         if root.checked:
         Icon {
@@ -126,7 +126,7 @@ export component AddGroupView inherits Rectangle {
         y: 240px;
         width: parent.width;
         text: @tr("No contacts yet. Add some before creating a group.");
-        color: #9aa0b4;
+        color: Theme.fg-muted;
         font-size: 14px;
         horizontal-alignment: center;
         wrap: word-wrap;
@@ -139,7 +139,7 @@ export component AddGroupView inherits Rectangle {
         width: parent.width - 16px;
         height: 44px;
         border-radius: 8px;
-        background: #fff2f0;
+        background: Theme.danger-soft;
 
         Text {
             x: 8px;
@@ -148,7 +148,7 @@ export component AddGroupView inherits Rectangle {
             height: 100%;
             text: AppState.group-status;
             font-size: 13px;
-            color: #ff4d4f;
+            color: Theme.danger;
             vertical-alignment: center;
             wrap: word-wrap;
             overflow: elide;
@@ -189,7 +189,7 @@ export component AddGroupView inherits Rectangle {
         y: parent.height - 64px;
         width: 100%;
         height: 64px;
-        background: #ffffff;
+        background: Theme.surface;
 
         Rectangle {
             x: 0px;
@@ -216,7 +216,7 @@ export component AddGroupView inherits Rectangle {
             width: 120px;
             height: 32px;
             border-radius: 6px;
-            background: root.has-selection ? Theme.brand : #d8ccf0;
+            background: root.has-selection ? Theme.brand : Theme.brand-tint;
 
             Text {
                 x: 0px;

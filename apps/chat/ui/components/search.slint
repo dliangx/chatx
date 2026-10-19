@@ -11,7 +11,7 @@ export component SearchBar inherits HorizontalLayout {
         horizontal-stretch: 1;
         height: 32px;
         border-radius: 8px;
-        background: #e8e8e8;
+        background: Theme.surface-2;
 
         HorizontalLayout {
             width: 100%;
@@ -22,7 +22,7 @@ export component SearchBar inherits HorizontalLayout {
                 width: 32px;
                 height: 32px;
                 border-radius: 8px;
-                background: AppState.search-active ? Theme.brand : #e8e8e8;
+                background: AppState.search-active ? Theme.brand : Theme.surface-2;
 
                 Icon {
                     x: (parent.width - self.size) / 2;

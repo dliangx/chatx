@@ -94,7 +94,7 @@ export component DiscoverDetailView inherits Rectangle {
         width: parent.width;
         height: 20px;
         text: PostDetailState.status;
-        color: #6b7280;
+        color: Theme.fg-muted;
         font-size: 12px;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -164,7 +164,7 @@ export component DiscoverDetailView inherits Rectangle {
             y: root.like-y + 4px;
             size: 22px;
             glyph: Glyph.heart;
-            tint: PostDetailState.liked ? #ff2442 : Theme.fg-muted;
+            tint: PostDetailState.liked ? Theme.like : Theme.fg-muted;
         }
 
         Text {
@@ -208,7 +208,7 @@ export component DiscoverDetailView inherits Rectangle {
             font-size: 12px;
             vertical-alignment: center;
             overflow: elide;
-            color: #ff2442;
+            color: Theme.like;
         }
 
         Rectangle {
@@ -256,7 +256,7 @@ export component DiscoverDetailView inherits Rectangle {
                 width: 36px;
                 height: 36px;
                 border-radius: 18px;
-                background: c.is-mine ? Theme.brand : #a0aec0;
+                background: c.is-mine ? Theme.brand : Theme.mute;
             }
 
             Text {

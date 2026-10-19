@@ -33,6 +33,8 @@ msgstr "طلب إضافة"
 
 msgid "Add to contacts"
 msgstr "إضافة إلى جهات الاتصال"
+msgid "Dark mode"
+msgstr "الوضع الداكن"
 
 msgid "Add via QR scan"
 msgstr "الإضافة عبر مسح رمز QR"

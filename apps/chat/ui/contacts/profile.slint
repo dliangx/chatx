@@ -85,7 +85,7 @@ export component ContactProfileView inherits Rectangle {
                     height: 28px;
                     text: ProfileState.status;
                     font-size: 12px;
-                    color: #6b7280;
+                    color: Theme.fg-muted;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
@@ -114,7 +114,7 @@ export component ContactProfileView inherits Rectangle {
                         horizontal-stretch: 1;
                         text: ProfileState.created-at != "" ? @tr("Joined {}", ProfileState.created-at) : @tr("Join date not synced");
                         font-size: 13px;
-                        color: #6b7280;
+                        color: Theme.fg-muted;
                         vertical-alignment: center;
                         overflow: elide;
                     }
@@ -135,7 +135,7 @@ export component ContactProfileView inherits Rectangle {
                         text: @tr("Moment");
                         font-size: 13px;
                         font-weight: 600;
-                        color: #6b7280;
+                        color: Theme.fg-muted;
                         vertical-alignment: center;
                     }
                 }
@@ -152,7 +152,7 @@ export component ContactProfileView inherits Rectangle {
                         horizontal-stretch: 1;
                         text: ProfileState.moment-time + (ProfileState.moment-likes > 0 ? @tr(" · {} likes", ProfileState.moment-likes) : "");
                         font-size: 12px;
-                        color: #9aa0b4;
+                        color: Theme.fg-muted;
                         overflow: elide;
                     }
                     Text {
@@ -173,7 +173,7 @@ export component ContactProfileView inherits Rectangle {
                         horizontal-stretch: 1;
                         text: @tr("You haven't posted a moment yet");
                         font-size: 13px;
-                        color: #9aa0b4;
+                        color: Theme.fg-muted;
                         vertical-alignment: center;
                     }
                 }

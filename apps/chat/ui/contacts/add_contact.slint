@@ -33,7 +33,7 @@ component ResultRow inherits Rectangle {
         y: 100px;
         width: parent.width;
         height: 1px;
-        background: #ececec;
+        background: Theme.border;
     }
 
     Text {
@@ -90,7 +90,7 @@ export component AddContactView inherits Rectangle {
         width: parent.width - 32px;
         height: 40px;
         border-radius: 8px;
-        background: #e8e8e8;
+        background: Theme.surface-2;
 
         Icon {
             x: 10px;
@@ -137,7 +137,7 @@ export component AddContactView inherits Rectangle {
         width: parent.width - 32px;
         text: AppState.add-status;
         font-size: 13px;
-        color: #1a7f37;
+        color: Theme.success-deep;
     }
 
     Flickable {

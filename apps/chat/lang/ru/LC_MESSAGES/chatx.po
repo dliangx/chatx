@@ -33,6 +33,8 @@ msgstr "Запрос на добавление"
 
 msgid "Add to contacts"
 msgstr "Добавить в контакты"
+msgid "Dark mode"
+msgstr "Тёмная тема"
 
 msgid "Add via QR scan"
 msgstr "Добавить по QR-коду"

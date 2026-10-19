@@ -59,7 +59,10 @@ pub fn compute_frame(
 
     let time_style = TextStyle {
         font_size: theme.time_font_size,
-        color: theme.time_color,
+        color: match bubble.side {
+            Side::SelfSide => theme.time_self,
+            Side::Other => theme.time_other,
+        },
         line_height: theme.line_height,
     };
     let time_lines = layout_text(manager, bubble.time, &time_style, max_content_w);

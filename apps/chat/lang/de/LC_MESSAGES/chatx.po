@@ -33,6 +33,8 @@ msgstr "Hinzufügenanfrage"
 
 msgid "Add to contacts"
 msgstr "Zu Kontakten hinzufügen"
+msgid "Dark mode"
+msgstr "Dunkelmodus"
 
 msgid "Add via QR scan"
 msgstr "Per QR-Code hinzufügen"

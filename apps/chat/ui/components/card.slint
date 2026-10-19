@@ -25,7 +25,7 @@ export component CardView inherits Rectangle {
             width: root.width;
             height: root.cover-h;
             border-radius: 8px;
-            background: #f2f2f5;
+            background: Theme.surface-2;
             Image {
                 width: root.width;
                 height: root.cover-h;
@@ -61,7 +61,7 @@ export component CardView inherits Rectangle {
                 width: 16px;
                 height: 16px;
                 border-radius: 8px;
-                background: #a0aec0;
+                background: Theme.mute;
             }
 
             Text {
@@ -83,7 +83,7 @@ export component CardView inherits Rectangle {
                 font-size: 12px;
                 horizontal-alignment: right;
                 vertical-alignment: center;
-                color: root.is-liked ? #ff2442 : Theme.fg-muted;
+                color: root.is-liked ? Theme.like : Theme.fg-muted;
             }
 
             Icon {
@@ -91,7 +91,7 @@ export component CardView inherits Rectangle {
                 y: (parent.height - 18px) / 2;
                 size: 18px;
                 glyph: Glyph.heart;
-                tint: root.is-liked ? #ff2442 : #d9d9de;
+                tint: root.is-liked ? Theme.like : Theme.fg-muted;
                 TouchArea {
                     width: 100%;
                     height: 100%;

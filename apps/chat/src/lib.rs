@@ -73,6 +73,35 @@ fn current_me() -> String {
     CURRENT_ME.read().unwrap().clone()
 }
 
+/// Read the persisted light/dark theme (stored in the `settings` table) before
+/// login. `apply_result` — where login side-effects kick in — runs after the
+/// auth screen is already visible, so this restores the saved scheme early
+/// enough for the auth screen to render in it. The DB lives at
+/// `~/.config/chatx/<profile>/messages.db`. `None` means "no DB / no value".
+async fn load_persisted_theme() -> Option<bool> {
+    let base = chatx_core::identity::DeviceIdentity::home_dir();
+    let profile = profile().trim().to_lowercase();
+    let dir = if profile.is_empty() {
+        base.clone()
+    } else {
+        base.join(profile)
+    };
+    let path = dir.join("messages.db");
+    if !path.exists() {
+        return None;
+    }
+    let url = format!("sqlite:{}?mode=ro", path.display());
+    let Ok(pool) = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+    else {
+        return None;
+    };
+    let v = sqlite::settings::get(&pool, "theme").await.ok().flatten()?;
+    Some(v == "dark")
+}
+
 static CURRENT_CHAT: std::sync::LazyLock<std::sync::RwLock<Option<String>>> =
     std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
 
@@ -138,6 +167,31 @@ pub fn run_app() {
     // Default language is English. Bundled translations become active once a
     // component exists (created above), so we can select the initial language now.
     let _ = slint::select_bundled_translation(&state.get_lang());
+
+    // Restore the persisted light/dark theme before the login block runs.
+    // `apply_result` (called from the login flow below) is too late — the
+    // auth screen is already visible by then. Reading is async so we spawn a
+    // task; the UI call hops onto the event-loop thread via `invoke_from_event_loop`.
+    {
+        let w2 = weak.clone();
+        runtime().spawn(async move {
+            let Some(dark) = load_persisted_theme().await else {
+                return;
+            };
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w2.upgrade() {
+                    ui.global::<Theme>().set_dark(dark);
+                }
+                if let Some(r) = RENDERER.get() {
+                    r.lock().unwrap().set_theme(if dark {
+                        render::theme::Theme::dark()
+                    } else {
+                        render::theme::Theme::default()
+                    });
+                }
+            });
+        });
+    }
 
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
@@ -366,6 +420,52 @@ pub fn run_app() {
             });
         }
     });
+
+    {
+        let weak = weak.clone();
+        ui.global::<AppState>().on_toggle_theme(move |dark| {
+            // 1) Flip the Slint theme global — every `Theme.*` in the UI is a
+            //    computed brush tied to `Theme.dark`, so the whole tree re-tints
+            //    reactively.
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<Theme>().set_dark(dark);
+            }
+
+            // 2) Update the Rust-side chat renderer so future bubble draws use
+            //    the new palette (theme_version bump also invalidates the cache).
+            {
+                let theme = if dark {
+                    render::theme::Theme::dark()
+                } else {
+                    render::theme::Theme::default()
+                };
+                if let Some(r) = RENDERER.get() {
+                    r.lock().unwrap().set_theme(theme);
+                }
+            }
+
+            // 3) Re-render the currently-viewed chat (if any) so the already-
+            //    baked bubble images in the list pick up the new palette without
+            //    the user having to leave and re-enter the chat.
+            if let Some(ui) = weak.upgrade() {
+                let active = ui.global::<AppState>().get_current_chat_peer_key();
+                if active >= 0 {
+                    load_chat_messages(ui.as_weak(), active);
+                }
+            }
+
+            // 4) Persist for the next launch (read back from the `settings` table
+            //    on startup, mirroring how `lang` is handled).
+            let pool = POOL.lock().unwrap().clone();
+            if let Some(pool) = pool {
+                runtime().spawn(async move {
+                    let v = if dark { "dark" } else { "light" };
+                    let _ = sqlite::settings::set(&pool, "theme", v).await;
+                });
+            }
+        });
+    }
+
 
     {
         let weak = weak.clone();
@@ -1140,6 +1240,30 @@ fn apply_result(
                                 ui.global::<AppState>().set_lang(SharedString::from(lang2.clone()));
                             }
                             slint::update_all_translations();
+                        });
+                    });
+                }
+                // Restore the persisted theme (light/dark). Applied on the
+                // event-loop thread alongside the Slint global + Rust renderer.
+                {
+                    let theme_pool = pool.clone();
+                    let theme_weak = weak.clone();
+                    runtime().spawn(async move {
+                        let Some(theme) = sqlite::settings::get(&theme_pool, "theme").await.ok().flatten() else {
+                            return;
+                        };
+                        let dark = theme == "dark";
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = theme_weak.upgrade() {
+                                ui.global::<Theme>().set_dark(dark);
+                            }
+                            if let Some(r) = RENDERER.get() {
+                                r.lock().unwrap().set_theme(if dark {
+                                    render::theme::Theme::dark()
+                                } else {
+                                    render::theme::Theme::default()
+                                });
+                            }
                         });
                     });
                 }

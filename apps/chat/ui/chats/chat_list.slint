@@ -27,7 +27,7 @@ export component ChatListView inherits Rectangle {
         width: parent.width;
         height: 26px;
         text: root.status;
-        color: #6b7280;
+        color: Theme.fg-muted;
         font-size: 12px;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -38,7 +38,7 @@ export component ChatListView inherits Rectangle {
         y: 180px;
         width: parent.width;
         text: @tr("No conversations yet. Messages will appear here.");
-        color: #9aa0b4;
+        color: Theme.fg-muted;
         font-size: 14px;
         horizontal-alignment: center;
         wrap: word-wrap;
