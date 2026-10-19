@@ -466,7 +466,6 @@ pub fn run_app() {
         });
     }
 
-
     {
         let weak = weak.clone();
         ui.global::<NoteState>().on_note_saved(move |text| {
@@ -815,6 +814,13 @@ pub fn run_app() {
     }
     {
         let weak = weak.clone();
+        ui.global::<PostDetailState>()
+            .on_request_relayout(move |key, w| {
+                relayout_post_detail(weak.clone(), key, w as i32);
+            });
+    }
+    {
+        let weak = weak.clone();
         ui.global::<PostDetailState>().on_toggle_like(move |key| {
             toggle_detail_like(weak.clone(), key);
         });
@@ -830,7 +836,6 @@ pub fn run_app() {
                 add_post_comment(weak.clone(), key, b);
             });
     }
-
     // ── install the album-photo sink (shared with all picker callbacks) ────
     {
         camera::album::set_photos_sink(move |paths: Vec<String>| {
@@ -1227,7 +1232,11 @@ fn apply_result(
                     let lang_pool = pool.clone();
                     let lang_weak = weak.clone();
                     runtime().spawn(async move {
-                        let Some(lang) = sqlite::settings::get(&lang_pool, "lang").await.ok().flatten() else {
+                        let Some(lang) = sqlite::settings::get(&lang_pool, "lang")
+                            .await
+                            .ok()
+                            .flatten()
+                        else {
                             return;
                         };
                         if lang.is_empty() {
@@ -1237,7 +1246,8 @@ fn apply_result(
                         let _ = slint::invoke_from_event_loop(move || {
                             let _ = slint::select_bundled_translation(&lang2);
                             if let Some(ui) = lang_weak.upgrade() {
-                                ui.global::<AppState>().set_lang(SharedString::from(lang2.clone()));
+                                ui.global::<AppState>()
+                                    .set_lang(SharedString::from(lang2.clone()));
                             }
                             slint::update_all_translations();
                         });
@@ -1249,7 +1259,11 @@ fn apply_result(
                     let theme_pool = pool.clone();
                     let theme_weak = weak.clone();
                     runtime().spawn(async move {
-                        let Some(theme) = sqlite::settings::get(&theme_pool, "theme").await.ok().flatten() else {
+                        let Some(theme) = sqlite::settings::get(&theme_pool, "theme")
+                            .await
+                            .ok()
+                            .flatten()
+                        else {
                             return;
                         };
                         let dark = theme == "dark";
@@ -1489,7 +1503,9 @@ async fn handle_inbound_friendq(weak: slint::Weak<MainWindow>, from_peer: &str, 
                     if let Some(ui) = weak.upgrade() {
                         let state = ui.global::<AppState>();
                         publish_to_views(&state, backend.clone());
-                        state.set_notice_text(SharedString::from("The other party declined your add request"));
+                        state.set_notice_text(SharedString::from(
+                            "The other party declined your add request",
+                        ));
                     }
                 });
             }
@@ -1863,7 +1879,9 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak.upgrade() {
                         ui.global::<ChatSession>()
-                            .set_send_status(SharedString::from(format!("Failed to load messages: {e}")));
+                            .set_send_status(SharedString::from(format!(
+                                "Failed to load messages: {e}"
+                            )));
                     }
                 });
                 return;
@@ -2159,19 +2177,57 @@ fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
     }
 }
 
+/// Count how many lines a piece of text occupies when word-wrapped in a column
+/// of width `inner_px` at `font_px`. Full-width (CJK / fullwidth-forms) code
+/// points cost 1 unit; everything else 0.6. A unit == one font-size, so
+/// `inner_px / font_px` is the units a single line holds. An explicit `\n`
+/// always starts a new line. Returns >= 1.
+///
+/// Shared by the my-note cards and the discover detail (post body + comments)
+/// so both use the same wrap model and rendered text fits its box.
+fn wrap_lines(text: &str, inner_px: f64, font_px: f64) -> i32 {
+    if inner_px <= 0.0 || font_px <= 0.0 {
+        return 1;
+    }
+    let units_per_line = inner_px / font_px;
+    let mut total: i32 = 0;
+    let mut cur: f64 = 0.0;
+    for ch in text.chars() {
+        if ch == '\n' {
+            total += if cur > 0.0 {
+                (cur / units_per_line).ceil() as i32
+            } else {
+                1
+            };
+            cur = 0.0;
+        } else {
+            let c = ch as u32;
+            let full = (0x1100..=0x11FF).contains(&c)
+                || (0x2E80..=0x9FFF).contains(&c)
+                || (0xAC00..=0xD7FF).contains(&c)
+                || (0xFF00..=0xFFEF).contains(&c);
+            cur += if full { 1.0 } else { 0.6 };
+        }
+    }
+    if cur > 0.0 {
+        total += (cur / units_per_line).ceil() as i32;
+    }
+    total.max(1)
+}
+
 fn layout_my_notes(
     notes: &[data::NoteRowData],
     container_w: i32,
     is_mobile: bool,
 ) -> (Vec<NoteRow>, i32) {
     const GAP: i32 = 8;
-    const MIN_CARD_H: i32 = 132;
+    const MIN_CARD_H: i32 = 136;
     const FONT_SIZE: i32 = 15;
-    const LINE_H: i32 = 18;
+    const LINE_H: i32 = 21;
     const PAD_X: i32 = 28;
-    const PAD_TOP: i32 = 12;
-    const LABEL_H: i32 = 24;
-    const PAD_BOTTOM: i32 = 12;
+    const PAD_TOP: i32 = 14;
+    const LABEL_H: i32 = 26;
+    const PAD_BOTTOM: i32 = 14;
 
     let n_cols = if is_mobile { 1 } else { 2 } as usize;
     let card_w = if n_cols > 1 {
@@ -2185,23 +2241,8 @@ fn layout_my_notes(
     let mut rows: Vec<NoteRow> = Vec::with_capacity(notes.len());
     let mut content_h = 0i32;
 
-    let units_per_line = inner_w as f64 / FONT_SIZE as f64;
-
     for n in notes {
-        let mut units: f64 = 0.0;
-        for ch in n.content.chars() {
-            let full = (ch as u32) >= 0x1100
-                && ((ch as u32 <= 0x11FF)
-                    || (0x2E80..=0x9FFF).contains(&(ch as u32))
-                    || (0xAC00..=0xD7FF).contains(&(ch as u32))
-                    || (0xFF00..=0xFFEF).contains(&(ch as u32)));
-            units += if full { 1.0 } else { 0.6 };
-        }
-        let lines = if units_per_line > 0.0 {
-            (units / units_per_line).ceil() as i32
-        } else {
-            1
-        };
+        let lines = wrap_lines(&n.content, inner_w as f64, FONT_SIZE as f64);
         let card_h = (PAD_TOP + lines * LINE_H + LABEL_H + PAD_BOTTOM).max(MIN_CARD_H);
 
         let mut c = 0;
@@ -2632,7 +2673,10 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
     let pool = POOL.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
     let (Some(pool), Some(backend)) = (pool, backend) else {
-        set_moment_status(weak.clone(), "Not signed in or backend not ready".to_string());
+        set_moment_status(
+            weak.clone(),
+            "Not signed in or backend not ready".to_string(),
+        );
         return;
     };
     let me = current_me();
@@ -3133,8 +3177,9 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
     if peer_id.is_empty() {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
-                ui.global::<AppState>()
-                    .set_add_status(SharedString::from("Cannot fetch the other party's device info"));
+                ui.global::<AppState>().set_add_status(SharedString::from(
+                    "Cannot fetch the other party's device info",
+                ));
             }
         });
         return;
@@ -3171,7 +3216,9 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
             if let Some(ui) = weak.upgrade() {
                 let state = ui.global::<AppState>();
                 publish_to_views(&state, backend.clone());
-                state.set_add_status(SharedString::from("Request sent. Waiting for the other party to approve."));
+                state.set_add_status(SharedString::from(
+                    "Request sent. Waiting for the other party to approve.",
+                ));
             }
         });
     });
@@ -3581,7 +3628,10 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
     let (Some(client), Some(backend)) = (client, backend) else {
         eprintln!("[audio.call] begin_voice_call: CLIENT or BACKEND not ready — abort");
         publish_call_state(weak.clone(), None, None, false);
-        show_app_error(weak, String::from("Cannot start a call: not signed in or backend not ready"));
+        show_app_error(
+            weak,
+            String::from("Cannot start a call: not signed in or backend not ready"),
+        );
         return;
     };
     let client = Arc::new(client);
@@ -3590,7 +3640,10 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
         let g = backend.blocking_read();
         let Some(pid) = g.peer_id_for(key).map(|s| s.to_string()) else {
             eprintln!("[audio.call] begin_voice_call: no peer_id for key={key} — abort");
-            show_app_error(weak, format!("Contact is invalid (key={key}); cannot start a call"));
+            show_app_error(
+                weak,
+                format!("Contact is invalid (key={key}); cannot start a call"),
+            );
             return;
         };
         let name = g
@@ -4080,7 +4133,11 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
     let (Some(backend), Some(pool)) = (backend, pool) else {
-        publish_profile_status(weak, key, SharedString::from("Not signed in or backend not ready"));
+        publish_profile_status(
+            weak,
+            key,
+            SharedString::from("Not signed in or backend not ready"),
+        );
         return;
     };
     let Some(user_id) = backend.blocking_read().contact_id_for(key) else {
@@ -4104,7 +4161,11 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
             Ok(Some(u)) => u,
             Ok(None) => {
                 if PROFILE_LATEST.load(std::sync::atomic::Ordering::SeqCst) == seq {
-                    publish_profile_status(weak2, my_key, SharedString::from("This user is not synced on this device"));
+                    publish_profile_status(
+                        weak2,
+                        my_key,
+                        SharedString::from("This user is not synced on this device"),
+                    );
                 }
                 return;
             }
@@ -4201,7 +4262,10 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
         return;
     };
     if c.peer_id.is_empty() {
-        show_app_error(weak, format!("Contact has no peer id; cannot start a conversation"));
+        show_app_error(
+            weak,
+            format!("Contact has no peer id; cannot start a conversation"),
+        );
         return;
     }
     let peer_id = c.peer_id;
@@ -4338,11 +4402,74 @@ fn parse_media_urls(s: &str) -> Vec<String> {
     Vec::new()
 }
 
+/// Comment-cell metrics (in px) — must match the Slint in
+/// `discover_detail.slint`: avatar+name header row, then the body `Text`
+/// (font 14, wrapped) below it.
+const COMMENT_HDR_H: i32 = 46; // top pad (8) + header row (30) + gap (8) → body starts at y=46
+const COMMENT_BOT_PAD: i32 = 8;
+const COMMENT_BODY_FONT: f64 = 14.0;
+const COMMENT_LINE_H: i32 = 20;
+const COMMENT_CELL_GAP: i32 = 8;
+
+/// Recompute each comment cell's absolute `y` / `h` and the surrounding block's
+/// `content-h` using `wrap_lines` — the same model as the `my_note` layout.
+/// A bare Flickable won't auto-measure `for`-loop children (slint #407), so the
+/// view binds these Rust-computed numbers instead. `w` is the view's current
+/// width in px, driving the wrap width of every cell's body.
+
+fn relayout_post_detail(weak: slint::Weak<MainWindow>, key: i32, w: i32) {
+    if w <= 0 {
+        return;
+    }
+
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let ps = ui.global::<PostDetailState>();
+        if ps.get_key() != key {
+            return;
+        }
+
+        let mut list: Vec<CommentRow> = {
+            use slint::Model;
+            let m = ps.get_comment_list();
+            (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+        };
+
+        // Outer VerticalLayout padding is 16px on each side; the body Text
+        // inside a cell is inset a further 16px, so the wrap width is:
+        let cell_w = w - 32;
+        let inner_w = (cell_w - 16).max(0) as f64;
+
+        let mut y = 0i32;
+        for c in list.iter_mut() {
+            let lines = wrap_lines(c.text.as_str(), inner_w, COMMENT_BODY_FONT) as i32;
+            let body_h = lines * COMMENT_LINE_H;
+            let h = (COMMENT_HDR_H + body_h + COMMENT_BOT_PAD).max(54);
+            c.y = y;
+            c.h = h;
+            y = y + h + COMMENT_CELL_GAP;
+        }
+
+        let content_h = if list.is_empty() {
+            0
+        } else {
+            y - COMMENT_CELL_GAP + COMMENT_BOT_PAD
+        };
+
+        ps.set_comment_list(slint::ModelRc::new(slint::VecModel::from(list)));
+        ps.set_content_h(content_h as f32);
+    });
+}
+
 fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
     let (Some(backend), Some(pool)) = (backend, pool) else {
-        publish_detail_status(weak, key, SharedString::from("Not signed in or backend not ready"));
+        publish_detail_status(
+            weak,
+            key,
+            SharedString::from("Not signed in or backend not ready"),
+        );
         return;
     };
     let Some(post_id) = detail_key_post(&backend, key) else {
@@ -4461,10 +4588,16 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
                     text: SharedString::from(c.content.clone()),
                     is_mine: me_id != 0 && c.author_id == me_id,
                     time_label: SharedString::from(fmt_time(c.created_at)),
+                    y: 0,
+                    h: 0,
                 })
                 .collect();
             ps.set_comment_list(slint::ModelRc::new(slint::VecModel::from(rows)));
             ps.set_status(SharedString::new());
+            // Kick off the comment-block relayout (computes per-cell `y`/`h` and
+            // `content-h`) using the current window width.
+            let w = ui.global::<AppState>().get_xp() as i32;
+            relayout_post_detail(weak2.clone(), key, w);
         });
     });
 }
@@ -4473,7 +4606,11 @@ fn toggle_detail_like(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
     let (Some(backend), Some(pool)) = (backend, pool) else {
-        publish_detail_status(weak, key, SharedString::from("Not signed in or backend not ready"));
+        publish_detail_status(
+            weak,
+            key,
+            SharedString::from("Not signed in or backend not ready"),
+        );
         return;
     };
     let post_id = detail_key_post(&backend, key);
@@ -4501,7 +4638,11 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
     let (Some(backend), Some(pool)) = (backend, pool) else {
-        publish_detail_status(weak, key, SharedString::from("Not signed in or backend not ready"));
+        publish_detail_status(
+            weak,
+            key,
+            SharedString::from("Not signed in or backend not ready"),
+        );
         return;
     };
     let Some(post_id) = detail_key_post(&backend, key) else {
@@ -4554,15 +4695,25 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                         text: SharedString::from(body),
                         is_mine: true,
                         time_label: SharedString::from("just now"),
+                        y: 0,
+                        h: 0,
                     };
                     list.insert(0, new);
                     ps.set_comment_list(slint::ModelRc::new(slint::VecModel::from(list)));
                     ps.set_comments((ps.get_comments() as i64 + 1) as i32);
                     ps.set_status(SharedString::new());
+                    // The list and its ordering changed — recompute `y`/`h` /
+                    // `content-h` so the new first comment is reachable too.
+                    let w = ui.global::<AppState>().get_xp() as i32;
+                    relayout_post_detail(weak.clone(), key, w);
                 });
             }
             Err(e) => {
-                publish_detail_status(weak, key, SharedString::from(format!("Comment failed: {e}")));
+                publish_detail_status(
+                    weak,
+                    key,
+                    SharedString::from(format!("Comment failed: {e}")),
+                );
             }
         }
     });
