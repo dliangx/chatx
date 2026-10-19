@@ -39,7 +39,7 @@ export component DiscoverDetailView inherits Rectangle {
     out property <length> input-h: 52px;
     out property <length> status-h: PostDetailState.status != "" ? 20px : 0px;
     out property <length> bottom: root.status-h + root.input-h;
-    out property <length> row-h: 64px;
+    out property <length> row-h: 78px;
     out property <length> like-by-h: PostDetailState.liked-by != "" ? 24px : 0px;
 
     // Image grid: same size + layout as the discover feed (2 cols, 4:3).
@@ -248,7 +248,7 @@ export component DiscoverDetailView inherits Rectangle {
             y: root.top-h + i * root.row-h;
             width: parent.width;
             height: root.row-h;
-            background: c.is-mine ? Theme.brand-soft : Colors.transparent;
+            background: c.is-mine ? Theme.surface : Colors.transparent;
 
             Rectangle {
                 x: 16px;
@@ -276,11 +276,12 @@ export component DiscoverDetailView inherits Rectangle {
                 x: 62px;
                 y: 26px;
                 width: parent.width - 70px;
-                height: 30px;
+                height: 44px;
                 text: c.text;
                 font-size: 14px;
                 wrap: word-wrap;
                 overflow: elide;
+                vertical-alignment: top;
                 color: Theme.fg;
             }
         }

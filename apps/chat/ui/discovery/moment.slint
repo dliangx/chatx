@@ -128,7 +128,7 @@ export component AddMomentView inherits Rectangle {
                         border-radius: 8px;
                         border-width: 1px;
                         border-color: Theme.border;
-                        background: Theme.brand-soft;
+                        background: Theme.surface;
 
                         Icon {
                             x: (parent.width - self.size) / 2;
@@ -218,10 +218,10 @@ export component AddMomentView inherits Rectangle {
                 height: 32px;
                 border-radius: 16px;
                 background: MomentState.publishing
-                    ?                     Theme.disabled
+                    ? Theme.disabled
                     : ((MomentState.content != "" || MomentState.media.length > 0)
                     ? Theme.brand
-                    :                     Theme.disabled);
+                    : Theme.disabled);
 
                 Text {
                     width: 100%;
