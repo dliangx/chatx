@@ -2202,41 +2202,74 @@ fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
 }
 
 /// Count how many lines a piece of text occupies when word-wrapped in a column
-/// of width `inner_px` at `font_px`. Full-width (CJK / fullwidth-forms) code
-/// points cost 1 unit; everything else 0.6. A unit == one font-size, so
-/// `inner_px / font_px` is the units a single line holds. An explicit `\n`
-/// always starts a new line. Returns >= 1.
-///
-/// Shared by the my-note cards and the discover detail (post body + comments)
-/// so both use the same wrap model and rendered text fits its box.
+/// of width `inner_px` at `font_px`.
 fn wrap_lines(text: &str, inner_px: f64, font_px: f64) -> i32 {
     if inner_px <= 0.0 || font_px <= 0.0 {
         return 1;
     }
     let units_per_line = inner_px / font_px;
     let mut total: i32 = 0;
-    let mut cur: f64 = 0.0;
-    for ch in text.chars() {
-        if ch == '\n' {
-            total += if cur > 0.0 {
-                (cur / units_per_line).ceil() as i32
-            } else {
-                1
-            };
-            cur = 0.0;
-        } else {
-            let c = ch as u32;
-            let full = (0x1100..=0x11FF).contains(&c)
-                || (0x2E80..=0x9FFF).contains(&c)
-                || (0xAC00..=0xD7FF).contains(&c)
-                || (0xFF00..=0xFFEF).contains(&c);
-            cur += if full { 1.0 } else { 0.6 };
+    for para in text.split('\n') {
+        let chars: Vec<char> = para.chars().collect();
+        let n = chars.len();
+        if n == 0 {
+            total += 1;
+            continue;
         }
-    }
-    if cur > 0.0 {
-        total += (cur / units_per_line).ceil() as i32;
+        // Tokenize: CJK/fullwidth char -> (1.0, space_before); run of other
+        // non-space chars -> (len*0.5, space_before). Leading whitespace is a
+        // no-op (it only arms `space_before`); a space between two tokens arms
+        // it so the next token is preceded by a 0.3em gap.
+        let mut toks: Vec<(f64, bool)> = Vec::new();
+        let mut i = 0;
+        let mut space_before = false;
+        while i < n {
+            let ch = chars[i];
+            if ch.is_whitespace() {
+                space_before = true;
+                i += 1;
+                continue;
+            }
+            if is_full_width(ch) {
+                toks.push((1.0, space_before));
+                space_before = false;
+                i += 1;
+            } else {
+                let s = i;
+                while i < n && !chars[i].is_whitespace() && !is_full_width(chars[i]) {
+                    i += 1;
+                }
+                toks.push(((i - s) as f64 * 0.5, space_before));
+                space_before = false;
+            }
+        }
+
+        let mut lines: i32 = 1;
+        let mut line_w: f64 = 0.0;
+        let mut placed = false;
+        for (w, sp) in toks {
+            let gap = if placed && sp { 0.3 } else { 0.0 };
+            if !placed {
+                line_w = w;
+                placed = true;
+            } else if line_w + gap + w > units_per_line {
+                lines += 1;
+                line_w = w;
+            } else {
+                line_w += gap + w;
+            }
+        }
+        total += lines;
     }
     total.max(1)
+}
+
+fn is_full_width(c: char) -> bool {
+    let u = c as u32;
+    (0x1100..=0x11FF).contains(&u)
+        || (0x2E80..=0x9FFF).contains(&u)
+        || (0xAC00..=0xD7FF).contains(&u)
+        || (0xFF00..=0xFFEF).contains(&u)
 }
 
 fn layout_my_notes(
