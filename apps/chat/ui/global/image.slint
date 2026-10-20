@@ -149,17 +149,17 @@ export component ImageViewer inherits Rectangle {
             root.clamp-pan(root.pan-x, root.pan-y);
         }
 
-        // The pictures: each covers the viewport at 1x, transformed by
-        // zoom / pan-x / pan-y. Only the one at `root.index` is shown.
+        // The pictures: each is fit to fit the viewport at 1x (whole image
+        // visible, not cropped). Pan/zoom apply on top of that.
         for m[i] in PostDetailState.media:
         Image {
             visible: i == root.index;
-            x: (root.width / 2.0) - (root.width / 2.0) * root.zoom + root.pan-x;
-            y: (root.height / 2.0) - (root.height / 2.0) * root.zoom + root.pan-y;
             width: root.width * root.zoom;
             height: root.height * root.zoom;
+            x: (root.width / 2.0) - (root.width * root.zoom / 2.0) + root.pan-x;
+            y: (root.height / 2.0) - (root.height * root.zoom / 2.0) + root.pan-y;
             source: m;
-            image-fit: cover;
+            image-fit: contain;
         }
 
         // Full-screen interaction surface (pan / wheel-zoom / tap-to-close).
