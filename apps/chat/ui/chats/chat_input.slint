@@ -1,4 +1,3 @@
-// Chat input bar: text field + send button.
 import { Theme } from "../theme.slint";
 
 export component ChatInputView inherits Rectangle {
@@ -11,6 +10,7 @@ export component ChatInputView inherits Rectangle {
 
     background: Theme.bg;
 
+    // A 1px divider sits at the top of the bar.
     Rectangle {
         x: 0px;
         y: 0px;
@@ -19,81 +19,124 @@ export component ChatInputView inherits Rectangle {
         background: Theme.border;
     }
 
+    // Box + inner geometry. Margins keep the box off both the divider (top) and
+    // the screen bottom (bottom) so its border is never clipped. The box grows
+    // with the text (measured by the hidden `imeasure` Text, a `TextInput`
+    // reports no natural height) and scrolls inside once it hits `box-h-max`.
+    // `tail-w` is reserved on the right so the text never underlaps the send.
     out property <length> pad: 8px;
-    out property <length> btn-w: 64px;
-    out property <length> spacing: 8px;
-    out property <length> field-w: root.width - 2 * root.pad - root.btn-w - root.spacing;
+    out property <length> top-pad: 6px;
+    out property <length> bottom-pad: 8px;
+    out property <length> in-pad: 10px;
+    out property <length> in-pad-x: 14px;
+    out property <length> tail-w: 82px;
+    out property <length> btn-w: 68px;
+    out property <length> btn-h: 32px;
+    out property <length> box-w: root.width - 2 * root.pad;
+    out property <length> field-w: root.box-w - root.in-pad-x - root.tail-w;
+    out property <length> raw-h: imeasure.preferred-height;
+    out property <length> box-h-min: max(24px, root.btn-h) + 2 * root.in-pad;
+    out property <length> box-h-max: 168px;
+    out property <length> box-h: min(root.box-h-max, max(root.box-h-min,
+        root.raw-h + 2 * root.in-pad));
+    out property <length> field-h: root.box-h - 2 * root.in-pad;
+    out property <length> content-h: max(root.field-h, root.raw-h);
+    out property <length> view-h: root.box-h + root.top-pad + root.bottom-pad;
 
     Rectangle {
         x: root.pad;
-        y: root.pad + 1px;
-        width: root.field-w;
-        height: parent.height - 2 * root.pad - 1px;
+        y: root.top-pad;
+        width: root.box-w;
+        height: root.box-h;
         background: Theme.surface;
-        border-radius: (parent.height - 2 * root.pad - 1px) / 2;
+        border-radius: 10px;
         border-width: 1px;
         border-color: Theme.border;
+        clip: true;
 
-        placeholder := Text {
-            x: 16px;
+        // Measures the text's natural height; drives the box height so it grows
+        // with the content (a `TextInput` reports no natural height).
+        imeasure := Text {
+            x: root.in-pad-x;
             y: 0px;
-            width: parent.width - 16px;
-            height: parent.height;
-            visible: root.text == "";
-            text: root.placeholder-text;
-            color: Theme.fg-muted;
+            width: root.field-w;
+            text: input.text;
             font-size: 15px;
-            vertical-alignment: center;
+            wrap: word-wrap;
+            visible: false;
+            accessible-role: none;
         }
 
-        input := TextInput {
-            x: 16px;
-            y: 0px;
-            width: parent.width - 16px;
-            height: parent.height;
-            color: Theme.fg;
-            font-size: 15px;
-            vertical-alignment: center;
-            single-line: true;
-            text <=> root.text;
-            selection-foreground-color: Theme.brand-soft;
-            accepted => { root.send(); }
-        }
-    }
+        Flickable {
+            x: root.in-pad-x;
+            y: root.in-pad;
+            width: root.field-w;
+            height: root.field-h;
+            content-height: root.content-h;
+            interactive: true;
 
-    Rectangle {
-        x: root.width - root.btn-w - root.pad;
-        y: 10px;
-        width: root.btn-w;
-        height: parent.height - 20px;
-        background: Theme.brand;
-        border-radius: (parent.height - 20px) / 2;
+            input := TextInput {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: max(parent.height, root.raw-h);
+                color: Theme.fg;
+                font-size: 15px;
+                vertical-alignment: top;
+                wrap: word-wrap;
+                single-line: false;
+                text <=> root.text;
+                selection-background-color: Theme.brand-soft;
+                selection-foreground-color: Theme.brand;
+                accepted => { send(input.text); }
+            }
 
-        Text {
-            x: 0px;
-            y: 0px;
-            width: parent.width;
-            height: parent.height;
-        text: @tr("Send");
-        color: Theme.fg-on-accent;
-            font-size: 15px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
+            placeholder := Text {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 20px;
+                visible: root.text == "";
+                text: root.placeholder-text;
+                color: Theme.fg-muted;
+                font-size: 15px;
+                vertical-alignment: top;
+            }
         }
 
-        TouchArea {
-            width: parent.width;
-            height: parent.height;
-            clicked => { root.send(); }
-        }
-    }
+        Rectangle {
+            x: parent.width - root.btn-w - (root.tail-w - root.btn-w);
+            y: parent.height - root.btn-h - root.in-pad;
+            width: root.btn-w;
+            height: root.btn-h;
+            border-radius: root.btn-h / 2;
+            background: input.text == "" ? Theme.disabled : Theme.brand;
 
-    function send() {
-        let t = root.text;
-        if (t == "") {
-            return;
+            Text {
+                width: 100%;
+                height: 100%;
+                text: @tr("Send");
+                font-size: 13px;
+                color: Theme.fg-on-accent;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => {
+                    send(input.text);
+                }
+            }
         }
-        root.text = "";
-        root.sent(t);
+
+        function send(text: string) {
+            if (text == "") {
+                return;
+            }
+            root.text = "";
+            root.sent(text);
+        }
     }
 }

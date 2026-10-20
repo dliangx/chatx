@@ -39,7 +39,7 @@ export component ChatView inherits Rectangle {
     background: Theme.bg;
 
     out property <length> msg-row-h: 56px;
-    out property <length> input-h: 52px;
+    out property <length> input-h: input-bar.view-h;
     out property <length> status-h: ChatSession.send-status != "" ? 20px : 0px;
     out property <length> _bottom: root.status-h + root.input-h;
     Header {
@@ -64,7 +64,7 @@ export component ChatView inherits Rectangle {
         }
     }
 
-    ChatInputView {
+    input-bar := ChatInputView {
         x: 0px;
         y: parent.height - root.input-h;
         width: parent.width;

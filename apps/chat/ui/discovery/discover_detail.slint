@@ -67,11 +67,18 @@ export component DiscoverDetailView inherits Rectangle {
         ? root.media-rows * root.tile-h + (root.media-rows - 1) * root.grid-gap
         : 0px;
 
-    // Comment input box height + inner field geometry (the field scrolls inside
-    // the box once the text grows past `input-field-min-h`).
-    out property <length> input-h: 88px;
+    // Comment input box (pinned to the bottom). It grows with the text (measured
+    // by a hidden `measure` Text, since a `TextInput` reports no natural height)
+    // up to `input-h-max`, after which it scrolls inside.
+    out property <length> input-h-min: 88px;
+    out property <length> input-h-max: 240px;
+    out property <length> input-pad: 10px;
     out property <length> input-field-w: root.width - 24px - 28px;
-    out property <length> input-field-min-h: root.input-h - 20px;
+    out property <length> input-raw-h: imeasure.preferred-height;
+    out property <length> input-h: min(root.input-h-max, max(root.input-h-min,
+        root.input-raw-h + 2 * root.input-pad));
+    out property <length> input-view-h: root.input-h - 2 * root.input-pad;
+    out property <length> input-content-h: max(root.input-view-h, root.input-raw-h);
     out property <length> comment-list-h: root.height - root.input-h - 12px;
 
     // Report the view width to Rust so it can compute `content-h` (the wrap
@@ -329,31 +336,53 @@ export component DiscoverDetailView inherits Rectangle {
         border-color: Theme.border;
         clip: true;
 
-        cedit := TextInput {
-            x: 14px;
-            y: 10px;
+        // Measures the text's natural height; drives the box height so it grows
+        // with the content (a `TextInput` reports no natural height).
+        imeasure := Text {
+            x: 0px;
+            y: 0px;
             width: root.input-field-w;
-            height: parent.height - 20px;
+            text: cedit.text;
             font-size: 15px;
-            color: Theme.fg;
-            vertical-alignment: top;
             wrap: word-wrap;
-            single-line: false;
-            selection-background-color: Theme.brand-soft;
-            selection-foreground-color: Theme.brand;
+            visible: false;
+            accessible-role: none;
         }
 
-        placeholder := Text {
+        Flickable {
             x: 14px;
-            y: 10px;
+            y: root.input-pad;
             width: root.input-field-w;
-            height: 20px;
-            text: @tr("Write a comment…");
-            color: Theme.fg-muted;
-            font-size: 15px;
-            vertical-alignment: top;
-            visible: cedit.text == "";
-            accessible-role: none;
+            height: root.input-view-h;
+            content-height: root.input-content-h;
+            interactive: true;
+
+            cedit := TextInput {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: max(root.input-view-h, root.input-raw-h);
+                font-size: 15px;
+                color: Theme.fg;
+                vertical-alignment: top;
+                wrap: word-wrap;
+                single-line: false;
+                selection-background-color: Theme.brand-soft;
+                selection-foreground-color: Theme.brand;
+            }
+
+            placeholder := Text {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 20px;
+                text: @tr("Write a comment…");
+                color: Theme.fg-muted;
+                font-size: 15px;
+                vertical-alignment: top;
+                visible: cedit.text == "";
+                accessible-role: none;
+            }
         }
 
         Rectangle {
