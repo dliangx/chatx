@@ -25,12 +25,12 @@ export component CardView inherits Rectangle {
             width: root.width;
             height: root.cover-h;
             border-radius: 8px;
-            background: Theme.surface-2;
+            background: Theme.bg;
             Image {
                 width: root.width;
                 height: root.cover-h;
                 source: root.image;
-                image-fit: cover;
+                image-fit: contain;
             }
 
             TouchArea {

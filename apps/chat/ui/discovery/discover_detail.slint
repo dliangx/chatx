@@ -144,7 +144,7 @@ export component DiscoverDetailView inherits Rectangle {
                         width: 100%;
                         height: 100%;
                         source: m;
-                        image-fit: cover;
+                        image-fit: contain;
                     }
 
                     TouchArea {
@@ -281,6 +281,7 @@ export component DiscoverDetailView inherits Rectangle {
                         visible: false;
                         accessible-role: none;
                     }
+
                     out property <length> body-h: max(measure.preferred-height, 16px);
                     height: 46px + card.body-h + 8px;
 
