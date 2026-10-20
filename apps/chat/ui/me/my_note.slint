@@ -1,3 +1,4 @@
+import { ScrollView } from "std-widgets.slint";
 import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
 import { NoteRow, AppState } from "../components/app_state.slint";
@@ -10,22 +11,16 @@ export component MyNoteView inherits Rectangle {
     height: 100%;
     background: Theme.bg;
 
-    out property <int> card-area-w: (root.width >= 24px) ? (root.width - 24px) / 1px : 0;
-    in-out property <bool> layout-fired: false;
-
-    Timer {
-        interval: 1ms;
-        running: root.card-area-w > 0 && !root.layout-fired;
-        triggered => {
-            root.layout-fired = true;
-            AppState.notes-layout(root.card-area-w);
-        }
-    }
-
-    changed card-area-w => {
-        root.layout-fired = true;
-        AppState.notes-layout(root.card-area-w);
-    }
+    out property <length> bottom: AppState.is-mobile ? 58px : 0px;
+    // Horizontal inset from the root edge to the body text's left edge:
+    // scroll gutter (12 each side) + card padding (14 each side).
+    out property <length> body-w: root.width - 52px;
+    out property <length> body-top: 12px;
+    out property <length> body-label-gap: 6px;
+    out property <length> label-h: 22px;
+    out property <length> pad-bottom: 10px;
+    out property <length> action-gap: 8px;
+    out property <length> action-h: 44px;
 
     Header {
         name: @tr("My notes");
@@ -34,114 +29,181 @@ export component MyNoteView inherits Rectangle {
     if root.notes.length == 0:
     Text {
         y: 180px;
+        width: parent.width;
         text: @tr("No notes yet");
         horizontal-alignment: center;
         font-size: 14px;
         color: Theme.fg-muted;
     }
 
-    Flickable {
-        x: 0px;
+    ScrollView {
         y: 49px;
-        width: parent.width;
-        height: parent.height - 49px - (AppState.is-mobile ? 58px : 0px);
-        content-height: AppState.my-notes-content-h * 1px;
-        interactive: true;
+        width: 100%;
+        height: parent.height - 49px - root.bottom;
 
-        for note[i] in root.notes: card := Rectangle {
-            in-out property <bool> show-del: false;
-            in-out property <bool> suppress: false;
+        VerticalLayout {
+            width: 100%;
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            spacing: 8px;
 
-            x: 12px + note.card-x * 1px;
-            y: note.card-y * 1px;
-            width: note.card-w * 1px;
-            height: note.card-h * 1px;
-            border-radius: 12px;
-            border-width: 1px;
-            border-color: (card.show-del) ? Theme.like : Theme.border;
-            background: Theme.surface;
-            clip: true;
+            for note[i] in root.notes: card := Rectangle {
+                in-out property <bool> show-del: false;
+                in-out property <bool> suppress: false;
 
-            Text {
-                x: 14px;
-                y: 12px;
-                width: parent.width - 28px;
-                height: parent.height - 12px - 24px - 12px;
-                text: note.content;
-                font-size: 15px;
-                color: Theme.fg;
-                wrap: word-wrap;
-                overflow: elide;
-                vertical-alignment: top;
-            }
-
-            Text {
-                x: 14px;
-                y: parent.height - 36px;
-                width: parent.width - 28px;
-                height: 24px;
-                text: note.created-label;
-                font-size: 12px;
-                vertical-alignment: center;
-                color: Theme.fg-muted;
-            }
-
-            lp := TouchArea {
-                width: parent.width;
-                height: parent.height;
-                clicked => {
-                    if (card.suppress) {
-                        card.suppress = false;
-                    } else if (card.show-del) {
-                        card.show-del = false;
-                    }
+                // Measures the body text's true laid-out height (same font /
+                // width / wrapping as the visible body). Slint does the text
+                // layout, so there is no manual line-count estimate and the
+                // body is never clipped.
+                measure := Text {
+                    width: root.body-w;
+                    text: note.content;
+                    font-size: 15px;
+                    wrap: word-wrap;
+                    visible: false;
+                    accessible-role: none;
                 }
-                changed pressed => {
-                    if (!self.pressed) {
-                        card.suppress = false;
-                    }
-                }
-            }
 
-            Timer {
-                interval: 2000ms;
-                running: lp.pressed && !card.show-del;
-                triggered => {
-                    card.show-del = true;
-                    card.suppress = true;
-                }
-            }
+                out property <length> body-h: max(measure.preferred-height, 20px);
+                out property <length> card-h:
+                    (root.body-top + card.body-h + root.body-label-gap + root.label-h + root.pad-bottom)
+                    + (card.show-del ? (root.action-gap + root.action-h) : 0px);
 
-            if card.show-del:
-            Rectangle {
-                x: 0px;
-                y: parent.height - 48px;
-                width: parent.width;
-                height: 48px;
-                background: Theme.danger-soft;
-
-                Icon {
-                    x: (parent.width - 26px) / 2 - 16px;
-                    y: (parent.height - 26px) / 2;
-                    size: 26px;
-                    glyph: Glyph.delete;
-                    tint: Theme.danger;
-                }
+                width: 100%;
+                height: card.card-h;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: (card.show-del) ? Theme.like : Theme.border;
+                background: Theme.surface;
+                clip: true;
 
                 Text {
-                    x: (parent.width - 26px) / 2 + 14px;
-                    width: 60px;
-                    height: parent.height;
-                    text: @tr("Delete");
-                    font-size: 14px;
-                    vertical-alignment: center;
-                    color: Theme.danger;
+                    x: 14px;
+                    y: root.body-top;
+                    width: parent.width - 28px;
+                    height: card.body-h;
+                    text: note.content;
+                    font-size: 15px;
+                    color: Theme.fg;
+                    wrap: word-wrap;
+                    overflow: clip;
+                    vertical-alignment: top;
                 }
 
-                TouchArea {
-                    width: 100%;
-                    height: 100%;
-                    clicked => { AppState.delete-note(note.id); }
+                // Date sits above the action bar whenever the bar is open; in
+                // the resting state it is the card's last line.
+                Text {
+                    x: 14px;
+                    y: root.body-top + card.body-h + root.body-label-gap;
+                    width: parent.width - 28px;
+                    height: root.label-h;
+                    text: note.created-label;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    color: Theme.fg-muted;
+                }
+
+                lp := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    clicked => {
+                        if (card.suppress) {
+                            card.suppress = false;
+                        } else if (card.show-del) {
+                            card.show-del = false;
+                        }
+                    }
+                    changed pressed => {
+                        if (!self.pressed) {
+                            card.suppress = false;
+                        }
+                    }
+                }
+
+                Timer {
+                    interval: 2000ms;
+                    running: lp.pressed && !card.show-del;
+                    triggered => {
+                        card.show-del = true;
+                        card.suppress = true;
+                    }
+                }
+
+                if card.show-del:
+                action := Rectangle {
+                    x: 14px;
+                    y: parent.height - 14px - root.action-h;
+                    width: parent.width - 28px;
+                    height: root.action-h;
+                    clip: true;
+
+                    cpy := TouchArea {
+                        x: 0px;
+                        width: parent.width / 2;
+                        height: parent.height;
+                        clicked => { AppState.copy-note(note.content); }
+
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: 8px;
+                            background: cpy.pressed ? Theme.surface : Theme.surface-2;
+
+                            Icon {
+                                x: (parent.width - 20px) / 2 - 12px;
+                                y: (parent.height - 20px) / 2;
+                                size: 20px;
+                                glyph: Glyph.copy;
+                                tint: cpy.pressed ? Theme.fg-on-accent : Theme.brand;
+                            }
+
+                            Text {
+                                x: (parent.width - 20px) / 2 + 12px;
+                                y: 0px;
+                                width: 44px;
+                                height: parent.height;
+                                text: @tr("Copy");
+                                font-size: 14px;
+                                vertical-alignment: center;
+                                color: cpy.pressed ? Theme.fg-on-accent : Theme.brand;
+                            }
+                        }
+                    }
+
+                    del := TouchArea {
+                        x: parent.width / 2;
+                        width: parent.width / 2;
+                        height: parent.height;
+                        clicked => { AppState.delete-note(note.id); }
+
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: 8px;
+                            background: del.pressed ? Theme.danger : Theme.danger-soft;
+
+                            Icon {
+                                x: (parent.width - 20px) / 2 - 12px;
+                                y: (parent.height - 20px) / 2;
+                                size: 20px;
+                                glyph: Glyph.delete;
+                                tint: del.pressed ? Theme.fg-on-accent : Theme.danger;
+                            }
+
+                            Text {
+                                x: (parent.width - 20px) / 2 + 12px;
+                                y: 0px;
+                                width: 52px;
+                                height: parent.height;
+                                text: @tr("Delete");
+                                font-size: 14px;
+                                vertical-alignment: center;
+                                color: del.pressed ? Theme.fg-on-accent : Theme.danger;
+                            }
+                        }
+                    }
                 }
             }
         }

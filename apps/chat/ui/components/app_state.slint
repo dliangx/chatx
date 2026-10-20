@@ -85,10 +85,6 @@ export struct NoteRow {
     id: int,
     content: string,
     created-label: string,
-    card-x: int,
-    card-y: int,
-    card-w: int,
-    card-h: int,
 }
 
 export struct SearchUser {
@@ -170,8 +166,6 @@ export global AppState {
     in-out property <bool> discover-has-more: false;
     callback discover-load-more();
     in property <[NoteRow]> my_notes: [];
-    in-out property <int> my-notes-content-h: 0;
-    in-out property <int> my-notes-w: 0;
     in property <string> data-status: "";
     in property <string> group-status: "";
     in-out property <string> error-message: "";
@@ -181,7 +175,7 @@ export global AppState {
 
     callback toggle-like(int);
     callback delete-note(int);
-    callback notes-layout(int);
+    callback copy-note(string);
     callback delete-contact(int);
     callback delete-chat(int);
     callback show-qr-code(string);

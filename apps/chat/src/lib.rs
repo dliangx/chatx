@@ -479,6 +479,11 @@ pub fn run_app() {
         });
     }
     {
+        ui.global::<AppState>().on_copy_note(move |text| {
+            copy_note_to_clipboard(text.to_string());
+        });
+    }
+    {
         let weak = weak.clone();
         ui.global::<AppState>().on_delete_contact(move |id| {
             delete_contact(weak.clone(), id);
@@ -490,13 +495,6 @@ pub fn run_app() {
             delete_chat(weak.clone(), id);
         });
     }
-    {
-        let weak = weak.clone();
-        ui.global::<AppState>().on_notes_layout(move |w| {
-            relayout_notes(weak.clone(), w);
-        });
-    }
-
     {
         use slint::Model;
         let w = weak.clone();
@@ -835,13 +833,6 @@ pub fn run_app() {
             }
             load_post_detail(weak.clone(), key);
         });
-    }
-    {
-        let weak = weak.clone();
-        ui.global::<PostDetailState>()
-            .on_request_relayout(move |key, w| {
-                relayout_post_detail(weak.clone(), key, w as i32);
-            });
     }
     {
         let weak = weak.clone();
@@ -2201,149 +2192,26 @@ fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
     }
 }
 
-/// Count how many lines a piece of text occupies when word-wrapped in a column
-/// of width `inner_px` at `font_px`.
-fn wrap_lines(text: &str, inner_px: f64, font_px: f64) -> i32 {
-    if inner_px <= 0.0 || font_px <= 0.0 {
-        return 1;
-    }
-    let units_per_line = inner_px / font_px;
-    let mut total: i32 = 0;
-    for para in text.split('\n') {
-        let chars: Vec<char> = para.chars().collect();
-        let n = chars.len();
-        if n == 0 {
-            total += 1;
-            continue;
-        }
-        // Tokenize: CJK/fullwidth char -> (1.0, space_before); run of other
-        // non-space chars -> (len*0.5, space_before). Leading whitespace is a
-        // no-op (it only arms `space_before`); a space between two tokens arms
-        // it so the next token is preceded by a 0.3em gap.
-        let mut toks: Vec<(f64, bool)> = Vec::new();
-        let mut i = 0;
-        let mut space_before = false;
-        while i < n {
-            let ch = chars[i];
-            if ch.is_whitespace() {
-                space_before = true;
-                i += 1;
-                continue;
-            }
-            if is_full_width(ch) {
-                toks.push((1.0, space_before));
-                space_before = false;
-                i += 1;
-            } else {
-                let s = i;
-                while i < n && !chars[i].is_whitespace() && !is_full_width(chars[i]) {
-                    i += 1;
-                }
-                toks.push(((i - s) as f64 * 0.5, space_before));
-                space_before = false;
-            }
-        }
-
-        let mut lines: i32 = 1;
-        let mut line_w: f64 = 0.0;
-        let mut placed = false;
-        for (w, sp) in toks {
-            let gap = if placed && sp { 0.3 } else { 0.0 };
-            if !placed {
-                line_w = w;
-                placed = true;
-            } else if line_w + gap + w > units_per_line {
-                lines += 1;
-                line_w = w;
-            } else {
-                line_w += gap + w;
-            }
-        }
-        total += lines;
-    }
-    total.max(1)
-}
-
-fn is_full_width(c: char) -> bool {
-    let u = c as u32;
-    (0x1100..=0x11FF).contains(&u)
-        || (0x2E80..=0x9FFF).contains(&u)
-        || (0xAC00..=0xD7FF).contains(&u)
-        || (0xFF00..=0xFFEF).contains(&u)
-}
-
-fn layout_my_notes(
-    notes: &[data::NoteRowData],
-    container_w: i32,
-    is_mobile: bool,
-) -> (Vec<NoteRow>, i32) {
-    const GAP: i32 = 8;
-    const MIN_CARD_H: i32 = 136;
-    const FONT_SIZE: i32 = 15;
-    const LINE_H: i32 = 21;
-    const PAD_X: i32 = 28;
-    const PAD_TOP: i32 = 14;
-    const LABEL_H: i32 = 26;
-    const PAD_BOTTOM: i32 = 14;
-
-    let n_cols = if is_mobile { 1 } else { 2 } as usize;
-    let card_w = if n_cols > 1 {
-        ((container_w - (n_cols - 1) as i32 * GAP) / n_cols as i32).max(1)
-    } else {
-        container_w
-    };
-    let inner_w = (card_w - PAD_X).max(0);
-
-    let mut col_top = vec![GAP; n_cols as usize];
-    let mut rows: Vec<NoteRow> = Vec::with_capacity(notes.len());
-    let mut content_h = 0i32;
-
-    for n in notes {
-        let lines = wrap_lines(&n.content, inner_w as f64, FONT_SIZE as f64);
-        let card_h = (PAD_TOP + lines * LINE_H + LABEL_H + PAD_BOTTOM).max(MIN_CARD_H);
-
-        let mut c = 0;
-        for j in 1..col_top.len() {
-            if col_top[j] < col_top[c] {
-                c = j;
-            }
-        }
-        let y = col_top[c];
-        let x = (c as i32) * (card_w + GAP);
-        col_top[c] = y + card_h + GAP;
-        content_h = (y + card_h).max(content_h);
-
-        rows.push(NoteRow {
+fn layout_my_notes(notes: &[data::NoteRowData]) -> Vec<NoteRow> {
+    // Column geometry / per-card heights are handled entirely in Slint: a
+    // single-column `ScrollView` + `VerticalLayout` sizes each card to its
+    // content's own preferred height, so the body never gets clipped and the
+    // scroll range always reaches the last card's action bar. We only project
+    // the stored notes into UI rows (preserving newest-first order).
+    notes
+        .iter()
+        .map(|n| NoteRow {
             id: n.key,
             content: SharedString::from(n.content.clone()),
             created_label: SharedString::from(fmt_time(n.created_at)),
-            card_x: x,
-            card_y: y,
-            card_w,
-            card_h,
-        });
-    }
-    (rows, content_h)
+        })
+        .collect()
 }
 
 fn publish_my_notes(state: &AppState, backend: &ArcBackend) {
     let notes = backend.blocking_read().notes.clone();
-    let w = state.get_my_notes_w().max(1);
-    let (rows, content_h) = layout_my_notes(&notes, w, state.get_is_mobile());
+    let rows = layout_my_notes(&notes);
     state.set_my_notes(slint::ModelRc::new(slint::VecModel::from(rows)));
-    state.set_my_notes_content_h(content_h);
-}
-
-fn relayout_notes(weak: slint::Weak<MainWindow>, w: i32) {
-    let backend = BACKEND.lock().unwrap().clone();
-    let Some(backend) = backend else {
-        return;
-    };
-    if let Some(ui) = weak.upgrade() {
-        let state = ui.global::<AppState>();
-        state.set_my_notes_w(w.max(1));
-        publish_my_notes(&state, &backend);
-    }
 }
 
 fn refresh_my_notes(weak: slint::Weak<MainWindow>) {
@@ -2466,8 +2334,12 @@ fn delete_my_note(weak: slint::Weak<MainWindow>, key: i32) {
     });
 }
 
+fn copy_note_to_clipboard(text: String) {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        let _ = cb.set_text(text);
+    }
+}
 // ─────────────── Share / publish moment helpers ──────────────────────────
-
 /// Open + start the camera and pump preview frames into `CameraState.preview`.
 /// Idempotent: if the camera is already running, the sinks are simply
 /// re-installed. Runs on the UI thread (same as the QR scanner); Apple's
@@ -4459,65 +4331,6 @@ fn parse_media_urls(s: &str) -> Vec<String> {
     Vec::new()
 }
 
-/// Comment-cell metrics (in px) — must match the Slint in
-/// `discover_detail.slint`: avatar+name header row, then the body `Text`
-/// (font 14, wrapped) below it.
-const COMMENT_HDR_H: i32 = 46; // top pad (8) + header row (30) + gap (8) → body starts at y=46
-const COMMENT_BOT_PAD: i32 = 8;
-const COMMENT_BODY_FONT: f64 = 14.0;
-const COMMENT_LINE_H: i32 = 20;
-const COMMENT_CELL_GAP: i32 = 8;
-
-/// Recompute each comment cell's absolute `y` / `h` and the surrounding block's
-/// `content-h` using `wrap_lines` — the same model as the `my_note` layout.
-/// A bare Flickable won't auto-measure `for`-loop children (slint #407), so the
-/// view binds these Rust-computed numbers instead. `w` is the view's current
-/// width in px, driving the wrap width of every cell's body.
-
-fn relayout_post_detail(weak: slint::Weak<MainWindow>, key: i32, w: i32) {
-    if w <= 0 {
-        return;
-    }
-
-    let _ = slint::invoke_from_event_loop(move || {
-        let Some(ui) = weak.upgrade() else { return };
-        let ps = ui.global::<PostDetailState>();
-        if ps.get_key() != key {
-            return;
-        }
-
-        let mut list: Vec<CommentRow> = {
-            use slint::Model;
-            let m = ps.get_comment_list();
-            (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
-        };
-
-        // Outer VerticalLayout padding is 16px on each side; the body Text
-        // inside a cell is inset a further 16px, so the wrap width is:
-        let cell_w = w - 32;
-        let inner_w = (cell_w - 16).max(0) as f64;
-
-        let mut y = 0i32;
-        for c in list.iter_mut() {
-            let lines = wrap_lines(c.text.as_str(), inner_w, COMMENT_BODY_FONT) as i32;
-            let body_h = lines * COMMENT_LINE_H;
-            let h = (COMMENT_HDR_H + body_h + COMMENT_BOT_PAD).max(54);
-            c.y = y;
-            c.h = h;
-            y = y + h + COMMENT_CELL_GAP;
-        }
-
-        let content_h = if list.is_empty() {
-            0
-        } else {
-            y - COMMENT_CELL_GAP + COMMENT_BOT_PAD
-        };
-
-        ps.set_comment_list(slint::ModelRc::new(slint::VecModel::from(list)));
-        ps.set_content_h(content_h as f32);
-    });
-}
-
 fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
     let backend = BACKEND.lock().unwrap().clone();
     let pool = POOL.lock().unwrap().clone();
@@ -4645,16 +4458,10 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
                     text: SharedString::from(c.content.clone()),
                     is_mine: me_id != 0 && c.author_id == me_id,
                     time_label: SharedString::from(fmt_time(c.created_at)),
-                    y: 0,
-                    h: 0,
                 })
                 .collect();
             ps.set_comment_list(slint::ModelRc::new(slint::VecModel::from(rows)));
             ps.set_status(SharedString::new());
-            // Kick off the comment-block relayout (computes per-cell `y`/`h` and
-            // `content-h`) using the current window width.
-            let w = ui.global::<AppState>().get_xp() as i32;
-            relayout_post_detail(weak2.clone(), key, w);
         });
     });
 }
@@ -4752,17 +4559,11 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                         text: SharedString::from(body),
                         is_mine: true,
                         time_label: SharedString::from("just now"),
-                        y: 0,
-                        h: 0,
                     };
                     list.insert(0, new);
                     ps.set_comment_list(slint::ModelRc::new(slint::VecModel::from(list)));
                     ps.set_comments((ps.get_comments() as i64 + 1) as i32);
                     ps.set_status(SharedString::new());
-                    // The list and its ordering changed — recompute `y`/`h` /
-                    // `content-h` so the new first comment is reachable too.
-                    let w = ui.global::<AppState>().get_xp() as i32;
-                    relayout_post_detail(weak.clone(), key, w);
                 });
             }
             Err(e) => {

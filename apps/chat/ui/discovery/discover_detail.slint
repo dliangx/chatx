@@ -8,12 +8,6 @@ export struct CommentRow {
     text: string,
     is-mine: bool,
     time-label: string,
-    // Absolute offset within the comment block + cell height, computed in
-    // Rust via `wrap_lines` (same model as `my_note`). A bare `Flickable`
-    // won't auto-measure `for`-loop cells (slint #407), so Rust supplies the
-    // exact numbers.
-    y: int,
-    h: int,
 }
 
 export global PostDetailState {
@@ -28,17 +22,11 @@ export global PostDetailState {
     in property <[image]> media: [];
     in property <[CommentRow]> comment-list: [];
     in property <string> status;
-    // Comment-block content-height, computed in Rust via `wrap_lines` — Slint
-    // won't auto-size the `for`-loop comment cells for the inner Flickable
-    // (issue #407), so the exact number comes from Rust.
-    in property <length> content-h: 0px;
 
     callback request-load(int);
     callback toggle-like(int);
     callback add-comment(int, string);
     callback clear-comment();
-    // Ask Rust to recompute `content-h` + the per-cell `y`/`h` for this post.
-    callback request-relayout(int, int);
     // Tapping a media tile opens the full-screen image viewer on this index
     // (kept here, next to `media`, so `ImageViewer` can snapshot both on mount).
     in-out property <int> image-index: 0;
@@ -82,15 +70,6 @@ export component DiscoverDetailView inherits Rectangle {
         root.input-raw-h + 2 * root.input-pad));
     out property <length> input-view-h: root.input-h - 2 * root.input-pad;
     out property <length> input-content-h: max(root.input-view-h, root.input-raw-h);
-    out property <length> comment-list-h: root.height - root.input-h - 12px;
-
-    // Report the view width to Rust so it can compute `content-h` (the wrap
-    // width of each comment cell depends on it). Fires on show + on resize.
-    changed width => {
-        if (root.width > 0 && PostDetailState.key != -1) {
-            PostDetailState.request-relayout(root.key, root.width / 1px);
-        }
-    }
 
     Header {
         name: @tr("discover");
@@ -275,24 +254,35 @@ export component DiscoverDetailView inherits Rectangle {
                 color: Theme.fg-muted;
             }
 
-            // 8) Comment list — one cell per row, scrollable in a fixed-height
-            //    area (input pinned below). Cell `y`/`h` + block `content-height`
-            //    come from Rust `wrap_lines` (slint #407).
+            // 8) Comment list — one cell per row. Each cell's body height is
+            // measured by a hidden `Text` (same font/width/wrap as the visible
+            // body) so Slint does the text layout; the outer VerticalLayout
+            // then accumulates each cell's `min-height` into its own, which
+            // the outer Flickable reads via `min-height`. No Rust-computed
+            // absolute y/h / content-height.
             if PostDetailState.comment-list.length > 0:
-            Flickable {
+            VerticalLayout {
                 width: 100%;
-                height: max(40px, root.comment-list-h);
-                content-height: PostDetailState.content-h;
-                interactive: true;
+                spacing: 8px;
 
-                for c[i] in PostDetailState.comment-list: Rectangle {
-                    x: 0px;
-                    y: c.y * 1px;
-                    width: parent.width;
-                    height: c.h * 1px;
+                for c[i] in PostDetailState.comment-list: card := Rectangle {
+                    width: 100%;
                     background: c.is-mine ? Theme.surface : Colors.transparent;
                     border-radius: 8px;
                     clip: true;
+
+                    // Measures the body's true laid-out height in this column
+                    // width (no manual wrap_lines / per-line math).
+                    measure := Text {
+                        width: parent.width - 16px;
+                        text: c.text;
+                        font-size: 14px;
+                        wrap: word-wrap;
+                        visible: false;
+                        accessible-role: none;
+                    }
+                    out property <length> body-h: max(measure.preferred-height, 16px);
+                    height: 46px + card.body-h + 8px;
 
                     // Header row: avatar + name.
                     Rectangle {
@@ -317,16 +307,18 @@ export component DiscoverDetailView inherits Rectangle {
                         color: c.is-mine ? Theme.brand : Theme.fg-muted;
                     }
 
-                    // Body — full text (no elide); height set by Rust.
+                    // Body — full text; height derived from the measured
+                    // `body-h` above so the cell's `min-height` is exact.
                     Text {
                         x: 8px;
                         y: 46px;
                         width: parent.width - 16px;
-                        height: (c.h - 46 - 8) * 1px;
+                        height: card.body-h;
                         text: c.text;
                         font-size: 14px;
                         color: Theme.fg;
                         wrap: word-wrap;
+                        overflow: clip;
                         vertical-alignment: top;
                     }
                 }
