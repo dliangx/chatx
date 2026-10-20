@@ -1,3 +1,318 @@
-export component ImageViewer {
+import { Icon, Glyph } from "../components/icon.slint";
+import { AppState, GlobalOverlayType } from "../components/app_state.slint";
+import { PostDetailState } from "../discovery/discover_detail.slint";
 
+/// Full-screen image viewer. Opened by tapping a media tile on the post detail
+/// page, which sets `PostDetailState.image-index` and flips the overlay on.
+/// The viewer is mounted fresh for each open, and on its first frame it reads
+/// `image-index` into local `index`, then resets it so a later close never
+/// lingers on the previous post's media.
+///
+/// View model: every image is drawn covering the whole viewport at 1x (its
+/// natural look), centered. Zoom scales about a moving anchor, pan translates —
+/// both expressed as `zoom` / `pan-x` / `pan-y` relative to the viewport center:
+///   x = center + r*(pan-x - offset)   where r = new-zoom / old-zoom
+/// Zoom is clamped to [1/50, 20]. Panning is clamped so the image can't be
+/// flung off-screen; panning while at 1x is disabled (nothing extra to reveal).
+///
+/// Interaction (desktop mouse + touch + trackpad):
+/// - pinch (`ScaleRotateGestureHandler`): zoom + pan about the gesture center.
+/// - drag while zoomed (`pointer-event` on the main area): pan.
+/// - mouse wheel / trackpad (`scroll-event`): zoom about the cursor.
+/// - double tap: zoom in at the tap point (or reset when already zoomed).
+///   Single tap on the empty area: close (only while not zoomed). The two are
+///   told apart with a 300 ms `tap-timer`, since the native `clicked` fires
+///   before `double-clicked` and Slint has no clock we can wait on.
+/// - close button (top-right) always closes; left / right arrows page.
+
+export component ImageViewer inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: #000;
+    clip: true;
+
+    in-out property <int> index: 0;
+
+    in-out property <float> zoom: 1.0;
+    in-out property <length> pan-x: 0px;
+    in-out property <length> pan-y: 0px;
+
+    in-out property <float> g-z0: 1.0;
+    in-out property <length> g-px0: 0px;
+    in-out property <length> g-py0: 0px;
+    in-out property <bool> panning: false;
+    in-out property <length> pan-mx: 0px;
+    in-out property <length> pan-my: 0px;
+    in-out property <length> pan-px0: 0px;
+    in-out property <length> pan-py0: 0px;
+
+    in-out property <int> tap-count: 0;
+    in-out property <bool> bootstrapped: false;
+
+    function zmin() -> float {
+        return 1.0 / 50.0;
+    }
+
+    function zmax() -> float {
+        return 20.0;
+    }
+
+    function clamp-pan(vx: length, vy: length) {
+        let limx = root.zoom > 1.0 ? (root.width / 2.0) * (root.zoom - 1.0) : 0px;
+        let limy = root.zoom > 1.0 ? (root.height / 2.0) * (root.zoom - 1.0) : 0px;
+        root.pan-x = vx < -limx ? -limx : (vx > limx ? limx : vx);
+        root.pan-y = vy < -limy ? -limy : (vy > limy ? limy : vy);
+    }
+
+    // Zoom by `factor`, anchored at the viewport-space point (ax, ay).
+    function zoom-at(factor: float, ax: length, ay: length) {
+        let nz = clamp(root.zoom * factor, root.zmin(), root.zmax());
+        let r = nz / root.zoom;
+        let a = ax - root.width / 2.0;
+        let b = ay - root.height / 2.0;
+        root.pan-x = a + r * (root.pan-x - a);
+        root.pan-y = b + r * (root.pan-y - b);
+        root.zoom = nz;
+        root.clamp-pan(root.pan-x, root.pan-y);
+    }
+
+    function close() {
+        AppState.close-image-viewer();
+    }
+
+    function show-prev() {
+        if (PostDetailState.media.length > 0 && root.index > 0) {
+            root.index = root.index - 1;
+            root.zoom = 1.0;
+            root.pan-x = 0px;
+            root.pan-y = 0px;
+            root.tap-count = 0;
+        }
+    }
+
+    function show-next() {
+        if (PostDetailState.media.length > 0 && root.index < PostDetailState.media.length - 1) {
+            root.index = root.index + 1;
+            root.zoom = 1.0;
+            root.pan-x = 0px;
+            root.pan-y = 0px;
+            root.tap-count = 0;
+        }
+    }
+
+    // Read the starting index on mount, then clear the transient one so a
+    // future close doesn't point at a stale post.
+    Timer {
+        interval: 1ms;
+        running: !root.bootstrapped;
+        triggered => {
+            root.bootstrapped = true;
+            root.index = PostDetailState.image-index;
+            PostDetailState.image-index = 0;
+        }
+    }
+
+    // Single-tap disambiguation: if a second tap doesn't land within 300 ms,
+    // treat the first as a "close" tap (only when we're at 1x).
+    tap-timer := Timer {
+        interval: 300ms;
+        running: root.tap-count == 1;
+        triggered => {
+            if (root.tap-count == 1) {
+                root.tap-count = 0;
+                if (root.zoom <= 1.0) {
+                    root.close();
+                }
+            }
+        }
+    }
+
+    if PostDetailState.media.length > 0:
+    ScaleRotateGestureHandler {
+        enabled: true;
+
+        started => {
+            root.tap-count = 0;
+            root.g-z0 = root.zoom;
+            root.g-px0 = root.pan-x;
+            root.g-py0 = root.pan-y;
+        }
+
+        updated => {
+            let nz = clamp(root.g-z0 * self.scale, root.zmin(), root.zmax());
+            let r = nz / root.g-z0;
+            let cx = self.center.x - root.width / 2.0;
+            let cy = self.center.y - root.height / 2.0;
+            root.pan-x = cx + r * (root.g-px0 - cx);
+            root.pan-y = cy + r * (root.g-py0 - cy);
+            root.zoom = nz;
+            root.clamp-pan(root.pan-x, root.pan-y);
+        }
+
+        // The pictures: each covers the viewport at 1x, transformed by
+        // zoom / pan-x / pan-y. Only the one at `root.index` is shown.
+        for m[i] in PostDetailState.media:
+        Image {
+            visible: i == root.index;
+            x: (root.width / 2.0) - (root.width / 2.0) * root.zoom + root.pan-x;
+            y: (root.height / 2.0) - (root.height / 2.0) * root.zoom + root.pan-y;
+            width: root.width * root.zoom;
+            height: root.height * root.zoom;
+            source: m;
+            image-fit: cover;
+        }
+
+        // Full-screen interaction surface (pan / wheel-zoom / tap-to-close).
+        // Declared before the buttons so the buttons, being later siblings,
+        // receive their taps first (Slint hit-tests top-most first).
+        main-ta := TouchArea {
+            width: parent.width;
+            height: parent.height;
+
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down) {
+                    root.panning = true;
+                    root.pan-mx = self.mouse-x;
+                    root.pan-my = self.mouse-y;
+                    root.pan-px0 = root.pan-x;
+                    root.pan-py0 = root.pan-y;
+                } else if (e.kind == PointerEventKind.move) {
+                    if (root.panning && root.zoom > 1.0) {
+                        root.pan-x = root.pan-px0 + (self.mouse-x - root.pan-mx);
+                        root.pan-y = root.pan-py0 + (self.mouse-y - root.pan-my);
+                        root.clamp-pan(root.pan-x, root.pan-y);
+                    }
+                } else if (e.kind == PointerEventKind.up
+                    || e.kind == PointerEventKind.cancel) {
+                    root.panning = false;
+                }
+            }
+
+            scroll-event(e) => {
+                if (e.delta-y > 0.0) {
+                    root.zoom-at(1.15, self.mouse-x, self.mouse-y);
+                    return accept;
+                } else if (e.delta-y < 0.0) {
+                    root.zoom-at(1.0 / 1.15, self.mouse-x, self.mouse-y);
+                    return accept;
+                }
+                return reject;
+            }
+
+            clicked => {
+                let dx = self.mouse-x - root.pan-mx;
+                let dy = self.mouse-y - root.pan-my;
+                // A real drag (not a tap) must not count.
+                if (dx > 8px || dx < -8px || dy > 8px || dy < -8px) {
+                    return;
+                }
+                if (root.tap-count == 0) {
+                    root.tap-count = 1;
+                } else if (root.tap-count == 1) {
+                    if (root.zoom > 1.0) {
+                        root.reset-transform();
+                    } else {
+                        root.zoom-at(3.0, self.mouse-x, self.mouse-y);
+                    }
+                    root.tap-count = 0;
+                }
+            }
+        }
+
+        if PostDetailState.media.length > 1:
+        Text {
+            x: 16px;
+            y: 18px;
+            width: 140px;
+            height: 20px;
+            text: (root.index + 1) + " / " + PostDetailState.media.length;
+            font-size: 14px;
+            color: #ffffff;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            x: parent.width - 56px;
+            y: 8px;
+            width: 40px;
+            height: 40px;
+            border-radius: 20px;
+            background: #ffffff33;
+
+            Icon {
+                x: (parent.width - self.size) / 2;
+                y: (parent.height - self.size) / 2;
+                glyph: Glyph.close-circle;
+                size: 20px;
+                tint: #ffffff;
+            }
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => {
+                    root.tap-count = 0;
+                    root.close();
+                }
+            }
+        }
+
+        if PostDetailState.media.length > 1:
+        Rectangle {
+            x: 8px;
+            y: (parent.height - 48px) / 2;
+            width: 40px;
+            height: 48px;
+
+            Icon {
+                x: (parent.width - self.size) / 2;
+                y: (parent.height - self.size) / 2;
+                glyph: Glyph.left;
+                size: 24px;
+                tint: #ffffffcc;
+            }
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => {
+                    root.tap-count = 0;
+                    root.show-prev();
+                }
+            }
+        }
+
+        if PostDetailState.media.length > 1:
+        Rectangle {
+            x: parent.width - 48px;
+            y: (parent.height - 48px) / 2;
+            width: 40px;
+            height: 48px;
+
+            Icon {
+                x: (parent.width - self.size) / 2;
+                y: (parent.height - self.size) / 2;
+                glyph: Glyph.right;
+                size: 24px;
+                tint: #ffffffcc;
+            }
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => {
+                    root.tap-count = 0;
+                    root.show-next();
+                }
+            }
+        }
+    }
+
+    // `reset-transform` is called from code, so it lives on the component (the
+    // gesture handler has no such member).
+    function reset-transform() {
+        root.zoom = 1.0;
+        root.pan-x = 0px;
+        root.pan-y = 0px;
+    }
 }

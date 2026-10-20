@@ -39,6 +39,9 @@ export global PostDetailState {
     callback clear-comment();
     // Ask Rust to recompute `content-h` + the per-cell `y`/`h` for this post.
     callback request-relayout(int, int);
+    // Tapping a media tile opens the full-screen image viewer on this index
+    // (kept here, next to `media`, so `ImageViewer` can snapshot both on mount).
+    in-out property <int> image-index: 0;
 }
 
 // The detail page is a single scrolling column (media / body / like row), with
@@ -163,6 +166,15 @@ export component DiscoverDetailView inherits Rectangle {
                         height: 100%;
                         source: m;
                         image-fit: cover;
+                    }
+
+                    TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => {
+                            PostDetailState.image-index = i;
+                            AppState.open-image-viewer();
+                        }
                     }
                 }
             }

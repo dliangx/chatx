@@ -142,6 +142,8 @@ export global AppState {
     callback toggle-theme(bool);
     in property <image> qr-image;
     in property <string> qr-target-id: "";
+    callback open-image-viewer();
+    callback close-image-viewer();
     in-out property <string> lang: "en";
     in property <string> font;
     in property <int> font-size: 16;

@@ -575,6 +575,30 @@ pub fn run_app() {
 
     {
         let w = weak.clone();
+        ui.global::<AppState>().on_open_image_viewer(move || {
+            if let Some(ui) = w.upgrade() {
+                let st = ui.global::<AppState>();
+                let mut nav = st.get_nav_state();
+                nav.global_overlay = GlobalOverlayType::ImageViewer;
+                st.set_nav_state(nav);
+            }
+        });
+    }
+
+    {
+        let w = weak.clone();
+        ui.global::<AppState>().on_close_image_viewer(move || {
+            if let Some(ui) = w.upgrade() {
+                let st = ui.global::<AppState>();
+                let mut nav = st.get_nav_state();
+                nav.global_overlay = GlobalOverlayType::None;
+                st.set_nav_state(nav);
+            }
+        });
+    }
+
+    {
+        let w = weak.clone();
         ui.global::<AppState>().on_search_users(move |q| {
             search_users(w.clone(), q.to_string());
         });
