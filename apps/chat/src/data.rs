@@ -435,11 +435,22 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
                 .unwrap_or_else(|| p.author_username.unwrap_or_default()),
             likes: p.like_count,
             liked: p.i_liked,
-            cover: first_media(&p.media_urls),
+            cover: first_preview_or_media(&p.preview_urls, &p.media_urls),
         });
     }
 
     Ok((b, my_nickname))
+}
+
+/// Card cover path: prefer the (small) preview of a post; fall back to the
+/// full-resolution original (e.g. old rows that predate `preview_urls` or
+/// posts whose previews failed to generate).
+pub fn first_preview_or_media(preview_urls: &Option<String>, media_urls: &Option<String>) -> String {
+    let p = first_media(preview_urls);
+    if !p.is_empty() {
+        return p;
+    }
+    first_media(media_urls)
 }
 
 /// First non-empty file path from a stored `media_urls` column (JSON array or
@@ -701,7 +712,7 @@ mod tests {
         .await
         .unwrap();
         sqlite::social::add(&pool, 1, 2).await.unwrap();
-        let post = sqlite::social_feed::create_post(&pool, 2, Some("hello"), None, 0).await.unwrap();
+        let post = sqlite::social_feed::create_post(&pool, 2, Some("hello"), None, None, 0).await.unwrap();
         sqlite::social_feed::like(&pool, post.id, 1).await.unwrap();
 
         let (b, _nickname) = load(&pool, me).await.unwrap();

@@ -7,6 +7,7 @@ pub struct SocialPost {
     pub author_id: i64,
     pub content: Option<String>,
     pub media_urls: Option<String>,
+    pub preview_urls: Option<String>,
     pub visibility: i64,
     pub timestamp: i64,
     pub like_count: i64,
@@ -35,18 +36,20 @@ pub async fn create_post(
     author_id: i64,
     content: Option<&str>,
     media_urls: Option<&str>,
+    preview_urls: Option<&str>,
     visibility: i64,
 ) -> anyhow::Result<SocialPost> {
     let id = new_id();
     let ts = now_ms();
     sqlx::query(
-        "INSERT INTO social_posts (id, author_id, content, media_urls, visibility, timestamp)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO social_posts (id, author_id, content, media_urls, preview_urls, visibility, timestamp)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )
     .bind(id)
     .bind(author_id)
     .bind(content)
     .bind(media_urls)
+    .bind(preview_urls)
     .bind(visibility)
     .bind(ts)
     .execute(pool)
@@ -210,7 +213,8 @@ mod tests {
     #[tokio::test]
     async fn post_like_comment_roundtrip() {
         let pool = open_memory().await.unwrap();
-        let post = create_post(&pool, 1, Some("hello world"), None, 0).await.unwrap();
+        let post = create_post(&pool, 1, Some("hello world"), None, None, 0).await.unwrap();
+        assert_eq!(post.preview_urls, None);
         assert_eq!(post.like_count, 0);
         assert_eq!(post.comment_count, 0);
 
@@ -236,5 +240,17 @@ mod tests {
         assert!(get_post(&pool, post.id).await.unwrap().is_none());
         assert_eq!(list_comments(&pool, post.id, 10, 0).await.unwrap().len(), 0, "comments cascade-deleted");
         assert!(!delete_post(&pool, post.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn post_preview_urls_roundtrip() {
+        let pool = open_memory().await.unwrap();
+        let media = r#"["/h/media/posts/p_1/1.jpg"]"#;
+        let preview = r#"["/h/media/posts/p_1/preview/1.jpg"]"#;
+        let post = create_post(&pool, 1, Some("with photos"), Some(media), Some(preview), 0).await.unwrap();
+        assert_eq!(post.preview_urls.as_deref(), Some(preview));
+        let back = get_post(&pool, post.id).await.unwrap().unwrap();
+        assert_eq!(back.preview_urls, post.preview_urls);
+        assert_eq!(back.media_urls.as_deref(), Some(media));
     }
 }

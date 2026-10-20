@@ -217,7 +217,7 @@ async fn seed(pool: &Pool, me: &str) -> anyhow::Result<()> {
     for i in 0..CONTACT_COUNT {
         let author = CONTACT_BASE + i;
         let text = POST_TEXTS[(i as usize) % POST_TEXTS.len()];
-        let post = social_feed::create_post(pool, author, Some(text), None, 0).await?;
+        let post = social_feed::create_post(pool, author, Some(text), None, None, 0).await?;
         if i % 2 == 0 {
             social_feed::like(pool, post.id, me_id).await?;
         }

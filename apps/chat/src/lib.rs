@@ -1668,11 +1668,19 @@ const DISCOVER_STEP: i32 = 2;
 fn publish_discover(state: &AppState, backend: &ArcBackend) {
     let snapshot = backend.blocking_read();
     let total = snapshot.discover.len() as i32;
-    let visible = state.get_discover_shown().clamp(0, total);
+    // `discover-shown` is a monotonically-growing reveal cursor (how many rows
+    // the user has scrolled to see). We must NOT clamp it down to `total` —
+    // doing so shrank it (e.g. 8 -> 1 for a one-row feed), and then publishing
+    // a *new* post left the cursor at 1 so only the freshly-pushed front row
+    // rendered and the previously-seen posts disappeared until an app restart
+    // re-initialised the cursor. The display slice is bounded by `total`; the
+    // stored cursor only ever advances.
+    let cursor = state.get_discover_shown().max(0);
+    let visible = cursor.min(total);
     let discover: Vec<DiscoverCard> = snapshot
         .discover
         .iter()
-        .take(visible.max(0) as usize)
+        .take(visible as usize)
         .map(|r| DiscoverCard {
             id: r.key,
             title: SharedString::from(r.title.clone()),
@@ -1683,8 +1691,8 @@ fn publish_discover(state: &AppState, backend: &ArcBackend) {
         })
         .collect();
     state.set_discover(slint::ModelRc::new(slint::VecModel::from(discover)));
-    state.set_discover_shown(visible);
-    state.set_discover_has_more(visible < total);
+    state.set_discover_shown(cursor);
+    state.set_discover_has_more(total > cursor);
 }
 
 /// Fetch the next discover batch when the user scrolls to the trigger area.
@@ -2545,13 +2553,23 @@ fn remove_moment_media(weak: slint::Weak<MainWindow>, i: i32) {
         if i < 0 || (i as usize) >= m.len() {
             return;
         }
-        m.remove(i as usize);
+        let removed = m.remove(i as usize);
+        let _ = std::fs::remove_file(std::path::Path::new(&removed));
     }
     refresh_moment_media_ui(weak);
 }
 
+/// Clear the draft. Any source files still on disk (temp-dir camera/album
+/// copies, or pre-publish originals) are removed — the persistent copies live
+/// in the post store and are tracked separately in `MOMENT_MEDIA`'s callers.
 fn reset_moment_draft() {
-    MOMENT_MEDIA.lock().unwrap().clear();
+    let paths: Vec<String> = {
+        let mut m = MOMENT_MEDIA.lock().unwrap();
+        std::mem::take(&mut *m)
+    };
+    for p in &paths {
+        let _ = std::fs::remove_file(std::path::Path::new(p));
+    }
 }
 
 /// Republish `MOMENT_MEDIA` as a `[image]` model on `MomentState.media`.
@@ -2666,12 +2684,52 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
         if !content.trim().is_empty() {
             body.push_str(content.trim());
         }
-        let media_json = serde_json::to_string(&media_paths).unwrap_or_default();
+        // Move the chosen media into the persistent post store under
+        // CHATX_HOME before persisting the post so the rows never point at
+        // temp files that the OS may clean.
+        let store_group = format!("p_{}", (sqlite::new_id() & 0x7fff_ffff_ffff) as u64);
+        let mut stored_media: Vec<String> = Vec::with_capacity(media_paths.len());
+        let mut stored_previews: Vec<String> = Vec::with_capacity(media_paths.len());
+        let mut any_failed = false;
+        for (i, src) in media_paths.iter().enumerate() {
+            match camera::posts::store_original(std::path::Path::new(src), &store_group, (i + 1) as u32) {
+                Ok(p) => {
+                    let stored = p.to_string_lossy().into_owned();
+                    // Fall back to the original as its own preview when the
+                    // format is not decodable (e.g. HEIC), so the index in
+                    // `stored_previews` matches `stored_media`.
+                    let preview = match camera::posts::make_preview(std::path::Path::new(src), &store_group, (i + 1) as u32) {
+                        Ok(pv) => pv.to_string_lossy().into_owned(),
+                        Err(_) => stored.clone(),
+                    };
+                    stored_media.push(stored);
+                    stored_previews.push(preview);
+                }
+                Err(e) => {
+                    eprintln!("[moment] store_original failed for {src}: {e}");
+                    any_failed = true;
+                }
+            }
+        }
+        if any_failed && stored_media.is_empty() {
+            set_moment_status(weak2.clone(), "Failed to save photos".to_string());
+            if let Some(ui) = weak2.upgrade() {
+                ui.global::<MomentState>().set_publishing(false);
+            }
+            return;
+        }
+        let media_json = serde_json::to_string(&stored_media).unwrap_or_default();
+        let preview_json = if !stored_previews.is_empty() {
+            Some(serde_json::to_string(&stored_previews).unwrap_or_default())
+        } else {
+            None
+        };
         let created = match sqlite::social_feed::create_post(
             &pool,
             me_id,
             Some(body.as_str()),
             Some(media_json.as_str()),
+            preview_json.as_deref(),
             0,
         )
         .await
@@ -2696,6 +2754,13 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
             {
                 let mut g = backend.blocking_write();
                 let key = g.key_for_post(created.id);
+                // Cover = preview (small) for the card; the detail view loads
+                // the full-resolution original from `media_urls` separately.
+                let cover = stored_previews
+                    .first()
+                    .cloned()
+                    .or_else(|| stored_media.first().cloned())
+                    .unwrap_or_default();
                 let row = data::DiscoverRow {
                     key,
                     post_id: created.id,
@@ -2703,7 +2768,7 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
                     author: my_nickname,
                     likes: 0,
                     liked: false,
-                    cover: media_paths.first().cloned().unwrap_or_default(),
+                    cover,
                 };
                 g.discover.insert(0, row);
             }
@@ -2723,6 +2788,8 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
                 let st = ui.global::<AppState>();
                 pop_sub_history(&st);
             }
+            // Reset the draft: clears MOMENT_MEDIA and removes the temp-dir
+            // sources (persistent copies already live in the post store).
             reset_moment_draft();
         });
     });
