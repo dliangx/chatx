@@ -3,6 +3,7 @@ import { Icon, Glyph, Variant } from "../components/icon.slint";
 import { SettingItem, ProfileItem } from "../components/item.slint";
 import { Theme } from "../theme.slint";
 import { SubPageType, AppState } from "../components/app_state.slint";
+import { EditProfileState } from "./edit.slint";
 
 
 export component MeView inherits Rectangle {
@@ -14,6 +15,11 @@ export component MeView inherits Rectangle {
         nickname: AppState.nickname;
         peer-id: AppState.peer-id;
         show-qr(peer) => { AppState.show-qr-code(peer); }
+        open-edit => {
+            EditProfileState.edit-username = AppState.user-id;
+            EditProfileState.request-load-name(AppState.user-id);
+            AppState.push-sub(SubPageType.EditProfile, 0);
+        }
     }
 
     ScrollView {

@@ -111,6 +111,10 @@ fn set_current_chat_id(chat_id: &str) {
 }
 static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PROFILE_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// When set, the album photo picker is serving the EditProfile avatar pick
+/// (rather than the Moment share flow) and the sink should route the first
+/// selection to the avatar draft instead.
+static PICKING_AVATAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 static POST_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -719,6 +723,33 @@ pub fn run_app() {
     }
     {
         let weak = weak.clone();
+        ui.global::<EditProfileState>()
+            .on_request_load_name(move |username| {
+                load_edit_profile_by_username(weak.clone(), username.to_string());
+            });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<EditProfileState>().on_pick_avatar(move || {
+            open_avatar_picker(weak.clone());
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<EditProfileState>().on_save_profile(
+            move |avatar_path, nickname, bio, research, _extra| {
+                save_profile_data(
+                    weak.clone(),
+                    avatar_path.to_string(),
+                    nickname.to_string(),
+                    bio.to_string(),
+                    research.to_string(),
+                );
+            },
+        );
+    }
+    {
+        let weak = weak.clone();
         ui.global::<AppState>().on_stop_screen_share(move || {
             end_screen_share(weak.clone());
         });
@@ -1092,6 +1123,19 @@ fn release_popped_page(ui: &MainWindow, page: SubPageType) {
             ms.set_status(SharedString::new());
             reset_moment_draft();
         }
+        SubPageType::EditProfile => {
+            let eps = ui.global::<EditProfileState>();
+            eps.set_edit_username(SharedString::new());
+            eps.set_avatar_picking(false);
+            eps.set_avatar_draft_path(SharedString::new());
+            eps.set_avatar_draft_image(slint::Image::default());
+            eps.set_saving(false);
+            eps.set_save_status(SharedString::new());
+            eps.set_name_loaded(false);
+            eps.set_nickname(SharedString::new());
+            eps.set_bio(SharedString::new());
+            eps.set_research(SharedString::new());
+        }
         _ => {}
     }
 }
@@ -1322,13 +1366,24 @@ fn apply_result(
                             let me_b58 = peer.clone();
                             let _ = data::load_fr_requests(&pool, &me_b58, &mut backend).await;
                             let backend = Arc::new(tokio::sync::RwLock::new(backend));
+                            // Publish the own-user bio + research into AppState so
+                            // the Me tab ProfileItem can show them.
+                            let own = match sqlite::users::get_by_username(&pool, &me).await {
+                                Ok(Some(u)) => (
+                                    u.bio.clone().unwrap_or_default(),
+                                    u.research.clone().unwrap_or_default(),
+                                ),
+                                _ => (String::new(), String::new()),
+                            };
                             let _ = slint::invoke_from_event_loop(move || {
                                 *BACKEND.lock().unwrap() = Some(backend.clone());
                                 if let Some(ui) = weak.upgrade() {
                                     let state = ui.global::<AppState>();
                                     state.set_peer_id(SharedString::from(peer.clone()));
-                                    state.set_qr_image(qr_image(&peer));
+                                    state.set_qr_image(qr_image(&peer.clone()));
                                     state.set_nickname(SharedString::from(nickname));
+                                    state.set_own_bio(SharedString::from(own.0));
+                                    state.set_own_research(SharedString::from(own.1));
                                     state.set_discover_shown(DISCOVER_INITIAL);
                                     publish_to_views(&state, backend);
                                 }
@@ -2612,6 +2667,38 @@ fn refresh_moment_media_ui(weak: slint::Weak<MainWindow>) {
 fn on_moment_photos_selected(paths: Vec<String>) {
     if paths.is_empty() {
         eprintln!("[moment] empty selection (cancelled)");
+        if PICKING_AVATAR.load(std::sync::atomic::Ordering::SeqCst) {
+            PICKING_AVATAR.store(false, std::sync::atomic::Ordering::SeqCst);
+            let weak = match call::weak_window() {
+                Some(w) => w,
+                None => return,
+            };
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.global::<EditProfileState>().set_avatar_picking(false);
+                }
+            });
+        }
+        return;
+    }
+    // Avatar pick (EditProfile) takes priority: the picker was armed for the
+    // avatar, so route the first chosen photo to the avatar draft and clear
+    // the flag so any later picks fall back to the moment flow.
+    if PICKING_AVATAR.load(std::sync::atomic::Ordering::SeqCst) {
+        PICKING_AVATAR.store(false, std::sync::atomic::Ordering::SeqCst);
+        let weak = match call::weak_window() {
+            Some(w) => w,
+            None => return,
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let es = ui.global::<EditProfileState>();
+            es.set_avatar_draft_path(SharedString::from(paths[0].clone()));
+            let img =
+                slint::Image::load_from_path(std::path::Path::new(&paths[0])).unwrap_or_default();
+            es.set_avatar_draft_image(img);
+            es.set_avatar_picking(false);
+        });
         return;
     }
     {
@@ -2708,13 +2795,21 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
         let mut stored_previews: Vec<String> = Vec::with_capacity(media_paths.len());
         let mut any_failed = false;
         for (i, src) in media_paths.iter().enumerate() {
-            match camera::posts::store_original(std::path::Path::new(src), &store_group, (i + 1) as u32) {
+            match camera::posts::store_original(
+                std::path::Path::new(src),
+                &store_group,
+                (i + 1) as u32,
+            ) {
                 Ok(p) => {
                     let stored = p.to_string_lossy().into_owned();
                     // Fall back to the original as its own preview when the
                     // format is not decodable (e.g. HEIC), so the index in
                     // `stored_previews` matches `stored_media`.
-                    let preview = match camera::posts::make_preview(std::path::Path::new(src), &store_group, (i + 1) as u32) {
+                    let preview = match camera::posts::make_preview(
+                        std::path::Path::new(src),
+                        &store_group,
+                        (i + 1) as u32,
+                    ) {
                         Ok(pv) => pv.to_string_lossy().into_owned(),
                         Err(_) => stored.clone(),
                     };
@@ -2768,9 +2863,7 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
             let my_peer = client.peer_base58().to_string();
             let my_user = client.user_id().to_string();
             let created_ts = created.timestamp;
-            let _ = client
-                .dir()
-                .notify_post(&my_user, &my_peer, created_ts);
+            let _ = client.dir().notify_post(&my_user, &my_peer, created_ts);
             eprintln!(
                 "[moment] notify_post -> server: user={my_user} peer={my_peer} ts={created_ts}"
             );
@@ -4207,7 +4300,7 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
                 return;
             }
         };
-        let (avatar_path, nickname, username, bio, created_at, moment) = {
+        let (avatar_path, nickname, username, bio, research, created_at, moment) = {
             let m = sqlite::joins::author_feed(&pool, user_id, 1, 0)
                 .await
                 .ok()
@@ -4219,6 +4312,7 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
                     .unwrap_or_else(|| st.username.clone().unwrap_or_default()),
                 st.username.clone().unwrap_or_default(),
                 st.bio.clone().unwrap_or_default(),
+                st.research.clone().unwrap_or_default(),
                 st.created_at,
                 m.map(|m| {
                     (
@@ -4242,10 +4336,12 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
             };
             ps.set_key(my_key);
             ps.set_avatar(avatar);
+            ps.set_avatar_path(SharedString::from(avatar_path));
             ps.set_nickname(SharedString::from(nickname));
             ps.set_username(SharedString::from(username));
             ps.set_peer_id(SharedString::from(peer_id));
             ps.set_bio(SharedString::from(bio));
+            ps.set_research(SharedString::from(research));
             ps.set_created_at(SharedString::from(fmt_profile_date(created_at)));
             ps.set_has_moment(has_moment);
             ps.set_moment_text(SharedString::from(mt));
@@ -4254,6 +4350,291 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
             ps.set_status(SharedString::new());
         });
     });
+}
+
+/// Open the album photo picker for the EditProfile avatar. The flag
+/// `PICKING_AVATAR` is set here so the shared photo sink can route the first
+/// selection to the avatar draft (instead of the Moment share draft).
+fn open_avatar_picker(weak: slint::Weak<MainWindow>) {
+    let weak1 = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak1.upgrade() else { return };
+        let es = ui.global::<EditProfileState>();
+        es.set_avatar_picking(true);
+    });
+    PICKING_AVATAR.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Err(e) = camera::album::pick_photos(1) {
+        eprintln!("[profile] avatar pick failed: {e}");
+        PICKING_AVATAR.store(false, std::sync::atomic::Ordering::SeqCst);
+        let weak = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                let es = ui.global::<EditProfileState>();
+                es.set_avatar_picking(false);
+                show_app_notice(
+                    ui.as_weak(),
+                    format!("Failed to open photo picker: {e}"),
+                    false,
+                );
+            }
+        });
+    }
+}
+
+/// Load a profile row by username ("self" = the signed-in account, or one of
+/// the contact's username strings) into ProfileState. The EditProfile page
+/// calls this on entry; we read the row, publish the fields, then flip
+/// `name-loaded` so the edit view can copy the defaults into its edit boxes.
+fn load_edit_profile_by_username(weak: slint::Weak<MainWindow>, username: String) {
+    let pool = POOL.lock().unwrap().clone();
+    let Some(pool) = pool else {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                let es = ui.global::<EditProfileState>();
+                es.set_avatar_picking(false);
+                show_app_notice(ui.as_weak(), "Not signed in".to_string(), false);
+            }
+        });
+        return;
+    };
+
+    let me = current_me();
+    let rt = runtime();
+    rt.spawn(async move {
+        let u = if username == "self" || username == me {
+            sqlite::users::get_by_username(&pool, &me)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            sqlite::users::get_by_username(&pool, &username)
+                .await
+                .ok()
+                .flatten()
+        };
+        let Some(u) = u else {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    let es = ui.global::<EditProfileState>();
+                    es.set_avatar_picking(false);
+                    show_app_notice(
+                        ui.as_weak(),
+                        "Profile not found on this device".to_string(),
+                        false,
+                    );
+                }
+            });
+            return;
+        };
+        let (avatar_path, nickname, bio, research) = (
+            u.avatar_path.clone().unwrap_or_default(),
+            u.nickname
+                .clone()
+                .unwrap_or_else(|| u.username.clone().unwrap_or_default()),
+            u.bio.clone().unwrap_or_default(),
+            u.research.clone().unwrap_or_default(),
+        );
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let avatar = load_image_cached(&avatar_path);
+            let es = ui.global::<EditProfileState>();
+            es.set_avatar_draft_image(avatar);
+            es.set_nickname(SharedString::from(nickname));
+            es.set_bio(SharedString::from(bio));
+            es.set_research(SharedString::from(research));
+            es.set_avatar_picking(false);
+            es.set_saving(false);
+            es.set_save_status(SharedString::new());
+            es.set_name_loaded(true);
+        });
+    });
+}
+
+/// Persist profile edits. For the own account (`edit-username == user-id` or
+/// "self"): apply avatar, nickname, bio and research. For a contact: apply
+/// only the nickname (per the product rule).
+fn save_profile_data(
+    weak: slint::Weak<MainWindow>,
+    avatar_path: String,
+    nickname: String,
+    bio: String,
+    research: String,
+) {
+    let pool = POOL.lock().unwrap().clone();
+    let Some(pool) = pool else {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                let es = ui.global::<EditProfileState>();
+                es.set_saving(false);
+                show_app_notice(ui.as_weak(), "Not signed in".to_string(), false);
+            }
+        });
+        return;
+    };
+    let Some(ui) = weak.upgrade() else { return };
+    let target = ui
+        .global::<EditProfileState>()
+        .get_edit_username()
+        .to_string();
+    ui.global::<EditProfileState>().set_saving(true);
+
+    let me = current_me();
+    let is_own = target == "self" || target == me;
+    let target_username = if is_own { me.clone() } else { target.clone() };
+
+    // Copy avatar into a stable location so we don't depend on the picker's
+    // temp path (which the OS/user may clean at any time). We use the same
+    // media/posts layout used by the Moment share flow; index 0, group keyed
+    // on a placeholder we'll resolve to the real row id below.
+    let stored_avatar = if !avatar_path.is_empty() {
+        let ext = std::path::Path::new(&avatar_path)
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_else(|| "jpg".into());
+        let dir = if let Some(home) =
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        {
+            std::path::PathBuf::from(home)
+                .join(".config")
+                .join("chatx")
+                .join("media")
+                .join("avatars")
+        } else {
+            std::env::temp_dir().join("chatx_avatars")
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let dst = dir.join(format!("avatar_{target_username}.{ext}"));
+        match std::fs::copy(&avatar_path, &dst) {
+            Ok(_) => Some(dst.to_string_lossy().to_string()),
+            Err(e) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        let es = ui.global::<EditProfileState>();
+                        es.set_saving(false);
+                        show_app_notice(
+                            ui.as_weak(),
+                            format!("Failed to store avatar: {e}"),
+                            false,
+                        );
+                    }
+                });
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    let patch = if is_own {
+        sqlite::users::UserPatch {
+            nickname: Some(nickname),
+            bio: Some(bio),
+            research: Some(research),
+            avatar_path: stored_avatar,
+            ..Default::default()
+        }
+    } else {
+        sqlite::users::UserPatch {
+            nickname: Some(nickname),
+            ..Default::default()
+        }
+    };
+
+    let rt = runtime();
+    let weak2 = weak.clone();
+    let pool2 = pool.clone();
+    rt.spawn(async move {
+        // Look up the user row by username (self -> me; contact -> target).
+        let Some(row) = (match sqlite::users::get_by_username(&pool2, &target_username).await {
+            Ok(Some(u)) => Some(u),
+            _ => None,
+        }) else {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak2.upgrade() {
+                    let es = ui.global::<EditProfileState>();
+                    es.set_saving(false);
+                    show_app_notice(ui.as_weak(), "Profile row not found".to_string(), false);
+                }
+            });
+            return;
+        };
+        let result = sqlite::users::upsert(&pool2, row.id, &patch).await;
+        match result {
+            Ok(u) => {
+                let new_nickname = u
+                    .nickname
+                    .clone()
+                    .unwrap_or_else(|| u.username.clone().unwrap_or_default());
+                let new_bio = u.bio.clone().unwrap_or_default();
+                let new_research = u.research.clone().unwrap_or_default();
+                let new_avatar = u.avatar_path.clone().unwrap_or_default();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak2.upgrade() else { return };
+                    let ps = ui.global::<ProfileState>();
+                    let es = ui.global::<EditProfileState>();
+                    es.set_saving(false);
+                    if is_own {
+                        let st = ui.global::<AppState>();
+                        st.set_nickname(SharedString::from(new_nickname.clone()));
+                        st.set_own_bio(SharedString::from(new_bio));
+                        st.set_own_research(SharedString::from(new_research));
+                    }
+                    // Only refresh the *displayed* contact profile if it is actually
+                    // showing the user we just saved; otherwise it still holds a
+                    // different contact and would get clobbered.
+                    if ps.get_username().to_string() == new_username_of(&u) {
+                        if !new_avatar.is_empty() {
+                            if let Some(img) =
+                                SlintImage::load_from_path(std::path::Path::new(&new_avatar)).ok()
+                            {
+                                ps.set_avatar(img);
+                                ps.set_avatar_path(SharedString::from(new_avatar));
+                            }
+                        }
+                        ps.set_nickname(SharedString::from(new_nickname));
+                    }
+                    show_app_notice(ui.as_weak(), "Saved".to_string(), true);
+                    // Leave the edit page (if it is still the top subpage); the
+                    // "Saved" notice floats on top of the page the user returns to.
+                    let st = ui.global::<AppState>();
+                    use slint::Model;
+                    let nav = st.get_nav_state();
+                    let active = nav.active_tab as usize;
+                    let is_top = (active < nav.tabs.row_count())
+                        && nav
+                            .tabs
+                            .row_data(active)
+                            .map(|t| {
+                                t.sub_top >= 0
+                                    && t.sub_history
+                                        .row_data(t.sub_top as usize)
+                                        .map(|e| e.page == SubPageType::EditProfile)
+                                        .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+                    if is_top {
+                        let popped = pop_sub_history(&st);
+                        if let Some(entry) = &popped {
+                            release_popped_page(&ui, entry.page);
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak2.upgrade() {
+                        let es = ui.global::<EditProfileState>();
+                        es.set_saving(false);
+                        show_app_notice(ui.as_weak(), format!("Save failed: {e}"), false);
+                    }
+                });
+            }
+        }
+    });
+}
+
+fn new_username_of(u: &sqlite::users::User) -> String {
+    u.username.clone().unwrap_or_default()
 }
 
 fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {

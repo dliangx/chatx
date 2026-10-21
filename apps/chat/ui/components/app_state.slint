@@ -21,6 +21,7 @@ export enum SubPageType {
     MyNote,
     MyDevices,
     LanguagePicker,
+    EditProfile,
 }
 
 export enum GlobalOverlayType {
@@ -127,6 +128,9 @@ export global AppState {
     in-out property <string> user-id: "";
     in-out property <string> nickname: "";
     in-out property <string> peer-id: "";
+    /// Own-user profile fields (displayed in the Me tab ProfileItem).
+    in property <string> own-bio: "";
+    in property <string> own-research: "";
 
     in-out property <string> add-status: "";
     in-out property <[SearchUser]> search-results: [];

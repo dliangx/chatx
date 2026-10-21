@@ -8,6 +8,7 @@ pub struct User {
     pub nickname: Option<String>,
     pub avatar_path: Option<String>,
     pub bio: Option<String>,
+    pub research: Option<String>,
     pub public_key: Option<String>,
     pub created_at: i64,
     pub updated_at: Option<i64>,
@@ -19,27 +20,30 @@ pub struct UserPatch {
     pub nickname: Option<String>,
     pub avatar_path: Option<String>,
     pub bio: Option<String>,
+    pub research: Option<String>,
     pub public_key: Option<String>,
 }
 
 pub async fn upsert(pool: &Pool, id: i64, patch: &UserPatch) -> anyhow::Result<User> {
     let now = now_ms();
     sqlx::query(
-        "INSERT INTO users (id, username, nickname, avatar_path, bio, public_key, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+        "INSERT INTO users (id, username, nickname, avatar_path, bio, research, public_key, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
          ON CONFLICT(id) DO UPDATE SET
             username    = COALESCE(?2, username),
             nickname    = COALESCE(?3, nickname),
             avatar_path = COALESCE(?4, avatar_path),
             bio         = COALESCE(?5, bio),
-            public_key  = COALESCE(?6, public_key),
-            updated_at  = ?7",
+            research    = COALESCE(?6, research),
+            public_key  = COALESCE(?7, public_key),
+            updated_at  = ?8",
     )
     .bind(id)
     .bind(&patch.username)
     .bind(&patch.nickname)
     .bind(&patch.avatar_path)
     .bind(&patch.bio)
+    .bind(&patch.research)
     .bind(&patch.public_key)
     .bind(now)
     .execute(pool)

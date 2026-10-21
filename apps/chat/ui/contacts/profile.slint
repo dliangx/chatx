@@ -1,17 +1,20 @@
 import { ScrollView } from "std-widgets.slint";
 import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
-import { AppState } from "../components/app_state.slint";
+import { AppState, SubPageType } from "../components/app_state.slint";
 import { Header } from "../components/header.slint";
 import { ProfileItem, SettingItem } from "../components/item.slint";
+import { EditProfileState } from "../me/edit.slint";
 
 export global ProfileState {
     in-out property <int> key: -1;
     in property <image> avatar;
+    in property <string> avatar-path;
     in property <string> nickname;
     in property <string> username;
     in property <string> peer-id;
     in property <string> bio;
+    in property <string> research;
     in property <string> created-at;
     in property <bool> has-moment: false;
     in property <string> moment-text;
@@ -67,6 +70,11 @@ export component ContactProfileView inherits Rectangle {
             nickname: ProfileState.nickname;
             peer-id: ProfileState.peer-id;
             show-qr(peer) => { AppState.show-qr-code(peer); }
+            open-edit => {
+                EditProfileState.edit-username = ProfileState.username;
+                EditProfileState.request-load-name(ProfileState.username);
+                AppState.push-sub(SubPageType.EditProfile, 0);
+            }
         }
 
         ScrollView {
@@ -103,6 +111,29 @@ export component ContactProfileView inherits Rectangle {
                         font-size: 13px;
                         color: Theme.fg;
                         wrap: word-wrap;
+                    }
+                }
+
+                VerticalLayout {
+                    width: 100%;
+                    height: 44px;
+                    padding-left: 16px;
+                    Text {
+                        width: 80px;
+                        text: @tr("Research");
+                        font-size: 13px;
+                        color: Theme.fg-muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: ProfileState.research != "" ? ProfileState.research : @tr("Not set");
+                        font-size: 13px;
+                        color: Theme.fg;
+                        vertical-alignment: center;
+                        overflow: elide;
                     }
                 }
 

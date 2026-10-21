@@ -25,6 +25,7 @@ component ResultRow inherits Rectangle {
         name: root.name;
         nickname: root.is_local ? @tr("Add via QR scan") : root.username;
         peer-id: root.peer_id;
+        edit-visible: false;
         show-qr(peer) => { AppState.show-qr-code(peer); }
     }
 

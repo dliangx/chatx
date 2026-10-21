@@ -7,7 +7,10 @@ export component ProfileItem inherits Rectangle {
     in property <string> name;
     in property <string> nickname;
     in property <string> peer-id;
+    in property <bool> edit-visible: true;
     callback show-qr(string);
+    callback open-edit();
+
     HorizontalLayout {
         x: 0px;
         y: 0px;
@@ -32,14 +35,32 @@ export component ProfileItem inherits Rectangle {
         VerticalLayout {
             horizontal-stretch: 1;
             spacing: 3px;
-
-            Text {
+            height: 56px;
+            HorizontalLayout {
                 width: 100%;
-                text: root.name;
-                font-size: 18px;
-                font-weight: 800;
-                color: Theme.fg;
-                overflow: elide;
+                spacing: 4px;
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.name;
+                    font-size: 18px;
+                    font-weight: 800;
+                    color: Theme.fg;
+                    overflow: elide;
+                }
+
+                if root.edit-visible:
+                Icon {
+                    size: 18px;
+                    glyph: Glyph.edit;
+                    variant: Variant.raw;
+                    tint: Theme.brand;
+                    TouchArea {
+                        width: 30px;
+                        height: 30px;
+                        clicked => { root.open-edit(); }
+                    }
+                }
             }
 
             Text {
@@ -57,7 +78,7 @@ export component ProfileItem inherits Rectangle {
                 Text {
                     horizontal-stretch: 1;
                     text: root.peer-id;
-                    font-size: 12px;
+                    font-size: 14px;
                     color: Theme.fg-muted;
                     overflow: elide;
                 }

@@ -1,0 +1,284 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { AppState } from "../components/app_state.slint";
+import { Header } from "../components/header.slint";
+
+export global EditProfileState {
+    in-out property <string> edit-username: "";
+    in-out property <string> avatar-draft-path: "";
+    in property <image> avatar-draft-image;
+    in-out property <bool> avatar-picking: false;
+    in-out property <bool> saving: false;
+    in-out property <string> save-status: "";
+    in property <bool> name-loaded: false;
+    in property <string> nickname: "";
+    in property <string> bio: "";
+    in property <string> research: "";
+
+    /// Load a profile row by username into EditProfileState + ProfileState display fields.
+    callback request-load-name(string);
+    /// Ask the backend to open the system photo picker for the avatar.
+    callback pick-avatar();
+    /// Persist profile edits. `avatar-path` is "" when no new avatar chosen.
+    callback save-profile(string, string, string, string, string);
+}
+
+component FieldBox inherits Rectangle {
+    in-out property <string> text;
+    in property <bool> enabled: true;
+
+    width: 100%;
+    height: 44px;
+    background: Theme.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    input := TextInput {
+        x: 10px;
+        vertical-alignment: center;
+        horizontal-alignment: left;
+        width: parent.width - 20px;
+        height: parent.height;
+        text <=> root.text;
+        single-line: true;
+        enabled: root.enabled;
+        opacity: root.enabled ? 1 : 0.5;
+        font-size: 15px;
+        color: Theme.fg;
+        selection-background-color: Theme.brand;
+        selection-foreground-color: white;
+    }
+}
+
+
+export component EditProfileView inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: Theme.bg;
+
+    out property <bool> is-own:
+        EditProfileState.edit-username != ""
+        && EditProfileState.edit-username == AppState.user-id;
+
+    Header {
+        name: root.is-own ? @tr("Edit profile") : @tr("Edit nickname");
+    }
+
+    ScrollView {
+        x: 0px;
+        y: 49px;
+        width: 100%;
+        height: parent.height - 49px - 58px;
+
+        VerticalLayout {
+            width: 80%;
+            spacing: 8px;
+            padding-left: 16px;
+            padding-right: 16px;
+            padding-top: 16px;
+
+            VerticalLayout {
+                width: 100%;
+                height: 80px;
+                spacing: 4px;
+                Text {
+                    width: 100%;
+                    height: 20px;
+                    text: @tr("Avatar");
+                    font-size: 13px;
+                    color: Theme.fg-muted;
+                }
+
+                Rectangle {
+                    width: 100%;
+                    height: 56px;
+                    background: Theme.surface;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+
+                    Rectangle {
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 8px;
+                        background: Theme.surface-2;
+                        clip: true;
+
+                        Image {
+                            width: 36px;
+                            height: 36px;
+                            source: EditProfileState.avatar-draft-image;
+                        }
+                    }
+
+                    Text {
+                        x: 56px;
+                        width: parent.width - 56px - 110px;
+                        height: parent.height;
+                        text: EditProfileState.avatar-picking
+                            ? @tr("Selecting…")
+                            : (EditProfileState.avatar-draft-path != "" ? @tr("New photo picked") : @tr("Change photo"));
+                        font-size: 13px;
+                        color: Theme.fg;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    Rectangle {
+                        x: parent.width - 100px;
+                        width: 84px;
+                        height: 30px;
+                        border-radius: 15px;
+                        background: root.is-own ? Theme.brand : Theme.disabled;
+
+                        Text {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width;
+                            height: parent.height;
+                            text: @tr("Choose");
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: root.is-own ? Theme.fg-on-accent : Theme.fg;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            enabled: !EditProfileState.avatar-picking && root.is-own;
+                            clicked => { EditProfileState.pick-avatar(); }
+                        }
+                    }
+                }
+            }
+
+            VerticalLayout {
+                width: 100%;
+                spacing: 6px;
+                height: 70px;
+                Text {
+                    width: 100%;
+                    height: 20px;
+                    text: @tr("Nickname");
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    color: Theme.fg-muted;
+                }
+
+                FieldBox {
+                    text <=> root.nickname;
+                    enabled: true;
+                }
+            }
+
+            VerticalLayout {
+                width: 100%;
+                spacing: 6px;
+                height: 70px;
+                Text {
+                    width: 100%;
+                    height: 20px;
+                    text: @tr("Bio");
+                    font-size: 13px;
+                    color: Theme.fg-muted;
+                    vertical-alignment: center;
+                }
+
+                FieldBox {
+                    text <=> root.bio;
+                    enabled: root.is-own;
+                }
+            }
+
+            VerticalLayout {
+                width: 100%;
+                spacing: 6px;
+                height: 70px;
+                Text {
+                    width: 100%;
+                    height: 20px;
+                    text: @tr("Research");
+                    font-size: 13px;
+                    color: Theme.fg-muted;
+                    vertical-alignment: center;
+                }
+
+                FieldBox {
+                    text <=> root.research;
+                    enabled: root.is-own;
+                }
+            }
+
+            Rectangle {
+                width: 100%;
+                height: 16px;
+                background: transparent;
+            }
+
+            Rectangle {
+                width: 100%;
+                height: 48px;
+                border-radius: 24px;
+                background: EditProfileState.saving ? Theme.fg-muted : Theme.brand;
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: EditProfileState.saving
+                        ? @tr("Saving…")
+                        : (root.is-own ? @tr("Save changes") : @tr("Save nickname"));
+                    font-size: 15px;
+                    font-weight: 600;
+                    color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    enabled: !EditProfileState.saving;
+                    clicked => {
+
+                        EditProfileState.save-profile(
+                            EditProfileState.avatar-draft-path,
+                            root.nickname,
+                            root.bio,
+                            root.research,
+                            "");
+                    }
+                }
+            }
+
+            Rectangle {
+                width: 100%;
+                height: 24px;
+                background: transparent;
+            }
+        }
+    }
+
+    in-out property <string> nickname: "";
+    in-out property <string> bio: "";
+    in-out property <string> research: "";
+
+    Timer {
+        interval: 60ms;
+        running: root.visible && EditProfileState.name-loaded;
+        triggered => {
+            if (root.nickname == "" && EditProfileState.nickname != "") {
+                root.nickname = EditProfileState.nickname;
+            }
+            if (root.bio == "" && EditProfileState.bio != "") {
+                root.bio = EditProfileState.bio;
+            }
+            if (root.research == "" && EditProfileState.research != "") {
+                root.research = EditProfileState.research;
+            }
+            EditProfileState.name-loaded = false;
+        }
+    }
+}
