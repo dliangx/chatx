@@ -116,6 +116,10 @@ export global AppState {
     callback login(string, string);
     callback register(string, string);
     callback logout();
+    /// Fired whenever the active tab changes. Backends use this (and the
+    /// new index) to trigger tab-specific work without a separate UI hook
+    /// (e.g. the moment sync loop kicks off when the user enters Discover).
+    callback tab-changed(int);
     in-out property <bool> auth-busy: false;
     in-out property <string> auth-message: "";
     in-out property <bool> is-mobile: true;

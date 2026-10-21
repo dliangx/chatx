@@ -9,6 +9,7 @@ pub mod devices;
 pub mod groups;
 pub mod joins;
 pub mod messages;
+pub mod moment_sync;
 pub mod notes;
 pub mod settings;
 pub mod server;

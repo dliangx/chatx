@@ -88,6 +88,34 @@ pub fn make_preview(src: &Path, group: &str, index: u32) -> Result<PathBuf, Stri
     Ok(dst)
 }
 
+/// Write raw image bytes to the original slot of a post group. Returns the
+/// stored absolute path. The caller passes the file extension (e.g. "jpg")
+/// or empty (in which case we default to "jpg").
+pub fn store_bytes(group: &str, index: u32, ext: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let ext = if ext.is_empty() { "jpg" } else { ext };
+    let dst = group_dir(group).join(format!("{index}.{ext}"));
+    std::fs::create_dir_all(dst.parent().map(Path::to_path_buf).unwrap_or_default())
+        .map_err(|e| e.to_string())?;
+    std::fs::write(&dst, bytes).map_err(|e| e.to_string())?;
+    Ok(dst)
+}
+
+/// Write raw image bytes to the preview slot of a post group. Returns the
+/// stored absolute path.
+pub fn store_preview_bytes(
+    group: &str,
+    index: u32,
+    ext: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
+    let ext = if ext.is_empty() { "jpg" } else { ext };
+    let dst = group_dir(group).join("preview").join(format!("{index}.{ext}"));
+    std::fs::create_dir_all(dst.parent().map(Path::to_path_buf).unwrap_or_default())
+        .map_err(|e| e.to_string())?;
+    std::fs::write(&dst, bytes).map_err(|e| e.to_string())?;
+    Ok(dst)
+}
+
 /// Best-effort cleanup of a post's stored files. Given any of the post's
 /// stored paths (original or preview), derive the post group dir and remove
 /// the whole tree (originals + preview dir). Errors are skipped — the DB row

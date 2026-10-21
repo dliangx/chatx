@@ -3,6 +3,7 @@ pub mod friendq;
 pub mod group;
 pub mod identity;
 pub mod message;
+pub mod moment;
 pub mod signal;
 pub mod store;
 pub mod swarm;
@@ -54,9 +55,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         base: &std::path::Path,
         profile: &str,
     ) -> anyhow::Result<Self> {
-        let (running, events) = sw::boot(&device).await?;
         let db_path = base.join(profile).join("messages.db");
         let db = sqlite::open(&db_path).await?;
+        // `boot` needs a pool so the *serving* side of the moment channel can
+        // read our own `social_posts` + media files when a friend requests them.
+        let (running, events) = sw::boot(&device, Some(db.clone())).await?;
 
         let peer_b58 = device.peer_base58().to_string();
         let username = account.user_id().to_string();
@@ -994,6 +997,132 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             payload: payload.to_string(),
         })?;
         Ok(())
+    }
+
+    /// Common dial + send-over-blob-channel plumbing. Resolves the peer's
+    /// dialable endpoints in the directory, then for each endpoint dials and
+    /// sends the binary request, waiting for the matching `PostResponse`.
+    async fn dial_and_send_blob(
+        &self,
+        peer_base58: &str,
+        op: crate::moment::PostReqOp,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<crate::moment::PostResponse> {
+        let rec = self
+            .dir
+            .resolve_device(peer_base58)
+            .map_err(|e| anyhow::anyhow!("device {peer_base58} not found: {e}"))?;
+        if rec.endpoints.is_empty() {
+            anyhow::bail!("device {peer_base58} is offline (no endpoints)");
+        }
+        let peer: PeerId = peer_base58
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
+
+        let mut candidates: Vec<Multiaddr> = Vec::new();
+        for endpoint in &rec.endpoints {
+            let Ok(addr) = endpoint.parse::<Multiaddr>() else {
+                eprintln!("[moment] skip unparseable endpoint: {endpoint}");
+                continue;
+            };
+            if let Some(reason) = unroutable_reason(&addr) {
+                eprintln!("[moment] skip unroutable endpoint ({reason}): {addr}");
+                continue;
+            }
+            candidates.push(addr);
+        }
+        if candidates.is_empty() {
+            anyhow::bail!("device {peer_base58} has no dialable endpoint");
+        }
+
+        let mut last_err = String::new();
+        for addr in &candidates {
+            let id: u64 = rand::random();
+            let req = crate::moment::PostRequest {
+                id,
+                op: op.clone(),
+            };
+            let (tx, rx) =
+                oneshot::channel::<anyhow::Result<crate::moment::PostResponse>>();
+            if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
+                peer: peer.clone(),
+                addr: addr.clone(),
+            }) {
+                last_err = format!("cmd channel closed: {e}");
+                continue;
+            }
+            if let Err(e) = self
+                .running
+                .cmd_tx
+                .send(Cmd::SendBlob { peer, req, ack_tx: tx })
+            {
+                last_err = format!("cmd channel closed: {e}");
+                continue;
+            }
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(Ok(resp))) => {
+                    eprintln!("[moment] blob ok id={id} via {addr}");
+                    return Ok(resp);
+                }
+                Ok(Ok(Err(e))) => {
+                    eprintln!("[moment] blob to {addr} failed: {e}");
+                    last_err = e.to_string();
+                }
+                Ok(Err(_)) => last_err = "peer dropped connection before response".to_string(),
+                Err(_) => {
+                    eprintln!("[moment] no response within {timeout:?} via {addr}");
+                    last_err = format!("no response within {timeout}s", timeout = timeout.as_secs());
+                }
+            }
+        }
+        anyhow::bail!("failed to sync from {peer_base58}: {last_err}");
+    }
+
+    /// Request metadata for posts in `(since, until]` from a friend's device.
+    pub async fn request_post_list(
+        &self,
+        peer_base58: &str,
+        since: i64,
+        until: i64,
+    ) -> anyhow::Result<Vec<crate::moment::PostMeta>> {
+        let resp = self
+            .dial_and_send_blob(
+                peer_base58,
+                crate::moment::PostReqOp::List { since, until },
+                std::time::Duration::from_secs(10),
+            )
+            .await?;
+        match resp.payload {
+            crate::moment::PostPayload::List { posts } => Ok(posts),
+            crate::moment::PostPayload::Image { .. } => {
+                anyhow::bail!("unexpected Image response to a List request")
+            }
+            crate::moment::PostPayload::Err { msg } => anyhow::bail!("remote error: {msg}"),
+        }
+    }
+
+    /// Request raw bytes of one image (`kind` 0=original, 1=preview).
+    pub async fn request_post_image(
+        &self,
+        peer_base58: &str,
+        ts: i64,
+        which: u32,
+        kind: u32,
+    ) -> anyhow::Result<Vec<u8>> {
+        let resp = self
+            .dial_and_send_blob(
+                peer_base58,
+                crate::moment::PostReqOp::Image { ts, which, kind },
+                std::time::Duration::from_secs(20),
+            )
+            .await?;
+        match resp.payload {
+            crate::moment::PostPayload::Image { bytes } => Ok(bytes),
+            crate::moment::PostPayload::List { .. } => {
+                anyhow::bail!("unexpected List response to an Image request")
+            }
+            crate::moment::PostPayload::Err { msg } => anyhow::bail!("remote error: {msg}"),
+        }
     }
 
     pub async fn send_dm(&self, peer_base58: &str, text: &str) -> anyhow::Result<String> {

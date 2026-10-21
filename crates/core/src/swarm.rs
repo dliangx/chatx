@@ -1,10 +1,12 @@
 use crate::identity::DeviceIdentity;
 use crate::message::{AudioPayload, ChatRequest, ChatResponse};
+use crate::moment::{PostRequest, PostResponse};
 use anyhow::Result;
 use libp2p::futures::StreamExt as _;
 pub use libp2p::gossipsub::IdentTopic;
 use libp2p::mdns::tokio::Behaviour as Mdns;
 use libp2p::mdns::{Config as MdnsConfig, Event as MdnsEvent};
+use libp2p::request_response::cbor::Behaviour as Blob;
 use libp2p::request_response::json::Behaviour as Chat;
 use libp2p::request_response::{
     Config as RrConfig, Event as RrEvent, Message as RrMessage, ProtocolSupport,
@@ -18,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 pub const TEXT_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/text/1");
+pub const MOMENT_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/moment/1");
 
 pub fn group_topic_name(group_id: &str) -> String {
     format!("/chatx/group/{}", group_id)
@@ -45,6 +48,10 @@ pub struct Net {
     // it, an otherwise-idle P2P session gets reaped by the peer's NAT after a
     // few seconds — the exact "CONNECTED then DISCONNECTED" symptom we fixed.
     pub ping: libp2p::ping::Behaviour,
+    /// Binary (CBOR) post-sync channel — carries raw image bytes and small
+    /// request/response frames (see `moment.rs`). Uses libp2p's built-in CBOR
+    /// codec so `Vec<u8>` serializes as a compact byte-string (no base64).
+    pub blob: Blob<PostRequest, PostResponse>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +110,16 @@ pub enum ChatEvent {
 }
 
 pub enum Cmd {
+    /// Send a moment/post frame over the binary CBOR channel and wait for
+    /// the matching `PostResponse` (resolved by `id`). The serving side is
+    /// handled directly by this crate's `swarm_loop` (serving its own
+    /// `social_posts` + local media files), so the app layer never touches
+    /// the wire.
+    SendBlob {
+        peer: PeerId,
+        req: crate::moment::PostRequest,
+        ack_tx: oneshot::Sender<anyhow::Result<crate::moment::PostResponse>>,
+    },
     Connect {
         peer: PeerId,
         addr: Multiaddr,
@@ -164,6 +181,11 @@ pub struct Running {
     pub listen_addrs: Arc<Mutex<Vec<Multiaddr>>>,
     pub my_peer_id: PeerId,
     pub pending_acks: Arc<Mutex<HashMap<u64, (PeerId, oneshot::Sender<anyhow::Result<()>>)>>>,
+    /// In-flight binary (moment) request waiters, keyed by `PostRequest::id`.
+    pub pending_blobs: Arc<Mutex<HashMap<u64, (PeerId, oneshot::Sender<anyhow::Result<crate::moment::PostResponse>>)>>>,
+    /// Shared pool over the local SQLite db, used by the serving side of the
+    /// moment channel to read our own `social_posts` on inbound requests.
+    pub pool: Option<sqlx::SqlitePool>,
     pub connected: Arc<Mutex<HashMap<PeerId, u32>>>,
     pub dial_backoff: Arc<Mutex<HashMap<String, (u64, u32)>>>,
     pub dial_fail_log: Arc<Mutex<HashMap<String, u64>>>,
@@ -239,6 +261,7 @@ pub type EventRx = mpsc::UnboundedReceiver<ChatEvent>;
 
 pub async fn boot(
     device: &DeviceIdentity,
+    pool: Option<sqlx::SqlitePool>,
 ) -> Result<(Arc<Running>, mpsc::UnboundedReceiver<ChatEvent>)> {
     let my_peer = device.peer_id();
     let gossip_cfg = libp2p::gossipsub::ConfigBuilder::default()
@@ -248,6 +271,10 @@ pub async fn boot(
     let mdns = Mdns::new(MdnsConfig::default(), my_peer)?;
     let chat: Chat<ChatRequest, ChatResponse> = Chat::new(
         [(TEXT_PROTOCOL, ProtocolSupport::Full)],
+        RrConfig::default(),
+    );
+    let blob: Blob<PostRequest, PostResponse> = Blob::new(
+        [(MOMENT_PROTOCOL, ProtocolSupport::Full)],
         RrConfig::default(),
     );
     let group: libp2p::gossipsub::Behaviour = libp2p::gossipsub::Behaviour::new(
@@ -275,6 +302,7 @@ pub async fn boot(
             upnp: Upnp::default(),
             relay,
             chat,
+            blob,
             group,
             ping,
         })?
@@ -290,6 +318,7 @@ pub async fn boot(
     let (injected_tx, injected_rx) = mpsc::unbounded_channel();
     let listen_addrs: Arc<Mutex<Vec<Multiaddr>>> = Arc::new(Mutex::new(Vec::new()));
     let pending_acks = Arc::new(Mutex::new(HashMap::new()));
+    let pending_blobs = Arc::new(Mutex::new(HashMap::new()));
     let connected = Arc::new(Mutex::new(HashMap::new()));
     let dial_backoff = Arc::new(Mutex::new(HashMap::new()));
     let dial_fail_log = Arc::new(Mutex::new(HashMap::new()));
@@ -312,6 +341,8 @@ pub async fn boot(
         listen_addrs: Arc::clone(&listen_addrs),
         my_peer_id: my_peer,
         pending_acks: Arc::clone(&pending_acks),
+        pending_blobs: Arc::clone(&pending_blobs),
+        pool: pool.clone(),
         connected: Arc::clone(&connected),
         dial_backoff: Arc::clone(&dial_backoff),
         dial_fail_log: Arc::clone(&dial_fail_log),
@@ -342,9 +373,20 @@ async fn swarm_loop(
     running: Arc<Running>,
 ) {
     let pending_acks = running.pending_acks.clone();
+    let pending_blobs = running.pending_blobs.clone();
     loop {
         tokio::select! {
             maybe_cmd = cmd_rx.recv() => match maybe_cmd {
+                Some(Cmd::SendBlob { peer, req, ack_tx }) => {
+                    let id = req.id;
+                    running
+                        .pending_blobs
+                        .lock()
+                        .unwrap()
+                        .insert(id, (peer.clone(), ack_tx));
+                    let _rid = swarm.behaviour_mut().blob.send_request(&peer, req);
+                    eprintln!("[swarm] SEND BLOB id={id} peer={peer}");
+                }
                 Some(Cmd::Connect { peer, addr }) => {
                     let own = is_own_address(&addr, &running);
                     if peer == *swarm.local_peer_id() {
@@ -666,10 +708,83 @@ async fn swarm_loop(
                                 });
                             }
                         },
+                            RrEvent::OutboundFailure { peer, error, .. } => {
+                                eprintln!("[swarm] SEND FAILED peer={peer} err={error:?}");
+                                // Fail every in-flight waiter addressed to this peer.
+                                let mut m = pending_acks.lock().unwrap();
+                                let ids: Vec<u64> = m
+                                    .iter()
+                                    .filter(|(_, (p, _))| *p == peer)
+                                    .map(|(id, _)| *id)
+                                    .collect();
+                                for id in ids {
+                                    if let Some((_p, tx)) = m.remove(&id) {
+                                        let _ = tx.send(Err(anyhow::anyhow!(
+                                            "send to {peer} failed: {error:?}"
+                                        )));
+                                    }
+                                }
+                                // Also fail any in-flight blob waiters for this peer.
+                                let mut mb = running.pending_blobs.lock().unwrap();
+                                let bids: Vec<u64> = mb
+                                    .iter()
+                                    .filter(|(_, (p, _))| *p == peer)
+                                    .map(|(id, _)| *id)
+                                    .collect();
+                                for id in bids {
+                                    if let Some((_p, tx)) = mb.remove(&id) {
+                                        let _ = tx.send(Err(anyhow::anyhow!(
+                                            "send blob to {peer} failed: {error:?}"
+                                        )));
+                                    }
+                                }
+                                drop(mb);
+                                let _ = ev.send(ChatEvent::SendFailed {
+                                peer,
+                                reason: format!("{error:?}"),
+                            });
+                        }
+                        _ => {}
+                    },
+                    // Moment/post sync — the binary CBOR channel.
+                    //  * Inbound request: we are the friend's device; answer
+                    //    from our own `social_posts` + local media files.
+                    //  * Inbound response: we are the syncing client; resolve
+                    //    the matching waiter in `pending_blobs`.
+                    NetEvent::Blob(b) => match b {
+                        RrEvent::Message { message, .. } => match message {
+                            RrMessage::Request { request, channel, .. } => {
+                                let req_id = request.id;
+                                let pool = running.pool.clone();
+                                let payload =
+                                    match crate::moment::serve(request, pool).await {
+                                        Ok(p) => p,
+                                        Err(e) => {
+                                            eprintln!("[swarm] SERVE FAIL id={req_id}: {e}");
+                                            crate::moment::PostPayload::Err {
+                                                msg: e.to_string(),
+                                            }
+                                        }
+                                    };
+                                let resp = crate::moment::PostResponse {
+                                    id: req_id,
+                                    payload,
+                                };
+                                let _ =
+                                    swarm.behaviour_mut().blob.send_response(channel, resp);
+                                eprintln!("[swarm] SERVED blob id={req_id}");
+                            }
+                            RrMessage::Response { response, .. } => {
+                                let mut m = pending_blobs.lock().unwrap();
+                                if let Some((_peer, tx)) = m.remove(&response.id) {
+                                    eprintln!("[swarm] BLOB ACKED id={}", response.id);
+                                    let _ = tx.send(Ok(response));
+                                }
+                            }
+                        },
                         RrEvent::OutboundFailure { peer, error, .. } => {
-                            eprintln!("[swarm] SEND FAILED peer={peer} err={error:?}");
-                            // Fail every in-flight waiter addressed to this peer.
-                            let mut m = pending_acks.lock().unwrap();
+                            eprintln!("[swarm] BLOB OUTBOUND FAILED peer={peer} err={error:?}");
+                            let mut m = pending_blobs.lock().unwrap();
                             let ids: Vec<u64> = m
                                 .iter()
                                 .filter(|(_, (p, _))| *p == peer)
@@ -678,14 +793,10 @@ async fn swarm_loop(
                             for id in ids {
                                 if let Some((_p, tx)) = m.remove(&id) {
                                     let _ = tx.send(Err(anyhow::anyhow!(
-                                        "send to {peer} failed: {error:?}"
+                                        "send blob to {peer} failed: {error:?}"
                                     )));
                                 }
                             }
-                            let _ = ev.send(ChatEvent::SendFailed {
-                                peer,
-                                reason: format!("{error:?}"),
-                            });
                         }
                         _ => {}
                     },

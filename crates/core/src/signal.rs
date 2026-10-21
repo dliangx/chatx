@@ -26,6 +26,16 @@ pub struct UserResolve {
     pub device: DeviceRecord,
 }
 
+/// One `post_index` pointer row returned by `GET /v1/posts`: identifies the
+/// publisher's account + device + post timestamp, so a client can dial that
+/// device over the binary moment channel to fetch the post's content.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PostPointer {
+    pub user_id: String,
+    pub peer_id: String,
+    pub post_ts: i64,
+}
+
 pub const ONLINE_TTL_MS: u64 = 30_000;
 
 pub trait DirectoryClient: Sync + Send {
@@ -90,6 +100,20 @@ pub trait DirectoryClient: Sync + Send {
 
     fn delete_group_key_slot(&self, _group_id: &str, _peer_id: &str) -> anyhow::Result<bool> {
         Ok(false)
+    }
+
+    /// Moment/post sync: notify the directory that this device published a
+    /// post at `post_ts` (so other devices can learn about it later via
+    /// `posts_since`).
+    fn notify_post(&self, _user_id: &str, _peer_id: &str, _post_ts: i64) -> anyhow::Result<()> {
+        anyhow::bail!("directory does not support moment/post notifications")
+    }
+
+    /// Moment/post sync: list post pointers in `(since, until]` (newest
+    /// first). Used by the sync loop to discover which friends have new
+    /// posts to fetch.
+    fn posts_since(&self, _since: i64, _until: i64) -> anyhow::Result<Vec<PostPointer>> {
+        anyhow::bail!("directory does not support moment/post sync")
     }
 
     fn check(&self) -> anyhow::Result<()> {
@@ -525,6 +549,34 @@ impl HttpDirectory {
             .call()
             .map(|_| ())
             .map_err(|e| anyhow::anyhow!("signal server unreachable: {e}"))
+    }
+
+    /// Notify the directory that `peer_id` (account `user_id`) published a
+    /// post at `post_ts`. Fire-and-forget: the publish succeeded locally and
+    /// a server-side notification failure must not roll that back.
+    pub fn notify_post(&self, user_id: &str, peer_id: &str, post_ts: i64) -> anyhow::Result<()> {
+        let url = format!("{}/v1/posts", self.base);
+        let body = serde_json::json!({
+            "user_id": user_id,
+            "peer_id": peer_id,
+            "post_ts": post_ts,
+        });
+        http_client().request("POST", &url)
+            .set("content-type", "application/json")
+            .send_string(&body.to_string())
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("notify_post failed: {e}"))
+    }
+
+    /// All post pointers in `(since, until]`, newest first. The sync loop
+    /// uses this to learn which friends have new posts to fetch.
+    pub fn posts_since(&self, since: i64, until: i64) -> anyhow::Result<Vec<PostPointer>> {
+        let url = format!("{}/v1/posts?since={since}&until={until}", self.base);
+        let resp = http_client().request("GET", &url)
+            .call()
+            .map_err(|e| anyhow::anyhow!("posts_since failed: {e}"))?;
+        resp.into_json::<Vec<PostPointer>>()
+            .map_err(|e| anyhow::anyhow!("bad PostPointer list: {e}"))
     }
 }
 

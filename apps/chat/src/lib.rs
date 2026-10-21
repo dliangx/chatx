@@ -14,6 +14,7 @@ use data::ArcBackend;
 pub mod call;
 pub mod call_dispatcher;
 pub mod image;
+pub mod moment;
 pub mod process;
 pub mod time;
 use image::{
@@ -340,6 +341,16 @@ pub fn run_app() {
                     apply_result(weak, uid, res);
                 });
             });
+        });
+    }
+
+    {
+        let w = weak.clone();
+        ui.global::<AppState>().on_tab_changed(move |tab: i32| {
+            // "Discover" (tab index 2) — kick off the moment sync round.
+            if tab == 2 {
+                moment::trigger_round(w.clone());
+            }
         });
     }
 
@@ -1235,6 +1246,11 @@ fn apply_result(
             set_current_me(&user_id);
 
             start_inbound_pump(weak.clone());
+
+            // Start the moment (post) sync 60s background timer. The timer
+            // is OnceLock-guarded so a re-login never double-spawns. It only
+            // fires a sync round; if nothing has changed it returns quickly.
+            moment::start_timer(weak.clone());
 
             if let Some(pool) = pool {
                 let pool = Arc::new(pool);
@@ -2744,6 +2760,21 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
                 return;
             }
         };
+        // Fire-and-forget notification to the signal server so friends can
+        // learn about this new post (and sync it from us over the binary
+        // moment channel). Failure here does NOT roll back the local publish.
+        let client = crate::CLIENT.lock().unwrap().clone();
+        if let Some(client) = client {
+            let my_peer = client.peer_base58().to_string();
+            let my_user = client.user_id().to_string();
+            let created_ts = created.timestamp;
+            let _ = client
+                .dir()
+                .notify_post(&my_user, &my_peer, created_ts);
+            eprintln!(
+                "[moment] notify_post -> server: user={my_user} peer={my_peer} ts={created_ts}"
+            );
+        }
         let _ = slint::invoke_from_event_loop(move || {
             // Insert the new row at the front of discover.
             let my_nickname = if let Some(ui) = weak2.upgrade() {

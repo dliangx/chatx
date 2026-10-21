@@ -36,6 +36,7 @@ async fn apply_migrations(pool: &Sdb) -> anyhow::Result<()> {
     for sql in [
         include_str!("migrations/0001_signal.sql"),
         include_str!("migrations/0002_group_mail.sql"),
+        include_str!("migrations/0003_post_index.sql"),
     ] {
         sqlx::raw_sql(sql).execute(pool).await?;
     }
@@ -352,6 +353,92 @@ pub async fn delete_group_key_slot(
         }
     }
     Ok(removed)
+}
+
+// --- Moment/post publish notifications -------------------------------------
+
+/// Retention bound: keep at most this many `post_index` rows. The index only
+/// needs to be fresh enough that a client returning within a few days sees
+/// its friends' new posts; everything older is already synced (the per-friend
+/// cursor in `moment_sync` is the real high-water mark).
+pub const POST_INDEX_KEEP: i64 = 50_000;
+
+/// Record that `peer_id` (account `user_id`) published a post at `post_ts`.
+/// Idempotent: re-notifying an existing (peer, post_ts) just refreshes
+/// `notified_at`.
+pub async fn notify_post(
+    db: &Sdb,
+    user_id: &str,
+    peer_id: &str,
+    post_ts: i64,
+) -> anyhow::Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    sqlx::query(
+        "INSERT INTO post_index (user_id, peer_id, post_ts, notified_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(peer_id, post_ts) DO UPDATE SET
+            user_id     = ?1,
+            notified_at = ?4",
+    )
+    .bind(user_id)
+    .bind(peer_id)
+    .bind(post_ts)
+    .bind(now)
+    .execute(db)
+    .await?;
+    trim_post_index(db).await?;
+    Ok(())
+}
+
+/// Return all `(user_id, peer_id, post_ts)` where `since < post_ts <= until`,
+/// newest first. This is the "is any of my friends publishing a new post"
+/// query the sync loop uses.
+pub async fn posts_since(
+    db: &Sdb,
+    since: i64,
+    until: i64,
+) -> anyhow::Result<Vec<(String, String, i64)>> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        user_id: String,
+        peer_id: String,
+        post_ts: i64,
+    }
+    let rows: Vec<Row> = sqlx::query_as::<_, Row>(
+        "SELECT user_id, peer_id, post_ts FROM post_index
+         WHERE post_ts > ?1 AND post_ts <= ?2
+         ORDER BY post_ts DESC",
+    )
+    .bind(since)
+    .bind(until)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.user_id, r.peer_id, r.post_ts))
+        .collect())
+}
+
+async fn trim_post_index(db: &Sdb) -> anyhow::Result<u64> {
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM post_index").fetch_one(db).await?;
+    if total <= POST_INDEX_KEEP {
+        return Ok(0);
+    }
+    let n = sqlx::query(
+        "DELETE FROM post_index
+         WHERE (peer_id, post_ts) NOT IN (
+             SELECT peer_id, post_ts FROM post_index
+             ORDER BY post_ts DESC LIMIT ?1
+         )",
+    )
+    .bind(POST_INDEX_KEEP)
+    .execute(db)
+    .await?;
+    Ok(n.rows_affected() as u64)
 }
 
 // --- read helpers (every request reads straight from the db) ----------------

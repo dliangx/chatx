@@ -544,6 +544,65 @@ async fn delete_group_key_slot(
     }
 }
 
+/// Record a moment/post publish from a client (fire-and-forget).
+#[derive(Deserialize)]
+struct NotifyPostBody {
+    user_id: String,
+    peer_id: String,
+    post_ts: i64,
+}
+
+async fn notify_post(
+    State(App { db, .. }): State<App>,
+    body: String,
+) -> ApiResult {
+    let body: NotifyPostBody =
+        serde_json::from_str(&body).map_err(|e| bad(StatusCode::BAD_REQUEST, e.to_string()))?;
+    if let Err(e) =
+        db::notify_post(db.as_ref(), &body.user_id, &body.peer_id, body.post_ts).await
+    {
+        tracing::warn!(%e, "persisting notify_post failed");
+        return Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
+    }
+    Ok(ok_json(&"ok"))
+}
+
+/// Query `(user_id, peer_id, post_ts)` pointers in `(since, until]`, newest
+/// first. The sync loop on a client uses this to learn "are any of my
+/// friends publishing a new post?" and then dials their devices over the
+/// binary moment channel to fetch the actual content.
+#[derive(Deserialize)]
+struct PostsSinceQuery {
+    #[serde(default)]
+    since: i64,
+    #[serde(default)]
+    until: i64,
+}
+
+#[derive(Serialize)]
+struct PostPointer {
+    user_id: String,
+    peer_id: String,
+    post_ts: i64,
+}
+
+async fn list_posts(
+    State(App { db, .. }): State<App>,
+    Query(q): Query<PostsSinceQuery>,
+) -> ApiResult {
+    let out = db::posts_since(db.as_ref(), q.since, q.until)
+        .await
+        .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .map(|(user_id, peer_id, post_ts)| PostPointer {
+            user_id,
+            peer_id,
+            post_ts,
+        })
+        .collect::<Vec<_>>();
+    Ok(ok_json(&out))
+}
+
 pub(crate) fn make_router(app: App) -> Router {
     Router::new()
         .route("/v1/health", get(health))
@@ -571,6 +630,7 @@ pub(crate) fn make_router(app: App) -> Router {
                 .get(get_group_key_slot)
                 .delete(delete_group_key_slot),
         )
+        .route("/v1/posts", post(notify_post).get(list_posts))
         .with_state(app)
 }
 

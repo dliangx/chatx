@@ -66,6 +66,31 @@ pub async fn get_post(pool: &Pool, id: i64) -> anyhow::Result<Option<SocialPost>
     Ok(row)
 }
 
+/// Look up a post by its `timestamp` (used by the binary moment channel —
+/// the remote client identifies posts by timestamp, not by our local `id`).
+pub async fn get_post_by_ts(pool: &Pool, ts: i64) -> anyhow::Result<Option<SocialPost>> {
+    let row = sqlx::query_as::<_, SocialPost>("SELECT * FROM social_posts WHERE timestamp = ?1")
+        .bind(ts)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row)
+}
+
+/// All posts where `since < timestamp <= until`, ordered newest first.
+/// Used by the binary moment channel serving side and by the background
+/// sync loop.
+pub async fn posts_between(pool: &Pool, since: i64, until: i64) -> anyhow::Result<Vec<SocialPost>> {
+    let rows = sqlx::query_as::<_, SocialPost>(
+        "SELECT * FROM social_posts WHERE timestamp > ?1 AND timestamp <= ?2
+         ORDER BY timestamp DESC",
+    )
+    .bind(since)
+    .bind(until)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 pub async fn delete_post(pool: &Pool, id: i64) -> anyhow::Result<bool> {
     let mut trans = pool.begin().await?;
     {

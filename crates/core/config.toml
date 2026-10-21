@@ -1,7 +1,2 @@
 # chatx-core default signal (directory) server.
-# Precedence in HttpDirectory::resolve_default_url:
-#   1. this file (crates/core/config.toml)  ← default
-#   2. CHATX_SIGNAL env var
-#   3. ~/.config/chatx/<profile>/config.toml
-# (no built-in fallback: a missing signal_url from all sources is an error)
 signal_url = "http://192.168.1.4:8787"

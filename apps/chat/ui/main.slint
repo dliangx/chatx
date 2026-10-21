@@ -46,6 +46,7 @@ export component MainWindow inherits Window {
 
     function select_tab(i: int) {
         AppState.nav-state.active-tab = i;
+        AppState.tab-changed(i);
     }
 
     preferred-height: AppState.is-mobile ? 844px : 768px;
