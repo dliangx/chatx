@@ -133,6 +133,110 @@ pub(crate) fn runtime() -> Arc<tokio::runtime::Runtime> {
     })
 }
 
+/// Build a `UserProfile` snapshot of the current user from locally-known
+/// state (username, nickname, bio, research, E2E public key, and the 40×40
+/// avatar read off-disk from the persisted `users.avatar_path`). Returns
+/// `Ok(None)` if no profile row exists yet.
+async fn my_profile_snapshot(
+    client: &Client<Directory>,
+) -> anyhow::Result<chatx_core::friendq::UserProfile> {
+    use chatx_core::friendq::UserProfile;
+    let me = current_me();
+    let pool = POOL.lock().unwrap().clone().ok_or_else(|| anyhow::anyhow!("no pool"))?;
+    let Some(row) = sqlite::users::get_by_username(&pool, &me).await? else {
+        anyhow::bail!("no user row for {me}; run login first")
+    };
+    let avatar_b64 = row
+        .avatar_path
+        .clone()
+        .filter(|p| !p.is_empty())
+        .and_then(|p| image::avatar_to_base64(&p, 40));
+    let public_key = client.e2e_public().to_string();
+    Ok(UserProfile {
+        nickname: row.nickname.clone().or_else(|| (!me.is_empty()).then(|| me.clone())),
+        bio: row.bio.clone(),
+        research: row.research.clone(),
+        public_key: Some(public_key),
+        avatar: avatar_b64,
+    })
+}
+
+/// Publish our profile to the signaling server. Best-effort; offline or
+/// non-supporting directories are warned but not treated as fatal.
+pub(crate) fn publish_profile_now() {
+    let Some(client) = CLIENT.lock().unwrap().clone() else {
+        return;
+    };
+    let user_id = client.user_id().to_string();
+    runtime().spawn(async move {
+        match my_profile_snapshot(&client).await {
+            Ok(profile) => {
+                if let Err(e) = client.dir().publish_profile(&user_id, &profile) {
+                    tracing::warn!("publish_profile failed: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("build profile snapshot failed: {e}"),
+        }
+    });
+}
+
+/// Stable on-disk location for a received contact's 40×40 avatar.
+fn received_avatar_dir() -> std::path::PathBuf {
+    if let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
+        let dir = std::path::PathBuf::from(home)
+            .join(".config")
+            .join("chatx")
+            .join("media")
+            .join("avatars");
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    } else {
+        let dir = std::env::temp_dir().join("chatx_avatars");
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+}
+
+/// Persist a profile received over the wire (from the *other* party) into the
+/// local `users` row for `username`: writes the base64 avatar to a stable
+/// on-disk path and upserts nickname / bio / research / E2E public key /
+/// avatar path. Returns the avatar path that was persisted (or `None`).
+/// Blank / absent fields are preserved (COALESCE) so a sparse frame never
+/// clobbers richer stored data.
+async fn persist_inbound_profile(
+    pool: &sqlx::SqlitePool,
+    username: &str,
+    profile: &chatx_core::friendq::UserProfile,
+) -> anyhow::Result<Option<String>> {
+    let avatar_path = match profile.avatar.as_deref().filter(|a| !a.is_empty()) {
+        Some(b64) => {
+            use base64::Engine as _;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| anyhow::anyhow!("bad avatar b64: {e}"))?;
+            let file = received_avatar_dir().join(format!("received_{username}.jpg"));
+            std::fs::write(&file, bytes)?;
+            Some(file.to_string_lossy().to_string())
+        }
+        None => None,
+    };
+    let patch = sqlite::users::UserPatch {
+        username: Some(username.to_string()),
+        nickname: profile.nickname.clone(),
+        bio: profile.bio.clone(),
+        research: profile.research.clone(),
+        public_key: profile.public_key.clone(),
+        avatar_path: avatar_path.clone(),
+        ..Default::default()
+    };
+    let id = match sqlite::users::get_by_username(pool, username).await? {
+        Some(u) => u.id,
+        None => sqlite::new_id(),
+    };
+    sqlite::users::upsert(pool, id, &patch).await?;
+    Ok(avatar_path)
+}
+
 fn profile() -> String {
     chatx_core::identity::DeviceIdentity::default_profile()
 }
@@ -1299,6 +1403,11 @@ fn apply_result(
             if let Some(pool) = pool {
                 let pool = Arc::new(pool);
                 *POOL.lock().unwrap() = Some(pool.clone());
+                // Publish our self-reported profile (nickname / bio / research /
+                // E2E pk / 40×40 avatar) to the signaling server now that we are
+                // logged in. Other users can fetch it via /v1/users/{me}/profile
+                // when they receive our add request.
+                publish_profile_now();
                 // Restore the persisted UI language (stored in the `settings`
                 // table) so it takes effect for the whole session, including the
                 // auth screen. Reading the DB is async; Slint calls must run on
@@ -1510,6 +1619,15 @@ async fn handle_inbound_friendq(weak: slint::Weak<MainWindow>, from_peer: &str, 
             } else {
                 q.sender_name.clone()
             };
+            // Persist the asker's self-reported profile (avatar / bio / research /
+            // public key) so the inbox shows their real identity immediately.
+            if let Some(p) = &q.profile {
+                if !p.is_empty() {
+                    if let Err(e) = persist_inbound_profile(&pool, &note, p).await {
+                        eprintln!("[friendq] inbound inquire: persist profile failed: {e}");
+                    }
+                }
+            }
             let _ = sqlite::social::frq_upsert(&pool, from_peer, &me_b58, Some(&note)).await;
             {
                 let mut g = backend.write().await;
@@ -1550,7 +1668,7 @@ async fn handle_inbound_friendq(weak: slint::Weak<MainWindow>, from_peer: &str, 
             } else {
                 q.sender_name.clone()
             };
-            if let Err(e) = do_add(&pool, &me, &other, &name, &backend).await {
+            if let Err(e) = do_add(&pool, &me, &other, &name, &backend, q.profile.as_ref()).await {
                 eprintln!("[friendq] inbound accept failed to add contact: {e}");
             }
             {
@@ -2949,9 +3067,42 @@ fn delete_contact(weak: slint::Weak<MainWindow>, key: i32) {
     let Some(backend) = backend else {
         return;
     };
+    // Capture the row before it is dropped so we can clean up sqlite in the
+    // async arm — `friendships`, `fr_requests`, and any stale `users` row
+    // would otherwise resurrect on the next launch.
+    let row_opt: Option<(i64, String, String)> = {
+        let g = backend.blocking_read();
+        g.contacts
+            .iter()
+            .find(|c| c.key == key)
+            .map(|c| (c.user_id, c.peer_id.clone(), c.name.clone()))
+    };
     {
         let mut g = backend.blocking_write();
         g.remove_contact(key);
+    }
+    if let (Some((user_id, peer_id, _name)), Some(pool)) =
+        (row_opt, POOL.lock().unwrap().clone())
+    {
+        let me = current_me();
+        // The `fr_requests` table stores libp2p base58 peer ids (not usernames),
+        // so clear it using my own peer id on the "me" side.
+        let my_peer = CLIENT
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|c| c.peer_base58())
+            .unwrap_or_default();
+        let rt = runtime();
+        rt.spawn(async move {
+            let Ok(Some(me_row)) = sqlite::users::get_by_username(&pool, &me).await else {
+                return;
+            };
+            let _ = sqlite::social::remove(&pool, me_row.id, user_id).await;
+            if !my_peer.is_empty() {
+                let _ = sqlite::social::frq_clear_between(&pool, &my_peer, &peer_id).await;
+            }
+        });
     }
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
@@ -3109,7 +3260,7 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
         Ok(_) => {
             let new_key = {
                 let mut g = backend.blocking_write();
-                g.append_chat(group_id.clone(), title, true, String::new())
+                g.append_chat(group_id.clone(), title, true, String::new(), String::new())
             };
             let w = weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
@@ -3139,6 +3290,56 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
     }
 }
 
+/// Resolve raw avatar source for the Add Member search list. Returns
+/// `(Option<local_path>, Option<bytes>)` — both fields `Send`, so the result
+/// can travel from the async resolver into the `slint::invoke_from_event_loop`
+/// closure that finally constructs the (non-`Send`) `slint::Image`.
+/// Preference order:
+///   1. local `users` row's `avatar_path` — only if the file still exists on
+///      disk (avoids handing the UI a broken local path for a deleted image).
+///   2. the signaling `/v1/users/{id}/profile` avatar (base64, decoded to
+///      raw bytes).
+///   3. `None, None` — caller falls back to the default (placeholder) image.
+async fn resolve_search_avatar_source(
+    client: &std::sync::Arc<Client<Directory>>,
+    username: &str,
+) -> (Option<String>, Option<Vec<u8>>) {
+    let pool = POOL.lock().unwrap().clone();
+    if let Some(pool) = pool {
+        if let Ok(Some(u)) = sqlite::users::get_by_username(&pool, username).await {
+            if let Some(p) = u.avatar_path.clone().filter(|p| !p.is_empty()) {
+                if std::path::Path::new(&p).exists() {
+                    return (Some(p), None);
+                }
+                // local file vanished — fall through to signaling below
+            }
+        }
+    }
+    if let Ok(Some(p)) = client.dir().fetch_profile(username) {
+        if let Some(b64) = p.avatar.clone().filter(|a| !a.is_empty()) {
+            use base64::Engine as _;
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+                return (None, Some(bytes));
+            }
+        }
+    }
+    (None, None)
+}
+
+/// Build a 40×40 capped `slint::Image` from a source produced by
+/// [`resolve_search_avatar_source`]. **Must be called on the Slint
+/// event-loop thread** (`slint::Image` holds a platform handle that is not
+/// `Send`).
+fn build_search_avatar(path: Option<String>, bytes: Option<Vec<u8>>) -> slint::Image {
+    if let Some(p) = path {
+        return image::load_avatar_path_capped(&p, 40);
+    }
+    if let Some(b) = bytes {
+        return image::image_from_bytes(&b, 40);
+    }
+    slint::Image::default()
+}
+
 fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
     let q: String = q_raw.chars().filter(|c| !c.is_whitespace()).collect();
     if q.is_empty() {
@@ -3161,14 +3362,20 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
                 if let Ok(ur) = ur {
                     let uname = ur.user.user_id;
                     let peer = ur.device.peer_id;
-                    let row = SearchUser {
-                        name: SharedString::from(uname.clone()),
-                        username: SharedString::from(uname),
-                        peer_id: SharedString::from(peer),
-                    };
-                    eprintln!("[search] -> result name={} username={} peer_id={}", row.name, row.username, row.peer_id);
+                    // Resolve the avatar *source* (a local path or raw bytes,
+                    // both `Send`) on this worker thread. The non-`Send`
+                    // `slint::Image` is built inside the UI-thread closure.
+                    let avatar_src = resolve_search_avatar_source(&client, &uname).await;
+                    eprintln!("[search] -> result name={uname} username={uname} peer_id={peer} avatar={:?}", avatar_src.0.is_some() || avatar_src.1.is_some());
+                    let weak2 = weak.clone();
                     let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
+                        if let Some(ui) = weak2.upgrade() {
+                            let row = SearchUser {
+                                name: SharedString::from(uname.clone()),
+                                username: SharedString::from(uname),
+                                peer_id: SharedString::from(peer),
+                                image: build_search_avatar(avatar_src.0, avatar_src.1),
+                            };
                             ui.global::<AppState>().set_search_results(slint::ModelRc::new(slint::VecModel::from(vec![row])));
                             ui.global::<AppState>().set_add_status(SharedString::new());
                         }
@@ -3216,14 +3423,19 @@ fn search_users_by_peer_id(weak: slint::Weak<MainWindow>, q_raw: String) {
                 if let Ok(dev) = dev {
                     let uname = dev.user_id;
                     let peer = dev.peer_id;
-                    let row = SearchUser {
-                        name: SharedString::from(uname.clone()),
-                        username: SharedString::from(uname),
-                        peer_id: SharedString::from(peer),
-                    };
-                    eprintln!("[search] -> result name={} username={} peer_id={}", row.name, row.username, row.peer_id);
+                    // Avatar source resolved on the worker thread; the
+                    // non-`Send` `slint::Image` is built on the UI thread.
+                    let avatar_src = resolve_search_avatar_source(&client, &uname).await;
+                    eprintln!("[search] -> result name={uname} username={uname} peer_id={peer} avatar={:?}", avatar_src.0.is_some() || avatar_src.1.is_some());
+                    let weak2 = weak.clone();
                     let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
+                        if let Some(ui) = weak2.upgrade() {
+                            let row = SearchUser {
+                                name: SharedString::from(uname.clone()),
+                                username: SharedString::from(uname),
+                                peer_id: SharedString::from(peer),
+                                image: build_search_avatar(avatar_src.0, avatar_src.1),
+                            };
                             ui.global::<AppState>().set_search_results(slint::ModelRc::new(slint::VecModel::from(vec![row])));
                             ui.global::<AppState>().set_add_status(SharedString::new());
                         }
@@ -3310,11 +3522,17 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
     }
 
     let rt = runtime();
-    let frame = FriendQ::new(FriendQAction::Inquire, &me_peer, &me, &peer_id)
-        .encode()
-        .unwrap_or_default();
-
     rt.spawn(async move {
+        // Compose the Inquire frame with our own profile (nickname / bio /
+        // research / E2E pk / 40×40 avatar). Profile fetch failures are
+        // non-fatal — we just send an older-style frame.
+        let profile = my_profile_snapshot(&client).await.ok();
+        let mut frame =
+            FriendQ::new(FriendQAction::Inquire, &me_peer, &me, &peer_id);
+        if let Some(p) = profile {
+            frame = frame.with_profile(p);
+        }
+        let frame = frame.encode().unwrap_or_default();
         if let Err(e) = client.send_friendq(&peer_id, &frame).await {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
@@ -3349,23 +3567,44 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
 }
 
 /// Create a contact entry for `their_peer` (a libp2p peer id), using `name`
-/// (the other party's display name / username). Called on accept of a friend
-/// request or after a legacy direct add.
+/// (the other party's display name / username). When `profile` is provided
+/// (either from the wire frame or from the signaling profile endpoint) the
+/// local `users` row is upserted with nickname / bio / research / E2E public
+/// key / avatar (base64 → disk) so the contact list and profile page render
+/// the full rich UI instead of just a bare username.
 async fn do_add(
     pool: &sqlx::SqlitePool,
     me: &str,
     their_peer: &str,
     name: &str,
     backend: &ArcBackend,
+    profile: Option<&chatx_core::friendq::UserProfile>,
 ) -> anyhow::Result<()> {
     let me_id = sqlite::users::get_by_username(pool, me)
         .await?
         .ok_or_else(|| anyhow::anyhow!("no user row for {me}; run login to create one"))?
         .id;
+
+    // If the peer sent a profile, persist it first so the avatar bytes are on
+    // disk and the upsert below can reference the local path.
+    let avatar_path: Option<String> = match profile {
+        Some(p) if !p.is_empty() => {
+            let avatar_local = persist_inbound_profile(pool, name, p).await?;
+            if let Some(_) = avatar_local {
+                avatar_local
+            } else {
+                // A profile without an avatar (rare) — fall through to the
+                // plain upsert.
+                None
+            }
+        }
+        _ => None,
+    };
+
     // Ensure their user + device rows exist locally so future messaging,
     // contact lookups, etc. work without a live directory.
-    let their_id = match sqlite::users::get_by_username(pool, name).await? {
-        Some(u) => u.id,
+    let their_row = match sqlite::users::get_by_username(pool, name).await? {
+        Some(u) => u,
         None => {
             sqlite::users::upsert(
                 pool,
@@ -3377,9 +3616,9 @@ async fn do_add(
                 },
             )
             .await?
-            .id
         }
     };
+    let their_id = their_row.id;
     if their_id == me_id {
         anyhow::bail!("Can't add yourself");
     }
@@ -3388,14 +3627,27 @@ async fn do_add(
         let _ = sqlite::devices::bind_device(pool, their_id, their_peer).await;
     }
 
+    // Avatar for the contact row: prefer the one just persisted from the wire
+    // frame, else fall back to whatever is already on disk for this user (e.g.
+    // captured earlier when their Inquire arrived).
+    let avatar = avatar_path.or_else(|| their_row.avatar_path.clone()).unwrap_or_default();
+
     let mut g = backend.write().await;
     if !g.has_contact(their_peer, name) {
         g.append_contact(
             their_id,
             their_peer.to_string(),
             name.to_string(),
-            String::new(),
+            avatar.clone(),
         );
+    } else if !avatar.is_empty() {
+        // Contact already existed — refresh the avatar slot in place so the
+        // list reflects the newly-persisted image.
+        for c in g.contacts.iter_mut() {
+            if c.peer_id == their_peer || c.name == name {
+                c.image = avatar.clone();
+            }
+        }
     }
     Ok(())
 }
@@ -3425,18 +3677,23 @@ fn accept_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
     };
 
     // Send the accept back to the requester (best-effort; they may be offline).
+    // Include our own profile so the peer's contact list can render us with
+    // avatar / bio / research / public key as soon as they accept.
     if let Some(client) = CLIENT.lock().unwrap().clone() {
-        if let Some(frame) =
-            FriendQ::new(FriendQAction::Accept, &me_peer, &me, &other_peer).encode()
-        {
-            let peer = other_peer.clone();
-            let weak2 = weak.clone();
-            let rt = runtime();
-            rt.spawn(async move {
-                let _ = client.send_friendq(&peer, &frame).await;
-                let _ = weak2;
-            });
-        }
+        let me_peer2 = me_peer.clone();
+        let me2 = me.clone();
+        let other_peer2 = other_peer.clone();
+        let rt = runtime();
+        rt.spawn(async move {
+            let mut frame =
+                FriendQ::new(FriendQAction::Accept, &me_peer2, &me2, &other_peer2);
+            if let Ok(p) = my_profile_snapshot(&client).await {
+                frame = frame.with_profile(p);
+            }
+            if let Some(encoded) = frame.encode() {
+                let _ = client.send_friendq(&other_peer2, &encoded).await;
+            }
+        });
     }
 
     let rt = runtime();
@@ -3451,6 +3708,8 @@ fn accept_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
         .await;
 
         // 2. Resolve a friendly name and create the contact entry (idempotent).
+        //    The peer's profile was already persisted from their Inquire frame;
+        //    here we only link them into our contacts.
         let display = {
             let b = backend.read().await;
             b.friend_requests
@@ -3464,7 +3723,7 @@ fn accept_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
         } else {
             display
         };
-        if let Err(e) = do_add(&pool, &me, &other_peer, &name, &backend).await {
+        if let Err(e) = do_add(&pool, &me, &other_peer, &name, &backend, None).await {
             eprintln!("[friendq] accept failed: {e}");
         }
 
@@ -4487,14 +4746,10 @@ fn save_profile_data(
     let target_username = if is_own { me.clone() } else { target.clone() };
 
     // Copy avatar into a stable location so we don't depend on the picker's
-    // temp path (which the OS/user may clean at any time). We use the same
-    // media/posts layout used by the Moment share flow; index 0, group keyed
-    // on a placeholder we'll resolve to the real row id below.
+    // temp path (which the OS/user may clean at any time). We compress it to a
+    // 40×40 JPEG on the way in so the on-disk row, the profile page, and any
+    // future wire copy all share one small canonical file.
     let stored_avatar = if !avatar_path.is_empty() {
-        let ext = std::path::Path::new(&avatar_path)
-            .extension()
-            .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_else(|| "jpg".into());
         let dir = if let Some(home) =
             std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         {
@@ -4507,8 +4762,8 @@ fn save_profile_data(
             std::env::temp_dir().join("chatx_avatars")
         };
         let _ = std::fs::create_dir_all(&dir);
-        let dst = dir.join(format!("avatar_{target_username}.{ext}"));
-        match std::fs::copy(&avatar_path, &dst) {
+        let dst = dir.join(format!("avatar_{target_username}.jpg"));
+        match image::compress_avatar_to_disk(&avatar_path, &dst, 40) {
             Ok(_) => Some(dst.to_string_lossy().to_string()),
             Err(e) => {
                 let _ = slint::invoke_from_event_loop(move || {
@@ -4595,6 +4850,11 @@ fn save_profile_data(
                         ps.set_nickname(SharedString::from(new_nickname));
                     }
                     show_app_notice(ui.as_weak(), "Saved".to_string(), true);
+                    // Publish our updated profile to the signaling server so the
+                    // other devices / users see the fresh avatar, bio, research.
+                    if is_own {
+                        publish_profile_now();
+                    }
                     // Leave the edit page (if it is still the top subpage); the
                     // "Saved" notice floats on top of the page the user returns to.
                     let st = ui.global::<AppState>();
@@ -4718,8 +4978,11 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
                 t0.elapsed().as_millis(),
                 std::thread::current().id()
             );
+            // Pass the contact's avatar so the new chat row in the list renders
+            // the counterparty's 40×40 image instead of a blank slot.
+            let avatar_path = c.image.clone();
             let mut g = backend.blocking_write();
-            let k = g.append_chat(chat_id, title, false, peer_id.clone());
+            let k = g.append_chat(chat_id, title, false, peer_id.clone(), avatar_path);
             drop(g);
             eprintln!(
                 "[chat] open_conversation: +{}ms THREAD {:?} WRITE lock released, appended new chat key={k}",

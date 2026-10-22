@@ -13,6 +13,7 @@ component ResultRow inherits Rectangle {
     in property <string> username;
     in property <string> peer_id;
     in property <bool> is_local;
+    in property <image> image;
     width: 100%;
     height: 132px;
     background: Theme.bg;
@@ -22,6 +23,7 @@ component ResultRow inherits Rectangle {
         y: 0px;
         width: parent.width;
         height: 100px;
+        image: root.image;
         name: root.name;
         nickname: root.is_local ? @tr("Add via QR scan") : root.username;
         peer-id: root.peer_id;
@@ -157,6 +159,7 @@ export component AddContactView inherits Rectangle {
             name: r.name;
             username: r.username;
             peer_id: r.peer_id;
+            image: r.image;
             is_local: r.username == "";
         }
     }

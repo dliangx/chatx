@@ -336,9 +336,26 @@ pub async fn frq_set_status(
         .bind(status)
         .bind(now)
         .bind(id)
-        .execute(pool)
-        .await?;
+    .execute(pool)
+    .await?;
     Ok(true)
+}
+
+/// Delete any `fr_requests` row between the two peer ids, in either
+/// direction (requester/recipient or recipient/requester). Used when a
+/// contact is deleted so the pair does not linger in the "sent" / "inbox"
+/// lists across app restarts. Returns the number of rows removed.
+pub async fn frq_clear_between(pool: &Pool, a: &str, b: &str) -> anyhow::Result<bool> {
+    let n = sqlx::query(
+        "DELETE FROM fr_requests
+         WHERE (requester = ?1 AND recipient = ?2)
+            OR (requester = ?2 AND recipient = ?1)",
+    )
+    .bind(a)
+    .bind(b)
+    .execute(pool)
+    .await?;
+    Ok(n.rows_affected() > 0)
 }
 
 // --- follows ---------------------------------------------------------------
@@ -460,6 +477,24 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].requester, mine);
         assert_eq!(sent[0].recipient, "PEER-THIRD");
+    }
+
+    #[tokio::test]
+    async fn frq_clear_between_removes_both_directions() {
+        let pool = open_memory().await.unwrap();
+        // inbound: other -> me
+        frq_upsert(&pool, "OTHER", "ME", Some("x")).await.unwrap();
+        assert!(frq_pending_between(&pool, "OTHER", "ME").await.unwrap());
+        // outgoing: me -> third (independent pair, must survive)
+        frq_upsert(&pool, "ME", "THIRD", Some("y")).await.unwrap();
+
+        assert!(frq_clear_between(&pool, "ME", "OTHER").await.unwrap());
+        // symmetric: cleared even though queried the other way around
+        assert!(!frq_pending_between(&pool, "OTHER", "ME").await.unwrap());
+        // the unrelated pair is untouched
+        assert!(frq_pending_between(&pool, "ME", "THIRD").await.unwrap());
+        // clearing again is a no-op
+        assert!(!frq_clear_between(&pool, "ME", "OTHER").await.unwrap());
     }
 
     #[tokio::test]

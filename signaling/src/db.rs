@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use chatx_core::account::{Attestation, DeviceRecord, DeviceStatus, UserRecord};
+use chatx_core::friendq::UserProfile;
 use chatx_core::group::GroupPublic;
 use sqlx::Pool;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -37,6 +38,7 @@ async fn apply_migrations(pool: &Sdb) -> anyhow::Result<()> {
         include_str!("migrations/0001_signal.sql"),
         include_str!("migrations/0002_group_mail.sql"),
         include_str!("migrations/0003_post_index.sql"),
+        include_str!("migrations/0004_user_profiles.sql"),
     ] {
         sqlx::raw_sql(sql).execute(pool).await?;
     }
@@ -571,6 +573,76 @@ pub async fn list_users(db: &Sdb) -> anyhow::Result<Vec<UserRecord>> {
         out.push(r.into_record());
     }
     Ok(out)
+}
+
+// --- user profile (display info) -------------------------------------------
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+#[allow(dead_code)] // `user_id` / `updated_at` are present to match the
+                    // SELECT * row shape but only `updated_at` is consumed.
+struct ProfileRow {
+    user_id: String,
+    nickname: String,
+    bio: String,
+    research: String,
+    public_key: String,
+    avatar: String,
+    updated_at: i64,
+}
+
+impl ProfileRow {
+    fn into_profile(r: Self) -> UserProfile {
+        UserProfile {
+            nickname: (!r.nickname.is_empty()).then(|| r.nickname),
+            bio: (!r.bio.is_empty()).then(|| r.bio),
+            research: (!r.research.is_empty()).then(|| r.research),
+            public_key: (!r.public_key.is_empty()).then(|| r.public_key),
+            avatar: (!r.avatar.is_empty()).then(|| r.avatar),
+        }
+    }
+}
+
+pub async fn publish_profile_db(
+    db: &Sdb,
+    user_id: &str,
+    p: &UserProfile,
+) -> anyhow::Result<()> {
+    let now = chatx_core::message::now_ms();
+    let nick = p.nickname.as_deref().unwrap_or("").to_string();
+    let bio = p.bio.as_deref().unwrap_or("").to_string();
+    let research = p.research.as_deref().unwrap_or("").to_string();
+    let public_key = p.public_key.as_deref().unwrap_or("").to_string();
+    let avatar = p.avatar.as_deref().unwrap_or("").to_string();
+    sqlx::query(
+        "INSERT INTO user_profiles (user_id, nickname, bio, research, public_key, avatar, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(user_id) DO UPDATE SET
+            nickname   = COALESCE(NULLIF(?2, ''), nickname),
+            bio        = COALESCE(NULLIF(?3, ''), bio),
+            research   = COALESCE(NULLIF(?4, ''), research),
+            public_key = COALESCE(NULLIF(?5, ''), public_key),
+            avatar     = COALESCE(NULLIF(?6, ''), avatar),
+            updated_at = ?7",
+    )
+    .bind(user_id)
+    .bind(nick)
+    .bind(bio)
+    .bind(research)
+    .bind(public_key)
+    .bind(avatar)
+    .bind(now as i64)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub async fn fetch_profile_db(db: &Sdb, user_id: &str) -> anyhow::Result<Option<UserProfile>> {
+    let row: Option<ProfileRow> =
+        sqlx::query_as::<_, ProfileRow>("SELECT * FROM user_profiles WHERE user_id = ?1")
+            .bind(user_id)
+            .fetch_optional(db)
+            .await?;
+    Ok(row.map(ProfileRow::into_profile))
 }
 
 pub async fn get_group_db(db: &Sdb, group_id: &str) -> anyhow::Result<Option<GroupPublic>> {

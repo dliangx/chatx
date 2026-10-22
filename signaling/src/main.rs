@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use chatx_core::account::{AttestationAction, DeviceRecord, DeviceStatus, UserRecord};
+use chatx_core::friendq::UserProfile;
 use chatx_core::group::GroupPublic;
 use chatx_core::message::now_ms;
 use chatx_core::signal::UserResolve;
@@ -71,6 +72,41 @@ async fn resolve_user(
             StatusCode::NOT_FOUND,
             format!("user {user_id} not found or ambiguous"),
         )),
+    }
+}
+
+async fn fetch_user_profile(
+    State(App { db, .. }): State<App>,
+    Path(user_id): Path<String>,
+) -> ApiResult {
+    match db::fetch_profile_db(db.as_ref(), &user_id).await {
+        Ok(Some(p)) => Ok(ok_json(&p)),
+        Ok(None) => Err(bad(
+            StatusCode::NOT_FOUND,
+            format!("user {user_id} has no profile"),
+        )),
+        Err(e) => {
+            tracing::warn!(%e, "fetch profile failed");
+            Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"))
+        }
+    }
+}
+
+async fn upsert_user_profile(
+    State(App { db, .. }): State<App>,
+    Path(user_id): Path<String>,
+    body: String,
+) -> ApiResult {
+    let p: UserProfile = match serde_json::from_str(&body) {
+        Ok(p) => p,
+        Err(e) => return Err(bad(StatusCode::BAD_REQUEST, format!("bad UserProfile: {e}"))),
+    };
+    match db::publish_profile_db(db.as_ref(), &user_id, &p).await {
+        Ok(()) => Ok(ok_json(&"ok")),
+        Err(e) => {
+            tracing::warn!(%e, "publish profile failed");
+            Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"))
+        }
     }
 }
 
@@ -608,6 +644,10 @@ pub(crate) fn make_router(app: App) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/users", get(list_users))
         .route("/v1/users/{user_id}", put(upsert_user).get(resolve_user))
+        .route(
+            "/v1/users/{user_id}/profile",
+            put(upsert_user_profile).get(fetch_user_profile),
+        )
         .route("/v1/users/{user_id}/resolve", get(resolve_and_device))
         .route("/v1/users/{user_id}/devices", get(list_user_devices))
         .route(

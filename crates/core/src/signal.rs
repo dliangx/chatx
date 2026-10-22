@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::account::{DeviceRecord, DeviceStatus, UserRecord};
+use crate::friendq::UserProfile;
 
 /// Shared `ureq::Agent` with hard timeouts. `http_client().request(...)` default has
 /// `timeout_read = None` — a socket that connects and then stalls blocks the
@@ -114,6 +115,20 @@ pub trait DirectoryClient: Sync + Send {
     /// posts to fetch.
     fn posts_since(&self, _since: i64, _until: i64) -> anyhow::Result<Vec<PostPointer>> {
         anyhow::bail!("directory does not support moment/post sync")
+    }
+
+    /// Publish this user's display profile ( nickname / bio / research / E2E
+    /// public key / 40×40 avatar) so other users can fetch it when adding a
+    /// contact. Best-effort: a directory without profile storage simply
+    /// ignores it.
+    fn publish_profile(&self, _user_id: &str, _profile: &UserProfile) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Fetch a user's self-reported display profile from the directory.
+    /// Returns `Ok(None)` when the directory has no profile row for the user.
+    fn fetch_profile(&self, _user_id: &str) -> anyhow::Result<Option<UserProfile>> {
+        Ok(None)
     }
 
     fn check(&self) -> anyhow::Result<()> {
@@ -664,6 +679,28 @@ impl DirectoryClient for HttpDirectory {
         match http_client().request("GET", &url).call() {
             Ok(resp) => resp.into_json::<Vec<DeviceRecord>>().unwrap_or_default(),
             Err(_) => Vec::new(),
+        }
+    }
+
+    fn publish_profile(&self, user_id: &str, profile: &UserProfile) -> anyhow::Result<()> {
+        let url = format!("{}/v1/users/{user_id}/profile", self.base);
+        let body = serde_json::to_string(profile).expect("serialize UserProfile");
+        http_client().request("PUT", &url)
+            .set("content-type", "application/json")
+            .send_string(&body)
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("publish profile failed: {e}"))
+    }
+
+    fn fetch_profile(&self, user_id: &str) -> anyhow::Result<Option<UserProfile>> {
+        let url = format!("{}/v1/users/{user_id}/profile", self.base);
+        match http_client().request("GET", &url).call() {
+            Ok(resp) => resp
+                .into_json::<UserProfile>()
+                .map(Some)
+                .map_err(|e| anyhow::anyhow!("fetch profile failed: {e}")),
+            Err(ureq::Error::Status(code, _)) if code == 404 => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("fetch profile failed: {e}")),
         }
     }
 

@@ -199,7 +199,10 @@ impl DataBackend {
     }
 
 
-    pub fn append_chat(&mut self, chat_id: String, title: String, is_group: bool, peer_id: String) -> i32 {
+    /// Append a new chat row to the in-memory chat list. `avatar_path` is the
+    /// local path of the counterparty's 40×40 avatar (may be empty for groups
+    /// or peers without one); the chat list renders it next to the title.
+    pub fn append_chat(&mut self, chat_id: String, title: String, is_group: bool, peer_id: String, avatar_path: String) -> i32 {
         let key = self.bump();
         self.chat_key_to_id.insert(key, chat_id.clone());
         let now_ms = std::time::SystemTime::now()
@@ -215,7 +218,7 @@ impl DataBackend {
             time_ms: now_ms,
             unread: 0,
             peer_id,
-            avatar_path: String::new(),
+            avatar_path,
         });
         key
     }

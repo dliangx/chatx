@@ -1211,6 +1211,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "audio",
+ "base64 0.22.1",
  "bridge",
  "camera",
  "chatx-core",

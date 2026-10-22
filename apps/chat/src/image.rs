@@ -82,6 +82,71 @@ pub fn load_avatar_path_capped(path: &str, cap: u32) -> SlintImage {
     }
 }
 
+/// Compress the avatar at `path` down to at most `cap`×`cap` (preserving
+/// aspect ratio, never upscaling), re-encode as JPEG, and write it to
+/// `dst_path`. Returns `Ok(())` on success.
+///
+/// The wire profile carries a base64-encoded, compact JPEG of the avatar so
+/// receiving devices can persist a small on-disk copy without shipping the
+/// source image — a 40×40 JPEG is a few KB even for the most detailed face.
+pub fn compress_avatar_to_disk(
+    src_path: &str,
+    dst_path: &std::path::Path,
+    cap: u32,
+) -> std::io::Result<()> {
+    let jpg_bytes = decode_capped_jpeg_bytes(src_path, cap)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(dst_path, jpg_bytes)?;
+    Ok(())
+}
+
+/// Decode the image at `path`, downscale it to at most `cap`×`cap` (preserving
+/// aspect ratio, never upscaling), and re-encode as JPEG bytes.
+fn decode_capped_jpeg_bytes(src_path: &str, cap: u32) -> std::io::Result<Vec<u8>> {
+    let img = image::open(std::path::Path::new(src_path))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let (w, h) = (img.width(), img.height());
+    let longest = w.max(h);
+    let resized: image::DynamicImage = if longest > cap {
+        let scale = cap as f64 / longest as f64;
+        let nw = (w as f64 * scale).max(1.0) as u32;
+        let nh = (h as f64 * scale).max(1.0) as u32;
+        img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    // `write_to` on a `Cursor<Vec<u8>>` lets us collect the encoded JPEG in
+    // memory; `save_with_format` only writes to a path.
+    let mut buf: std::io::Cursor<Vec<u8>> = std::io::Cursor::new(Vec::new());
+    resized
+        .write_to(&mut buf, image::ImageFormat::Jpeg)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    Ok(buf.into_inner())
+}
+
+/// Load an avatar from `path`, cap it to `cap`×`cap`, re-encode as JPEG, and
+/// return a base64 string (for embedding in a FriendQ profile over the P2P
+/// wire). Returns `None` if the file cannot be decoded.
+pub fn avatar_to_base64(path: &str, cap: u32) -> Option<String> {
+    use base64::Engine as _;
+    let bytes = decode_capped_jpeg_bytes(path, cap).ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Decode `bytes` (JPEG / PNG / any format the `image` crate supports) and
+/// produce a capped, RGBA8-pixel-buffer `SlintImage` at most `cap`×`cap`.
+/// Empty / undecodable payloads return the default (`empty`) image so the
+/// slot keeps its placeholder.
+pub fn image_from_bytes(bytes: &[u8], cap: u32) -> SlintImage {
+    if bytes.is_empty() {
+        return SlintImage::default();
+    }
+    match image::load_from_memory(bytes) {
+        Ok(img) => to_pixel_buffer(img, cap),
+        Err(_) => SlintImage::default(),
+    }
+}
+
 const FONT_LATIN: &[u8] = include_bytes!("../fonts/NotoSans.ttf");
 const FONT_CJK: &[u8] = include_bytes!("../fonts/NotoSansSC.ttf");
 const FONT_EMOJI: &[u8] = include_bytes!("../fonts/NotoColorEmoji.ttf");
