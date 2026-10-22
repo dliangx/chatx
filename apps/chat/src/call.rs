@@ -170,6 +170,22 @@ fn fire_ui_end() {
     }
 }
 
+/// Per-call generation. Bumped on every teardown (`stop_common`). Remote-
+/// camera / remote-screen / local-preview sink closures capture the value
+/// at install time; if it no longer matches, the frame is dropped. This
+/// kills the race where a frame already in-flight on the webrtc read thread
+/// (or camera / screen capture thread) lands on the Slint event loop AFTER
+/// our teardown reset — re-populating the `CallState` image slots with the
+/// peer's full-resolution pixel buffer (and a freshly-allocated local
+/// preview copy) even though the call is over.
+static CALL_GEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// `g` captured at install time is still current?
+fn gen_live(g: u64) -> bool {
+    CALL_GEN.load(std::sync::atomic::Ordering::Acquire) == g
+}
+
 // ── public: active / peer ─────────────────────────────────────────────────
 
 pub fn is_active() -> bool {
@@ -651,6 +667,14 @@ pub fn stop_call_no_notify() {
 }
 
 fn stop_common(send_bye: bool) {
+    // Invalidate every sink closure installed by the call we are tearing
+    // down (remote cam / remote scr / local cam preview / local scr preview).
+    // Frames already queued on their source threads will check this when
+    // they next enter the SLint event loop and bail — so they can NOT
+    // re-populate the `CallState` image slots with the last full-res pixel
+    // buffer we just reset. Bump FIRST so the invalidation is visible to
+    // any thread that hasn't yet captured a new value.
+    CALL_GEN.fetch_add(1, std::sync::atomic::Ordering::Release);
     if let Some(call) = active_call() {
         if send_bye {
             let _ = call.hangup();
@@ -939,44 +963,71 @@ fn wire_remote_sinks(
     });
 
     // Remote camera (webrtc read thread) → Slint event loop → CallState.remote-cam.
-    call.set_remote_camera_sink(move |rgba: Vec<u8>, w: u32, h: u32| {
-        if let Some(weak) = weak_window() {
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = weak.upgrade() {
-                    let img = rgba_to_slint(&rgba, w, h);
-                    let cs = ui.global::<CallState>();
-                    cs.set_remote_cam(img);
-                    cs.set_has_remote_cam(true);
-                }
-            });
-        }
-    });
+    // Gen guard: if the call has been torn down by the time this frame reaches
+    // the event loop, drop it — see `CALL_GEN`.
+    {
+        let g = CALL_GEN.load(std::sync::atomic::Ordering::Acquire);
+        call.set_remote_camera_sink(move |rgba: Vec<u8>, w: u32, h: u32| {
+            if !gen_live(g) {
+                return;
+            }
+            if let Some(weak) = weak_window() {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if !gen_live(g) {
+                        return;
+                    }
+                    if let Some(ui) = weak.upgrade() {
+                        let img = rgba_to_slint(&rgba, w, h);
+                        let cs = ui.global::<CallState>();
+                        cs.set_remote_cam(img);
+                        cs.set_has_remote_cam(true);
+                    }
+                });
+            }
+        });
+    }
 
     // Remote screen (webrtc read thread) → Slint event loop → CallState.remote-scr.
-    call.set_remote_screen_sink(move |rgba: Vec<u8>, w: u32, h: u32| {
-        if let Some(weak) = weak_window() {
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = weak.upgrade() {
-                    let img = rgba_to_slint(&rgba, w, h);
-                    let cs = ui.global::<CallState>();
-                    cs.set_remote_scr(img);
-                    cs.set_has_remote_scr(true);
-                }
-            });
-        }
-    });
+    {
+        let g = CALL_GEN.load(std::sync::atomic::Ordering::Acquire);
+        call.set_remote_screen_sink(move |rgba: Vec<u8>, w: u32, h: u32| {
+            if !gen_live(g) {
+                return;
+            }
+            if let Some(weak) = weak_window() {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if !gen_live(g) {
+                        return;
+                    }
+                    if let Some(ui) = weak.upgrade() {
+                        let img = rgba_to_slint(&rgba, w, h);
+                        let cs = ui.global::<CallState>();
+                        cs.set_remote_scr(img);
+                        cs.set_has_remote_scr(true);
+                    }
+                });
+            }
+        });
+    }
 }
 
 /// Install the local camera preview sink so the UI shows a PIP of "me" in
 /// parallel with the webrtc `VidSource` that the camera frames feed. Marks
 /// `has-my-cam` so the A image slot renders my camera immediately.
 pub(crate) fn install_local_cam_preview() {
+    let g = CALL_GEN.load(std::sync::atomic::Ordering::Acquire);
     call_dispatcher::set_cam_preview(Some(Box::new(move |rgba: &[u8], w: u32, h: u32| {
+        if !gen_live(g) {
+            return;
+        }
         if let Some(weak) = weak_window() {
             // Copy + horizontal mirror so the "me" preview reads as a mirror.
             let mut local = rgba.to_vec();
             call_dispatcher::flip_h(&mut local, w);
             let _ = slint::invoke_from_event_loop(move || {
+                if !gen_live(g) {
+                    return;
+                }
                 if let Some(ui) = weak.upgrade() {
                     let img = rgba_to_slint(&local, w, h);
                     let cs = ui.global::<CallState>();
@@ -993,10 +1044,18 @@ pub(crate) fn install_local_cam_preview() {
 /// forwards each screen frame to this hook in parallel with the outgoing
 /// `VidSource`. No mirror — the screen is not a mirror feed.
 pub(crate) fn install_local_scr_preview() {
+    // Gen guard: if the call is torn down between when the frame arrives on
+    // the capture thread and when we hit the UI, we skip the downscale +
+    // copy on the capture thread (the full-res desktop frame is ~14.7 MB —
+    // no point building it for a UI slot that is about to be wiped).
+    let g = CALL_GEN.load(std::sync::atomic::Ordering::Acquire);
     // The A slot is tiny (~150x94). Ship a downscaled local screen to the UI
     // instead of the full-resolution desktop frame (2560x1440 = ~14.7 MB each)
     // — the full-res encode for the peer happens via the `VidSource`, not here.
     call_dispatcher::set_scr_preview(Some(Box::new(move |rgba: &[u8], w: u32, h: u32| {
+        if !gen_live(g) {
+            return;
+        }
         if let Some(weak) = weak_window() {
             let (dw, dh) = fit_within(w, h, SCR_PREVIEW_MAX_W);
             let local = if dw == w && dh == h {
@@ -1005,6 +1064,9 @@ pub(crate) fn install_local_scr_preview() {
                 downscale_rgba(rgba, w, h, dw, dh)
             };
             let _ = slint::invoke_from_event_loop(move || {
+                if !gen_live(g) {
+                    return;
+                }
                 if let Some(ui) = weak.upgrade() {
                     let img = rgba_to_slint(&local, dw, dh);
                     let cs = ui.global::<CallState>();

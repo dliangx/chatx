@@ -4053,9 +4053,17 @@ pub(crate) fn publish_call_state_with(
             cs.set_scr_on(false);
             // Reset local image sources + "has-*" flags so the surfaces and
             // device buttons start gray; they come back on when each local
-            // camera / screen frame is pushed + `has_my_*` is set.
+            // camera / screen frame is pushed + `has_my_*` is set. Release
+            // BOTH the local (`my_*`) and remote (`remote_*`) `Image` props
+            // — each holds a `SharedPixelBuffer` (remote at native res).
+            // Previously only `has_remote_*` was cleared, so the remote
+            // pixel buffer stayed pinned to the `CallState` property after
+            // hangup (visible only as retained memory / VRAM, not a visible
+            // image, since the flag hid it).
             cs.set_my_cam(slint::Image::default());
             cs.set_my_scr(slint::Image::default());
+            cs.set_remote_cam(slint::Image::default());
+            cs.set_remote_scr(slint::Image::default());
             cs.set_has_my_cam(false);
             cs.set_has_my_scr(false);
             cs.set_has_remote_cam(false);
