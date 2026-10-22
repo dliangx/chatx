@@ -276,3 +276,63 @@ msgstr "设置"
 msgid "{} comments"
 msgstr "{} 条评论"
 
+
+msgid "AUDIO"
+msgstr "声音"
+
+msgid "Avatar"
+msgstr "头像"
+
+msgid "Bio"
+msgstr "简介"
+
+msgid "CAMERA"
+msgstr "摄像头"
+
+msgid "Calling…"
+msgstr "呼叫中…"
+
+msgid "Change photo"
+msgstr "更换照片"
+
+msgid "Choose"
+msgstr "选择"
+
+msgid "Edit nickname"
+msgstr "编辑昵称"
+
+msgid "Edit profile"
+msgstr "编辑资料"
+
+msgid "New photo picked"
+msgstr "已选择新照片"
+
+msgid "Nickname"
+msgstr "昵称"
+
+msgid "Not set"
+msgstr "未设置"
+
+msgid "Research"
+msgstr "研究"
+
+msgid "SCREEN"
+msgstr "屏幕"
+
+msgid "Save changes"
+msgstr "保存更改"
+
+msgid "Save nickname"
+msgstr "保存昵称"
+
+msgid "Saving…"
+msgstr "保存中…"
+
+msgid "Selecting…"
+msgstr "选择中…"
+
+msgid "Type a message…"
+msgstr "输入消息…"
+
+msgid "VOICE"
+msgstr "语音"

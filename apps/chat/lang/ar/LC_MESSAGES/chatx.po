@@ -276,3 +276,63 @@ msgstr "الإعدادات"
 msgid "{} comments"
 msgstr "{} تعليقًا"
 
+
+msgid "AUDIO"
+msgstr "الصوت"
+
+msgid "Avatar"
+msgstr "الصورة الشخصية"
+
+msgid "Bio"
+msgstr "نبذة"
+
+msgid "CAMERA"
+msgstr "الكاميرا"
+
+msgid "Calling…"
+msgstr "جارٍ الاتصال…"
+
+msgid "Change photo"
+msgstr "تغيير الصورة"
+
+msgid "Choose"
+msgstr "اختيار"
+
+msgid "Edit nickname"
+msgstr "تعديل الاسم"
+
+msgid "Edit profile"
+msgstr "تعديل الملف الشخصي"
+
+msgid "New photo picked"
+msgstr "تم اختيار صورة جديدة"
+
+msgid "Nickname"
+msgstr "الاسم"
+
+msgid "Not set"
+msgstr "غير محدد"
+
+msgid "Research"
+msgstr "البحث"
+
+msgid "SCREEN"
+msgstr "الشاشة"
+
+msgid "Save changes"
+msgstr "حفظ التغييرات"
+
+msgid "Save nickname"
+msgstr "حفظ الاسم"
+
+msgid "Saving…"
+msgstr "جارٍ الحفظ…"
+
+msgid "Selecting…"
+msgstr "جارٍ الاختيار…"
+
+msgid "Type a message…"
+msgstr "اكتب رسالة…"
+
+msgid "VOICE"
+msgstr "الصوت"

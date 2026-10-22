@@ -276,3 +276,63 @@ msgstr "Настройки"
 msgid "{} comments"
 msgstr "{} комментариев"
 
+
+msgid "AUDIO"
+msgstr "ЗВУК"
+
+msgid "Avatar"
+msgstr "Аватар"
+
+msgid "Bio"
+msgstr "О себе"
+
+msgid "CAMERA"
+msgstr "КАМЕРА"
+
+msgid "Calling…"
+msgstr "Вызов…"
+
+msgid "Change photo"
+msgstr "Сменить фото"
+
+msgid "Choose"
+msgstr "Выбрать"
+
+msgid "Edit nickname"
+msgstr "Изменить ник"
+
+msgid "Edit profile"
+msgstr "Изменить профиль"
+
+msgid "New photo picked"
+msgstr "Выбрано новое фото"
+
+msgid "Nickname"
+msgstr "Никнейм"
+
+msgid "Not set"
+msgstr "Не указано"
+
+msgid "Research"
+msgstr "Исследования"
+
+msgid "SCREEN"
+msgstr "ЭКРАН"
+
+msgid "Save changes"
+msgstr "Сохранить изменения"
+
+msgid "Save nickname"
+msgstr "Сохранить ник"
+
+msgid "Saving…"
+msgstr "Сохранение…"
+
+msgid "Selecting…"
+msgstr "Выбор…"
+
+msgid "Type a message…"
+msgstr "Введите сообщение…"
+
+msgid "VOICE"
+msgstr "ГОЛОС"

@@ -2,7 +2,7 @@ import { Icon, Glyph } from "../components/icon.slint";
 export global CallState {
     in property <string> peer-base58: "";
     in property <string> peer-name: "";
-    in property <string> status: "Calling…";
+    in property <string> status: @tr("Calling…");
     in property <string> error-message: "";
     in property <bool> active: false;
     /// True once the peer has actually answered (WebRTC `Connected`). Before
@@ -311,7 +311,7 @@ export component CallView inherits Rectangle {
             spacing: 10px;
 
             CallBtn {
-                label: "VOICE";
+                label: @tr("VOICE");
                 on: !CallState.muted;
                 glyph-on: Glyph.voice;
                 glyph-off: Glyph.voice-close;
@@ -319,7 +319,7 @@ export component CallView inherits Rectangle {
             }
 
             CallBtn {
-                label: "AUDIO";
+                label: @tr("AUDIO");
                 on: !CallState.audio-muted;
                 glyph-on: Glyph.volume;
                 glyph-off: Glyph.volume-close;
@@ -327,14 +327,14 @@ export component CallView inherits Rectangle {
             }
 
             CallBtn {
-                label: "CAMERA";
+                label: @tr("CAMERA");
                 on: CallState.cam-on;
                 glyph: Glyph.video;
                 clicked => { CallState.toggle-cam(); }
             }
 
             CallBtn {
-                label: "SCREEN";
+                label: @tr("SCREEN");
                 on: CallState.scr-on;
                 glyph: Glyph.meeting;
                 clicked => { CallState.toggle-scr(); }

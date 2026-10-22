@@ -276,3 +276,63 @@ msgstr "設定"
 msgid "{} comments"
 msgstr "{} 件のコメント"
 
+
+msgid "AUDIO"
+msgstr "音"
+
+msgid "Avatar"
+msgstr "アバター"
+
+msgid "Bio"
+msgstr "経歴"
+
+msgid "CAMERA"
+msgstr "カメラ"
+
+msgid "Calling…"
+msgstr "通話中…"
+
+msgid "Change photo"
+msgstr "写真を変更"
+
+msgid "Choose"
+msgstr "選択"
+
+msgid "Edit nickname"
+msgstr "ニックネーム編集"
+
+msgid "Edit profile"
+msgstr "プロフィール編集"
+
+msgid "New photo picked"
+msgstr "新しい写真を選択しました"
+
+msgid "Nickname"
+msgstr "ニックネーム"
+
+msgid "Not set"
+msgstr "未設定"
+
+msgid "Research"
+msgstr "研究"
+
+msgid "SCREEN"
+msgstr "画面"
+
+msgid "Save changes"
+msgstr "変更を保存"
+
+msgid "Save nickname"
+msgstr "ニックネームを保存"
+
+msgid "Saving…"
+msgstr "保存中…"
+
+msgid "Selecting…"
+msgstr "選択中…"
+
+msgid "Type a message…"
+msgstr "メッセージを入力…"
+
+msgid "VOICE"
+msgstr "マイク"

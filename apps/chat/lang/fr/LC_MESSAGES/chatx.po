@@ -276,3 +276,63 @@ msgstr "Paramètres"
 msgid "{} comments"
 msgstr "{} commentaires"
 
+
+msgid "AUDIO"
+msgstr "AUDIO"
+
+msgid "Avatar"
+msgstr "Avatar"
+
+msgid "Bio"
+msgstr "Bio"
+
+msgid "CAMERA"
+msgstr "CAMÉRA"
+
+msgid "Calling…"
+msgstr "Appel en cours…"
+
+msgid "Change photo"
+msgstr "Changer de photo"
+
+msgid "Choose"
+msgstr "Choisir"
+
+msgid "Edit nickname"
+msgstr "Modifier le pseudo"
+
+msgid "Edit profile"
+msgstr "Modifier le profil"
+
+msgid "New photo picked"
+msgstr "Nouvelle photo sélectionnée"
+
+msgid "Nickname"
+msgstr "Pseudo"
+
+msgid "Not set"
+msgstr "Non défini"
+
+msgid "Research"
+msgstr "Recherche"
+
+msgid "SCREEN"
+msgstr "ÉCRAN"
+
+msgid "Save changes"
+msgstr "Enregistrer les modifications"
+
+msgid "Save nickname"
+msgstr "Enregistrer le pseudo"
+
+msgid "Saving…"
+msgstr "Enregistrement…"
+
+msgid "Selecting…"
+msgstr "Sélection en cours…"
+
+msgid "Type a message…"
+msgstr "Saisir un message…"
+
+msgid "VOICE"
+msgstr "VOIX"

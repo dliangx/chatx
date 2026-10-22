@@ -1,7 +1,7 @@
 import { Theme } from "../theme.slint";
 
 export component ChatInputView inherits Rectangle {
-    in property <string> placeholder-text: "Type a message…";
+    in property <string> placeholder-text: @tr("Type a message…");
     in-out property <string> text: "";
     in property <bool> is-recording: false;
     in property <bool> is-recording-paused: false;

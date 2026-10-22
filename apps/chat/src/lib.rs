@@ -22,7 +22,7 @@ use image::{
     make_avatar, make_preview_image, qr_image, render_msg, to_message_data,
 };
 use process::{group_conn_enter, start_group_conn_sweeper, touch_chat_activity};
-use time::{fmt_profile_date, fmt_time, time_label};
+use time::{fmt_profile_date, fmt_time, set_lang as set_time_lang, time_label};
 
 use camera::Camera;
 use screen::Screen;
@@ -529,6 +529,10 @@ pub fn run_app() {
         } else {
             let _ = slint::select_bundled_translation(&lang);
         }
+        // Keep the Rust-side "X ago" labels in lock-step with the Slint catalog
+        // (the time labels baked into previously-rendered rows stay put until
+        // the user re-enters the view; new ones will pick up the new language).
+        set_time_lang(&lang);
         slint::update_all_translations();
         // Persist for the next launch (read back from the `settings` table on startup).
         let pool = POOL.lock().unwrap().clone();
@@ -1429,6 +1433,7 @@ fn apply_result(
                         let lang2 = lang.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             let _ = slint::select_bundled_translation(&lang2);
+                            set_time_lang(&lang2);
                             if let Some(ui) = lang_weak.upgrade() {
                                 ui.global::<AppState>()
                                     .set_lang(SharedString::from(lang2.clone()));
