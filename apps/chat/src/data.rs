@@ -15,6 +15,8 @@ pub struct ChatRow {
     pub time_ms: i64,
     pub unread: i64,
     pub peer_id: String,
+    /// Peer/group avatar file path (empty when none).
+    pub avatar_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +215,7 @@ impl DataBackend {
             time_ms: now_ms,
             unread: 0,
             peer_id,
+            avatar_path: String::new(),
         });
         key
     }
@@ -390,6 +393,7 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
             time_ms: c.last_message_time.unwrap_or(0),
             unread: c.unread_count,
             peer_id: c.peer_id.unwrap_or_default(),
+            avatar_path: c.avatar_path.clone().unwrap_or_default(),
         });
     }
 
@@ -506,6 +510,7 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
             time_ms: 0,
             unread: 0,
             peer_id: String::new(),
+            avatar_path: String::new(),
         });
         return Ok(true);
     };
@@ -540,6 +545,7 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
             time_ms: src.last_message_time.unwrap_or(0),
             unread: src.unread_count,
             peer_id: src.peer_id.clone().unwrap_or_default(),
+            avatar_path: src.avatar_path.clone().unwrap_or_default(),
         });
         return Ok(true);
     }
@@ -581,12 +587,14 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
         time_ms: src.last_message_time.unwrap_or(0),
         unread: src.unread_count,
         peer_id: peer_id.clone(),
+        avatar_path: src.avatar_path.clone().unwrap_or_default(),
     };
     let changed = new.title != row.title
         || new.preview != row.preview
         || new.unread != row.unread
         || new.time_ms != row.time_ms
-        || new.peer_id != row.peer_id;
+        || new.peer_id != row.peer_id
+        || new.avatar_path != row.avatar_path;
     *row = new;
     Ok(changed)
 }

@@ -1214,6 +1214,7 @@ dependencies = [
  "bridge",
  "camera",
  "chatx-core",
+ "image",
  "libp2p",
  "media",
  "pinyin",

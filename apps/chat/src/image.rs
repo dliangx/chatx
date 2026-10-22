@@ -48,6 +48,40 @@ pub fn load_image_cached(path: &str) -> SlintImage {
     })
 }
 
+/// Decode `path` and downscale it to a side-capped square of at most `cap`px,
+/// preserving the source aspect ratio (never upscales). The result is a
+/// pixel-buffer `SlintImage` that `Image` elements can sample at a smaller
+/// display size (e.g. a ProfileItem 40x40 avatar) without holding the full
+/// bitmap.
+fn to_pixel_buffer(img: image::DynamicImage, cap: u32) -> SlintImage {
+    let w = img.width();
+    let h = img.height();
+    let longest = w.max(h).min(cap);
+    let scale = longest as f64 / w.max(h) as f64;
+    let (nw, nh) = ((w as f64 * scale) as u32, (h as f64 * scale) as u32);
+    let resized = if nw != w || nh != h {
+        img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let rgba = resized.to_rgba8();
+    let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(rgba.width(), rgba.height());
+    buf.make_mut_bytes().copy_from_slice(rgba.as_raw());
+    SlintImage::from_rgba8(buf)
+}
+
+/// Load `path` into a capped, decode-once 40x40 avatar `SlintImage`. Empty /
+/// missing paths yield the default image so the slot shows its placeholder.
+pub fn load_avatar_path_capped(path: &str, cap: u32) -> SlintImage {
+    if path.is_empty() {
+        return SlintImage::default();
+    }
+    match image::open(std::path::Path::new(path)) {
+        Ok(img) => to_pixel_buffer(img, cap),
+        Err(_) => SlintImage::default(),
+    }
+}
+
 const FONT_LATIN: &[u8] = include_bytes!("../fonts/NotoSans.ttf");
 const FONT_CJK: &[u8] = include_bytes!("../fonts/NotoSansSC.ttf");
 const FONT_EMOJI: &[u8] = include_bytes!("../fonts/NotoColorEmoji.ttf");

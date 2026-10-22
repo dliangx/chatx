@@ -11,6 +11,7 @@ export component MeView inherits Rectangle {
     in-out property <int> selected-key: -1;
 
     ProfileItem {
+        image: AppState.own-avatar;
         name: AppState.user-id;
         nickname: AppState.nickname;
         peer-id: AppState.peer-id;

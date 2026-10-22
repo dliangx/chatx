@@ -24,10 +24,11 @@ export component ProfileItem inherits Rectangle {
             height: 56px;
             border-radius: 4px;
             background: Theme.surface-2;
+            clip: true;
 
             Image {
-                width: 40px;
-                height: 40px;
+                width: 56px;
+                height: 56px;
                 source: root.image;
             }
         }
@@ -135,8 +136,11 @@ export component ChatListItem inherits Rectangle {
             height: parent.height - 8px;
             border-radius: 8px;
             background: Theme.surface-2;
+            clip: true;
 
             Image {
+                width: parent.width;
+                height: parent.height;
                 source: root.image;
             }
         }
@@ -284,8 +288,10 @@ export component ContactListItem inherits Rectangle {
             height: parent.height - 8px;
             border-radius: 8px;
             background: Theme.surface-2;
-
+            clip: true;
             Image {
+                width: parent.width;
+                height: parent.height;
                 source: root.image;
             }
         }

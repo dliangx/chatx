@@ -18,8 +18,8 @@ pub mod moment;
 pub mod process;
 pub mod time;
 use image::{
-    ChatMsg, RENDERER, RenderedMsg, ensure_renderer, load_image_cached, make_avatar,
-    make_preview_image, qr_image, render_msg, to_message_data,
+    ChatMsg, RENDERER, RenderedMsg, ensure_renderer, load_avatar_path_capped, load_image_cached,
+    make_avatar, make_preview_image, qr_image, render_msg, to_message_data,
 };
 use process::{group_conn_enter, start_group_conn_sweeper, touch_chat_activity};
 use time::{fmt_profile_date, fmt_time, time_label};
@@ -1372,8 +1372,9 @@ fn apply_result(
                                 Ok(Some(u)) => (
                                     u.bio.clone().unwrap_or_default(),
                                     u.research.clone().unwrap_or_default(),
+                                    u.avatar_path.clone().unwrap_or_default(),
                                 ),
-                                _ => (String::new(), String::new()),
+                                _ => (String::new(), String::new(), String::new()),
                             };
                             let _ = slint::invoke_from_event_loop(move || {
                                 *BACKEND.lock().unwrap() = Some(backend.clone());
@@ -1384,6 +1385,7 @@ fn apply_result(
                                     state.set_nickname(SharedString::from(nickname));
                                     state.set_own_bio(SharedString::from(own.0));
                                     state.set_own_research(SharedString::from(own.1));
+                                    state.set_own_avatar(load_avatar_path_capped(&own.2, 56));
                                     state.set_discover_shown(DISCOVER_INITIAL);
                                     publish_to_views(&state, backend);
                                 }
@@ -1664,6 +1666,7 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
             preview: SharedString::from(r.preview.clone()),
             is_group: r.is_group,
             time_label: SharedString::from(fmt_time(r.time_ms)),
+            image: load_avatar_path_capped(&r.avatar_path, 40),
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
@@ -1679,7 +1682,7 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
         .iter()
         .map(|r| ContactRow {
             id: r.key,
-            image: load_image_cached(&r.image),
+            image: load_avatar_path_capped(&r.image, 40),
             peer_id: SharedString::from(r.peer_id.clone()),
             name: SharedString::from(r.name.clone()),
         })
@@ -1862,6 +1865,7 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
             preview: SharedString::from(r.preview.clone()),
             is_group: r.is_group,
             time_label: SharedString::from(fmt_time(r.time_ms)),
+            image: load_avatar_path_capped(&r.avatar_path, 40),
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
@@ -4329,7 +4333,7 @@ fn load_profile_data(weak: slint::Weak<MainWindow>, key: i32) {
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak2.upgrade() else { return };
             let ps = ui.global::<ProfileState>();
-            let avatar = load_image_cached(&avatar_path);
+            let avatar = load_avatar_path_capped(&avatar_path, 40);
             let (has_moment, mt, mtime, ml) = match moment {
                 Some((text, ts, likes)) => (true, text, ts, likes),
                 None => (false, String::new(), 0, 0),
@@ -4578,18 +4582,15 @@ fn save_profile_data(
                         st.set_nickname(SharedString::from(new_nickname.clone()));
                         st.set_own_bio(SharedString::from(new_bio));
                         st.set_own_research(SharedString::from(new_research));
+                        st.set_own_avatar(load_avatar_path_capped(&new_avatar, 56));
                     }
                     // Only refresh the *displayed* contact profile if it is actually
                     // showing the user we just saved; otherwise it still holds a
                     // different contact and would get clobbered.
                     if ps.get_username().to_string() == new_username_of(&u) {
                         if !new_avatar.is_empty() {
-                            if let Some(img) =
-                                SlintImage::load_from_path(std::path::Path::new(&new_avatar)).ok()
-                            {
-                                ps.set_avatar(img);
-                                ps.set_avatar_path(SharedString::from(new_avatar));
-                            }
+                            ps.set_avatar(load_avatar_path_capped(&new_avatar, 40));
+                            ps.set_avatar_path(SharedString::from(new_avatar));
                         }
                         ps.set_nickname(SharedString::from(new_nickname));
                     }

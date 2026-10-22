@@ -59,6 +59,7 @@ export struct ConversationRow {
     preview: string,
     is-group: bool,
     time-label: string,
+    image: image,
 }
 
 export struct ContactRow {
@@ -131,6 +132,7 @@ export global AppState {
     /// Own-user profile fields (displayed in the Me tab ProfileItem).
     in property <string> own-bio: "";
     in property <string> own-research: "";
+    in property <image> own-avatar;
 
     in-out property <string> add-status: "";
     in-out property <[SearchUser]> search-results: [];
