@@ -179,13 +179,15 @@ pub fn start_call(
     let aud2 = Arc::clone(&aud_src);
     let cam2 = cam_src.as_ref().cloned();
     let scr2 = scr_src.as_ref().cloned();
+    let me58 = client.peer_base58();
+    let me58c = me58.clone();
 
     let (call, offer) = {
         let t = Arc::clone(&transport);
         media_rt().block_on(async move {
             PeerCall::offer(
                 call_id_c.clone(),
-                String::new(),
+                me58c,
                 &cfg,
                 as_dyn(t),
                 Some(aud2),
@@ -264,12 +266,15 @@ pub fn answer_offer(
     let aud2 = Arc::clone(&aud_src);
     let cam2 = cam_src.as_ref().cloned();
     let scr2 = scr_src.as_ref().cloned();
+    let me58 = client.peer_base58();
+    let me58c = me58.clone();
 
     let (call, answer) = {
         let t = Arc::clone(&transport);
         media_rt().block_on(async move {
             PeerCall::answer(
                 &offer_c,
+                me58c,
                 &cfg,
                 as_dyn(t),
                 Some(aud2),

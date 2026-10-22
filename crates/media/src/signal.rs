@@ -57,6 +57,13 @@ pub enum SignalKind {
 /// One signaling frame. `call_id` correlates a whole call session; both
 /// peers use the same id (offerer picks it, answerer echoes it).
 ///
+/// `from` is the **sender's identity** (this app: the peer's libp2p base58,
+/// resolved from the transport endpoint). The transport already authenticates
+/// identity via PeerId, so `from` carries the same logical peer id that the
+/// app uses everywhere else — letting the receiver display / correlate the
+/// sender without a separate lookup. Empty for legacy peers (deserialized
+/// from the wire default) or for frames the sender never stamped.
+///
 /// `upgrade_kind` / `both_sides` describe a *mid-call* renegotiation carried
 /// on an `Offer`/`Answer` frame (e.g. audio → video, audio → screen, or a
 /// screen-recipient opening their own camera). Both are `None` for the
@@ -93,6 +100,13 @@ impl SignalFrame {
     pub fn with_upgrade(mut self, kind: VKind, both: bool) -> Self {
         self.upgrade_kind = Some(kind);
         self.both_sides = Some(both);
+        self
+    }
+
+    /// Stamp the sender's identity onto the frame (e.g. the libp2p base58
+    /// peer id) so the receiver can display / correlate the sender.
+    pub fn with_from(mut self, from: impl Into<String>) -> Self {
+        self.from = from.into();
         self
     }
 

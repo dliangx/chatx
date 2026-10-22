@@ -49,7 +49,15 @@ pub struct PeerCall {
 
 struct Inner {
     call_id: String,
-    from: String,
+    /// This side's own identity (the libp2p base58 the app passes in). Used
+    /// to stamp `SignalFrame.from` on every frame this peer sends, so the
+    /// other side can display / correlate the sender.
+    local_id: String,
+    /// The *other* side's identity (peer's libp2p base58), learned from the
+    /// `from` field of inbound signaling frames. Seeded on the answerer from
+    /// the initial offer's `from`; updated as further stamped frames arrive.
+    /// Empty for legacy peers that never stamp.
+    remote_id: Mutex<String>,
     pc: Arc<RTCPeerConnection>,
     transport: Arc<dyn SignalTransport>,
 
@@ -83,14 +91,15 @@ impl Inner {
 impl PeerCall {
     fn new(
         call_id: impl Into<String>,
-        from: impl Into<String>,
+        local_id: impl Into<String>,
         pc: Arc<RTCPeerConnection>,
         transport: Arc<dyn SignalTransport>,
     ) -> Self {
         let (event_tx, _rx) = async_broadcast::broadcast(64);
         let inner = Arc::new(Inner {
             call_id: call_id.into(),
-            from: from.into(),
+            local_id: local_id.into(),
+            remote_id: Mutex::new(String::new()),
             pc,
             transport,
             aud: Mutex::new(None),
@@ -106,6 +115,14 @@ impl PeerCall {
 
     fn pc(&self) -> Arc<RTCPeerConnection> {
         self.inner.pc.clone()
+    }
+
+    /// Build a signaling frame for this call: pins `call_id` and stamps
+    /// `from` with our local identity so the peer can display/correlate who
+    /// sent it. Callers add any kind-specific metadata (upgrade fields,
+    /// mode) afterwards.
+    fn new_frame(&self, kind: SignalKind) -> SignalFrame {
+        SignalFrame::new(self.call_id().to_string(), kind).with_from(&self.inner.local_id)
     }
 
     fn built_api(cfg: &Config) -> Result<(API, RTCConfiguration)> {
@@ -125,6 +142,9 @@ impl PeerCall {
     }
 
     /// Offerer: attach media, create + apply the local SDP, wait for ICE.
+    ///
+    /// `from` is *this* peer's identity (the app's libp2p base58); it is
+    /// stamped onto the returned offer so the recipient learns who called.
     pub async fn offer(
         call_id: impl Into<String>,
         from: impl Into<String>,
@@ -145,10 +165,9 @@ impl PeerCall {
         pc.set_local_description(offer.clone()).await?;
         let _ = pc.gathering_complete_promise().await;
 
-        let cid = call.call_id().to_string();
         Ok((
-            call,
-            SignalFrame::new(cid, SignalKind::Offer(offer.sdp.clone())),
+            call.clone(),
+            call.new_frame(SignalKind::Offer(offer.sdp.clone())),
         ))
     }
 
@@ -209,11 +228,7 @@ impl PeerCall {
         let _ = self.pc().gathering_complete_promise().await;
 
         self.emit(
-            SignalFrame::new(
-                self.call_id().to_string(),
-                SignalKind::Offer(offer.sdp.clone()),
-            )
-            .with_upgrade(kind, both_sides),
+            self.new_frame(SignalKind::Offer(offer.sdp.clone())).with_upgrade(kind, both_sides),
         );
         Ok(())
     }
@@ -236,6 +251,7 @@ impl PeerCall {
                 ));
             }
         };
+        self.learn_remote(&offer.from);
         if let Some(src) = own_src {
             // Only attach if we don't already have this kind (e.g. screen
             // recipient re-upgrading their camera is a no-op).
@@ -287,18 +303,19 @@ impl PeerCall {
         let _ = self.pc().gathering_complete_promise().await;
 
         self.emit(
-            SignalFrame::new(
-                offer.call_id.clone(),
-                SignalKind::Answer(answer.sdp.clone()),
-            )
-            .with_upgrade(kind, both),
+            self.new_frame(SignalKind::Answer(answer.sdp.clone())).with_upgrade(kind, both),
         );
         Ok(())
     }
 
     /// Answerer: apply the `Offer`, create + apply the local SDP.
+    ///
+    /// `from` is *this* peer's identity (the app's libp2p base58). The
+    /// remote peer's identity is learned from `offer.from` (if the sender
+    /// stamped it) and exposed via [`PeerCall::remote_id`].
     pub async fn answer(
         offer: &SignalFrame,
+        from: impl Into<String>,
         cfg: &Config,
         transport: Arc<dyn SignalTransport>,
         aud: Option<Arc<AudSource>>,
@@ -313,10 +330,11 @@ impl PeerCall {
         let pc = Arc::new(api.new_peer_connection(cfg_pc).await?);
         let call = Self::new(
             offer.call_id.clone(),
-            offer.from.clone(),
+            from,
             pc.clone(),
             transport,
         );
+        call.learn_remote(&offer.from);
         call.set_local_sources(aud, cam, scr);
         call.add_local_tracks().await?;
         call.wire_event_handlers();
@@ -328,12 +346,36 @@ impl PeerCall {
         let _ = pc.gathering_complete_promise().await;
 
         Ok((
-            call,
-            SignalFrame::new(
-                offer.call_id.clone(),
-                SignalKind::Answer(answer.sdp.clone()),
-            ),
+            call.clone(),
+            call.new_frame(SignalKind::Answer(answer.sdp.clone())),
         ))
+    }
+
+    /// Update the cached *remote* identity when we receive a frame whose
+    /// `from` is non-empty. We treat the most recent stamped value as
+    /// authoritative because it is the only frame-level signal we have about
+    /// "who the other side says they are."
+    fn learn_remote(&self, from: &str) {
+        if from.is_empty() {
+            return;
+        }
+        let mut rx = self.inner.remote_id.lock().unwrap();
+        if *rx != from {
+            tracing::debug!(remote_id = %from, "learned remote identity");
+            *rx = from.to_string();
+        }
+    }
+
+    /// The other side's identity (empty until the first stamped frame
+    /// arrives — see [`SignalFrame::from`] and [`Self::learn_remote`]).
+    pub fn remote_id(&self) -> String {
+        self.inner.remote_id.lock().unwrap().clone()
+    }
+
+    /// This side's identity as passed to `offer`/`answer`. Useful for
+    /// tests and for the app to display "me" alongside the remote.
+    pub fn local_id(&self) -> &str {
+        &self.inner.local_id
     }
 
     // ── media ─────────────────────────────────────────────────────────
@@ -384,7 +426,7 @@ impl PeerCall {
     /// `MuteMic`) to the peer. The peer's `handle_inbound` observes it and
     /// updates its remote-video state. Non-Signaling: doesn't renegotiate.
     pub fn send_control(&self, kind: SignalKind) {
-        self.emit(SignalFrame::new(self.call_id().to_string(), kind));
+        self.emit(self.new_frame(kind));
     }
 
     async fn add_local_tracks(&self) -> Result<()> {
@@ -414,6 +456,10 @@ impl PeerCall {
 
     /// Apply an inbound signaling frame (sync, fire-and-forget for async ops).
     pub fn handle_inbound(&self, frame: &SignalFrame) -> Result<()> {
+        // Learn / refresh our understanding of who the other side is, using
+        // the sender-stamped identity on the frame. No-op for legacy peers
+        // that never set `from`.
+        self.learn_remote(&frame.from);
         let call = self.clone();
         match &frame.kind {
             SignalKind::Offer(sdp) => {
@@ -565,15 +611,12 @@ impl PeerCall {
             self.pc().on_ice_candidate(Box::new(move |cand| {
                 if let Some(cand) = cand {
                     if let Ok(init) = cand.to_json() {
-                        let frame = SignalFrame::new(
-                            call.call_id().to_string(),
-                            SignalKind::Ice {
-                                ufrag: init.username_fragment.unwrap_or_default(),
-                                sdp_mid: init.sdp_mid.unwrap_or_default(),
-                                sdp_mline_index: init.sdp_mline_index.unwrap_or(0),
-                                candidate: init.candidate,
-                            },
-                        );
+                        let frame = call.new_frame(SignalKind::Ice {
+                            ufrag: init.username_fragment.unwrap_or_default(),
+                            sdp_mid: init.sdp_mid.unwrap_or_default(),
+                            sdp_mline_index: init.sdp_mline_index.unwrap_or(0),
+                            candidate: init.candidate,
+                        });
                         call.emit(frame);
                     }
                 }
