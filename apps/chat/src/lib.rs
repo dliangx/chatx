@@ -142,7 +142,11 @@ async fn my_profile_snapshot(
 ) -> anyhow::Result<chatx_core::friendq::UserProfile> {
     use chatx_core::friendq::UserProfile;
     let me = current_me();
-    let pool = POOL.lock().unwrap().clone().ok_or_else(|| anyhow::anyhow!("no pool"))?;
+    let pool = POOL
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("no pool"))?;
     let Some(row) = sqlite::users::get_by_username(&pool, &me).await? else {
         anyhow::bail!("no user row for {me}; run login first")
     };
@@ -153,7 +157,10 @@ async fn my_profile_snapshot(
         .and_then(|p| image::avatar_to_base64(&p, 40));
     let public_key = client.e2e_public().to_string();
     Ok(UserProfile {
-        nickname: row.nickname.clone().or_else(|| (!me.is_empty()).then(|| me.clone())),
+        nickname: row
+            .nickname
+            .clone()
+            .or_else(|| (!me.is_empty()).then(|| me.clone())),
         bio: row.bio.clone(),
         research: row.research.clone(),
         public_key: Some(public_key),
@@ -931,6 +938,18 @@ pub fn run_app() {
                 }
                 None => {}
             });
+    }
+
+    // Inbound accept / decline (ringing panel).
+    {
+        ui.global::<CallState>().on_accept_call(move || {
+            call::accept_inbound();
+        });
+    }
+    {
+        ui.global::<CallState>().on_decline_call(move || {
+            call::decline_inbound();
+        });
     }
 
     {
@@ -3135,9 +3154,7 @@ fn delete_contact(weak: slint::Weak<MainWindow>, key: i32) {
         let mut g = backend.blocking_write();
         g.remove_contact(key);
     }
-    if let (Some((user_id, peer_id, _name)), Some(pool)) =
-        (row_opt, POOL.lock().unwrap().clone())
-    {
+    if let (Some((user_id, peer_id, _name)), Some(pool)) = (row_opt, POOL.lock().unwrap().clone()) {
         let me = current_me();
         // The `fr_requests` table stores libp2p base58 peer ids (not usernames),
         // so clear it using my own peer id on the "me" side.
@@ -3581,8 +3598,7 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
         // research / E2E pk / 40×40 avatar). Profile fetch failures are
         // non-fatal — we just send an older-style frame.
         let profile = my_profile_snapshot(&client).await.ok();
-        let mut frame =
-            FriendQ::new(FriendQAction::Inquire, &me_peer, &me, &peer_id);
+        let mut frame = FriendQ::new(FriendQAction::Inquire, &me_peer, &me, &peer_id);
         if let Some(p) = profile {
             frame = frame.with_profile(p);
         }
@@ -3684,7 +3700,9 @@ async fn do_add(
     // Avatar for the contact row: prefer the one just persisted from the wire
     // frame, else fall back to whatever is already on disk for this user (e.g.
     // captured earlier when their Inquire arrived).
-    let avatar = avatar_path.or_else(|| their_row.avatar_path.clone()).unwrap_or_default();
+    let avatar = avatar_path
+        .or_else(|| their_row.avatar_path.clone())
+        .unwrap_or_default();
 
     let mut g = backend.write().await;
     if !g.has_contact(their_peer, name) {
@@ -3739,8 +3757,7 @@ fn accept_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
         let other_peer2 = other_peer.clone();
         let rt = runtime();
         rt.spawn(async move {
-            let mut frame =
-                FriendQ::new(FriendQAction::Accept, &me_peer2, &me2, &other_peer2);
+            let mut frame = FriendQ::new(FriendQAction::Accept, &me_peer2, &me2, &other_peer2);
             if let Ok(p) = my_profile_snapshot(&client).await {
                 frame = frame.with_profile(p);
             }
@@ -3972,7 +3989,7 @@ fn show_app_notice(weak: slint::Weak<MainWindow>, msg: String, success: bool) {
     });
 }
 
-fn show_call_overlay(weak: slint::Weak<MainWindow>, overlay: GlobalOverlayType) {
+pub(crate) fn show_call_overlay(weak: slint::Weak<MainWindow>, overlay: GlobalOverlayType) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             let state = ui.global::<AppState>();
@@ -3983,17 +4000,50 @@ fn show_call_overlay(weak: slint::Weak<MainWindow>, overlay: GlobalOverlayType) 
     });
 }
 
-/// Reset `CallState` to a clean active / inactive baseline.
-fn publish_call_state(
+/// Resolve a peer's libp2p base58 to (peer_base58, display-name-or-None).
+/// Used by `call::answer_offer` to present the remote peer's name in the
+/// call UI without requiring a UI-side key lookup (which doesn't exist for
+/// inbound peers — they may not be in the local contact list yet).
+pub(crate) fn resolve_peer_display(peer_base58: &str) -> (String, Option<String>) {
+    let backend = BACKEND.lock().unwrap().clone();
+    let Some(backend) = backend else {
+        return (peer_base58.to_string(), None);
+    };
+    let g = backend.blocking_read();
+    let name = g
+        .contacts
+        .iter()
+        .find(|r| r.peer_id == peer_base58)
+        .map(|r| r.name.clone());
+    (peer_base58.to_string(), name)
+}
+
+/// Reset `CallState` to a clean active / inactive baseline. Exposed as
+/// `pub(crate)` so the inbound (`answer_offer`) path in `call.rs` can
+/// present the UI the same way the outbound `begin_*_call` paths do.
+pub(crate) fn publish_call_state(
     weak: slint::Weak<MainWindow>,
     peer_base58: Option<String>,
     peer_name: Option<String>,
     active: bool,
 ) {
+    publish_call_state_with(weak, peer_base58, peer_name, active, false);
+}
+
+/// Like `publish_call_state` but also sets the `ringing` flag — used by the
+/// inbound path to present the Accept/Decline panel.
+pub(crate) fn publish_call_state_with(
+    weak: slint::Weak<MainWindow>,
+    peer_base58: Option<String>,
+    peer_name: Option<String>,
+    active: bool,
+    ringing: bool,
+) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             let cs = ui.global::<CallState>();
             cs.set_active(active);
+            cs.set_ringing(ringing);
             cs.set_connected(false);
             cs.set_muted(false);
             cs.set_audio_muted(call::is_remote_muted());
@@ -4013,6 +4063,7 @@ fn publish_call_state(
             cs.set_swapped(false);
             cs.set_minimized(false);
             cs.set_error_message(SharedString::new());
+            cs.set_status(SharedString::from("Calling…"));
             if let Some(p) = peer_base58 {
                 cs.set_peer_base58(SharedString::from(p));
             }

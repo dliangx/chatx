@@ -556,6 +556,33 @@ impl PeerCall {
         &self.inner.call_id
     }
 
+    /// Actively end the call from *this* side: notify the peer with a `Bye`
+    /// frame over the transport, then tear down locally via [`Self::close`].
+    ///
+    /// Use this when the local user hangs up — the peer's `handle_inbound`
+    /// observes the `Bye` and ends *its* side immediately. Relying on the
+    /// raw `pc.close()` / ICE teardown alone leaves the peer hanging, because
+    /// webrtc-rs only surfaces `Disconnected`/`Failed` well after the DTLS
+    /// keepalive expires (tens of seconds, sometimes never).
+    pub fn hangup(&self) -> Result<()> {
+        // Emit the `Bye` *before* the local teardown so the transport and
+        // PC are still alive to carry it.
+        eprintln!("[call] hangup(): sending Bye to peer");
+        match self
+            .inner
+            .transport
+            .send(&self.new_frame(SignalKind::Bye))
+        {
+            Ok(()) => eprintln!("[call] hangup(): Bye accepted by transport"),
+            Err(e) => eprintln!("[call] hangup(): Bye send FAILED: {e}"),
+        }
+        self.close()
+    }
+
+    /// Local-only teardown: gate off outbound media, stop encoders, close the
+    /// `RTCPeerConnection`, and broadcast `Hangup`. Does NOT send a `Bye` —
+    /// the receiver of a remote `Bye` (and any idempotent re-invocation)
+    /// calls this so it doesn't echo a `Bye` back into a signaling loop.
     pub fn close(&self) -> Result<()> {
         // Connection gate off: nothing more may reach the webrtc track.
         crate::media_source::set_send_gate(false);
@@ -646,9 +673,23 @@ impl PeerCall {
             RemoteVideo::Camera
         };
         let call = self.clone();
+        eprintln!("[media] on_track: kind={:?} stream_id={stream_id}", track.kind());
         runtime().spawn(async move {
-            let mut acc = NalAcc::new();
-            let mut buf: Vec<u8> = vec![0u8; 4096];
+            // One LONG-LIVED H.264 stateful decoder per track. `openh264::Decoder`
+            // keeps motion/reference state across `decode` calls, which is
+            // required for P/B frames (which are >99% of a typical stream).
+            // Creating a fresh decoder per frame — the old approach — silently
+            // dropped every non-IDR frame so only keyframes rendered.
+            //
+            // We feed each RTP packet's NALs straight through the same decoder
+            // in arrival order. SPS/PPS arrive ahead of their IDR frame and are
+            // consumed (they return `None`); subsequent P/B NALs decode to
+            // pictures that we forward to the remote sink.
+            let mut decoder = openh264::decoder::Decoder::new()
+                .expect("h264 decoder alloc");
+            let mut depack = H264DePacketizer::new();
+            let mut buf: Vec<u8> = vec![0u8; 8192];
+            let mut frames_decoded = 0u64;
             loop {
                 match track.read(&mut buf).await {
                     Ok((pkt, _)) => {
@@ -658,21 +699,33 @@ impl PeerCall {
                                 cb(&pcm, 8_000, 1);
                             }
                         } else {
-                            acc.push(&pkt.payload, pkt.header.timestamp);
-                            if let Some((rgba, w, h)) = acc.drain_frame() {
-                                match remote_video {
-                                    RemoteVideo::Screen => {
-                                        if let Some(cb) =
-                                            call.inner.remote_scr.lock().unwrap().as_ref()
-                                        {
-                                            cb(rgba, w, h);
-                                        }
+                            // Reassemble the raw RTP payload into full Annex-B
+                            // NAL unit(s), then feed the stateful decoder.
+                            let annexb = depack.depacketize(&pkt.payload);
+                            if !annexb.is_empty() {
+                                if let Some((rgba, w, h)) =
+                                    decode_h264_seq(&mut decoder, &annexb)
+                                {
+                                    frames_decoded += 1;
+                                    if frames_decoded <= 3 || frames_decoded % 60 == 0 {
+                                        eprintln!(
+                                            "[media] video decoded #{frames_decoded} {w}x{h} ({remote_video:?})",
+                                        );
                                     }
-                                    RemoteVideo::Camera => {
-                                        if let Some(cb) =
-                                            call.inner.remote_cam.lock().unwrap().as_ref()
-                                        {
-                                            cb(rgba, w, h);
+                                    match remote_video {
+                                        RemoteVideo::Screen => {
+                                            if let Some(cb) =
+                                                call.inner.remote_scr.lock().unwrap().as_ref()
+                                            {
+                                                cb(rgba, w, h);
+                                            }
+                                        }
+                                        RemoteVideo::Camera => {
+                                            if let Some(cb) =
+                                                call.inner.remote_cam.lock().unwrap().as_ref()
+                                            {
+                                                cb(rgba, w, h);
+                                            }
                                         }
                                     }
                                 }
@@ -686,56 +739,130 @@ impl PeerCall {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum RemoteVideo {
     Camera,
     Screen,
 }
 
-/// Minimal H.264 NAL frame accumulator (best-effort: coalesce payloads that
-/// share an RTP timestamp, then hand the concatenated NALs to openh264).
-struct NalAcc {
-    ts: u32,
-    acc: Vec<u8>,
-    have: bool,
+// ── H.264 over RTP (RFC 6184) depacketization + stateful decode ────────────
+
+/// Reassembles H.264 NAL units from raw RTP video payloads (RFC 6184).
+///
+/// webrtc-rs hands us the *raw* RTP payload (no depacketizer in its receive
+/// path), so a video frame is split across packets depending on size:
+///   * Single NAL Unit (type 1..=23) — whole NAL in one packet;
+///   * STAP-A (type 24) — several small NALs (e.g. SPS+PPS) in one packet;
+///   * FU-A (type 28) — one large NAL split across many packets.
+///
+/// We rebuild full Annex-B NAL units (with `00 00 00 01` start codes) so a
+/// single *long-lived* [`openh264::Decoder`] (which is stateful and thus
+/// retains the motion reference data P/B frames need) can decode them in
+/// order. This is what finally makes remote video appear — the earlier code
+/// fed raw payloads straight to `openh264::nal_units`, which requires Annex-B
+/// start codes that RTP payloads don't carry, so it decoded *zero* frames.
+struct H264DePacketizer {
+    /// In-flight FU-A fragment buffer (accumulated until the FU-A End flag).
+    fua: Vec<u8>,
+    fua_active: bool,
 }
 
-impl NalAcc {
+impl H264DePacketizer {
+    const NALU_TYPE_BITMASK: u8 = 0x1F;
+    const NALU_REF_IDC_BITMASK: u8 = 0x60;
+    const FU_START_BITMASK: u8 = 0x80;
+    const FU_END_BITMASK: u8 = 0x40;
+    const STAPA_NALU_TYPE: u8 = 24;
+    const FUA_NALU_TYPE: u8 = 28;
+    const START_CODE: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
+
     fn new() -> Self {
         Self {
-            ts: 0,
-            acc: Vec::new(),
-            have: false,
+            fua: Vec::new(),
+            fua_active: false,
         }
     }
-    fn push(&mut self, payload: &[u8], ts: u32) {
-        if self.have && ts != self.ts {
-            self.acc.clear();
-            self.have = false;
+
+    /// Feed one RTP video payload. Returns the rebuilt Annex-B NAL unit(s)
+    /// carried by this packet (empty for non-terminal FU-A fragments or
+    /// NAL types we drop, e.g. AUD/filler).
+    fn depacketize(&mut self, packet: &[u8]) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        if packet.len() < 1 {
+            return out;
         }
-        self.ts = ts;
-        self.have = true;
-        self.acc.extend_from_slice(payload);
-    }
-    fn drain_frame(&mut self) -> Option<(Vec<u8>, u32, u32)> {
-        if self.acc.is_empty() {
-            return None;
+        let b0 = packet[0];
+        let nalu_type = b0 & Self::NALU_TYPE_BITMASK;
+
+        match nalu_type {
+            // Single NAL Unit — already a complete NAL.
+            1..=23 => {
+                out.extend_from_slice(&Self::START_CODE);
+                out.extend_from_slice(packet);
+            }
+            // STAP-A — multiple NAL Units concatenated.
+            Self::STAPA_NALU_TYPE => {
+                let mut off = 1; // skip STAP-A type byte
+                while off + 2 <= packet.len() {
+                    let nalu_size =
+                        ((packet[off] as usize) << 8) | packet[off + 1] as usize;
+                    off += 2;
+                    if off + nalu_size > packet.len() {
+                        break; // malformed / truncated
+                    }
+                    out.extend_from_slice(&Self::START_CODE);
+                    out.extend_from_slice(&packet[off..off + nalu_size]);
+                    off += nalu_size;
+                }
+            }
+            // FU-A — one NAL split across packets.
+            Self::FUA_NALU_TYPE => {
+                if packet.len() < 2 {
+                    return out;
+                }
+                let b1 = packet[1];
+                if (b1 & Self::FU_START_BITMASK) != 0 {
+                    // Start flag: reset any stale fragment, begin a new one.
+                    self.fua.clear();
+                    self.fua_active = true;
+                }
+                if !self.fua_active {
+                    // Middle fragment with no start — drop it (desync).
+                    return out;
+                }
+                // Rebuild the NAL header: ref_idc | type.
+                if self.fua.is_empty() {
+                    let nalu_header = (b0 & Self::NALU_REF_IDC_BITMASK) | (b1 & Self::NALU_TYPE_BITMASK);
+                    self.fua.push(nalu_header);
+                }
+                // Append this fragment's payload (after the 2-byte FU header).
+                self.fua.extend_from_slice(&packet[2..]);
+
+                if (b1 & Self::FU_END_BITMASK) != 0 {
+                    // End fragment — emit the full NAL.
+                    out.extend_from_slice(&Self::START_CODE);
+                    out.append(&mut self.fua);
+                    self.fua_active = false;
+                }
+            }
+            // AUD (9), filler (12), STAP-B (25), FU-B (29), reserved — drop.
+            _ => {}
         }
-        let data = std::mem::take(&mut self.acc);
-        self.have = false;
-        decode_h264(&data)
+        out
     }
 }
 
-fn decode_h264(nal: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
-    use openh264::decoder::Decoder;
-    use openh264::nal_units;
-    let mut dec = Decoder::new().ok()?;
+/// Split an Annex-B stream into its NAL units and feed each — in order —
+/// through a long-lived stateful [`openh264::Decoder`]. Returns the last
+/// picture produced (RGBA8, w, h), if any (SPS/PPS-only NAL sets return
+/// `None`, which is normal).
+fn decode_h264_seq(
+    dec: &mut openh264::decoder::Decoder,
+    annexb: &[u8],
+) -> Option<(Vec<u8>, u32, u32)> {
     let mut last = None;
-    for pkt in nal_units(nal) {
-        // `decode` returns `Option<DecodedYUV>` — skip NALs that don't produce
-        // a frame (e.g. SPS/PPS).
-        if let Ok(Some(yuv)) = dec.decode(pkt) {
+    for nal in openh264::nal_units(annexb) {
+        if let Ok(Some(yuv)) = dec.decode(nal) {
             let (uw, uh) = yuv.dimensions_uv();
             let (w, h) = (uw * 2, uh * 2);
             let mut rgba = vec![0u8; w * h * 4];
@@ -744,6 +871,73 @@ fn decode_h264(nal: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
         }
     }
     last
+}
+
+#[cfg(test)]
+mod h264_depacketize_tests {
+    use super::H264DePacketizer;
+
+    const START: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
+
+    /// A single-NAL packet (e.g. an IDR slice) must pass through verbatim
+    /// with an Annex-B start code prepended.
+    #[test]
+    fn single_nal() {
+        let mut d = H264DePacketizer::new();
+        let nalu = [0x25u8, 0xAA, 0xBB, 0xCC]; // NRI 0b01 | type 5 (IDR)
+        let out = d.depacketize(&nalu);
+        assert_eq!(out[..4], START);
+        assert_eq!(&out[4..], &nalu[..]);
+    }
+
+    /// STAP-A carrying two NALs must yield two independent start-coded units.
+    #[test]
+    fn stap_a() {
+        let mut d = H264DePacketizer::new();
+        let stap = [
+            0x18u8,            // type 24 (STAP-A), lower 5 bits = 11000
+            0x00, 0x02,        // NALU1 size = 2
+            0x88, 0x88,        // NALU1 body
+            0x00, 0x03,        // NALU2 size = 3
+            0xC8, 0xC8, 0xC8,  // NALU2 body
+        ];
+        let out = d.depacketize(&stap);
+        assert_eq!(out.len(), 4 + 2 + 4 + 3);
+        assert_eq!(out[..4], START);
+        assert_eq!(&out[4..6], &[0x88, 0x88]);
+        assert_eq!(out[6..10], START);
+        assert_eq!(&out[10..13], &[0xC8, 0xC8, 0xC8]);
+    }
+
+    /// A NAL fragmented across three FU-A packets must reassemble into one
+    /// complete unit with a reconstructed header (NRI from FU header, type
+    /// from FU indicator).
+    #[test]
+    fn fu_a_roundtrip() {
+        let mut d = H264DePacketizer::new();
+        // b0 = FU-A(28) | NRI; b1 holds the F(0x80) / E(0x40) flags + type(5).
+        let s1 = [0x3C, 0x85, 0xAA]; // start only (0x80) | type 5
+        let s2 = [0x3C, 0x05, 0xBB]; // middle (no flags)
+        let s3 = [0x3C, 0x45, 0xCC, 0xDD]; // end (0x40) | type 5
+        assert!(d.depacketize(&s1).is_empty());
+        assert!(d.depacketize(&s2).is_empty());
+        let out = d.depacketize(&s3);
+        // start(4) + header(1) + body(4) = 9 bytes.
+        assert_eq!(out.len(), 9);
+        assert_eq!(out[..4], START);
+        // Reconstructed NAL header: NRI(0x20) | type(5) = 0x25.
+        assert_eq!(out[4], 0x25);
+        assert_eq!(&out[5..], &[0xAA, 0xBB, 0xCC, 0xDD]);
+    }
+
+    /// A middle fragment arriving with no start in flight is dropped
+    /// (desync recovery) rather than corrupting the buffer.
+    #[test]
+    fn fu_a_stray_middle_dropped() {
+        let mut d = H264DePacketizer::new();
+        let stray = [0x3C, 0x05, 0xFF];
+        assert!(d.depacketize(&stray).is_empty());
+    }
 }
 
 // ─── runtime ────────────────────────────────────────────────────────────────

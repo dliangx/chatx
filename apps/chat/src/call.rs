@@ -24,15 +24,16 @@
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock};
 
+pub use crate::call_dispatcher;
+use crate::{AppState, CallState, GlobalOverlayType, MainWindow};
 use chatx_core::Client;
 use chatx_core::signal::HttpDirectory;
 use media::{
     AudSource, CallMode, Config as MediaConfig, PeerCall, PeerEvent, SignalFrame, SignalKind,
     SignalTransport, VidSource,
 };
-pub use crate::call_dispatcher;
-use crate::{CallState, MainWindow};
 use slint::ComponentHandle;
+use slint::SharedString;
 
 pub type ChatxClient = Client<HttpDirectory>;
 
@@ -45,6 +46,21 @@ struct Lp2pSignal {
 
 impl SignalTransport for Lp2pSignal {
     fn send(&self, frame: &SignalFrame) -> media::Result<()> {
+        // A `Bye` is the one signaling frame that must *reliably* reach the
+        // peer. During an active call the media rides WebRTC's own DTLS socket,
+        // so the libp2p relay circuit that carries signaling idles and is
+        // typically reclaimed by the time we hang up — and a `send_request`
+        // with no live route (no fresh address) silently fails. That is why
+        // offer/answer/ICE got through (each was preceded by a `dial_peer` at
+        // call setup) but the hang-up `Bye` did not. Re-dial first to refresh
+        // the peer's address + circuit, so the `Bye` actually has a route.
+        if matches!(frame.kind, SignalKind::Bye) {
+            let base58 = self.peer.to_base58();
+            eprintln!("[media] Bye → {base58}; re-dialing to refresh route");
+            if let Err(e) = self.client.dial_peer(&base58) {
+                eprintln!("[media] pre-Bye dial failed (still sending): {e}");
+            }
+        }
         let json = serde_json::to_string(frame)
             .map_err(|e| media::Error::other(format!("serialize SignalFrame: {e}")))?;
         self.client
@@ -79,6 +95,31 @@ thread_local! {
     static CALL: RefCell<Option<CallInner>> = RefCell::new(None);
 }
 
+/// One inbound offer waiting for the user's decision. Stashed in the
+/// process-global `RINGING` slot when it arrives; consumed either by `accept`
+/// (user tapped ACCEPT) or `decline` (user tapped DECLINE) / `timeout`.
+/// Only one at a time — the second offer replaces the first.
+struct PendingInbound {
+    client: Arc<ChatxClient>,
+    peer: libp2p::PeerId,
+    offer: SignalFrame,
+    opts: CallOptions,
+    call_id: String,
+}
+
+#[derive(Default)]
+struct RingingSlot {
+    pending: Option<PendingInbound>,
+    /// Bumped on every new inbound offer. A timeout task only acts if the
+    /// slot's generation still matches the one it captured when it started —
+    /// this avoids a stale timeout (from a previous, already-acted-upon
+    /// offer) clobbering a newer one.
+    generation: u64,
+}
+
+static RINGING: std::sync::LazyLock<std::sync::Mutex<RingingSlot>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(RingingSlot::default()));
+
 /// Weak reference to the Slint `MainWindow`. Set once at app startup.
 static WINDOW: OnceLock<slint::Weak<MainWindow>> = OnceLock::new();
 
@@ -99,10 +140,12 @@ pub fn weak_window() -> Option<slint::Weak<MainWindow>> {
 fn fire_ui_end() {
     if let Some(weak) = weak_window() {
         let _ = slint::invoke_from_event_loop(move || {
-            stop_call();
+            // Passive side: clean up locally, do NOT echo a `Bye` back.
+            stop_call_no_notify();
             if let Some(ui) = weak.upgrade() {
                 let cs = ui.global::<CallState>();
                 cs.set_active(false);
+                cs.set_ringing(false);
                 cs.set_connected(false);
                 cs.set_muted(false);
                 cs.set_audio_muted(false);
@@ -213,7 +256,9 @@ pub fn start_call(
     // `PeerCall::offer` returns the offer SDP frame; we are responsible for
     // sending it to the peer over the transport. (The media crate doesn't
     // auto-transmit; `Lp2pSignal::send` is invoked per frame.)
-    transport.send(&offer).map_err(|e| anyhow::anyhow!("transport send: {e}"))?;
+    transport
+        .send(&offer)
+        .map_err(|e| anyhow::anyhow!("transport send: {e}"))?;
 
     wire_remote_sinks(&call, &audio, &queue);
 
@@ -237,8 +282,10 @@ pub fn start_call(
         });
     });
 
-    eprintln!("[call] offerer started: peer={peer} cam={} scr={}",
-        opts.include_cam, opts.include_scr);
+    eprintln!(
+        "[call] offerer started: peer={peer} cam={} scr={}",
+        opts.include_cam, opts.include_scr
+    );
     Ok(())
 }
 
@@ -272,22 +319,15 @@ pub fn answer_offer(
     let (call, answer) = {
         let t = Arc::clone(&transport);
         media_rt().block_on(async move {
-            PeerCall::answer(
-                &offer_c,
-                me58c,
-                &cfg,
-                as_dyn(t),
-                Some(aud2),
-                cam2,
-                scr2,
-            )
-            .await
+            PeerCall::answer(&offer_c, me58c, &cfg, as_dyn(t), Some(aud2), cam2, scr2).await
         })
     }
-        .map_err(|e| anyhow::anyhow!("PeerCall::answer: {e}"))?; // keep (answerer path)
+    .map_err(|e| anyhow::anyhow!("PeerCall::answer: {e}"))?; // keep (answerer path)
 
     // Send our answer SDP back to the peer.
-    transport.send(&answer).map_err(|e| anyhow::anyhow!("transport send: {e}"))?;
+    transport
+        .send(&answer)
+        .map_err(|e| anyhow::anyhow!("transport send: {e}"))?;
 
     wire_remote_sinks(&call, &audio, &queue);
 
@@ -311,7 +351,33 @@ pub fn answer_offer(
             call_id,
         });
     });
-    eprintln!("[call] answerer started");
+
+    // ── push the call UI to the user ────────────────────────────────────
+    // The outbound path (`begin_voice_call` / `begin_video_call` /
+    // `begin_screen_call` in lib.rs) does this right after `start_call`
+    // returns OK. The inbound path was missing this — the call was
+    // running with no UI overlay, so the user could not tell a call was
+    // in progress. Mirror the mapping: offer mode → overlay type.
+    if let Some(weak) = weak_window() {
+        let peer_b58 = peer.to_base58();
+        let (peer_b58, peer_name) = crate::resolve_peer_display(&peer_b58);
+        let overlay = match offer.mode {
+            Some(CallMode::Video) => crate::GlobalOverlayType::VideoCall,
+            Some(CallMode::Screen) => crate::GlobalOverlayType::ScreenShare,
+            Some(CallMode::Audio) | None => crate::GlobalOverlayType::AudioCall,
+        };
+        crate::publish_call_state(weak.clone(), Some(peer_b58), peer_name, true);
+        if opts.include_cam {
+            let wk = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = wk.upgrade() {
+                    ui.global::<CallState>().set_cam_on(true);
+                }
+            });
+        }
+        crate::show_call_overlay(weak, overlay);
+    }
+    eprintln!("[call] answerer started (ui=on)");
     Ok(())
 }
 
@@ -320,6 +386,7 @@ pub fn answer_offer(
 /// Entry point for `ChatEvent::Webrtc`. `json` is the JSON-encoded
 /// `media::SignalFrame` produced by the peer's `Lp2pSignal::send`.
 pub fn handle_signal_offer(client: Arc<ChatxClient>, peer: libp2p::PeerId, json: &str) {
+    eprintln!("[call] inbound webrtc signal: len={}", json.len());
     let frame: SignalFrame = match serde_json::from_str(json) {
         Ok(f) => f,
         Err(e) => {
@@ -327,6 +394,7 @@ pub fn handle_signal_offer(client: Arc<ChatxClient>, peer: libp2p::PeerId, json:
             return;
         }
     };
+    eprintln!("[call] inbound {:?} call_id={}", frame.kind, frame.call_id);
     match &frame.kind {
         SignalKind::Offer(_) => {
             if is_active() {
@@ -341,8 +409,9 @@ pub fn handle_signal_offer(client: Arc<ChatxClient>, peer: libp2p::PeerId, json:
                 tracing::warn!("[call] got Offer while active — dropping (not an upgrade)");
                 return;
             }
-            // Initial answer. Mirror the offerer's call intent (audio → 1
-            // m-line, video → audio+cam, screen → audio but no local share).
+            // Stash the offer in the ringing slot and surface the UI.
+            // `accept_inbound` / `decline_inbound` (called from the Slint
+            // callbacks) actually drive the WebRTC answer.
             let opts = match frame.mode {
                 Some(CallMode::Video) => CallOptions {
                     include_cam: true,
@@ -357,11 +426,36 @@ pub fn handle_signal_offer(client: Arc<ChatxClient>, peer: libp2p::PeerId, json:
                     include_scr: false,
                 },
             };
-            if let Err(e) = answer_offer(client, peer, &frame, opts) {
-                eprintln!("[call] answer_offer: {e}");
-            }
+            ring_inbound(client, peer, frame, opts);
         }
         _ => {
+            if matches!(frame.kind, SignalKind::Bye) {
+                // Peer hung up. `handle_signal_offer` already runs on the UI
+                // thread (it is dispatched via `slint::invoke_from_event_loop`),
+                // so we can tear down *synchronously* right here. This removes
+                // the dependency on the fragile async chain that was silently
+                // losing the passive-side teardown:
+                //   handle_inbound → close → try_broadcast(Hangup) → drain task
+                //   (on media_rt) → fire_ui_end → stop_call
+                // — any link dying (drain task not alive, broadcast dropped)
+                // left B's UI frozen exactly as observed. The synchronous path
+                // below is airtight. We still keep `handle_inbound` available for
+                // other kinds (MuteMic, Cam, Screen) — for those the state is
+                // applied on the local PeerCall, no UI mutation is required.
+                eprintln!(
+                    "[call] Bye from peer: active={} → tearing down synchronously",
+                    is_active()
+                );
+                if is_active() {
+                    fire_ui_end();
+                } else {
+                    // We were waiting on an inbound offer (ringing) and the peer
+                    // hung up / cancelled before we answered. Dismiss the panel
+                    // without sending a `Bye` back (the call was theirs).
+                    dismiss_inbound();
+                }
+                return;
+            }
             if let Some(call) = active_call() {
                 if let Err(e) = call.handle_inbound(&frame) {
                     eprintln!("[call] handle_inbound: {e}");
@@ -371,11 +465,198 @@ pub fn handle_signal_offer(client: Arc<ChatxClient>, peer: libp2p::PeerId, json:
     }
 }
 
+/// Clear a pending inbound offer + its ringing UI WITHOUT notifying the peer.
+/// Used when the offer's originating side ends the call first (e.g. the
+/// caller hung up while we were still at the Accept/Decline screen).
+fn dismiss_inbound() {
+    let was_pending = {
+        let mut slot = RINGING.lock().unwrap();
+        slot.generation += 1;
+        slot.pending.take().is_some()
+    };
+    if !was_pending {
+        return;
+    }
+    if let Some(weak) = weak_window() {
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let st = ui.global::<CallState>();
+            st.set_ringing(false);
+            st.set_active(false);
+            let state = ui.global::<AppState>();
+            let mut nav = state.get_nav_state();
+            nav.global_overlay = GlobalOverlayType::None;
+            state.set_nav_state(nav);
+        });
+    }
+}
+
+/// Stash an inbound offer and present the ringing UI. Replaces any
+/// existing pending inbound (only one at a time).
+fn ring_inbound(
+    client: Arc<ChatxClient>,
+    peer: libp2p::PeerId,
+    offer: SignalFrame,
+    opts: CallOptions,
+) {
+    let call_id = offer.call_id.clone();
+    let mode = offer.mode; // copy out before moving into the slot
+
+    {
+        let mut slot = RINGING.lock().unwrap();
+        slot.pending = Some(PendingInbound {
+            client: Arc::clone(&client),
+            peer: peer.clone(),
+            offer,
+            opts,
+            call_id: call_id.clone(),
+        });
+        slot.generation += 1;
+        let g = slot.generation;
+        ring_inbound_spawn_timeout(g);
+    }
+
+    // Surface the UI. `publish_call_state_with(..., active=false, ringing=true)`
+    // resets the controls + presents the Accept/Decline panel.
+    if let Some(weak) = weak_window() {
+        let peer_b58 = peer.to_base58();
+        let (peer_b58, peer_name) = crate::resolve_peer_display(&peer_b58);
+        let overlay = match mode {
+            Some(CallMode::Video) => crate::GlobalOverlayType::VideoCall,
+            Some(CallMode::Screen) => crate::GlobalOverlayType::ScreenShare,
+            Some(CallMode::Audio) | None => crate::GlobalOverlayType::AudioCall,
+        };
+        crate::publish_call_state_with(weak.clone(), Some(peer_b58), peer_name, false, true);
+        crate::show_call_overlay(weak, overlay);
+    }
+    eprintln!("[call] inbound offer: {call_id}");
+}
+
+/// Spawn a 30-second timeout task that declines the offer if the user
+/// hasn't acted. Only one is live; a newer offer (with a higher generation)
+/// supersedes an older one via the generation guard.
+fn ring_inbound_spawn_timeout(g: u64) {
+    let rt = crate::runtime();
+    rt.spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let still_current = {
+            let slot = RINGING.lock().unwrap();
+            slot.generation == g && slot.pending.is_some()
+        };
+        if !still_current {
+            return;
+        }
+        eprintln!("[call] inbound offer timed out");
+        let _ = slint::invoke_from_event_loop(move || decline_inbound());
+    });
+}
+
+/// Consume the pending inbound (if any) and drive the WebRTC answer.
+/// Called from the ACCEPT button (`CallState.accept-call`) or from the
+/// timeout task.
+pub fn accept_inbound() {
+    let taken: Option<PendingInbound> = RINGING.lock().unwrap().pending.take();
+    // Bump generation so a live timeout task (for this offer) becomes stale.
+    RINGING.lock().unwrap().generation += 1;
+
+    let Some(p) = taken else {
+        eprintln!("[call] accept_inbound: no pending offer");
+        return;
+    };
+
+    match answer_offer(p.client, p.peer, &p.offer, p.opts) {
+        Ok(()) => {
+            if let Some(weak) = weak_window() {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        let st = ui.global::<CallState>();
+                        st.set_ringing(false);
+                        st.set_active(true);
+                    }
+                });
+            }
+        }
+        Err(e) => {
+            eprintln!("[call] answer_offer: {e}");
+            if let Some(weak) = weak_window() {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        let st = ui.global::<CallState>();
+                        st.set_ringing(false);
+                        st.set_error_message(SharedString::from(format!("Call failed: {e}")));
+                    }
+                });
+            }
+        }
+    }
+}
+
+/// Consume the pending inbound (if any) and send a `Bye` to the peer.
+/// Called from the DECLINE button or the timeout task.
+pub fn decline_inbound() {
+    let taken: Option<PendingInbound> = RINGING.lock().unwrap().pending.take();
+    RINGING.lock().unwrap().generation += 1;
+
+    let Some(p) = taken else {
+        eprintln!("[call] decline_inbound: no pending offer");
+        return;
+    };
+
+    let bye = SignalFrame::new(p.call_id.clone(), media::SignalKind::Bye)
+        .with_from(p.client.peer_base58());
+    let json = serde_json::to_string(&bye);
+    if let Ok(json) = json {
+        if let Err(e) = p.client.send_webrtc_signal(p.peer.clone(), &json) {
+            eprintln!("[call] decline: send_webrtc: {e}");
+        }
+    }
+    eprintln!(
+        "[call] inbound offer declined: {call_id}",
+        call_id = p.call_id
+    );
+
+    if let Some(weak) = weak_window() {
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let st = ui.global::<CallState>();
+            st.set_ringing(false);
+            st.set_active(false);
+            st.set_error_message(SharedString::new());
+            let state = ui.global::<AppState>();
+            let mut nav = state.get_nav_state();
+            nav.global_overlay = GlobalOverlayType::None;
+            state.set_nav_state(nav);
+        });
+    }
+}
+
 // ── public: lifecycle ─────────────────────────────────────────────────────
 
 pub fn stop_call() {
+    // Local user hung up (active side) → tell the peer with a `Bye` so it
+    // tears down now, instead of waiting for its ICE/DTLS to time out.
+    stop_common(true);
+}
+
+/// Teardown used when *we* are the passive side (the peer already sent a
+/// `Bye`, or a new call supersedes this one), or from the async event-drain's
+/// `ended` branch. Cleans everything local but does NOT send a `Bye` —
+/// echoing one back is at best noise and risks a signaling loop.
+pub fn stop_call_no_notify() {
+    stop_common(false);
+}
+
+fn stop_common(send_bye: bool) {
     if let Some(call) = active_call() {
-        let _ = call.close();
+        if send_bye {
+            let _ = call.hangup();
+        } else {
+            let _ = call.close();
+        }
     }
     CALL.with(|slot| {
         if let Some(inner) = slot.borrow_mut().take() {
@@ -459,7 +740,11 @@ pub fn is_remote_muted() -> bool {
 ///      `set_scr_source` so camera frames flow in.
 /// Then call this to attach the track, re-offer, and emit the upgrade offer
 /// over the transport (peer will answer automatically).
-pub fn upgrade_outgoing(kind: media::VKind, both_sides: bool, src: Arc<VidSource>) -> anyhow::Result<()> {
+pub fn upgrade_outgoing(
+    kind: media::VKind,
+    both_sides: bool,
+    src: Arc<VidSource>,
+) -> anyhow::Result<()> {
     let call = active_call().ok_or_else(|| anyhow::anyhow!("no active call"))?;
     media_rt()
         .block_on(call.upgrade_offer(src, kind, both_sides))
@@ -632,9 +917,7 @@ fn wire_remote_sinks(
     // the render callback consumes a correct frame stride.
     let out_rate = audio.out_rate();
     let out_ch = audio.out_channels();
-    tracing::info!(
-        "[call] wire_remote_sinks: in=8k/1ch  out={out_rate}Hz/{out_ch}ch"
-    );
+    tracing::info!("[call] wire_remote_sinks: in=8k/1ch  out={out_rate}Hz/{out_ch}ch");
     let q = queue.clone();
     call.set_remote_audio_sink(move |s16le: &[u8], r: u32, c: u32| {
         if s16le.is_empty() {

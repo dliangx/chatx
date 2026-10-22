@@ -5,6 +5,10 @@ export global CallState {
     in property <string> status: @tr("Calling…");
     in property <string> error-message: "";
     in property <bool> active: false;
+    /// True while an inbound offer is awaiting the user's Accept/Decline.
+    /// Once the user accepts, `answer_offer` flips this to false and the
+    /// call transitions to the connected / ringing (outbound) state.
+    in property <bool> ringing: false;
     /// True once the peer has actually answered (WebRTC `Connected`). Before
     /// this the call is still in the ringing state — controls must stay visible so the
     /// caller can hang up.
@@ -51,6 +55,11 @@ export global CallState {
     callback toggle-scr();
     callback swap-ab();
     callback toggle-minimize();
+    /// Inbound only: user tapped ACCEPT. Rust calls `answer_offer`.
+    callback accept-call();
+    /// Inbound only: user tapped DECLINE. Rust sends a `Bye` frame and tears
+    /// the call down.
+    callback decline-call();
 }
 
 export component CallBtn inherits Rectangle {
@@ -268,7 +277,7 @@ export component CallView inherits Rectangle {
             x: 0px;
             y: 56px;
             width: 100%;
-            text: CallState.status;
+            text: CallState.ringing ? @tr("Incoming") : CallState.status;
             horizontal-alignment: center;
             font-size: 13px;
             color: #8b95a3;
@@ -282,6 +291,7 @@ export component CallView inherits Rectangle {
             height: 44px;
             border-radius: 22px;
             background: #2a3340;
+            visible: !CallState.ringing;
             Icon {
                 x: 10px;
                 y: 10px;
@@ -297,6 +307,8 @@ export component CallView inherits Rectangle {
     }
 
     // ── CONTROL BAR ────────────────────────────────────────────────
+    // When `ringing` (inbound offer awaiting accept/decline), show the
+    // two decision buttons instead of the live-call device controls.
     Rectangle {
         x: 0px;
         y: parent.height - 218px;
@@ -304,66 +316,121 @@ export component CallView inherits Rectangle {
         height: 190px;
         visible: !CallState.minimized && !CallState.controls-hidden;
 
-        // Four always-on device buttons.
+        // ── RINGING : ACCEPT + DECLINE ─────────────────────────────
         HorizontalLayout {
-            y: 6px;
+            y: 72px;
             alignment: center;
-            spacing: 10px;
+            spacing: 40px;
+            visible: CallState.ringing;
 
-            CallBtn {
-                label: @tr("VOICE");
-                on: !CallState.muted;
-                glyph-on: Glyph.voice;
-                glyph-off: Glyph.voice-close;
-                clicked => { CallState.toggle-mute(); }
+            // DECLINE (red).
+            Rectangle {
+                width: 76px;
+                height: 76px;
+                border-radius: 38px;
+                background: #ff4545;
+                Icon {
+                    x: 25px;
+                    y: 25px;
+                    size: 26px;
+                    glyph: Glyph.close;
+                    tint: #ffffff;
+                }
+
+                TouchArea {
+                    clicked => { CallState.decline-call(); }
+                }
             }
 
-            CallBtn {
-                label: @tr("AUDIO");
-                on: !CallState.audio-muted;
-                glyph-on: Glyph.volume;
-                glyph-off: Glyph.volume-close;
-                clicked => { CallState.toggle-audio(); }
-            }
+            // ACCEPT (green).
+            Rectangle {
+                width: 76px;
+                height: 76px;
+                border-radius: 38px;
+                background: #22c55e;
+                Icon {
+                    x: 25px;
+                    y: 25px;
+                    size: 26px;
+                    glyph: Glyph.call;
+                    tint: #ffffff;
+                }
 
-            CallBtn {
-                label: @tr("CAMERA");
-                on: CallState.cam-on;
-                glyph: Glyph.video;
-                clicked => { CallState.toggle-cam(); }
-            }
-
-            CallBtn {
-                label: @tr("SCREEN");
-                on: CallState.scr-on;
-                glyph: Glyph.meeting;
-                clicked => { CallState.toggle-scr(); }
+                TouchArea {
+                    clicked => { CallState.accept-call(); }
+                }
             }
         }
 
-        // END.
+        // ── LIVE : device buttons ───────────────────────────────────
         Rectangle {
-            x: (parent.width - 76px) / 2;
-            y: 72px;
-            width: 76px;
-            height: 76px;
-            border-radius: 38px;
-            background: #ff4545;
-            Text {
-                x: 0px;
-                y: 0px;
-                width: 100%;
-                height: 100%;
-                text: @tr("END");
-                color: #ffffff;
-                font-size: 15px;
-                font-weight: 600;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 100%;
+            visible: !CallState.ringing;
+
+            // Four always-on device buttons.
+            HorizontalLayout {
+                y: 6px;
+                alignment: center;
+                spacing: 10px;
+
+                CallBtn {
+                    label: @tr("VOICE");
+                    on: !CallState.muted;
+                    glyph-on: Glyph.voice;
+                    glyph-off: Glyph.voice-close;
+                    clicked => { CallState.toggle-mute(); }
+                }
+
+                CallBtn {
+                    label: @tr("AUDIO");
+                    on: !CallState.audio-muted;
+                    glyph-on: Glyph.volume;
+                    glyph-off: Glyph.volume-close;
+                    clicked => { CallState.toggle-audio(); }
+                }
+
+                CallBtn {
+                    label: @tr("CAMERA");
+                    on: CallState.cam-on;
+                    glyph: Glyph.video;
+                    clicked => { CallState.toggle-cam(); }
+                }
+
+                CallBtn {
+                    label: @tr("SCREEN");
+                    on: CallState.scr-on;
+                    glyph: Glyph.meeting;
+                    clicked => { CallState.toggle-scr(); }
+                }
             }
 
-            TouchArea {
-                clicked => { CallState.end-call(); }
+            // END.
+            Rectangle {
+                x: (parent.width - 76px) / 2;
+                y: 72px;
+                width: 76px;
+                height: 76px;
+                border-radius: 38px;
+                background: #ff4545;
+                Text {
+                    x: 0px;
+                    y: 0px;
+                    width: 100%;
+                    height: 100%;
+                    text: @tr("END");
+                    color: #ffffff;
+                    font-size: 15px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    clicked => { CallState.end-call(); }
+                }
             }
         }
     }
