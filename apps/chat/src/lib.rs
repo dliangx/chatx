@@ -1,4 +1,4 @@
-use slint::{Image as SlintImage, SharedString};
+use slint::{Image as SlintImage, Model as _, SharedString};
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -2075,7 +2075,12 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     let rt = runtime();
     let ui_weak2 = ui_weak.clone();
 
-    let (available_w, scale) = if let Some(ui) = ui_weak2.upgrade() {
+    // Snapshot the known contact avatars (peer_id -> pixel data) and the own
+    // avatar here on the UI thread so they can be handed to the worker thread.
+    // `slint::Image` itself is not `Send` (its cache is thread-local), but the
+    // underlying `SharedPixelBuffer` is — we materialise each into a plain
+    // (w, h, Vec<u8>) tuple.
+    let (available_w, scale, own_avatar, contacts) = if let Some(ui) = ui_weak2.upgrade() {
         let state = ui.global::<AppState>();
         let window_w = state.get_xp().max(320.0);
         let pane_w = if state.get_is_mobile() {
@@ -2084,9 +2089,30 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             (window_w - 338.0).max(320.0)
         };
         let dpr = ui.window().scale_factor().max(1.0);
-        (pane_w as u32, dpr)
+        let pick = |img: &SlintImage| -> Option<(u32, u32, Vec<u8>)> {
+            let buf = img.to_rgba8()?;
+            let w = buf.width();
+            let h = buf.height();
+            if w == 0 || h == 0 {
+                None
+            } else {
+                Some((w, h, buf.as_bytes().to_vec()))
+            }
+        };
+        let own = pick(&state.get_own_avatar());
+        let cs = state
+            .get_contacts()
+            .iter()
+            .filter_map(|row| {
+                if row.peer_id.is_empty() {
+                    return None;
+                }
+                pick(&row.image).map(|rgb| (row.peer_id.to_string(), rgb))
+            })
+            .collect::<std::collections::HashMap<String, (u32, u32, Vec<u8>)>>();
+        (pane_w as u32, dpr, own, cs)
     } else {
-        (390, 2.0)
+        (390, 2.0, None, std::collections::HashMap::new())
     };
     rt.spawn(async move {
         let rows = match client.store().load(&chat_id, 200, 0).await {
@@ -2160,13 +2186,36 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                     std::hash::Hash::hash(&is_self, &mut h);
                     std::hash::Hash::hash(&time, &mut h);
 
-                    let avatar = Some(make_avatar(&m.sender, 80));
+                    // Avatar resolution:
+                    //  - own messages -> `AppState.own_avatar` (set in Me tab / EditProfile)
+                    //  - other messages -> the in-memory contact avatar from
+                    //    `AppState.contacts` (keyed by the sender's peer/user id)
+                    //  - last resort -> generated placeholder
+                    let avatar = if is_self {
+                        match own_avatar.as_ref() {
+                            Some((w, h, rgba)) => render::canvas::Image {
+                                w: *w,
+                                h: *h,
+                                rgba: rgba.clone(),
+                            },
+                            None => make_avatar(&m.sender, 80),
+                        }
+                    } else {
+                        match contacts.get(&m.sender) {
+                            Some((w, h, rgba)) => render::canvas::Image {
+                                w: *w,
+                                h: *h,
+                                rgba: rgba.clone(),
+                            },
+                            None => make_avatar(&m.sender, 80),
+                        }
+                    };
                     let msg = ChatMsg {
                         sender,
                         side: if is_self { Side::SelfSide } else { Side::Other },
                         time,
                         text: m.text.clone(),
-                        avatar,
+                        avatar: Some(avatar),
                     };
                     render_msg(
                         &mut r,
