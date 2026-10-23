@@ -1024,6 +1024,73 @@ pub fn run_app() {
 
     {
         let weak = weak.clone();
+        ui.global::<RecordState>().on_toggle(move |key| {
+            toggle_record(weak.clone(), key);
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        ui.global::<ChatSession>().on_play_voice(move |idx| {
+            if let Some(ui) = weak.upgrade() {
+                let cs = ui.global::<ChatSession>();
+                use slint::Model as _;
+                let Some(msg) = cs.get_messages().row_data(idx as usize) else {
+                    eprintln!("[play] idx {idx} out of range");
+                    return;
+                };
+                let path = msg.voice_path.clone();
+                if path.is_empty() {
+                    eprintln!("[play] idx {idx} has no voice_path");
+                    return;
+                }
+                // Stop any previously-playing row, then start this one.
+                record::stop_playback();
+                match record::read_voice_clip(path.as_str()) {
+                    Ok((bytes, rate, ch)) => match record::play(bytes, rate, ch) {
+                        Ok(dur_ms) => {
+                            cs.set_playing_idx(idx);
+                            // When the clip ends, stop the spinner: clear the
+                            // playing row so chat.slint's reset timer runs and the
+                            // icon returns to the resting frame.
+                            let weak = weak.clone();
+                            slint::Timer::single_shot(
+                                std::time::Duration::from_millis(dur_ms.max(200).min(600_000)),
+                                move || {
+                                    let _ = slint::invoke_from_event_loop(move || {
+                                        if let Some(ui) = weak.upgrade() {
+                                            if (ui.global::<ChatSession>()
+                                                .get_playing_idx())
+                                                == idx
+                                            {
+                                                ui.global::<ChatSession>()
+                                                    .set_playing_idx(-1);
+                                            }
+                                        }
+                                    });
+                                },
+                            );
+                        }
+                        Err(e) => eprintln!("[play] play failed: {e}"),
+                    },
+                    Err(e) => eprintln!("[play] read failed: {e}"),
+                }
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        ui.global::<ChatSession>().on_stop_play(move || {
+            record::stop_playback();
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<ChatSession>().set_playing_idx(-1);
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
         ui.global::<PostDetailState>().on_request_load(move |key| {
             // Release the previous post's full-resolution images before we go
             // off to load the new one; holding both at once doubles the bitmap
@@ -1037,6 +1104,8 @@ pub fn run_app() {
             load_post_detail(weak.clone(), key);
         });
     }
+
+
     {
         let weak = weak.clone();
         ui.global::<PostDetailState>().on_toggle_like(move |key| {
@@ -1634,6 +1703,25 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                             }
                         }
                     }
+                    if let chatx_core::swarm::ChatEvent::Voice {
+                        peer,
+                        rate,
+                        ch,
+                        data,
+                        duration_ms,
+                    } = &evt
+                    {
+                        handle_inbound_voice(
+                            weak.clone(),
+                            &peer.to_base58(),
+                            *rate,
+                            *ch,
+                            data.clone(),
+                            *duration_ms,
+                        )
+                        .await;
+                        continue;
+                    }
                     let touched = client.process_event(evt).await;
                     if let Some(touched) = touched {
                         refresh_inbound_chat(weak.clone(), touched).await;
@@ -1642,6 +1730,298 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
             }
         }
     });
+}
+
+/// Handle an inbound voice message: write the clip to disk, persist a voice
+/// row for the DM with the sender, and refresh the current chat if visible.
+async fn handle_inbound_voice(
+    weak: slint::Weak<MainWindow>,
+    peer_base58: &str,
+    rate: u32,
+    ch: u32,
+    data: Vec<u8>,
+    duration_ms: u64,
+) {
+    eprintln!(
+        "[voice] INBOUND from={peer_base58} bytes={} rate={rate} ch={ch} dur={duration_ms}ms",
+        data.len()
+    );
+    let Some(client) = CLIENT.lock().unwrap().clone() else {
+        eprintln!("[voice] inbound: no client yet, dropping");
+        return;
+    };
+    let me = client.peer_base58();
+    let chat_id = dm_chat_id(&me, peer_base58);
+    match record::write_voice_clip(rate, ch, &data) {
+        Ok(path) => {
+            let path_str = path.to_string_lossy().into_owned();
+            eprintln!("[voice] inbound persisted {} ({} bytes)", path.display(), data.len());
+            client
+                .persist_voice(&chat_id, peer_base58, &path_str, duration_ms)
+                .await;
+            refresh_inbound_chat(weak, chat_id).await;
+        }
+        Err(e) => {
+            eprintln!("[voice] inbound write failed: {e}");
+        }
+    }
+}
+
+/// Send a voice message (the already-captured clip) to the peer of `key`.
+/// Mirrors `send_chat_message`'s peer resolution / status handling.
+fn send_chat_voice(
+    weak: slint::Weak<MainWindow>,
+    key: i32,
+    data: Vec<u8>,
+    rate: u32,
+    ch: u32,
+    duration_ms: u64,
+) {
+    if !require_approved(weak.clone()) {
+        return;
+    }
+    let client = CLIENT.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
+    let (Some(client), Some(backend)) = (client, backend) else {
+        return;
+    };
+    let chat_id = {
+        let g = backend.blocking_read();
+        g.chat_id_for(key).map(|s| s.to_string())
+    };
+    let Some(chat_id) = chat_id else {
+        eprintln!("[voice] no chat_id for key={key}, aborting");
+        return;
+    };
+    if chat_id.starts_with("grp-") {
+        let _ = slint::invoke_from_event_loop({
+            let weak = weak.clone();
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.global::<ChatSession>()
+                        .set_send_status(SharedString::from(
+                            "Voice messages aren't supported in groups yet",
+                        ));
+                }
+            }
+        });
+        return;
+    }
+
+    if let Some(ui) = weak.upgrade() {
+        ui.global::<ChatSession>()
+            .set_send_status(SharedString::from("Sending voice…"));
+    }
+    let row_peer: String = {
+        backend
+            .blocking_read()
+            .chats
+            .iter()
+            .find(|r| r.key == key)
+            .map(|r| r.peer_id.clone())
+            .unwrap_or_default()
+    };
+    let me = client.peer_base58();
+    let my_peers: Vec<String> = {
+        let mut v: Vec<String> = Vec::new();
+        if !row_peer.is_empty() && row_peer != me {
+            v.push(row_peer.clone());
+        }
+        if chat_id.contains('|') {
+            for part in chat_id.split('|') {
+                if !part.is_empty() && part != me && !v.iter().any(|x| x == part) {
+                    v.push(part.to_string());
+                }
+            }
+        }
+        v
+    };
+    let rt = runtime();
+    let weak2 = weak.clone();
+    let c = client.clone();
+    let weak3 = weak.clone();
+    rt.spawn(async move {
+        let local_path = match record::write_voice_clip(rate, ch, &data) {
+            Ok(p) => Some(p.to_string_lossy().into_owned()),
+            Err(e) => {
+                eprintln!("[voice] local write failed: {e}");
+                None
+            }
+        };
+        let mut last_err = if my_peers.is_empty() {
+            "Cannot determine peer".to_string()
+        } else {
+            String::new()
+        };
+        let mut sent_to: Option<String> = None;
+        'outer: for cand in &my_peers {
+            if cand == &me {
+                continue;
+            }
+            match c.send_voice_cmd(cand, data.clone(), rate, ch, duration_ms).await {
+                Ok(()) => {
+                    eprintln!("[voice] sent -> {cand}");
+                    if let Some(p) = local_path.as_ref() {
+                        // Sender MUST be our own peer id (mirrors the text
+                        // path, which stores the local peer for outbound DMs):
+                        // the UI derives `is_self` from `sender == me`, so
+                        // recording `cand` (the receiver) would paint our own
+                        // voice bubble on the "other" side.
+                        c.persist_voice(&chat_id, &me, p, duration_ms).await;
+                    }
+                    sent_to = Some(cand.clone());
+                    break 'outer;
+                }
+                Err(e) => {
+                    eprintln!("[voice] peer={cand} failed: {e}");
+                    last_err = e.to_string();
+                }
+            }
+        }
+        let sent = sent_to.is_some();
+        if sent {
+            touch_chat_activity(&chat_id);
+        }
+        let msg = if !sent {
+            if last_err.trim().is_empty() {
+                "Peer is offline".to_string()
+            } else {
+                last_err
+            }
+        } else {
+            String::new()
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak3.upgrade() {
+                let cs = ui.global::<ChatSession>();
+                cs_set_send_status(&cs, msg.clone());
+            }
+        });
+        if sent {
+            load_chat_messages(weak2, key);
+        }
+    });
+}
+
+#[inline]
+fn cs_set_send_status(cs: &ChatSession, msg: String) {
+    let s = if msg.is_empty() {
+        SharedString::new()
+    } else {
+        SharedString::from(format!("Send failed: {msg}"))
+    };
+    cs.set_send_status(s);
+}
+
+const MIN_VOICE_MS: u64 = 300;
+
+/// Toggles the voice recorder for chat `key`. Driven from `RecordState.toggle`.
+/// idle → recording : start the mic; set `RecordState.state = "recording"`.
+/// recording → idle : stop the mic; if the clip is at least `MIN_VOICE_MS`,
+/// send it to the peer of `key`; else discard.
+fn toggle_record(weak: slint::Weak<MainWindow>, key: i32) {
+    if !record::is_recording() {
+        // idle → recording
+        match record::start() {
+            Ok(()) => {
+                eprintln!("[voice] recording started for key={key}");
+                let _ = slint::invoke_from_event_loop({
+                    let weak = weak.clone();
+                    move || {
+                        if let Some(ui) = weak.upgrade() {
+                            let rs = ui.global::<RecordState>();
+                            rs.set_state(SharedString::from("recording"));
+                            rs.set_started_at(record::monotonic_ms() as i32);
+                            rs.set_label(SharedString::from("0:00"));
+                        }
+                    }
+                });
+                arm_elapsed_tick(weak);
+            }
+            Err(e) => {
+                eprintln!("[voice] start failed: {e}");
+            }
+        }
+        return;
+    }
+    // recording → idle
+    let rec = match record::stop_capture() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[voice] stop failed: {e}");
+            let _ = slint::invoke_from_event_loop({
+                let weak = weak.clone();
+                move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.global::<RecordState>().set_state(SharedString::from("idle"));
+                    }
+                }
+            });
+            return;
+        }
+    };
+    let _ = slint::invoke_from_event_loop({
+        let weak = weak.clone();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<RecordState>()
+                    .set_state(SharedString::from("idle"));
+            }
+        }
+    });
+    if rec.duration_ms < MIN_VOICE_MS {
+        eprintln!(
+            "[voice] clip too short ({}ms < {}ms), discarding",
+            rec.duration_ms, MIN_VOICE_MS
+        );
+        return;
+    }
+    if key < 0 {
+        eprintln!("[voice] no key bound, discarding clip");
+        return;
+    }
+    send_chat_voice(weak, key, rec.data, rec.rate, rec.ch, rec.duration_ms);
+}
+
+static ELAPSED_TICK_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Kick off (once) a Slint timer that updates `RecordState.label` every 100 ms
+/// while recording. Computes elapsed from `RecordState.started_at` (monotonic
+/// ms) and re-arms itself until state != "recording".
+fn arm_elapsed_tick(weak: slint::Weak<MainWindow>) {
+    use std::sync::atomic::Ordering as Ord;
+    if ELAPSED_TICK_ARMED
+        .compare_exchange(false, true, Ord::SeqCst, Ord::SeqCst)
+        .is_ok()
+    {
+        slint::Timer::single_shot(std::time::Duration::from_millis(100), move || {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    let rs = ui.global::<RecordState>();
+                    if rs.get_state().as_str() == "recording" {
+                        let elapsed_ms = record::monotonic_ms() as i32 - rs.get_started_at();
+                        let label = image::format_duration_ms(elapsed_ms.max(0) as u64);
+                        rs.set_label(SharedString::from(label));
+                        slint::Timer::single_shot(std::time::Duration::from_millis(100), move || {
+                            if let Some(ui) = weak.upgrade() {
+                                let rs = ui.global::<RecordState>();
+                                if rs.get_state().as_str() == "recording" {
+                                    let elapsed_ms =
+                                        record::monotonic_ms() as i32 - rs.get_started_at();
+                                    let label =
+                                        image::format_duration_ms(elapsed_ms.max(0) as u64);
+                                    rs.set_label(SharedString::from(label));
+                                }
+                            }
+                            arm_elapsed_tick(weak.clone());
+                        });
+                    } else {
+                        ELAPSED_TICK_ARMED.store(false, Ord::SeqCst);
+                    }
+                }
+            });
+        });
+    }
 }
 
 /// Handle an inbound friendq frame (someone sent us Inquire / Accept / Reject
@@ -2268,12 +2648,20 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                             None => make_avatar(&m.sender, 80),
                         }
                     };
+                    let voice = match &m.kind {
+                        chatx_core::store::Kind::Voice {
+                            path,
+                            duration_ms,
+                        } => Some((path.clone(), *duration_ms)),
+                        chatx_core::store::Kind::Text => None,
+                    };
                     let msg = ChatMsg {
                         sender,
                         side: if is_self { Side::SelfSide } else { Side::Other },
                         time,
                         text: m.text.clone(),
                         avatar: Some(avatar),
+                        voice,
                     };
                     render_msg(
                         &mut r,
@@ -2302,8 +2690,18 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
 
             const PAD: f32 = 12.0;
             const GAP: f32 = 12.0;
+            const VOICE_H: f32 = 54.0;
             let n = rendered.len();
-            let heights: Vec<f32> = rendered.iter().map(|m| m.height as f32 / scale).collect();
+            let heights: Vec<f32> = rendered
+                .iter()
+                .map(|m| {
+                    if m.voice.is_some() {
+                        VOICE_H
+                    } else {
+                        m.height as f32 / scale
+                    }
+                })
+                .collect();
             let sum_all: f32 = heights.iter().sum();
             let messages: Vec<MessageData> = rendered
                 .into_iter()

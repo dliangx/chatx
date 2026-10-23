@@ -13,6 +13,14 @@ export struct MessageData {
     text: string,
     selected: bool,
     top: length,
+    /// Empty for text rows; the local s16le clip path for voice rows.
+    voice_path: string,
+    /// Pre-formatted duration label ("M:SS") for voice rows.
+    voice_label: string,
+    /// Sender avatar (right for own voice bubble, left for theirs).
+    avatar: image,
+    /// Time label shown below the voice bubble body (e.g. "14:32").
+    voice_time: string,
 }
 
 export global ChatSession {
@@ -22,9 +30,18 @@ export global ChatSession {
     in property <length> scroll-dist: 0px;
     in property <int> scroll-token: 0;
     in property <length> content-h: 0px;
+    /// Index into `messages` of the currently-playing voice bubble; -1 = none.
+    in property <int> playing-idx: -1;
+    /// Continuous rotation angle (degrees) of the playing record icon.
+    /// Advanced by one Timer while `playing-idx >= 0`; frozen otherwise.
+    in-out property <angle> spin: 0deg;
     callback message-sent(int, string);
     callback update-scroll(int, length);
     callback scroll-request(int);
+    /// User tapped a voice bubble — start playback (Rust sets `playing-idx`).
+    callback play-voice(int);
+    /// User tapped the currently-playing bubble — stop (Rust clears `playing-idx`).
+    callback stop-play();
 }
 
 export component ChatView inherits Rectangle {
@@ -42,6 +59,17 @@ export component ChatView inherits Rectangle {
     out property <length> input-h: input-bar.view-h;
     out property <length> status-h: ChatSession.send-status != "" ? 20px : 0px;
     out property <length> _bottom: root.status-h + root.input-h;
+
+    // Single Timer that advances the record icon's rotation angle while a clip
+    // is playing. `rotation-angle` is a basic `Path` property (no effects), so
+    // we just keep adding degrees — no pre-baked frames or reset logic needed.
+    // ~3.4deg per 16ms tick → ~60fps, ~1.05s per full turn.
+    Timer {
+        interval: 16ms;
+        running: ChatSession.playing-idx >= 0;
+        triggered => { ChatSession.spin += 3deg; }
+    }
+
     Header {
         name: @tr("chat");
 
@@ -69,6 +97,7 @@ export component ChatView inherits Rectangle {
         y: parent.height - root.input-h;
         width: parent.width;
         height: root.input-h;
+        chat-id: root.chat-id;
         sent(t) => { ChatSession.message-sent(root.chat-id, t); }
     }
 
@@ -107,6 +136,23 @@ export component ChatView inherits Rectangle {
         content-height: ChatSession.content-h;
         interactive: ChatSession.messages.length > 0;
 
+        // User-initiated drag cancels any pending programmatic scroll request
+        // — once they take the wheel, the saved position (kept fresh by the
+        // position-report timer) wins over a stale restore request.
+        flicked => {
+            if (root.my-token != ChatSession.scroll-token) {
+                root.my-token = ChatSession.scroll-token;
+            }
+        }
+
+        // Apply the requested scroll position whenever `scroll-token` bumps
+        // from Rust (on entry or after a message is sent). One-shot per token:
+        // we commit `my-token` inside `triggered`, otherwise this timer stays
+        // "running" and re-applies `content-y` every 16ms forever — each
+        // application re-triggers the position-report timer (below, whose ±1px
+        // window is crossed by the sub-pixel drift), which bumps the scroll
+        // token back from Rust, and the two fight each other: the visible
+        // symptom is a stutter view that snaps back to the saved position.
         Timer {
             interval: 16ms;
             running: root.my-token != ChatSession.scroll-token
@@ -146,8 +192,97 @@ export component ChatView inherits Rectangle {
             width: parent.width;
             height: msg.height;
 
+            // ── voice bubble (matching text-bubble proportions) ──────────
+            // Row geometry (logical px, scale=1):
+            //   avatar  = 36×36  (theme.avatar_size; same as text bubbles)
+            //   body    = 36px tall, 72px wide (8 pad + 24 icon + 4 + 34 dur)
+            //   time    = 11px font, 14px tall, directly below the body
+            //   gap     = 8px, edge = 6px  (same as text bubbles)
+            //   row     = avatar/body (36) + 4 gap + time (14) = 54 ≈ text height
+            // Own:   [body 72][gap][avatar 36]  → right edge
+            // Other: [avatar 36][gap][body 72]  → left edge
+            if msg.voice_path != "":
+            Rectangle {
+                width: 100%;
+                height: parent.height;
+
+                // ── avatar (36×36, same size as the text-bubble avatar) ──
+                Image {
+                    width: 36px;
+                    height: 36px;
+                    y: 0px;
+                    x: msg.is_self
+                        ? parent.width - 6px - 36px
+                        : 6px;
+                    source: msg.avatar;
+                }
+
+                // ── bubble body (mic icon + duration, tap to play) ─────
+                Rectangle {
+                    x: msg.is_self
+                        ? parent.width - 6px - 36px - 8px - 72px
+                        : 6px + 36px + 8px;
+                    y: 0px;
+                    width: 72px;
+                    height: 36px;
+                    border-radius: 12px;
+                    background: msg.is_self ? Theme.brand : Theme.surface;
+                    clip: true;
+
+                    // record icon: 24×24, rotates (rotation-angle) while this row
+                    // is playing, frozen at current angle otherwise.
+                    Icon {
+                        x: 4px; y: 6px;
+                        size: 24px;
+                        glyph: Glyph.record;
+                        tint: msg.is_self ? Theme.fg-on-accent : Theme.fg;
+                        transform-rotation: ChatSession.playing-idx == i ? ChatSession.spin : 0deg;
+                    }
+
+                    Text {
+                        x: 36px; y: 0px;
+                        width: 36px;
+                        height: 100%;
+                        text: msg.voice_label;
+                        font-size: 12px;
+                        color: msg.is_self ? Theme.fg-on-accent : Theme.fg;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => {
+                            if (ChatSession.playing-idx == i) {
+                                ChatSession.stop-play();
+                            } else {
+                                ChatSession.play-voice(i);
+                            }
+                        }
+                    }
+                }
+
+                // ── send time (same muted 11px style as text bubbles) ───
+                Text {
+                    x: msg.is_self
+                        ? parent.width - 6px - 36px - 8px - 72px
+                        : 6px + 36px + 8px;
+                    y: 40px;
+                    width: 72px;
+                    height: 14px;
+                    text: msg.voice_time;
+                    font-size: 11px;
+                    color: Theme.fg-muted;
+                    horizontal-alignment: msg.is_self ? right : left;
+                    vertical-alignment: center;
+                }
+            }
+
+            // ── text bubble (existing path, only for non-voice rows) ─────
+            if msg.voice_path == "":
             TouchArea {
-                x: msg.is-self ? parent.width - msg.width - 6px : 6px;
+                x: msg.is_self ? parent.width - msg.width - 6px : 6px;
                 y: 0px;
                 width: msg.width;
                 height: msg.height;
@@ -165,9 +300,9 @@ export component ChatView inherits Rectangle {
                 }
             }
 
-            if msg.selected: Button {
+            if msg.selected && msg.voice_path == "": Button {
                 text: @tr("Copy");
-                x: msg.is-self ? parent.width - msg.width - 6px - 64px : 6px + msg.width + 8px;
+                x: msg.is_self ? parent.width - msg.width - 6px - 64px : 6px + msg.width + 8px;
                 y: 0px;
                 width: 56px;
                 height: 28px;

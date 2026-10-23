@@ -221,6 +221,7 @@ async fn member_receives_group_key_and_msg() {
         group_id: Some(GID.into()),
         audio: None,
         signal: None,
+        voice: None,
     };
 
     let handled = bob_c
@@ -255,6 +256,7 @@ async fn member_receives_group_key_and_msg() {
         group_id: Some(GID.into()),
         audio: None,
         signal: None,
+        voice: None,
     };
     let m = bob_c
         .apply_inbound(&req)
@@ -295,6 +297,7 @@ async fn member_receives_group_key_and_msg() {
         group_id: Some(GID.into()),
         audio: None,
         signal: None,
+        voice: None,
     };
     bob_c.apply_inbound(&key_req2).await.unwrap();
     let now_group = bob_c.get_group(GID).unwrap();

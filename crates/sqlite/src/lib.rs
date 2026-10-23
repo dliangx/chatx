@@ -25,10 +25,18 @@ pub struct MsgRow {
     pub id: i64,
     pub chat_id: String,
     pub sender: String,
+    /// Plain-text body. For voice rows this is empty; the clip is the
+    /// on-disk file referenced by `media_path`.
     pub text: String,
     pub sealed: bool,
     pub t: u64,
     pub mine: bool,
+    /// Local file path of a voice clip; `None` for text rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_path: Option<String>,
+    /// Voice-clip duration in milliseconds; `None` for text rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_duration_ms: Option<u64>,
 }
 
 /// Auto-collected by `build.rs` from `migrations/*.sql` (lexicographic order).

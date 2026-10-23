@@ -1,60 +1,55 @@
-//! Standalone "record mic to WAV" debug hook for the in-call overlay.
+//! "Record mic to PCM" + playback helper used by the voice-message feature.
 //!
-//! Adds a small Glyph.voice icon at the bottom-left of the control bar.
-//! First click → open a fresh cpal input stream (independent of the
-//! call's own mic path / `Audio` / `INPUT_SINK`), push every s16le
-//! frame into a shared buffer. Second click → flush the buffer to disk
-//! as `~/chatx-audio-test-<unix-ts>.wav` (16-bit PCM WAV, device rate)
-//! and drop the stream.
+//! The legacy in-call debug hook (`start` / `stop`) is preserved so the
+//! existing `call::toggle-record` callback keeps working. The voice-message
+//! UI uses `start_capture` / `stop_capture` which return the raw PCM bytes
+//! instead of writing a WAV file to disc — the caller decides what to do
+//! with them (send them over P2P, play them back, etc.).
 //!
-//! No existing function is touched — this module owns its own cpal
-//! stream (thread-local, held on the UI thread that called `start`),
-//! its own frames buffer, and writes its own file.
+//! Playback is a thin wrapper around [`audio::Audio`] with a global
+//! playing-state flag so the Slint UI can flip a spinner.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
-use std::sync::{Arc, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-/// "We are currently recording" — global so the Slint icon tint can read
-/// it. Written on the UI thread, read anywhere.
 static RECORDING: AtomicBool = AtomicBool::new(false);
-
-/// Accumulated s16le PCM bytes, appended from the cpal audio thread,
-/// drained by `stop()` on the UI thread. Behind an `Arc<Mutex<..>>` so
-/// the cpal callback closure can take an `Arc` clone (a plain
-/// `Mutex<Vec<u8>>` is not cloneable).
 static FRAMES: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
 
-fn frames_inner() -> &'static Arc<Mutex<Vec<u8>>> {
-    FRAMES.get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+/// Hard cap on captured PCM bytes: ~5 min at 48 kHz / 2 ch / 16-bit.
+/// The audio callback stops appending when this is reached, preventing
+/// unbounded memory growth if the user forgets to tap stop.
+/// 5 min × 48000 Hz × 2 ch × 2 bytes = 4 800 000 bytes ≈ 5 MB.
+pub const MAX_FRAMES: usize = 5 * 60 * 48_000 * 2 * 2;
+
+struct StreamCfg {
+    rate: u32,
+    ch: u32,
 }
+impl Clone for StreamCfg {
+    fn clone(&self) -> Self {
+        Self {
+            rate: self.rate,
+            ch: self.ch,
+        }
+    }
+}
+static CONFIG: Mutex<StreamCfg> = Mutex::new(StreamCfg { rate: 48_000, ch: 2 });
 
-/// (rate, ch) at stream start, used when stamping the WAV header on stop.
-static CONFIG: Mutex<(u32, u32)> = Mutex::new((48_000, 2));
-
-// The cpal stream handle. `cpal::Stream` is `!Send`, so a thread-local
-// is the only slot that can hold it. In practice this is always the UI
-// thread (the Slint callback that drives the icon runs there), so the
-// `thread_local!` is effectively the same as a process-singleton.
 thread_local! {
     static STREAM: std::cell::RefCell<Option<cpal::Stream>> =
         std::cell::RefCell::new(None);
 }
 
-pub fn is_recording() -> bool {
-    RECORDING.load(Ordering::Relaxed)
+fn frames_inner() -> &'static Arc<Mutex<Vec<u8>>> {
+    FRAMES.get_or_init(|| Arc::new(Mutex::new(Vec::new())))
 }
 
-/// Open a fresh cpal input stream on the UI thread. Frames accumulate in
-/// `FRAMES`. The stream lives in `STREAM` (thread-local) until `stop()`.
+/// Begin capturing mic PCM. No-op (error) if already recording.
 pub fn start() -> anyhow::Result<()> {
-    // Already running? No-op (icon toggle shouldn't double-start).
     if RECORDING.swap(true, Ordering::SeqCst) {
-        // Reset to false so the caller doesn't think it just started
-        // something that was actually already going.
         RECORDING.store(false, Ordering::SeqCst);
         anyhow::bail!("already recording");
     }
@@ -67,24 +62,32 @@ pub fn start() -> anyhow::Result<()> {
     let supported = device
         .default_input_config()
         .map_err(|e| anyhow::anyhow!("default_input_config: {e}"))?;
-    let config = supported.config();
-    let rate = config.sample_rate.0;
-    let ch = config.channels;
-    *CONFIG.lock().unwrap() = (rate, ch as u32);
+    let cfg = supported.config();
+    let rate = cfg.sample_rate.0;
+    let ch = cfg.channels;
+    *CONFIG.lock().unwrap() = StreamCfg {
+        rate,
+        ch: ch as u32,
+    };
     eprintln!("[record] start: rate={rate} Hz, ch={ch}");
 
     let frames = frames_inner().clone();
     let stream = device
         .build_input_stream(
-            &config,
+            &cfg,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                // f32 in [-1,1] → i16 LE, appended to the shared buffer.
-                // Runs on cpal's audio thread — keep it cheap.
                 let mut g = frames.lock().unwrap();
-                for s in data {
+                let room = MAX_FRAMES.saturating_sub(g.len());
+                if room == 0 {
+                    return; // cap reached: stop buffering (memory is bounded)
+                }
+                for s in data.iter().take(room / 2) {
                     let v = (*s).clamp(-1.0, 1.0) * 32_767.0;
                     let i = v as i16;
                     g.extend_from_slice(&i.to_le_bytes());
+                    if g.len() >= MAX_FRAMES {
+                        break;
+                    }
                 }
             },
             |err| eprintln!("[record] input stream error: {err}"),
@@ -97,38 +100,81 @@ pub fn start() -> anyhow::Result<()> {
             RECORDING.store(false, Ordering::SeqCst);
             anyhow::anyhow!("play: {e}")
         })?;
-    STREAM.with(|slot| {
-        // If a previous recording's stream is still parked, drop it first.
-        *slot.borrow_mut() = Some(stream);
-    });
+    STREAM.with(|slot| *slot.borrow_mut() = Some(stream));
     Ok(())
 }
 
-/// Flush `FRAMES` to `~/chatx-audio-test-<unix-ts>.wav` and drop the
-/// cpal stream. Returns the file path.
-pub fn stop() -> anyhow::Result<String> {
+/// Result of a captured voice clip.
+#[derive(Debug, Clone)]
+pub struct RecordedVoice {
+    /// s16le PCM bytes (frames × channels × 2).
+    pub data: Vec<u8>,
+    /// Sample rate in Hz at capture time.
+    pub rate: u32,
+    /// Channel count (1 or 2).
+    pub ch: u32,
+    /// Accumulated capture duration in milliseconds (frames / rate × 1000).
+    pub duration_ms: u64,
+}
+
+/// True if a capture stream is currently open on this thread.
+pub fn is_recording() -> bool {
+    RECORDING.load(Ordering::Relaxed)
+}
+
+static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Monotonic milliseconds since the process started (for the elapsed label).
+pub fn monotonic_ms() -> u64 {
+    let t0 = T0.get_or_init(Instant::now);
+    t0.elapsed().as_millis() as u64
+}
+
+/// Stop the stream and return the raw PCM bytes (not written to disk).
+///
+/// The returned `duration_ms` is computed from the sample count and the
+/// sample rate — it matches what the capture device clocked.
+pub fn stop_capture() -> anyhow::Result<RecordedVoice> {
     let was_recording = RECORDING.swap(false, Ordering::SeqCst);
     if !was_recording {
-        // Still tear down (in case start() succeeded but failed halfway).
         STREAM.with(|slot| *slot.borrow_mut() = None);
         anyhow::bail!("was not recording");
     }
-    STREAM.with(|slot| {
-        *slot.borrow_mut() = None; // drop the handle → stream stops
-    });
+    STREAM.with(|slot| *slot.borrow_mut() = None);
+    let data: Vec<u8> = std::mem::take(&mut *frames_inner().lock().unwrap());
+    let c = (*CONFIG.lock().unwrap()).clone();
+    let samples = (data.len() / (2 * c.ch.max(1) as usize)).max(0) as u64;
+    let duration_ms = if c.rate == 0 {
+        0
+    } else {
+        (samples * 1000) / c.rate as u64
+    };
+    Ok(RecordedVoice {
+        data,
+        rate: c.rate,
+        ch: c.ch,
+        duration_ms,
+    })
+}
 
-    let frames: Vec<u8> = std::mem::take(&mut *frames_inner().lock().unwrap());
-    let (rate, ch) = *CONFIG.lock().unwrap();
-
+/// Compatibility shim: stop + persist a WAV file to $HOME.
+pub fn stop() -> anyhow::Result<String> {
+    let rec = stop_capture()?;
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let path = format!("{home}/chatx-audio-test-{ts}.wav");
-    let out = wav_encode(&frames, rate, ch);
-    std::fs::write(&path, out).map_err(|e| anyhow::anyhow!("write {path}: {e}"))?;
-    eprintln!("[record] wrote {path} ({} raw bytes @ {}Hz/{}ch)", frames.len(), rate, ch);
+    std::fs::write(&path, wav_encode(&rec.data, rec.rate, rec.ch))
+        .map_err(|e| anyhow::anyhow!("write {path}: {e}"))?;
+    eprintln!(
+        "[record] wrote {path} ({} raw bytes @ {}Hz/{}ch, {}ms)",
+        rec.data.len(),
+        rec.rate,
+        rec.ch,
+        rec.duration_ms
+    );
     Ok(path)
 }
 
@@ -144,21 +190,134 @@ fn wav_encode(frames: &[u8], rate: u32, ch: u32) -> Vec<u8> {
     out.extend_from_slice(&(36u32 + data_len).to_le_bytes());
     out.extend_from_slice(b"WAVE");
 
-    // fmt sub-chunk (PCM, 16-bit).
     out.extend_from_slice(b"fmt ");
     out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes()); // format 1
+    out.extend_from_slice(&1u16.to_le_bytes());
     out.extend_from_slice(&ch.to_le_bytes());
     out.extend_from_slice(&rate.to_le_bytes());
     out.extend_from_slice(&byte_rate.to_le_bytes());
     out.extend_from_slice(&block_align.to_le_bytes());
-    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    out.extend_from_slice(&16u16.to_le_bytes());
 
-    // data sub-chunk.
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_len.to_le_bytes());
     out.extend_from_slice(frames);
     out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Playback
+// ─────────────────────────────────────────────────────────────────────────────
+
+// The speaker stream. `Audio` is `!Send` (thread-local cpal streams), and all
+// our playback entry points run on the UI thread, so a thread-local fits.
+thread_local! {
+    static P_AUDIO: std::cell::RefCell<Option<audio::Audio>> =
+        std::cell::RefCell::new(None);
+}
+
+static PLAYING: AtomicBool = AtomicBool::new(false);
+
+fn home_dir() -> std::path::PathBuf {
+    let s = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    match s {
+        Some(s) => std::path::PathBuf::from(s),
+        None => std::env::temp_dir(),
+    }
+}
+
+pub fn voice_dir() -> std::path::PathBuf {
+    let dir = home_dir().join(".chatx").join("voice");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Self-describing voice-clip container: `"CHAV"` + `rate:u32le` + `ch:u32le`
+/// + raw s16le PCM. Storing the sample rate + channel count in the file lets
+/// the receiver resample correctly regardless of which device recorded it.
+pub fn write_voice_clip(
+    rate: u32,
+    ch: u32,
+    data: &[u8],
+) -> anyhow::Result<std::path::PathBuf> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dir = voice_dir();
+    let path = dir.join(format!("v-{ts}.pcm"));
+    let mut out = Vec::with_capacity(12 + data.len());
+    out.extend_from_slice(b"CHAV");
+    out.extend_from_slice(&rate.to_le_bytes());
+    out.extend_from_slice(&ch.to_le_bytes());
+    out.extend_from_slice(data);
+    std::fs::write(&path, out).map_err(|e| anyhow::anyhow!("write {path:?}: {e}"))?;
+    Ok(path)
+}
+
+/// Read a clip written by [`write_voice_clip`] → `(data, rate, ch)`.
+pub fn read_voice_clip(path: &str) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    let buf = std::fs::read(path).map_err(|e| anyhow::anyhow!("read {path}: {e}"))?;
+    if buf.len() < 12 || &buf[0..4] != b"CHAV" {
+        anyhow::bail!("bad voice clip {path}");
+    }
+    let rate = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+    let ch = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+    Ok((buf[12..].to_vec(), rate, ch.max(1)))
+}
+
+
+/// Queue `s16le` bytes (at `rate`/`ch`) for speaker playback and start
+/// the output stream. Safe to call at any time — idempotent.
+///
+/// The returned value is the clip's duration in ms (from the *source*
+/// `rate`/`ch`), which the UI uses for the elapsed timer.
+pub fn play(data: Vec<u8>, rate: u32, ch: u32) -> anyhow::Result<u64> {
+    // Compute the duration while we still own `data` (it's moved into the
+    // queue below), so we don't need a copy of the whole clip.
+    let samples = (data.len() / (2 * ch.max(1) as usize)).max(0) as u64;
+    let duration_ms = if rate == 0 {
+        0
+    } else {
+        (samples * 1000) / rate as u64
+    };
+    let (out_rate, out_ch) = P_AUDIO.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(audio::Audio::new());
+        }
+        slot.as_mut().unwrap().start_output()
+    })
+    .map_err(|e| anyhow::anyhow!("start_output: {e}"))?;
+    let s16le = if rate != out_rate || ch != out_ch {
+        audio::resample_s16le(&data, rate, ch, out_rate, out_ch)
+    } else {
+        // Same layout: hand the buffer to the queue without copying it.
+        data
+    };
+    P_AUDIO.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .unwrap()
+            .queue_output(s16le)
+    });
+    PLAYING.store(true, Ordering::SeqCst);
+    Ok(duration_ms)
+}
+
+/// Immediately stop speaker output (drops any queued samples).
+pub fn stop_playback() {
+    PLAYING.store(false, Ordering::SeqCst);
+    P_AUDIO.with(|cell| {
+        if let Some(a) = cell.borrow_mut().as_mut() {
+            a.stop_output();
+        }
+    });
+}
+
+pub fn is_playing() -> bool {
+    PLAYING.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]

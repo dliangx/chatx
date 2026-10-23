@@ -2,14 +2,26 @@ use crate::message::now_ms;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
+/// A stored chat message — either plain text or a voice message.
 #[derive(Debug, Clone)]
 pub struct StoredMsg {
     pub id: i64,
     pub chat_id: String,
     pub sender: String,
+    /// For text rows: the body. For voice rows: unused / empty.
     pub text: String,
     pub sealed: bool,
     pub t: u64,
+    /// `None` for text rows; `Some((pcm_path, duration_ms))` for voice rows.
+    pub kind: Kind,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Kind {
+    #[default]
+    Text,
+    /// `0` = disk path to the s16le PCM clip, `1` = duration in milliseconds.
+    Voice { path: String, duration_ms: u64 },
 }
 
 impl StoredMsg {
@@ -81,17 +93,7 @@ impl Store {
     pub async fn hydrate(&self, chat_id: &str) -> anyhow::Result<usize> {
         if let Some(db) = &self.db {
             let rows = sqlite::messages::load_all(db, chat_id).await?;
-            let mut asc: Vec<StoredMsg> = rows
-                .into_iter()
-                .map(|m| StoredMsg {
-                    id: m.id,
-                    chat_id: m.chat_id,
-                    sender: m.sender,
-                    text: m.text,
-                    sealed: m.sealed,
-                    t: m.t,
-                })
-                .collect();
+            let mut asc: Vec<StoredMsg> = rows.into_iter().map(row_into_stored).collect();
             asc.reverse();
             self.msgs.write().extend(asc);
             return Ok(self.msgs.read().len());
@@ -99,7 +101,17 @@ impl Store {
         Ok(0)
     }
 
-    pub async fn push(&self, chat_id: &str, sender: &str, text: &str, sealed: bool) {
+    /// Insert a new message. Pass `kind = None` for a plain text row, or
+    /// `Some((pcm_path, duration_ms))` for a voice clip (the `path` is
+    /// written to the `media_path` column).
+    pub async fn push(
+        &self,
+        chat_id: &str,
+        sender: &str,
+        text: &str,
+        sealed: bool,
+        kind: Option<(String, u64)>,
+    ) {
         let t = now_ms();
         let msg = StoredMsg {
             id: t as i64,
@@ -108,10 +120,23 @@ impl Store {
             text: text.to_string(),
             sealed,
             t,
+            kind: kind
+                .map(|(p, d)| Kind::Voice {
+                    path: p,
+                    duration_ms: d,
+                })
+                .unwrap_or_default(),
         };
         self.msgs.write().push(msg.clone());
         if let Some(db) = &self.db {
             let mine = msg.sender == self.me;
+            let (vpath, vdur) = match &msg.kind {
+                Kind::Voice {
+                    path,
+                    duration_ms,
+                } => (Some(path.clone()), Some(*duration_ms)),
+                Kind::Text => (None, None),
+            };
             let _ = sqlite::messages::insert_row(
                 db,
                 &sqlite::MsgRow {
@@ -122,6 +147,8 @@ impl Store {
                     sealed: msg.sealed,
                     t: msg.t,
                     mine,
+                    media_path: vpath,
+                    media_duration_ms: vdur,
                 },
             )
             .await;
@@ -143,14 +170,7 @@ impl Store {
                 sqlite::messages::load_page(db, chat_id, limit as u32, offset as u32).await?;
             return Ok(rows
                 .into_iter()
-                .map(|m| StoredMsg {
-                    id: m.id,
-                    chat_id: m.chat_id,
-                    sender: m.sender,
-                    text: m.text,
-                    sealed: m.sealed,
-                    t: m.t,
-                })
+                .map(row_into_stored)
                 .collect());
         }
         let buf: Vec<StoredMsg> = self
@@ -196,6 +216,29 @@ impl Store {
     }
 }
 
+fn row_into_stored(m: sqlite::MsgRow) -> StoredMsg {
+    let kind = row_to_kind(&m);
+    StoredMsg {
+        id: m.id,
+        chat_id: m.chat_id,
+        sender: m.sender,
+        text: m.text,
+        sealed: m.sealed,
+        t: m.t,
+        kind,
+    }
+}
+
+fn row_to_kind(m: &sqlite::MsgRow) -> Kind {
+    match (m.media_path.as_deref(), m.media_duration_ms) {
+        (Some(p), Some(d)) if !p.is_empty() => Kind::Voice {
+            path: p.to_string(),
+            duration_ms: d,
+        },
+        _ => Kind::Text,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,8 +257,8 @@ mod tests {
         let store = Store::with_sql(db.clone(), "QmMe");
         let chat = dm_chat_id("QmMe", "QmOther");
 
-        store.push(&chat, "QmMe", "hi", false).await;
-        store.push(&chat, "QmOther", "yo", true).await;
+        store.push(&chat, "QmMe", "hi", false, None).await;
+        store.push(&chat, "QmOther", "yo", true, None).await;
         let me = "QmMe";
         assert_eq!(store.all().len(), 2);
         assert!(store
@@ -251,6 +294,8 @@ mod tests {
                     sealed: false,
                     t: 10 + i as u64,
                     mine: false,
+                    media_path: None,
+                    media_duration_ms: None,
                 },
             )
             .await

@@ -1,16 +1,16 @@
 import { Theme } from "../theme.slint";
+import { Icon, Glyph } from "../components/icon.slint";
+import { RecordState } from "../global/record_state.slint";
 
 export component ChatInputView inherits Rectangle {
     in property <string> placeholder-text: @tr("Type a message…");
+    in property <int> chat-id: -1;
     in-out property <string> text: "";
-    in property <bool> is-recording: false;
-    in property <bool> is-recording-paused: false;
-
     callback sent(string);
 
     background: Theme.bg;
 
-    // A 1px divider sits at the top of the bar.
+    // 1px top divider.
     Rectangle {
         x: 0px;
         y: 0px;
@@ -19,21 +19,38 @@ export component ChatInputView inherits Rectangle {
         background: Theme.border;
     }
 
-    // Box + inner geometry. Margins keep the box off both the divider (top) and
-    // the screen bottom (bottom) so its border is never clipped. The box grows
-    // with the text (measured by the hidden `imeasure` Text, a `TextInput`
-    // reports no natural height) and scrolls inside once it hits `box-h-max`.
-    // `tail-w` is reserved on the right so the text never underlaps the send.
+    // Recording status bar (elapsed + hint) above the box.
+    if RecordState.state == "recording":
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: 20px;
+        background: Theme.bg;
+        Text {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 100%;
+            text: RecordState.label;
+            font-size: 11px;
+            color: Theme.brand;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
     out property <length> pad: 8px;
     out property <length> top-pad: 6px;
     out property <length> bottom-pad: 8px;
     out property <length> in-pad: 10px;
     out property <length> in-pad-x: 14px;
     out property <length> tail-w: 82px;
+    out property <length> head-w: 32px;
     out property <length> btn-w: 68px;
     out property <length> btn-h: 32px;
     out property <length> box-w: root.width - 2 * root.pad;
-    out property <length> field-w: root.box-w - root.in-pad-x - root.tail-w;
+    out property <length> field-w: root.box-w - root.in-pad-x - root.head-w - root.tail-w;
     out property <length> raw-h: imeasure.preferred-height;
     out property <length> box-h-min: max(24px, root.btn-h) + 2 * root.in-pad;
     out property <length> box-h-max: 168px;
@@ -54,10 +71,30 @@ export component ChatInputView inherits Rectangle {
         border-color: Theme.border;
         clip: true;
 
-        // Measures the text's natural height; drives the box height so it grows
-        // with the content (a `TextInput` reports no natural height).
+        // Voice-toggle icon at the bottom-left of the input box.
+        Rectangle {
+            x: 0px;
+            y: parent.height - root.btn-h - (root.in-pad / 2);
+            width: root.head-w;
+            height: root.btn-h;
+
+            Icon {
+                x: (root.head-w - 22px) / 2;
+                y: (root.btn-h - 22px) / 2;
+                size: 22px;
+                glyph: Glyph.voice;
+                tint: RecordState.state == "recording" ? Theme.brand : Theme.fg-muted;
+            }
+
+            TouchArea {
+                clicked => {
+                    RecordState.toggle(root.chat-id);
+                }
+            }
+        }
+
         imeasure := Text {
-            x: root.in-pad-x;
+            x: root.in-pad-x + root.head-w;
             y: 0px;
             width: root.field-w;
             text: input.text;
@@ -68,7 +105,7 @@ export component ChatInputView inherits Rectangle {
         }
 
         Flickable {
-            x: root.in-pad-x;
+            x: root.in-pad-x + root.head-w;
             y: root.in-pad;
             width: root.field-w;
             height: root.field-h;

@@ -1,9 +1,14 @@
-use slint::{Image as SlintImage, SharedPixelBuffer, SharedString};
+use slint::Image as SlintImage;
+use slint::{SharedPixelBuffer, SharedString};
 
 use render::Renderer;
 use render::bubble::parse::parse_text;
 use render::bubble::{Bubble, GroupPos, Side};
 use render::canvas::Image;
+
+/// voice record icon + 8 pre-rotated spin frames are now pure Slint paths
+/// (see `apps/chat/ui/components/icon.slint`, `Glyph.record`); no more PNG
+/// decoding here. `Slint::Image` remains below for avatars and other raster paths.
 
 pub(crate) static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> =
     std::sync::OnceLock::new();
@@ -246,6 +251,15 @@ pub struct RenderedMsg {
     pub height: u32,
     pub is_self: bool,
     pub text: String,
+    /// Present when this is a voice-message bubble: (disk path, duration ms).
+    /// When set, the pixel buffer is a 1x1 dummy and the caller controls the
+    /// *displayed* size (Slint draws the bubble).
+    pub voice: Option<(String, u64)>,
+    /// Sender avatar (right for own, left for theirs) shown beside a voice
+    /// bubble, mirroring the rasterised text-bubble avatar.
+    pub avatar: Option<render::canvas::Image>,
+    /// Time label (e.g. "14:32") — displayed under the voice bubble body.
+    pub time: String,
 }
 
 pub struct ChatMsg {
@@ -254,6 +268,9 @@ pub struct ChatMsg {
     pub time: String,
     pub text: String,
     pub avatar: Option<Image>,
+    /// A voice message replaces the text body with a play bubble. The `path`
+    /// is a local s16le clip and `duration_ms` is what the UI should show.
+    pub voice: Option<(String, u64)>,
 }
 
 pub fn render_msg(
@@ -263,6 +280,21 @@ pub fn render_msg(
     available_w: u32,
     scale: f32,
 ) -> RenderedMsg {
+    // Voice bubbles are drawn by Slint (icon + duration + play state), so the
+    // rasterised image is a 1x1 dummy; the caller picks the displayed size in
+    // `voice_dim` / `to_message_data_voice`.
+    if let Some((path, dur)) = &msg.voice {
+        return RenderedMsg {
+            rgba: vec![255u8, 255, 255, 255],
+            width: 1,
+            height: 1,
+            is_self: msg.side == Side::SelfSide,
+            text: format!("{dur}ms"),
+            voice: Some((path.clone(), *dur)),
+            avatar: msg.avatar.clone(),
+            time: msg.time.clone(),
+        };
+    }
     let segs = parse_text(&msg.text);
     let bubble = Bubble {
         segments: &segs,
@@ -277,23 +309,66 @@ pub fn render_msg(
         rgba: out.to_straight_rgba(),
         width: out.width,
         height: out.height,
-        is_self: msg.side == Side::SelfSide,
-        text: msg.text.clone(),
+            is_self: msg.side == Side::SelfSide,
+            text: msg.text.clone(),
+            voice: None,
+            avatar: None,
+            time: msg.time.clone(),
+        }
     }
-}
 
 pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageData {
-    let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(m.width, m.height);
-    buf.make_mut_bytes().copy_from_slice(&m.rgba);
+    // Voice bubbles are drawn by Slint; give them a fixed logical size.
+    let is_voice = m.voice.is_some();
+    let (w, h) = if is_voice {
+        (72.0, 54.0)
+    } else {
+        (m.width as f64 / scale as f64, m.height as f64 / scale as f64)
+    };
     crate::MessageData {
-        bubble: SlintImage::from_rgba8(buf),
-        width: (m.width as f64 / scale as f64) as f32,
-        height: (m.height as f64 / scale as f64) as f32,
+        bubble: {
+            let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(
+                m.width.max(1),
+                m.height.max(1),
+            );
+            buf.make_mut_bytes().copy_from_slice(&m.rgba);
+            SlintImage::from_rgba8(buf)
+        },
+        width: w as f32,
+        height: h as f32,
         is_self: m.is_self,
         text: SharedString::from(m.text),
         selected: false,
         top,
+        voice_path: m
+            .voice
+            .as_ref()
+            .map(|(p, _)| SharedString::from(p.clone()))
+            .unwrap_or_default(),
+        voice_label: m
+            .voice
+            .map(|(_, d)| format_duration_ms(d))
+            .map(SharedString::from)
+            .unwrap_or_default(),
+        avatar: {
+            if let Some(a) = &m.avatar {
+                let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(a.w, a.h);
+                buf.make_mut_bytes().copy_from_slice(&a.rgba);
+                SlintImage::from_rgba8(buf)
+            } else {
+                SlintImage::default()
+            }
+        },
+        voice_time: SharedString::from(m.time),
     }
+}
+
+/// Format a duration in milliseconds as "M:SS" (e.g. 45000 → "0:45").
+pub fn format_duration_ms(ms: u64) -> String {
+    let s = ms / 1000;
+    let m = s / 60;
+    let rs = s % 60;
+    format!("{m}:{rs:02}")
 }
 
 pub fn make_preview_image(data: &[u8], w: u32, h: u32, fmt: u32) -> slint::Image {

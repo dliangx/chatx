@@ -36,7 +36,7 @@ pub struct Bubble<'a> {
     pub avatar: Option<&'a Image>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RenderedBubble {
     pub rgba: Vec<u8>,
     pub width: u32,

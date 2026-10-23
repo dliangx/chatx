@@ -94,7 +94,7 @@ impl Audio {
     pub fn push_output_shared(&self, s16le: Vec<u8>) {
         let mut q = self.out_queue.lock().unwrap();
         q.extend(s16le);
-        const CAP: usize = 5 * 48_000 * 2 * 2;
+        const CAP: usize = 5 * 60 * 48_000 * 2 * 2;
         while q.len() > CAP {
             q.pop_front();
         }
@@ -113,12 +113,15 @@ impl Audio {
     /// even before `start_output`. The buffer is taken by value; the audio
     /// thread consumes it.
     ///
-    /// Bounded to ~5s of audio (at 48 kHz stereo) — excess samples are
-    /// dropped from the front so a runaway producer cannot wedge playback.
+    /// Bounded to ~5 minutes of audio (at 48 kHz stereo) — excess samples
+    /// are dropped from the front so a runaway producer cannot wedge
+    /// playback. Must comfortably hold a full voice clip (up to ~5 min
+    /// recorded by `apps/chat/src/record.rs`) so we never lose the head of
+    /// a queued message.
     pub fn queue_output(&self, s16le: Vec<u8>) {
         let mut q = self.out_queue.lock().unwrap();
         q.extend(s16le);
-        const CAP: usize = 5 * 48_000 * 2 * 2;
+        const CAP: usize = 5 * 60 * 48_000 * 2 * 2;
         while q.len() > CAP {
             q.pop_front();
         }
@@ -241,8 +244,13 @@ impl Audio {
     pub fn stop_input(&self) {
         *self.input.borrow_mut() = None;
     }
+    /// Stop the speaker and discard any samples still queued for playback.
+    /// Clearing the queue matters: without it, unplayed bytes from a stopped
+    /// clip would be re-emitted at the head of the *next* clip (stale audio)
+    /// and would keep occupying the queue's backing allocation.
     pub fn stop_output(&self) {
         *self.output.borrow_mut() = None;
+        self.out_queue.lock().unwrap().clear();
     }
 }
 

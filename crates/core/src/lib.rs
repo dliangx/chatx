@@ -1187,7 +1187,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     eprintln!("[dm] acked via {addr}");
                     let chat = store::dm_chat_id(&self.peer_base58(), peer_base58);
                     self.store
-                        .push(&chat, &self.peer_base58(), text, false)
+                        .push(&chat, &self.peer_base58(), text, false, None)
                         .await;
                     eprintln!("[dm] send_dm done, chat={chat}");
                     return Ok(chat);
@@ -1209,6 +1209,98 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
         }
         anyhow::bail!("failed to deliver to {peer_base58}: {last_err}");
+    }
+
+    /// Send a voice message to `peer_base58` over the DM channel and wait for
+    /// the peer's ack. The clip itself is NOT persisted by core — the caller
+    /// is expected to have already written the s16le bytes to a local path and
+    /// will call [`Self::persist_voice`] after a successful ack (mirroring
+    /// `send_dm` + `store.push`).
+    pub async fn send_voice_cmd(
+        &self,
+        peer_base58: &str,
+        data: Vec<u8>,
+        rate: u32,
+        ch: u32,
+        duration_ms: u64,
+    ) -> anyhow::Result<()> {
+        eprintln!(
+            "[voice] send_voice peer={peer_base58} bytes={} rate={rate} ch={ch} dur={duration_ms}ms",
+            data.len()
+        );
+        let rec = self
+            .dir
+            .resolve_device(peer_base58)
+            .map_err(|e| anyhow::anyhow!("device {peer_base58} not found: {e}"))?;
+        if rec.endpoints.is_empty() {
+            anyhow::bail!("device {peer_base58} is offline (no endpoints)");
+        }
+        let peer: PeerId = peer_base58
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
+        let from = self.peer_base58();
+        let e2e = self.e2e_public().to_string();
+        let timeout = std::time::Duration::from_secs(8);
+        let mut last_err = String::new();
+        for endpoint in &rec.endpoints {
+            let Ok(addr) = endpoint.parse::<Multiaddr>() else {
+                continue;
+            };
+            if let Some(reason) = unroutable_reason(&addr) {
+                last_err = format!("{addr} unroutable ({reason})");
+                continue;
+            }
+            if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
+                peer: peer.clone(),
+                addr: addr.clone(),
+            }) {
+                last_err = format!("cmd channel closed: {e}");
+                continue;
+            }
+            let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+            if let Err(e) = self.running.cmd_tx.send(Cmd::SendVoice {
+                peer: peer.clone(),
+                from: from.clone(),
+                e2e: e2e.clone(),
+                rate,
+                ch,
+                duration_ms,
+                data: data.clone(),
+                ack_tx: Some(tx),
+            }) {
+                last_err = format!("cmd channel closed: {e}");
+                continue;
+            }
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(Ok(()))) => {
+                    eprintln!("[voice] acked via {addr}");
+                    return Ok(());
+                }
+                Ok(Ok(Err(e))) => {
+                    last_err = format!("send to {addr} failed: {e}");
+                }
+                Ok(Err(_)) => {
+                    last_err = "peer connection dropped before ack".to_string();
+                }
+                Err(_) => {
+                    last_err = format!("no ack from {addr} within {timeout:?}");
+                }
+            }
+        }
+        anyhow::bail!("failed to deliver to {peer_base58}: {last_err}");
+    }
+
+    /// Record a voice message in the chat store (after the clip is on disk).
+    pub async fn persist_voice(
+        &self,
+        chat_id: &str,
+        sender: &str,
+        local_path: &str,
+        duration_ms: u64,
+    ) {
+        self.store
+            .push(chat_id, sender, "", false, Some((local_path.to_string(), duration_ms)))
+            .await;
     }
 
     /// Send a friend-request frame to `peer_base58` over the DM channel and
@@ -1325,9 +1417,13 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         req: &message::ChatRequest,
     ) -> anyhow::Result<Option<InboundGroup>> {
         match req.kind {
-            message::MsgKind::Dm => Ok(None),
-            message::MsgKind::Audio => Ok(None),
-            message::MsgKind::Webrtc => Ok(None),
+                        message::MsgKind::Dm => Ok(None),
+                        message::MsgKind::Audio => Ok(None),
+                        message::MsgKind::Webrtc => Ok(None),
+                        // Voice messages are persisted by the application layer
+                        // once it has written the clip to disk, so core does
+                        // nothing here.
+                        message::MsgKind::Voice => Ok(None),
             message::MsgKind::GroupKey => {
                 let group_id = req
                     .group_id
@@ -1586,14 +1682,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     pub async fn store_group_outbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
         let wire = serde_json::to_string(env)?;
         let b64 = crate::account::b64(wire.as_bytes());
-        self.store.push(&env.group_id, &env.from, &b64, true).await;
+        self.store.push(&env.group_id, &env.from, &b64, true, None).await;
         Ok(())
     }
 
     pub async fn store_group_inbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
         let wire = serde_json::to_string(env)?;
         let b64 = crate::account::b64(wire.as_bytes());
-        self.store.push(&env.group_id, &env.from, &b64, true).await;
+        self.store.push(&env.group_id, &env.from, &b64, true, None).await;
         Ok(())
     }
 
@@ -1912,7 +2008,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         let text = req.text.clone().unwrap_or_default();
                         let chat = store::dm_chat_id(&self.peer_base58(), &peer_b58);
                         self.store
-                            .push(&chat, &peer_b58, &text, req.sealed.is_some())
+                            .push(&chat, &peer_b58, &text, req.sealed.is_some(), None)
                             .await;
                         Some(chat)
                     }

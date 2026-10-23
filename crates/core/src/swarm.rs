@@ -1,12 +1,12 @@
 use crate::identity::DeviceIdentity;
-use crate::message::{AudioPayload, ChatRequest, ChatResponse};
+use crate::message::{AudioPayload, ChatRequest, ChatResponse, VoiceAck, VoiceRequest};
 use crate::moment::{PostRequest, PostResponse};
 use anyhow::Result;
 use libp2p::futures::StreamExt as _;
 pub use libp2p::gossipsub::IdentTopic;
 use libp2p::mdns::tokio::Behaviour as Mdns;
 use libp2p::mdns::{Config as MdnsConfig, Event as MdnsEvent};
-use libp2p::request_response::cbor::Behaviour as Blob;
+use libp2p::request_response::cbor::{self, Behaviour as Blob};
 use libp2p::request_response::json::Behaviour as Chat;
 use libp2p::request_response::{
     Config as RrConfig, Event as RrEvent, Message as RrMessage, ProtocolSupport,
@@ -21,6 +21,15 @@ use tokio::sync::{mpsc, oneshot};
 
 pub const TEXT_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/text/1");
 pub const MOMENT_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/moment/1");
+/// Binary (CBOR) voice-message transport. The CBOR codec serializes the
+/// raw PCM payload as a compact byte-string — no base64 expansion, no JSON
+/// envelope — so the on-wire size equals the clip size.
+pub const VOICE_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/voice/1");
+
+/// Hard ceiling for a single inbound (or outbound) voice request. ~64 MiB
+/// covers the 5-minute capture cap (`MAX_FRAMES`, ~4.9 MB raw) with wide
+/// margin while still bounding the receiver's read buffer.
+const VOICE_REQ_MAX: u64 = 64 * 1024 * 1024;
 
 pub fn group_topic_name(group_id: &str) -> String {
     format!("/chatx/group/{}", group_id)
@@ -52,6 +61,10 @@ pub struct Net {
     /// request/response frames (see `moment.rs`). Uses libp2p's built-in CBOR
     /// codec so `Vec<u8>` serializes as a compact byte-string (no base64).
     pub blob: Blob<PostRequest, PostResponse>,
+    /// Binary (CBOR) voice-message channel — carries the raw s16le PCM clip as
+    /// a compact byte-string. Kept separate from `blob` (moment sync) so the
+    /// codec type parameters and per-protocol size limits stay distinct.
+    pub voice: Blob<VoiceRequest, VoiceAck>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +79,17 @@ pub enum ChatEvent {
         rate: u32,
         ch: u32,
         data: Vec<u8>,
+    },
+
+    /// Persistent voice message received from a peer. The application layer is
+    /// expected to write `data` (s16le PCM) to disk and then call
+    /// [`crate::Client::persist_voice`] to record it into the chat store.
+    Voice {
+        peer: PeerId,
+        rate: u32,
+        ch: u32,
+        data: Vec<u8>,
+        duration_ms: u64,
     },
 
     Webrtc {
@@ -138,6 +162,20 @@ pub enum Cmd {
         rate: u32,
         ch: u32,
         data: Vec<u8>,
+    },
+    /// Send a persistent voice *message*. The peer responds with the standard
+    /// chat ack (resolved via `ack_tx`). The sender is expected to have
+    /// already written the clip to local disk before calling this — the
+    /// network only carries the PCM bytes.
+    SendVoice {
+        peer: PeerId,
+        from: String,
+        e2e: String,
+        rate: u32,
+        ch: u32,
+        duration_ms: u64,
+        data: Vec<u8>,
+        ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
     },
     SendWebrtc {
         peer: PeerId,
@@ -269,6 +307,10 @@ pub async fn boot(
         .build()
         .map_err(|e| anyhow::anyhow!("gossipsub config: {e}"))?;
     let mdns = Mdns::new(MdnsConfig::default(), my_peer)?;
+    // JSON channel is for small control frames (text / webrtc / realtime audio)
+    // — its stock 1 MiB request cap is plenty, so we keep the default codec.
+    // Large voice clips travel on the dedicated binary (CBOR) `voice` channel
+    // below, whose request cap is raised to fit a full clip.
     let chat: Chat<ChatRequest, ChatResponse> = Chat::new(
         [(TEXT_PROTOCOL, ProtocolSupport::Full)],
         RrConfig::default(),
@@ -277,6 +319,15 @@ pub async fn boot(
         [(MOMENT_PROTOCOL, ProtocolSupport::Full)],
         RrConfig::default(),
     );
+    // Binary (CBOR) voice channel. `Vec<u8>` serializes as a compact byte-string
+    // (no base64 / JSON), and we raise the request cap to fit a full clip — the
+    // stock 1 MiB default would truncate longer recordings and drop the stream.
+    let voice: Blob<VoiceRequest, VoiceAck> = {
+        let codec = cbor::codec::Codec::<VoiceRequest, VoiceAck>::default()
+            .set_request_size_maximum(VOICE_REQ_MAX)
+            .set_response_size_maximum(10 * 1024 * 1024);
+        Blob::with_codec(codec, [(VOICE_PROTOCOL, ProtocolSupport::Full)], RrConfig::default())
+    };
     let group: libp2p::gossipsub::Behaviour = libp2p::gossipsub::Behaviour::new(
         libp2p::gossipsub::MessageAuthenticity::Signed(device.keypair()),
         gossip_cfg,
@@ -303,6 +354,7 @@ pub async fn boot(
             relay,
             chat,
             blob,
+            voice,
             group,
             ping,
         })?
@@ -437,6 +489,7 @@ async fn swarm_loop(
                         group_id: None,
                         audio: None,
                         signal: None,
+                        voice: None,
                     };
                     let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
                 }
@@ -463,6 +516,7 @@ async fn swarm_loop(
                             data: crate::account::b64(&data),
                         }),
                         signal: None,
+                        voice: None,
                     };
                     let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
                 }
@@ -483,8 +537,39 @@ async fn swarm_loop(
                         group_id: None,
                         audio: None,
                         signal: Some(payload),
+                        voice: None,
                     };
                     let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
+                }
+                Some(Cmd::SendVoice {
+                    peer,
+                    from,
+                    e2e: _,
+                    rate,
+                    ch,
+                    duration_ms,
+                    data,
+                    ack_tx,
+                }) => {
+                    let id: u64 = rand::random();
+                    if let Some(tx) = ack_tx {
+                        pending_acks
+                            .lock()
+                            .unwrap()
+                            .insert(id, (peer, tx));
+                    }
+                    // Binary (CBOR) channel: `data` is the raw s16le PCM and
+                    // `cbor4ii` serializes it as a compact byte-string — no
+                    // base64, no JSON. Wire size ≈ clip size.
+                    let req = VoiceRequest {
+                        id,
+                        from,
+                        rate,
+                        ch,
+                        duration_ms,
+                        data,
+                    };
+                    let _rid = swarm.behaviour_mut().voice.send_request(&peer, req);
                 }
                 Some(Cmd::GroupKeyDirect {
                     peer,
@@ -504,6 +589,7 @@ async fn swarm_loop(
                         group_id: Some(group_id),
                         audio: None,
                         signal: None,
+                        voice: None,
                     };
                     let _rid = swarm.behaviour_mut().chat.send_request(&peer, req);
                 }
@@ -743,6 +829,56 @@ async fn swarm_loop(
                                 peer,
                                 reason: format!("{error:?}"),
                             });
+                        }
+                        _ => {}
+                    },
+                    // Binary (CBOR) voice-message channel.
+                    //  * Inbound request: we received a voice clip; notify the app.
+                    //  * Inbound response: we are the sender; resolve the waiter.
+                    NetEvent::Voice(v) => match v {
+                        RrEvent::Message { peer, message, .. } => match message {
+                            RrMessage::Request { request, channel, .. } => {
+                                eprintln!(
+                                    "[swarm] VOICE INBOUND from peer={peer} id={} {} bytes rate={} ch={} dur={}ms",
+                                    request.id, request.data.len(),
+                                    request.rate, request.ch, request.duration_ms
+                                );
+                                // Ack immediately (the app writes to disk + persists
+                                // asynchronously); the sender unblocks.
+                                let ack = VoiceAck { id: request.id };
+                                let _ = swarm.behaviour_mut().voice.send_response(channel, ack);
+                                let _ = ev.send(ChatEvent::Voice {
+                                    peer,
+                                    rate: request.rate,
+                                    ch: request.ch,
+                                    data: request.data,
+                                    duration_ms: request.duration_ms,
+                                });
+                            }
+                            RrMessage::Response { response, .. } => {
+                                eprintln!("[swarm] VOICE ACKED id={}", response.id);
+                                if let Some((_peer, tx)) =
+                                    pending_acks.lock().unwrap().remove(&response.id)
+                                {
+                                    let _ = tx.send(Ok(()));
+                                }
+                            }
+                        },
+                        RrEvent::OutboundFailure { peer, error, .. } => {
+                            eprintln!("[swarm] VOICE OUTBOUND FAILED peer={peer} err={error:?}");
+                            let mut m = pending_acks.lock().unwrap();
+                            let ids: Vec<u64> = m
+                                .iter()
+                                .filter(|(_, (p, _))| *p == peer)
+                                .map(|(id, _)| *id)
+                                .collect();
+                            for id in ids {
+                                if let Some((_p, tx)) = m.remove(&id) {
+                                    let _ = tx.send(Err(anyhow::anyhow!(
+                                        "send voice to {peer} failed: {error:?}"
+                                    )));
+                                }
+                            }
                         }
                         _ => {}
                     },

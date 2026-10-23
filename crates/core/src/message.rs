@@ -17,6 +17,10 @@ pub enum MsgKind {
     /// WebRTC signaling frame (SDP offer/answer + ICE trickle) carried as an
     /// opaque JSON string. Not persisted.
     Webrtc,
+    /// Persistent voice *message* — a recorded mic clip transmitted as s16le
+    /// PCM (base64), stored locally on both sides and rendered as a bubble
+    /// with a duration.
+    Voice,
 }
 
 /// One realtime-audio frame carried inside a [`ChatRequest::audio`].
@@ -30,6 +34,21 @@ pub enum MsgKind {
 pub struct AudioPayload {
     pub rate: u32,
     pub ch: u32,
+    pub data: String,
+}
+
+/// A persistent voice message body carried inside a [`ChatRequest::voice`].
+///
+/// - `rate` — sample rate in Hz of `data`
+/// - `ch`   — channel count (1 or 2)
+/// - `duration_ms` — total capture duration in milliseconds (UI shows it)
+/// - `data` — base64(s16le PCM); `decoded.len() == frames * 2 * ch`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoicePayload {
+    pub rate: u32,
+    pub ch: u32,
+    #[serde(default)]
+    pub duration_ms: u64,
     pub data: String,
 }
 
@@ -50,12 +69,39 @@ pub struct ChatRequest {
     /// JSON). Kept as a `String` so this crate does not depend on `media`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<VoicePayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub id: u64,
     pub e2e: String,
+}
+
+/// Voice-message request/response pair, carried on the binary CBOR channel
+/// (`VOICE_PROTOCOL`). Unlike the JSON channel, `data` is a raw `Vec<u8>` —
+/// `cbor4ii` serialises it as a byte-string with no base64 expansion, so a
+/// 4.9 MB clip stays ~4.9 MB on the wire (JSON + string would have been
+/// ~6.5 MB). The `request_size_maximum` is set on the codec at construction
+/// time in `swarm.rs` to a value comfortably above any clip we produce.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceRequest {
+    pub id: u64,
+    /// Peer base58 of the recording sender (echoed in log/audit, not required
+    /// for correctness — the transport already tells us who we are).
+    pub from: String,
+    pub rate: u32,
+    pub ch: u32,
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// Raw s16le PCM. `len == frames * 2 * ch`.
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceAck {
+    pub id: u64,
 }
 
 pub fn now_ms() -> u64 {

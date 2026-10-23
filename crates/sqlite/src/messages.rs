@@ -156,14 +156,24 @@ pub async fn insert_row(pool: &Pool, m: &MsgRow) -> anyhow::Result<()> {
     if !m.mine {
         conversations::set_peer_id(pool, conversation_id, &m.sender).await?;
     }
+    let (msg_type, media_path, media_duration) = match &m.media_path {
+        Some(p) if !p.is_empty() => (
+            MSG_TYPE_VOICE,
+            Some(p.clone()),
+            m.media_duration_ms.map(|d| d as i64),
+        ),
+        _ => (MSG_TYPE_TEXT, None, None),
+    };
     insert(
         pool,
         &NewMessage {
             conversation_id,
             sender_user_id,
             sender_peer_id: Some(m.sender.clone()),
-            msg_type: MSG_TYPE_TEXT,
+            msg_type,
             text_content: Some(m.text.clone()),
+            media_path,
+            media_duration,
             timestamp: Some(m.t as i64),
             is_encrypted: m.sealed,
             from_me: m.mine,
@@ -210,31 +220,45 @@ async fn load_rows(
     let offset = offset.unwrap_or(0);
     // Prefer the wire peer id (set on every P2P message); fall back to the
     // sender user's username for legacy rows that only carried a users.id.
-    let rows: Vec<(i64, String, Option<String>, bool, i64)> = sqlx::query_as(
-        "SELECT m.id, COALESCE(m.sender_peer_id, u.username, '') AS sender,
-                m.text_content, m.is_encrypted, m.timestamp
-          FROM messages m
-          LEFT JOIN users u ON u.id = m.sender_user_id
-          WHERE m.conversation_id = ?1
-          ORDER BY m.timestamp DESC
-          LIMIT ?2 OFFSET ?3",
-    )
-    .bind(conversation_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<(i64, String, Option<String>, bool, i64, i64, Option<String>, Option<i64>)> =
+        sqlx::query_as(
+            "SELECT m.id, COALESCE(m.sender_peer_id, u.username, '') AS sender,
+                    m.text_content, m.is_encrypted, m.timestamp,
+                    m.msg_type, m.media_path, m.media_duration
+              FROM messages m
+              LEFT JOIN users u ON u.id = m.sender_user_id
+              WHERE m.conversation_id = ?1
+              ORDER BY m.timestamp DESC
+              LIMIT ?2 OFFSET ?3",
+        )
+        .bind(conversation_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, sender, text, sealed, t)| MsgRow {
-            id,
-            chat_id: chat_id.to_string(),
-            sender,
-            text: text.unwrap_or_default(),
-            sealed,
-            t: t as u64,
-            mine: false,
-        })
+        .map(
+            |(id, sender, text, sealed, t, msg_type, media_path, media_duration)| MsgRow {
+                id,
+                chat_id: chat_id.to_string(),
+                sender,
+                text: text.unwrap_or_default(),
+                sealed,
+                t: t as u64,
+                mine: false,
+                media_path: if msg_type == MSG_TYPE_VOICE {
+                    media_path
+                } else {
+                    None
+                },
+                media_duration_ms: if msg_type == MSG_TYPE_VOICE {
+                    media_duration.map(|d| d as u64)
+                } else {
+                    None
+                },
+            },
+        )
         .collect())
 }
 
@@ -322,6 +346,8 @@ mod tests {
                     sealed: false,
                     t: (base + i as i64) as u64,
                     mine: false,
+                    media_path: None,
+                    media_duration_ms: None,
                 },
             )
             .await
@@ -360,6 +386,8 @@ mod tests {
                 sealed: false,
                 t: now_ms() as u64,
                 mine: false,
+                media_path: None,
+                media_duration_ms: None,
             },
         )
         .await
