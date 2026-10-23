@@ -1,4 +1,3 @@
-
 use libp2p::identity::Keypair;
 
 #[derive(Clone)]
@@ -39,12 +38,15 @@ impl DeviceIdentity {
     }
 
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let kp = self.keypair.to_protobuf_encoding().map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, e)
-        })?;
+        let kp = self
+            .keypair
+            .to_protobuf_encoding()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         let bundle: Vec<u8> = {
             use base64::Engine as _;
-            base64::engine::general_purpose::STANDARD.encode(&kp).into_bytes()
+            base64::engine::general_purpose::STANDARD
+                .encode(&kp)
+                .into_bytes()
         };
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -75,7 +77,7 @@ impl DeviceIdentity {
         let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
         #[cfg(not(windows))]
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        std::path::PathBuf::from(format!("{home}/.config/chatx"))
+        std::path::PathBuf::from(format!("{home}/.chatx"))
     }
 
     pub fn profile_dir(profile: &str) -> std::path::PathBuf {

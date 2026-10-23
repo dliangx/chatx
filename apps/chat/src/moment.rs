@@ -138,18 +138,16 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
     }
 
     // Ask the server for post pointers in `(earliest_cursor, now]`.
-    let earliest_cursor = friend_by_peer.values().map(|f| f.since_ts).min().unwrap_or(0);
+    let earliest_cursor = friend_by_peer
+        .values()
+        .map(|f| f.since_ts)
+        .min()
+        .unwrap_or(0);
     let now_ts = sqlite::now_ms();
     let pointers: Vec<PostPointer> = client
         .dir()
         .posts_since(earliest_cursor, now_ts)
         .unwrap_or_default();
-    eprintln!(
-        "[moment] server returned {} pointer(s); {} friend(s)",
-        pointers.len(),
-        friend_by_peer.len()
-    );
-
     // Work = one entry per friend that has a newer post than our cursor.
     // `upper` is the newest post_ts that friend published (the inclusive
     // window bound used in `request_post_list`); the friend's *entire* new
@@ -170,7 +168,6 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
     // Newest friend first (stable tie-break by peer).
     work.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     if work.is_empty() {
-        eprintln!("[moment] no new posts for our friends — nothing to fetch");
         return Ok(());
     }
 
@@ -180,18 +177,17 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
             Some(f) => f.clone(),
             None => continue,
         };
-        let posts = match client
-            .request_post_list(&peer_id, f.since_ts, _upper)
-            .await
-        {
+        let posts = match client.request_post_list(&peer_id, f.since_ts, _upper).await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("[moment] request_post_list({peer_id}) failed: {e}");
                 continue;
             }
         };
-        let mut post_metas: Vec<PostMeta> =
-            posts.into_iter().filter(|m| m.timestamp > f.since_ts).collect();
+        let mut post_metas: Vec<PostMeta> = posts
+            .into_iter()
+            .filter(|m| m.timestamp > f.since_ts)
+            .collect();
         if post_metas.is_empty() {
             continue;
         }
@@ -215,8 +211,16 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
                 &pool,
                 f.local_users_id,
                 meta.content.as_deref(),
-                if media_json.is_empty() { None } else { Some(media_json.as_str()) },
-                if preview_json.is_empty() { None } else { Some(preview_json.as_str()) },
+                if media_json.is_empty() {
+                    None
+                } else {
+                    Some(media_json.as_str())
+                },
+                if preview_json.is_empty() {
+                    None
+                } else {
+                    Some(preview_json.as_str())
+                },
                 0,
             )
             .await
@@ -276,7 +280,11 @@ async fn fetch_and_store_media(
     group: &str,
     is_original: bool,
 ) -> anyhow::Result<String> {
-    let n = if is_original { meta.n_media } else { meta.n_previews };
+    let n = if is_original {
+        meta.n_media
+    } else {
+        meta.n_previews
+    };
     if n == 0 {
         return Ok(String::new());
     }
