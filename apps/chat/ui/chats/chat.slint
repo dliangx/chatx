@@ -17,6 +17,11 @@ export struct MessageData {
     voice_path: string,
     /// Pre-formatted duration label ("M:SS") for voice rows.
     voice_label: string,
+    /// Empty for text/voice rows; the local photo path for image rows.
+    image_path: string,
+    /// The decoded chat photo (set for image rows; the `Image` element shows it,
+    /// capped to the preview box by `width`/`height`).
+    image_img: image,
     /// Sender avatar (right for own voice bubble, left for theirs).
     avatar: image,
     /// Time label shown below the voice bubble body (e.g. "14:32").
@@ -42,6 +47,11 @@ export global ChatSession {
     callback play-voice(int);
     /// User tapped the currently-playing bubble — stop (Rust clears `playing-idx`).
     callback stop-play();
+    /// User tapped the image icon in the input bar — open the system photo
+    /// picker for chat `key`, then send the chosen photo.
+    callback sent-image(int);
+    /// User tapped a photo bubble — open the full-screen viewer on `idx`.
+    callback open-image(int);
 }
 
 export component ChatView inherits Rectangle {
@@ -99,6 +109,7 @@ export component ChatView inherits Rectangle {
         height: root.input-h;
         chat-id: root.chat-id;
         sent(t) => { ChatSession.message-sent(root.chat-id, t); }
+        sent-image(id) => { ChatSession.sent-image(id); }
     }
 
     if ChatSession.send-status != "":
@@ -279,8 +290,41 @@ export component ChatView inherits Rectangle {
                 }
             }
 
-            // ── text bubble (existing path, only for non-voice rows) ─────
-            if msg.voice_path == "":
+            // ── image bubble (only for image rows) ───────────────────────
+            if msg.image_path != "":
+            Rectangle {
+                width: 100%;
+                height: parent.height;
+
+                // Avatar (36×36) sits on the outer edge, matching voice bubbles.
+                Image {
+                    width: 36px;
+                    height: 36px;
+                    y: 0px;
+                    x: msg.is_self ? parent.width - 6px - 36px : 6px;
+                    source: msg.avatar;
+                }
+
+                TouchArea {
+                    x: msg.is_self ? parent.width - 6px - 36px - 8px - msg.width : 6px + 36px + 8px;
+                    y: 0px;
+                    width: msg.width;
+                    height: msg.height;
+                    clicked => { ChatSession.open-image(i); }
+
+                    Image {
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width;
+                        height: parent.height;
+                        source: msg.image_img;
+                        image-fit: contain;
+                    }
+                }
+            }
+
+            // ── text bubble (existing path, only for non-voice, non-image rows) ─
+            if msg.voice_path == "" && msg.image_path == "":
             TouchArea {
                 x: msg.is_self ? parent.width - msg.width - 6px : 6px;
                 y: 0px;
@@ -300,7 +344,7 @@ export component ChatView inherits Rectangle {
                 }
             }
 
-            if msg.selected && msg.voice_path == "": Button {
+            if msg.selected && msg.image_path == "": Button {
                 text: @tr("Copy");
                 x: msg.is_self ? parent.width - msg.width - 6px - 64px : 6px + msg.width + 8px;
                 y: 0px;

@@ -104,6 +104,24 @@ pub struct VoiceAck {
     pub id: u64,
 }
 
+/// A photo message carried on the binary CBOR `image` channel. `data` is the
+/// raw image bytes (JPEG/PNG) — `cbor4ii` serializes `Vec<u8>` as a compact
+/// byte-string, so the wire size equals the image size. The sender writes the
+/// same bytes to its own local disk *before* sending and records them by
+/// path; the receiver writes the received bytes to disk and records them by
+/// path (so both sides keep a self-contained local copy).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageRequest {
+    pub id: u64,
+    pub from: String,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageAck {
+    pub id: u64,
+}
+
 pub fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

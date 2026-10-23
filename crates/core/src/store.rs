@@ -2,17 +2,17 @@ use crate::message::now_ms;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
-/// A stored chat message — either plain text or a voice message.
+/// A stored chat message — text, a voice clip, or a photo.
 #[derive(Debug, Clone)]
 pub struct StoredMsg {
     pub id: i64,
     pub chat_id: String,
     pub sender: String,
-    /// For text rows: the body. For voice rows: unused / empty.
+    /// For text rows: the body. For media rows: unused / empty.
     pub text: String,
     pub sealed: bool,
     pub t: u64,
-    /// `None` for text rows; `Some((pcm_path, duration_ms))` for voice rows.
+    /// `Text` for plain rows; `Voice`/`Image` carry the media file path.
     pub kind: Kind,
 }
 
@@ -20,8 +20,11 @@ pub struct StoredMsg {
 pub enum Kind {
     #[default]
     Text,
-    /// `0` = disk path to the s16le PCM clip, `1` = duration in milliseconds.
+    /// `path` = disk path to the s16le PCM clip, `duration_ms` = its length.
     Voice { path: String, duration_ms: u64 },
+    /// `path` = disk path to a photo (original + compressed preview are the
+    /// same compressed JPEG on disk; the UI decides how large to show it).
+    Image { path: String },
 }
 
 impl StoredMsg {
@@ -101,16 +104,16 @@ impl Store {
         Ok(0)
     }
 
-    /// Insert a new message. Pass `kind = None` for a plain text row, or
-    /// `Some((pcm_path, duration_ms))` for a voice clip (the `path` is
-    /// written to the `media_path` column).
+    /// Insert a new message. `kind = Kind::Text` for a plain text row,
+    /// `Kind::Voice`/`Kind::Image` for media (the path is written to the
+    /// `media_path` column).
     pub async fn push(
         &self,
         chat_id: &str,
         sender: &str,
         text: &str,
         sealed: bool,
-        kind: Option<(String, u64)>,
+        kind: Kind,
     ) {
         let t = now_ms();
         let msg = StoredMsg {
@@ -120,22 +123,22 @@ impl Store {
             text: text.to_string(),
             sealed,
             t,
-            kind: kind
-                .map(|(p, d)| Kind::Voice {
-                    path: p,
-                    duration_ms: d,
-                })
-                .unwrap_or_default(),
+            kind: kind.clone(),
         };
         self.msgs.write().push(msg.clone());
         if let Some(db) = &self.db {
             let mine = msg.sender == self.me;
-            let (vpath, vdur) = match &msg.kind {
+            let (mkind, mpath, mdur) = match &msg.kind {
                 Kind::Voice {
                     path,
                     duration_ms,
-                } => (Some(path.clone()), Some(*duration_ms)),
-                Kind::Text => (None, None),
+                } => (
+                    sqlite::MediaKind::Voice,
+                    Some(path.clone()),
+                    Some(*duration_ms),
+                ),
+                Kind::Image { path } => (sqlite::MediaKind::Image, Some(path.clone()), None),
+                Kind::Text => (sqlite::MediaKind::None, None, None),
             };
             let _ = sqlite::messages::insert_row(
                 db,
@@ -147,8 +150,9 @@ impl Store {
                     sealed: msg.sealed,
                     t: msg.t,
                     mine,
-                    media_path: vpath,
-                    media_duration_ms: vdur,
+                    media_kind: mkind,
+                    media_path: mpath,
+                    media_duration_ms: mdur,
                 },
             )
             .await;
@@ -230,12 +234,19 @@ fn row_into_stored(m: sqlite::MsgRow) -> StoredMsg {
 }
 
 fn row_to_kind(m: &sqlite::MsgRow) -> Kind {
-    match (m.media_path.as_deref(), m.media_duration_ms) {
-        (Some(p), Some(d)) if !p.is_empty() => Kind::Voice {
-            path: p.to_string(),
-            duration_ms: d,
+    match m.media_kind {
+        sqlite::MediaKind::Voice => match (m.media_path.clone(), m.media_duration_ms) {
+            (Some(p), Some(d)) if !p.is_empty() => Kind::Voice {
+                path: p,
+                duration_ms: d,
+            },
+            _ => Kind::Text,
         },
-        _ => Kind::Text,
+        sqlite::MediaKind::Image => match &m.media_path {
+            Some(p) if !p.is_empty() => Kind::Image { path: p.clone() },
+            _ => Kind::Text,
+        },
+        sqlite::MediaKind::None => Kind::Text,
     }
 }
 
@@ -257,8 +268,8 @@ mod tests {
         let store = Store::with_sql(db.clone(), "QmMe");
         let chat = dm_chat_id("QmMe", "QmOther");
 
-        store.push(&chat, "QmMe", "hi", false, None).await;
-        store.push(&chat, "QmOther", "yo", true, None).await;
+        store.push(&chat, "QmMe", "hi", false, Kind::Text).await;
+        store.push(&chat, "QmOther", "yo", true, Kind::Text).await;
         let me = "QmMe";
         assert_eq!(store.all().len(), 2);
         assert!(store
@@ -294,6 +305,7 @@ mod tests {
                     sealed: false,
                     t: 10 + i as u64,
                     mine: false,
+                    media_kind: sqlite::MediaKind::None,
                     media_path: None,
                     media_duration_ms: None,
                 },

@@ -1,5 +1,7 @@
 use crate::identity::DeviceIdentity;
-use crate::message::{AudioPayload, ChatRequest, ChatResponse, VoiceAck, VoiceRequest};
+use crate::message::{
+    AudioPayload, ChatRequest, ChatResponse, ImageAck, ImageRequest, VoiceAck, VoiceRequest,
+};
 use crate::moment::{PostRequest, PostResponse};
 use anyhow::Result;
 use libp2p::futures::StreamExt as _;
@@ -26,10 +28,17 @@ pub const MOMENT_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/moment/1
 /// envelope — so the on-wire size equals the clip size.
 pub const VOICE_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/voice/1");
 
+/// Binary (CBOR) photo-message transport — raw image bytes as a byte-string.
+pub const IMAGE_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/image/1");
+
 /// Hard ceiling for a single inbound (or outbound) voice request. ~64 MiB
 /// covers the 5-minute capture cap (`MAX_FRAMES`, ~4.9 MB raw) with wide
 /// margin while still bounding the receiver's read buffer.
 const VOICE_REQ_MAX: u64 = 64 * 1024 * 1024;
+
+/// Ceiling for a single inbound photo request (photos are capped server-side
+/// before sending, but keep a generous margin for large originals).
+const IMAGE_REQ_MAX: u64 = 64 * 1024 * 1024;
 
 pub fn group_topic_name(group_id: &str) -> String {
     format!("/chatx/group/{}", group_id)
@@ -65,6 +74,8 @@ pub struct Net {
     /// a compact byte-string. Kept separate from `blob` (moment sync) so the
     /// codec type parameters and per-protocol size limits stay distinct.
     pub voice: Blob<VoiceRequest, VoiceAck>,
+    /// Binary (CBOR) photo-message channel — carries raw image bytes.
+    pub image: Blob<ImageRequest, ImageAck>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +101,14 @@ pub enum ChatEvent {
         ch: u32,
         data: Vec<u8>,
         duration_ms: u64,
+    },
+
+    /// Persistent photo message received from a peer. The application layer is
+    /// expected to write `data` (image bytes) to disk and then call
+    /// [`crate::Client::persist_image`] to record it into the chat store.
+    Image {
+        peer: PeerId,
+        data: Vec<u8>,
     },
 
     Webrtc {
@@ -174,6 +193,15 @@ pub enum Cmd {
         rate: u32,
         ch: u32,
         duration_ms: u64,
+        data: Vec<u8>,
+        ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+    },
+    /// Send a persistent photo *message*. The peer responds with the standard
+    /// ack (resolved via `ack_tx`). The sender writes the image to local disk
+    /// before calling this — the network carries the raw image bytes.
+    SendImage {
+        peer: PeerId,
+        from: String,
         data: Vec<u8>,
         ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
     },
@@ -328,6 +356,13 @@ pub async fn boot(
             .set_response_size_maximum(10 * 1024 * 1024);
         Blob::with_codec(codec, [(VOICE_PROTOCOL, ProtocolSupport::Full)], RrConfig::default())
     };
+    // Binary (CBOR) photo channel — raw image bytes, capped like voice.
+    let image: Blob<ImageRequest, ImageAck> = {
+        let codec = cbor::codec::Codec::<ImageRequest, ImageAck>::default()
+            .set_request_size_maximum(IMAGE_REQ_MAX)
+            .set_response_size_maximum(10 * 1024 * 1024);
+        Blob::with_codec(codec, [(IMAGE_PROTOCOL, ProtocolSupport::Full)], RrConfig::default())
+    };
     let group: libp2p::gossipsub::Behaviour = libp2p::gossipsub::Behaviour::new(
         libp2p::gossipsub::MessageAuthenticity::Signed(device.keypair()),
         gossip_cfg,
@@ -355,6 +390,7 @@ pub async fn boot(
             chat,
             blob,
             voice,
+            image,
             group,
             ping,
         })?
@@ -570,6 +606,27 @@ async fn swarm_loop(
                         data,
                     };
                     let _rid = swarm.behaviour_mut().voice.send_request(&peer, req);
+                }
+                Some(Cmd::SendImage {
+                    peer,
+                    from,
+                    data,
+                    ack_tx,
+                }) => {
+                    let id: u64 = rand::random();
+                    if let Some(tx) = ack_tx {
+                        pending_acks
+                            .lock()
+                            .unwrap()
+                            .insert(id, (peer, tx));
+                    }
+                    eprintln!(
+                        "[swarm] IMAGE OUTBOUND peer={peer} id={} {} bytes",
+                        id,
+                        data.len()
+                    );
+                    let req = ImageRequest { id, from, data };
+                    let _rid = swarm.behaviour_mut().image.send_request(&peer, req);
                 }
                 Some(Cmd::GroupKeyDirect {
                     peer,
@@ -876,6 +933,51 @@ async fn swarm_loop(
                                 if let Some((_p, tx)) = m.remove(&id) {
                                     let _ = tx.send(Err(anyhow::anyhow!(
                                         "send voice to {peer} failed: {error:?}"
+                                    )));
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                    // Binary (CBOR) photo-message channel.
+                    //  * Inbound request: we received a photo; notify the app.
+                    //  * Inbound response: we are the sender; resolve the waiter.
+                    NetEvent::Image(img) => match img {
+                        RrEvent::Message { peer, message, .. } => match message {
+                            RrMessage::Request { request, channel, .. } => {
+                                eprintln!(
+                                    "[swarm] IMAGE INBOUND from peer={peer} id={} {} bytes",
+                                    request.id,
+                                    request.data.len()
+                                );
+                                let ack = ImageAck { id: request.id };
+                                let _ = swarm.behaviour_mut().image.send_response(channel, ack);
+                                let _ = ev.send(ChatEvent::Image {
+                                    peer,
+                                    data: request.data,
+                                });
+                            }
+                            RrMessage::Response { response, .. } => {
+                                eprintln!("[swarm] IMAGE ACKED id={}", response.id);
+                                if let Some((_peer, tx)) =
+                                    pending_acks.lock().unwrap().remove(&response.id)
+                                {
+                                    let _ = tx.send(Ok(()));
+                                }
+                            }
+                        },
+                        RrEvent::OutboundFailure { peer, error, .. } => {
+                            eprintln!("[swarm] IMAGE OUTBOUND FAILED peer={peer} err={error:?}");
+                            let mut m = pending_acks.lock().unwrap();
+                            let ids: Vec<u64> = m
+                                .iter()
+                                .filter(|(_, (p, _))| *p == peer)
+                                .map(|(id, _)| *id)
+                                .collect();
+                            for id in ids {
+                                if let Some((_p, tx)) = m.remove(&id) {
+                                    let _ = tx.send(Err(anyhow::anyhow!(
+                                        "send image to {peer} failed: {error:?}"
                                     )));
                                 }
                             }

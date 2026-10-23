@@ -1,5 +1,5 @@
 use crate::conversations;
-use crate::{new_id, now_ms, MsgRow, Pool};
+use crate::{new_id, now_ms, MediaKind, MsgRow, Pool};
 use sqlx::FromRow;
 
 /// 0=text, 1=image, 2=voice, 3=video, 4=file, 5=system
@@ -156,12 +156,13 @@ pub async fn insert_row(pool: &Pool, m: &MsgRow) -> anyhow::Result<()> {
     if !m.mine {
         conversations::set_peer_id(pool, conversation_id, &m.sender).await?;
     }
-    let (msg_type, media_path, media_duration) = match &m.media_path {
-        Some(p) if !p.is_empty() => (
+    let (msg_type, media_path, media_duration) = match (m.media_kind, m.media_path.as_deref()) {
+        (MediaKind::Voice, Some(p)) if !p.is_empty() => (
             MSG_TYPE_VOICE,
-            Some(p.clone()),
+            Some(p.to_string()),
             m.media_duration_ms.map(|d| d as i64),
         ),
+        (MediaKind::Image, Some(p)) if !p.is_empty() => (MSG_TYPE_IMAGE, Some(p.to_string()), None),
         _ => (MSG_TYPE_TEXT, None, None),
     };
     insert(
@@ -239,24 +240,28 @@ async fn load_rows(
     Ok(rows
         .into_iter()
         .map(
-            |(id, sender, text, sealed, t, msg_type, media_path, media_duration)| MsgRow {
-                id,
-                chat_id: chat_id.to_string(),
-                sender,
-                text: text.unwrap_or_default(),
-                sealed,
-                t: t as u64,
-                mine: false,
-                media_path: if msg_type == MSG_TYPE_VOICE {
-                    media_path
-                } else {
-                    None
-                },
-                media_duration_ms: if msg_type == MSG_TYPE_VOICE {
-                    media_duration.map(|d| d as u64)
-                } else {
-                    None
-                },
+            |(id, sender, text, sealed, t, msg_type, media_path, media_duration)| {
+                let (kind, path, dur) = match msg_type {
+                    MSG_TYPE_IMAGE => (MediaKind::Image, media_path, None),
+                    MSG_TYPE_VOICE => (
+                        MediaKind::Voice,
+                        media_path,
+                        media_duration.map(|d| d as u64),
+                    ),
+                    _ => (MediaKind::None, None, None),
+                };
+                MsgRow {
+                    id,
+                    chat_id: chat_id.to_string(),
+                    sender,
+                    text: text.unwrap_or_default(),
+                    sealed,
+                    t: t as u64,
+                    mine: false,
+                    media_kind: kind,
+                    media_path: path,
+                    media_duration_ms: dur,
+                }
             },
         )
         .collect())
@@ -347,6 +352,7 @@ mod tests {
                     t: (base + i as i64) as u64,
                     mine: false,
                     media_path: None,
+                    media_kind: MediaKind::None,
                     media_duration_ms: None,
                 },
             )
@@ -384,11 +390,12 @@ mod tests {
                 sender: "a".into(),
                 text: "hi".into(),
                 sealed: false,
-                t: now_ms() as u64,
-                mine: false,
-                media_path: None,
-                media_duration_ms: None,
-            },
+                    t: now_ms() as u64,
+                    mine: false,
+                    media_path: None,
+                    media_kind: MediaKind::None,
+                    media_duration_ms: None,
+                },
         )
         .await
         .unwrap();

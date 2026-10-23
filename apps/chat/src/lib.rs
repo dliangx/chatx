@@ -117,6 +117,16 @@ static PROFILE_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// selection to the avatar draft instead.
 static PICKING_AVATAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// When set, the album photo picker is serving a chat image send rather than
+/// the Moment share flow; the picked photo is routed to that chat.
+static PICKING_CHAT_IMAGE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The chat key (from `on_moment_photos_selected`'s view) armed for a chat
+/// image send, so the shared picker sink can route the selection back to it.
+static CHAT_IMAGE_PICK_KEY: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(-1);
+
 static POST_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 static POST_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1091,6 +1101,18 @@ pub fn run_app() {
 
     {
         let weak = weak.clone();
+        ui.global::<ChatSession>()
+            .on_sent_image(move |key| { pick_chat_image(weak.clone(), key); });
+    }
+
+    {
+        let weak = weak.clone();
+        ui.global::<ChatSession>()
+            .on_open_image(move |idx| { open_chat_image_from_index(weak.clone(), idx); });
+    }
+
+    {
+        let weak = weak.clone();
         ui.global::<PostDetailState>().on_request_load(move |key| {
             // Release the previous post's full-resolution images before we go
             // off to load the new one; holding both at once doubles the bitmap
@@ -1126,7 +1148,16 @@ pub fn run_app() {
     // ── install the album-photo sink (shared with all picker callbacks) ────
     {
         camera::album::set_photos_sink(move |paths: Vec<String>| {
-            on_moment_photos_selected(paths);
+            if PICKING_CHAT_IMAGE.load(std::sync::atomic::Ordering::SeqCst) {
+                PICKING_CHAT_IMAGE.store(false, std::sync::atomic::Ordering::SeqCst);
+                let key = CHAT_IMAGE_PICK_KEY.load(std::sync::atomic::Ordering::SeqCst);
+                let picked = paths.into_iter().next();
+                if let Some(w) = call::weak_window() {
+                    on_chat_image_picked(w, key, picked);
+                }
+            } else {
+                on_moment_photos_selected(paths);
+            }
         });
     }
 
@@ -1722,6 +1753,15 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                         .await;
                         continue;
                     }
+                    if let chatx_core::swarm::ChatEvent::Image { peer, data } = &evt {
+                        handle_inbound_image(
+                            weak.clone(),
+                            &peer.to_base58(),
+                            data.clone(),
+                        )
+                        .await;
+                        continue;
+                    }
                     let touched = client.process_event(evt).await;
                     if let Some(touched) = touched {
                         refresh_inbound_chat(weak.clone(), touched).await;
@@ -1763,6 +1803,40 @@ async fn handle_inbound_voice(
         }
         Err(e) => {
             eprintln!("[voice] inbound write failed: {e}");
+        }
+    }
+}
+
+/// Handle an inbound photo message: write the bytes to disk, persist an image
+/// row for the DM with the sender, and refresh the current chat if visible.
+async fn handle_inbound_image(
+    weak: slint::Weak<MainWindow>,
+    peer_base58: &str,
+    data: Vec<u8>,
+) {
+    eprintln!(
+        "[chat-image] INBOUND from={peer_base58} bytes={}",
+        data.len()
+    );
+    let Some(client) = CLIENT.lock().unwrap().clone() else {
+        eprintln!("[chat-image] inbound: no client yet, dropping");
+        return;
+    };
+    let me = client.peer_base58();
+    let chat_id = dm_chat_id(&me, peer_base58);
+    match image::store_image_bytes(&data, None) {
+        Ok(path) => {
+            let path_str = path.to_string_lossy().into_owned();
+            eprintln!(
+                "[chat-image] inbound persisted {} ({} bytes)",
+                path.display(),
+                data.len()
+            );
+            client.persist_image(&chat_id, peer_base58, &path_str).await;
+            refresh_inbound_chat(weak, chat_id).await;
+        }
+        Err(e) => {
+            eprintln!("[chat-image] inbound write failed: {e}");
         }
     }
 }
@@ -2022,6 +2096,197 @@ fn arm_elapsed_tick(weak: slint::Weak<MainWindow>) {
             });
         });
     }
+}
+
+/// Open the system photo picker armed to send one photo to chat `key`.
+fn pick_chat_image(weak: slint::Weak<MainWindow>, key: i32) {
+    if !require_approved(weak.clone()) {
+        return;
+    }
+    PICKING_CHAT_IMAGE.store(true, std::sync::atomic::Ordering::SeqCst);
+    CHAT_IMAGE_PICK_KEY.store(key, std::sync::atomic::Ordering::SeqCst);
+    if let Err(e) = camera::album::pick_photos(1) {
+        eprintln!("[chat-image] pick failed: {e}");
+        PICKING_CHAT_IMAGE.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<ChatSession>()
+                .set_send_status(SharedString::from(format!("Photo picker: {e}")));
+        }
+    }
+}
+
+/// A photo was chosen for chat `key`: compress and store it, send the bytes over
+/// P2P, record it, and refresh the chat.
+fn on_chat_image_picked(
+    weak: slint::Weak<MainWindow>,
+    key: i32,
+    path: Option<String>,
+) {
+    let Some(src) = path else {
+        eprintln!("[chat-image] no photo picked (cancelled)");
+        return;
+    };
+    if key < 0 {
+        eprintln!("[chat-image] no chat bound, discarding");
+        return;
+    }
+    let client = CLIENT.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
+    let (Some(client), Some(backend)) = (client, backend) else {
+        return;
+    };
+    let chat_id = {
+        let g = backend.blocking_read();
+        g.chat_id_for(key).map(|s| s.to_string())
+    };
+    let Some(chat_id) = chat_id else {
+        eprintln!("[chat-image] no chat_id for key={key}, aborting");
+        return;
+    };
+    if let Some(ui) = weak.upgrade() {
+        ui.global::<ChatSession>()
+            .set_send_status(SharedString::from("Sending photo…"));
+    }
+    let me = client.peer_base58();
+    let my_peers: Vec<String> = {
+        let row_peer: String = backend
+            .blocking_read()
+            .chats
+            .iter()
+            .find(|r| r.key == key)
+            .map(|r| r.peer_id.clone())
+            .unwrap_or_default();
+        let mut v: Vec<String> = Vec::new();
+        if !row_peer.is_empty() && row_peer != me {
+            v.push(row_peer);
+        }
+        if chat_id.contains('|') {
+            for part in chat_id.split('|') {
+                if !part.is_empty() && part != me && !v.iter().any(|x| x == part) {
+                    v.push(part.to_string());
+                }
+            }
+        }
+        v
+    };
+    let src_ext = std::path::Path::new(&src)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_string());
+    let bytes = match image::derive_chat_image_bytes(&src) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("[chat-image] read failed: {e}");
+            set_chat_send_error(weak.clone(), "Could not read that photo.");
+            return;
+        }
+    };
+    let local_path = match image::store_image_bytes(&bytes, src_ext.as_deref()) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(e) => {
+            eprintln!("[chat-image] store failed: {e}");
+            set_chat_send_error(weak.clone(), "Could not save that photo.");
+            return;
+        }
+    };
+    let rt = runtime();
+    let weak2 = weak.clone();
+    let c = client.clone();
+    let weak3 = weak.clone();
+    rt.spawn(async move {
+        let mut last_err = if my_peers.is_empty() {
+            "Cannot determine peer".to_string()
+        } else {
+            String::new()
+        };
+        let mut sent = false;
+        'outer: for cand in &my_peers {
+            if cand == &me {
+                continue;
+            }
+            match c.send_image_cmd(cand, bytes.clone()).await {
+                Ok(_) => {
+                    c.persist_image(&chat_id, &me, &local_path).await;
+                    sent = true;
+                    eprintln!("[chat-image] sent -> {cand}");
+                    break 'outer;
+                }
+                Err(e) => {
+                    eprintln!("[chat-image] peer={cand} failed: {e}");
+                    last_err = e.to_string();
+                }
+            }
+        }
+        if sent {
+            touch_chat_activity(&chat_id);
+        }
+        let msg = if sent {
+            String::new()
+        } else if last_err.trim().is_empty() {
+            "Peer is offline".to_string()
+        } else {
+            last_err
+        };
+        set_chat_status(weak3, msg.clone());
+        if sent {
+            load_chat_messages(weak2, key);
+        }
+    });
+}
+
+/// Open the shared full-screen image viewer on the chat photo at `idx`.
+fn open_chat_image_from_index(weak: slint::Weak<MainWindow>, idx: i32) {
+    let idx = idx as usize;
+    let Some(ui) = weak.upgrade() else { return };
+    let cs = ui.global::<ChatSession>();
+    use slint::Model as _;
+    let msgs = cs.get_messages();
+    let Some(row) = msgs.row_data(idx) else {
+        eprintln!("[chat-image] index {idx} out of range");
+        return;
+    };
+    let path = row.image_path.as_str().to_string();
+    open_image_viewer(std::vec![path], 0);
+}
+
+/// Present the photos at `paths` in the shared full-screen image viewer at
+/// `start`. `SlintImage` is `!Send`, so the files are decoded *inside* the
+/// event-loop hop (paths are cheap + `Send`).
+fn open_image_viewer(paths: Vec<String>, start: i32) {
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = call::weak_window().and_then(|w| w.upgrade()) else { return };
+        let imgs: Vec<SlintImage> = paths
+            .iter()
+            .map(|p| image::decode_image(p))
+            .collect();
+        let state = ui.global::<PostDetailState>();
+        state.set_media(slint::ModelRc::new(slint::VecModel::from(imgs)));
+        state.set_image_index(start);
+        let app = ui.global::<AppState>();
+        let mut nav = app.get_nav_state();
+        nav.global_overlay = GlobalOverlayType::ImageViewer;
+        app.set_nav_state(nav);
+    });
+}
+
+/// Derive the bytes to send for a picked photo: if it is already a decodable
+/// image, use the original; otherwise downscale+re-encode as JPEG. Returns the
+/// bytes (the same file the bubble + viewer will show).
+fn set_chat_status(weak: slint::Weak<MainWindow>, msg: String) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            let cs = ui.global::<ChatSession>();
+            cs.set_send_status(if msg.is_empty() {
+                SharedString::new()
+            } else {
+                SharedString::from(format!("Send failed: {msg}"))
+            });
+        }
+    });
+}
+
+fn set_chat_send_error(weak: slint::Weak<MainWindow>, msg: &str) {
+    set_chat_status(weak, msg.to_string());
 }
 
 /// Handle an inbound friendq frame (someone sent us Inquire / Accept / Reject
@@ -2653,7 +2918,11 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                             path,
                             duration_ms,
                         } => Some((path.clone(), *duration_ms)),
-                        chatx_core::store::Kind::Text => None,
+                        _ => None,
+                    };
+                    let image = match &m.kind {
+                        chatx_core::store::Kind::Image { path } => Some(path.clone()),
+                        _ => None,
                     };
                     let msg = ChatMsg {
                         sender,
@@ -2662,6 +2931,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         text: m.text.clone(),
                         avatar: Some(avatar),
                         voice,
+                        image,
                     };
                     render_msg(
                         &mut r,

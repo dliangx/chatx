@@ -152,6 +152,89 @@ pub fn image_from_bytes(bytes: &[u8], cap: u32) -> SlintImage {
     }
 }
 
+fn home_dir() -> std::path::PathBuf {
+    let s = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    match s {
+        Some(s) => std::path::PathBuf::from(s),
+        None => std::env::temp_dir(),
+    }
+}
+
+/// Directory where sent / received chat photos live (per-user, not per-chat —
+/// mirrors `record::voice_dir`).
+pub fn image_dir() -> std::path::PathBuf {
+    let dir = home_dir().join(".chatx").join("images");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn ext_of(bytes: &[u8], src_ext_hint: Option<&str>) -> String {
+    // Prefer a known source extension (e.g. .heic / .webp) so the stored file
+    // keeps a format Slint can render; otherwise sniff the content and default
+    // to JPEG (the most common picker output).
+    if let Some(h) = src_ext_hint {
+        let h = h.to_lowercase();
+        if h == "jpg" || h == "jpeg" || h == "png" || h == "webp" || h == "heic" {
+            return h;
+        }
+    }
+    if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
+        return "png".into();
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return "heic".into();
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" {
+        return "webp".into();
+    }
+    "jpg".into()
+}
+
+/// Write raw image bytes into the chat-images dir and return the stored path.
+/// This is the single on-disk copy shown in the bubble + viewer. `src_ext_hint`
+/// is the picked/received file's original extension, kept when it is a format
+/// Slint can decode (so HEIC/WebP originals stay originals).
+pub fn store_image_bytes(
+    bytes: &[u8],
+    src_ext_hint: Option<&str>,
+) -> std::io::Result<std::path::PathBuf> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = image_dir().join(format!("img-{ts}.{}", ext_of(bytes, src_ext_hint)));
+    std::fs::write(&path, bytes)?;
+    Ok(path)
+}
+
+/// The bytes to send for a picked photo: the picker's original file, verbatim.
+/// The chat bubble renders this file small (the "compressed preview"), and the
+/// full-screen viewer opens the same file at full detail (the "original"), so
+/// the peer always has the original image to tap into.
+pub fn derive_chat_image_bytes(src: &str) -> std::io::Result<Vec<u8>> {
+    std::fs::read(src)
+}
+
+/// Decode the photo at `path` (any format the `image` crate supports — PNG,
+/// JPEG, WebP, …) into a full-resolution `SlintImage`. Slint's built-in
+/// `load_from_path` only handles PNG/JPEG, so we decode through the `image`
+/// crate here to support WebP and the other formats picked/received photos use.
+pub fn decode_image(path: &str) -> SlintImage {
+    match image::open(std::path::Path::new(path)) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(rgba.width(), rgba.height());
+            buf.make_mut_bytes().copy_from_slice(rgba.as_raw());
+            SlintImage::from_rgba8(buf)
+        }
+        Err(e) => {
+            eprintln!("[image] decode failed for {path}: {e}");
+            SlintImage::default()
+        }
+    }
+}
+
 const FONT_LATIN: &[u8] = include_bytes!("../fonts/NotoSans.ttf");
 const FONT_CJK: &[u8] = include_bytes!("../fonts/NotoSansSC.ttf");
 const FONT_EMOJI: &[u8] = include_bytes!("../fonts/NotoColorEmoji.ttf");
@@ -255,6 +338,9 @@ pub struct RenderedMsg {
     /// When set, the pixel buffer is a 1x1 dummy and the caller controls the
     /// *displayed* size (Slint draws the bubble).
     pub voice: Option<(String, u64)>,
+    /// Present when this is a photo bubble: the disk path. When set, the pixel
+    /// buffer is a 1x1 dummy and Slint draws the image (bubble + viewer).
+    pub image: Option<String>,
     /// Sender avatar (right for own, left for theirs) shown beside a voice
     /// bubble, mirroring the rasterised text-bubble avatar.
     pub avatar: Option<render::canvas::Image>,
@@ -271,6 +357,9 @@ pub struct ChatMsg {
     /// A voice message replaces the text body with a play bubble. The `path`
     /// is a local s16le clip and `duration_ms` is what the UI should show.
     pub voice: Option<(String, u64)>,
+    /// A photo replaces the text body with an image bubble. The `path` is the
+    /// local disk copy (original, possibly downscaled); tapping opens the viewer.
+    pub image: Option<String>,
 }
 
 pub fn render_msg(
@@ -291,6 +380,33 @@ pub fn render_msg(
             is_self: msg.side == Side::SelfSide,
             text: format!("{dur}ms"),
             voice: Some((path.clone(), *dur)),
+            image: None,
+            avatar: msg.avatar.clone(),
+            time: msg.time.clone(),
+        };
+    }
+    // Photo bubbles are drawn by Slint (the `Image` element shows the disk file
+    // and the viewer re-uses the same file), so the pixel buffer is a 1x1 dummy.
+    // We still read the file's aspect ratio so the preview box keeps the photo's
+    // proportions (capped to `IMAGE_PREVIEW_MAX` on the long edge, logical px).
+    if let Some(path) = &msg.image {
+        let (iw, ih) = image::image_dimensions(std::path::Path::new(path)).unwrap_or((1, 1));
+        let max_h = 260.0;
+        let iw = iw.max(1) as f64;
+        let ih = ih.max(1) as f64;
+        // Capped preview width, leaving room for the avatar (36px) + gap (8px).
+        let max_w = (available_w as f64 / 2.0).min(220.0) - 44.0;
+        let s = (max_w / iw).min(max_h / ih);
+        let w_phys = (iw * s * scale as f64).max(1.0) as u32;
+        let h_phys = (ih * s * scale as f64).max(1.0) as u32;
+        return RenderedMsg {
+            rgba: vec![255u8, 255, 255, 255],
+            width: w_phys,
+            height: h_phys,
+            is_self: msg.side == Side::SelfSide,
+            text: String::new(),
+            voice: None,
+            image: Some(path.clone()),
             avatar: msg.avatar.clone(),
             time: msg.time.clone(),
         };
@@ -312,6 +428,7 @@ pub fn render_msg(
             is_self: msg.side == Side::SelfSide,
             text: msg.text.clone(),
             voice: None,
+            image: None,
             avatar: None,
             time: msg.time.clone(),
         }
@@ -319,7 +436,10 @@ pub fn render_msg(
 
 pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageData {
     // Voice bubbles are drawn by Slint; give them a fixed logical size.
+    // Image bubbles already carry logical preview dimensions in `width`/`height`
+    // (see `render_msg`), same handling as text rows.
     let is_voice = m.voice.is_some();
+    let is_image = m.image.is_some();
     let (w, h) = if is_voice {
         (72.0, 54.0)
     } else {
@@ -327,10 +447,12 @@ pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageDa
     };
     crate::MessageData {
         bubble: {
-            let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(
-                m.width.max(1),
-                m.height.max(1),
-            );
+            // Image rows carry a 1x1 dummy raster (Slint draws `image_img`
+            // instead, sized by `width`/`height`), so keep the buffer 1x1 to
+            // match the 4-byte `rgba`.
+            let bw = if is_image { 1 } else { m.width.max(1) };
+            let bh = if is_image { 1 } else { m.height.max(1) };
+            let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(bw, bh);
             buf.make_mut_bytes().copy_from_slice(&m.rgba);
             SlintImage::from_rgba8(buf)
         },
@@ -350,6 +472,21 @@ pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageDa
             .map(|(_, d)| format_duration_ms(d))
             .map(SharedString::from)
             .unwrap_or_default(),
+        image_path: m
+            .image
+            .clone()
+            .map(SharedString::from)
+            .unwrap_or_default(),
+        image_img: {
+            if let Some(p) = &m.image {
+                // Cap the decoded bitmap to the preview box's long edge (CSS) so
+                // we don't hold a multi-MB bitmap for a small bubble thumbnail.
+                let cap = (w.max(h) as u32 * 2).max(1);
+                load_avatar_path_capped(p, cap)
+            } else {
+                SlintImage::default()
+            }
+        },
         avatar: {
             if let Some(a) = &m.avatar {
                 let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(a.w, a.h);

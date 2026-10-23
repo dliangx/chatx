@@ -7,6 +7,9 @@ export component ChatInputView inherits Rectangle {
     in property <int> chat-id: -1;
     in-out property <string> text: "";
     callback sent(string);
+    /// The photo icon was tapped — Rust opens the system photo picker for
+    /// `chat-id`, then sends the chosen photo to the peer.
+    callback sent-image(int);
 
     background: Theme.bg;
 
@@ -46,7 +49,7 @@ export component ChatInputView inherits Rectangle {
     out property <length> in-pad: 10px;
     out property <length> in-pad-x: 14px;
     out property <length> tail-w: 82px;
-    out property <length> head-w: 32px;
+    out property <length> head-w: 56px;
     out property <length> btn-w: 68px;
     out property <length> btn-h: 32px;
     out property <length> box-w: root.width - 2 * root.pad;
@@ -71,7 +74,7 @@ export component ChatInputView inherits Rectangle {
         border-color: Theme.border;
         clip: true;
 
-        // Voice-toggle icon at the bottom-left of the input box.
+        // Left icon row: voice-toggle then photo (pick + send), bottom-left.
         Rectangle {
             x: 0px;
             y: parent.height - root.btn-h - (root.in-pad / 2);
@@ -79,7 +82,7 @@ export component ChatInputView inherits Rectangle {
             height: root.btn-h;
 
             Icon {
-                x: (root.head-w - 22px) / 2;
+                x: 3px;
                 y: (root.btn-h - 22px) / 2;
                 size: 22px;
                 glyph: Glyph.voice;
@@ -87,8 +90,30 @@ export component ChatInputView inherits Rectangle {
             }
 
             TouchArea {
+                x: 0px;
+                y: 0px;
+                width: 28px;
+                height: root.btn-h;
                 clicked => {
                     RecordState.toggle(root.chat-id);
+                }
+            }
+
+            Icon {
+                x: 31px;
+                y: (root.btn-h - 22px) / 2;
+                size: 22px;
+                glyph: Glyph.picture;
+                tint: Theme.fg-muted;
+            }
+
+            TouchArea {
+                x: 28px;
+                y: 0px;
+                width: 28px;
+                height: root.btn-h;
+                clicked => {
+                    root.sent-image(root.chat-id);
                 }
             }
         }

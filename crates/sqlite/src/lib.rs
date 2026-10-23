@@ -20,21 +20,34 @@ pub mod users;
 pub use sqlx::{self, SqlitePool as Pool};
 pub use sqlx::sqlite::SqlitePoolOptions;
 
+/// Which kind of media `MsgRow::media_path` points at (used to disambiguate a
+/// voice clip from a photo, since both store a `media_path`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum MediaKind {
+    #[default]
+    None,
+    Voice,
+    Image,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MsgRow {
     pub id: i64,
     pub chat_id: String,
     pub sender: String,
-    /// Plain-text body. For voice rows this is empty; the clip is the
-    /// on-disk file referenced by `media_path`.
+    /// Plain-text body. For media rows this is empty; the file is the
+    /// on-disk path referenced by `media_path`.
     pub text: String,
     pub sealed: bool,
     pub t: u64,
     pub mine: bool,
-    /// Local file path of a voice clip; `None` for text rows.
+    /// Local file path of a media clip/photo; `None` for plain text rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_path: Option<String>,
-    /// Voice-clip duration in milliseconds; `None` for text rows.
+    /// What `media_path` holds: a voice clip or a photo (`None` = plain text).
+    #[serde(default)]
+    pub media_kind: MediaKind,
+    /// Voice-clip duration in milliseconds; `None` for text/image rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_duration_ms: Option<u64>,
 }

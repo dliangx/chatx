@@ -783,6 +783,7 @@ mod tests {
                 sealed: false,
                 t: 1234,
                 mine: false,
+                media_kind: sqlite::MediaKind::None,
                 media_path: None,
                 media_duration_ms: None,
             },
