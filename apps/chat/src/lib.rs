@@ -16,6 +16,7 @@ pub mod call_dispatcher;
 pub mod image;
 pub mod moment;
 pub mod process;
+pub mod record;
 pub mod time;
 use image::{
     ChatMsg, RENDERER, RenderedMsg, ensure_renderer, load_avatar_path_capped, load_image_cached,
@@ -874,6 +875,39 @@ pub fn run_app() {
         let weak = weak.clone();
         ui.global::<CallState>().on_end_call(move || {
             end_voice_call(weak.clone());
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<CallState>().on_toggle_record(move || match weak.upgrade() {
+            Some(ui) => {
+                let st = ui.global::<CallState>();
+                if st.get_recording() {
+                    match record::stop() {
+                        Ok(path) => {
+                            st.set_recording(false);
+                            st.set_status(SharedString::from(format!("Saved to {path}")));
+                        }
+                        Err(e) => {
+                            st.set_recording(false);
+                            eprintln!("[record] stop failed: {e}");
+                            st.set_status(SharedString::from(format!("Record failed: {e}")));
+                        }
+                    }
+                } else {
+                    match record::start() {
+                        Ok(()) => {
+                            st.set_recording(true);
+                            st.set_status(SharedString::from("Recording… (tap to stop)"));
+                        }
+                        Err(e) => {
+                            eprintln!("[record] start failed: {e}");
+                            st.set_status(SharedString::from(format!("Record failed: {e}")));
+                        }
+                    }
+                }
+            }
+            None => {}
         });
     }
     {

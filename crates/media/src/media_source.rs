@@ -375,48 +375,69 @@ fn encode_loop(
     }
 }
 
-// ── μ-law (RFC 3551) ───────────────────────────────────────────────────────
+// ── Audio payload (PCMU track slot) ────────────────────────────────────────
+//
+// webrtc-rs 0.17 is a **pure byte pipe** for the PCMU track: the sender's
+// `Sample.data` is sliced by MTU and put verbatim into the RTP payload, and
+// the receiver's `read()` hands back exactly those bytes (the rtp crate's
+// `G7xxPayloader` is a bytes-chopper, NOT a codec — it contains no µ-law /
+// A-law math; there is no G.711 codec anywhere in the library).
+//
+// Because **both endpoints are always our own app**, the wire bytes can be
+// plain 16-bit little-endian PCM. The functions below are therefore
+// *identity*: they pass the s16le buffer through untouched. The SDP still
+// advertises `audio/PCMU 8000` (the only audio codec we register), but that
+// is just a label — the actual payload is 16-bit PCM, consistent on both
+// sides. This gives full dynamic range (no quantization hiss) at
+// 8 kHz / 16-bit / mono = 128 kbps, plenty for the relay.
+//
+// (The earlier implementations tried to be µ-law and broke; 8-bit linear
+// quantization produced audible hiss. Lossless PCMU-slot PCM avoids both
+// problems and is trivially correct + testable.)
 
+/// Pass 16-bit LE PCM bytes through to the webrtc `Sample.data`.
+/// `pcm` is already at the codec's 8 kHz / 1-ch rate (resampled upstream).
 pub fn mulaw_encode(pcm: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(pcm.len() / 2);
-    let mut i = 0;
-    while i + 1 < pcm.len() {
-        let v = i16::from_le_bytes([pcm[i], pcm[i + 1]]);
-        out.push(le_mulaw(v as u16));
-        i += 2;
-    }
-    out
+    pcm.to_vec()
 }
 
+/// The received `law` bytes are already 16-bit LE PCM (identity of
+/// `mulaw_encode`). Pass through unchanged to the speaker queue.
 pub fn mulaw_decode(law: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(law.len() * 2);
-    for &b in law {
-        let v = ule_mulaw(b) as i16;
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-    out
+    law.to_vec()
 }
 
-fn le_mulaw(v: u16) -> u8 {
-    const BIAS: i32 = 0x84;
-    let sign = ((v >> 15) & 1) as i32;
-    let mut x = (v & 0x7fff) as i32 + BIAS;
-    let mut exp = 0;
-    let mut shift = 1 << 13;
-    while x & (shift as u32 as i32) == 0 && exp < 6 {
-        x = (x << 1) as i32;
-        exp += 1;
-        shift >>= 1;
-    }
-    let mant = (x >> (1 + exp)) & 0x7f;
-    ((sign & 1) << 7 | (exp & 7) << 4 | mant) as u8
-}
+#[cfg(test)]
+mod mulaw_tests {
+    use super::*;
 
-fn ule_mulaw(law: u8) -> u32 {
-    const BIAS: i32 = 0x84;
-    let sign = ((law >> 7) & 1) as i32;
-    let exp = ((law >> 4) & 7) as i32;
-    let mant = (law & 0x0f) as i32;
-    let x = ((mant << 4) + (1 << 3) + (1 << exp)) << (exp + 1);
-    ((1i32 - 2 * sign) * (x - BIAS)) as u32
+    fn roundtrip(m: i16) -> i16 {
+        let pcm = m.to_le_bytes();
+        let enc = mulaw_encode(&pcm);
+        let dec = mulaw_decode(&enc);
+        i16::from_le_bytes([dec[0], dec[1]])
+    }
+
+    #[test]
+    fn zero_maps_to_zero() {
+        assert_eq!(roundtrip(0), 0);
+    }
+
+    #[test]
+    fn roundtrip_is_lossless_for_every_sample() {
+        // Identity codec must reconstruct every possible 16-bit value exactly.
+        for m in std::i16::MIN..=std::i16::MAX {
+            assert_eq!(roundtrip(m), m, "m={m}");
+        }
+    }
+
+    #[test]
+    fn byte_count_and_bits_preserved() {
+        // 16 samples @ 16-bit = 32 bytes, preserved both directions.
+        let pcm: Vec<u8> = (0..16).flat_map(|i| (i as i16 * 2000).to_le_bytes()).collect();
+        assert_eq!(pcm.len(), 32);
+        assert_eq!(mulaw_encode(&pcm).len(), 32);
+        assert_eq!(mulaw_decode(&mulaw_encode(&pcm)).len(), 32);
+        assert_eq!(mulaw_decode(&mulaw_encode(&pcm)), pcm);
+    }
 }

@@ -21,6 +21,10 @@ export global CallState {
     in property <bool> audio-muted: false; // my speaker muted (remote audio off)
     in property <bool> cam-on: false;     // my camera on
     in property <bool> scr-on: false;     // my screen on
+    /// True while the in-call "record mic to WAV" debug hook is capturing.
+    /// The bottom-left icon tints brand-purple. First click starts, second
+    /// stops and writes the file to the user's home directory.
+    in property <bool> recording: false;
 
     // ── four image sources (Rust sets these directly) ─────────────
     in property <image> my-cam;
@@ -60,6 +64,9 @@ export global CallState {
     /// Inbound only: user tapped DECLINE. Rust sends a `Bye` frame and tears
     /// the call down.
     callback decline-call();
+    /// Toggle the test recording (debug hook). Rust opens / closes a fresh
+    /// cpal input stream and, on stop, writes a WAV to the home directory.
+    callback toggle-record();
 }
 
 export component CallBtn inherits Rectangle {
@@ -369,6 +376,34 @@ export component CallView inherits Rectangle {
             width: 100%;
             height: 100%;
             visible: !CallState.ringing;
+
+            // ── TEST RECORD (debug): mic → WAV to home directory ───────
+            // Tiny 13px voice mic, bottom-left of the control bar. First
+            // click starts capturing; second stops + writes the file.
+            // Independent of the call's own mic path — purely a diagnostic
+            // surface to inspect the local mic + our audio pipeline.
+            Rectangle {
+                x: 12px;
+                y: 39px;             // 58px tall → 13px icon vertically centered
+                width: 26px;        // roomy tap target
+                height: 26px;
+                border-radius: 13px;
+                background: #2a3340;
+
+                Icon {
+                    x: (26px - 13px) / 2;  // center the 13px glyph
+                    y: (26px - 13px) / 2;
+                    size: 13px;
+                    glyph: Glyph.voice;
+                    // #7d54cd = the brand purple (matches Theme.brand in the other views;
+                    // this file doesn't import Theme, so hardcode the hex).
+                    tint: CallState.recording ? #7d54cd : #eaeef3;
+                }
+
+                TouchArea {
+                    clicked => { CallState.toggle-record(); }
+                }
+            }
 
             // Four always-on device buttons.
             HorizontalLayout {
