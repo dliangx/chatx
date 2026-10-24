@@ -218,16 +218,8 @@ thread_local! {
 
 static PLAYING: AtomicBool = AtomicBool::new(false);
 
-fn home_dir() -> std::path::PathBuf {
-    let s = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
-    match s {
-        Some(s) => std::path::PathBuf::from(s),
-        None => std::env::temp_dir(),
-    }
-}
-
 pub fn voice_dir() -> std::path::PathBuf {
-    let dir = home_dir().join(".chatx").join("voice");
+    let dir = chatx_core::identity::DeviceIdentity::home_dir().join("voice");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }

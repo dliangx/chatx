@@ -152,18 +152,10 @@ pub fn image_from_bytes(bytes: &[u8], cap: u32) -> SlintImage {
     }
 }
 
-fn home_dir() -> std::path::PathBuf {
-    let s = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
-    match s {
-        Some(s) => std::path::PathBuf::from(s),
-        None => std::env::temp_dir(),
-    }
-}
-
 /// Directory where sent / received chat photos live (per-user, not per-chat —
 /// mirrors `record::voice_dir`).
 pub fn image_dir() -> std::path::PathBuf {
-    let dir = home_dir().join(".chatx").join("images");
+    let dir = chatx_core::identity::DeviceIdentity::home_dir().join("images");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
