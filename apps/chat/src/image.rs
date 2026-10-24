@@ -190,11 +190,18 @@ fn ext_of(bytes: &[u8], src_ext_hint: Option<&str>) -> String {
     "jpg".into()
 }
 
-/// Write raw image bytes into the chat-images dir and return the stored path.
-/// This is the single on-disk copy shown in the bubble + viewer. `src_ext_hint`
-/// is the picked/received file's original extension, kept when it is a format
-/// Slint can decode (so HEIC/WebP originals stay originals).
-pub fn store_image_bytes(
+/// Write raw image bytes into the chat-images dir and return the stored
+/// original path. `src_ext_hint` is the picked/received file's original
+/// extension, kept when it is a format Slint can decode (so HEIC/WebP
+/// originals stay originals).
+///
+/// The original is the single full-resolution copy the peer receives and that
+/// the full-screen viewer opens lazily. A compressed preview is produced in
+/// the **same** blocking task, so when this `Future` resolves both files exist
+/// and are fully written — no detached thread racing the chat's lazy
+/// preview-loads. Must be awaited from a Tokio runtime context (both callers
+/// drive it inside `tokio::spawn` / async fns).
+pub async fn store_image_bytes(
     bytes: &[u8],
     src_ext_hint: Option<&str>,
 ) -> std::io::Result<std::path::PathBuf> {
@@ -204,8 +211,17 @@ pub fn store_image_bytes(
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let path = image_dir().join(format!("img-{ts}.{}", ext_of(bytes, src_ext_hint)));
-    std::fs::write(&path, bytes)?;
-    Ok(path)
+    let owned = bytes.to_vec();
+    tokio::task::spawn_blocking(move || -> std::io::Result<std::path::PathBuf> {
+        std::fs::write(&path, &owned)?;
+        // Preview failure is non-fatal: the bubble falls back to loading the
+        // original's dimensions, and the original stays the single source of
+        // truth for the full-screen viewer.
+        let _ = ensure_preview(path.to_string_lossy().as_ref(), 300);
+        Ok(path)
+    })
+    .await
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
 }
 
 /// The bytes to send for a picked photo: the picker's original file, verbatim.
@@ -233,6 +249,33 @@ pub fn decode_image(path: &str) -> SlintImage {
             SlintImage::default()
         }
     }
+}
+
+/// On-disk preview path for a chat photo at `original`: same directory, name
+/// prefixed with `preview-`, so the compressed copy sits next to the original.
+pub fn preview_path(original: &str) -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(original);
+    let stem = p.file_stem()?.to_string_lossy();
+    Some(p.with_file_name(format!("preview-{stem}.jpg")))
+}
+
+/// Ensure the compressed preview for `original` exists on disk. The preview is
+/// a JPEG capped to `cap` on the long edge (never upscaled) — a few KB for a
+/// ~330px thumbnail, versus the multi-MB original the full-screen viewer opens
+/// lazily. Returns the preview path on success.
+pub fn ensure_preview(original: &str, cap: u32) -> std::io::Result<std::path::PathBuf> {
+    let Some(dst) = preview_path(original) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "no preview path",
+        ));
+    };
+    if dst.is_file() {
+        return Ok(dst);
+    }
+    let bytes = decode_capped_jpeg_bytes(original, cap)?;
+    std::fs::write(&dst, bytes)?;
+    Ok(dst)
 }
 
 const FONT_LATIN: &[u8] = include_bytes!("../fonts/NotoSans.ttf");
@@ -477,16 +520,11 @@ pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageDa
             .clone()
             .map(SharedString::from)
             .unwrap_or_default(),
-        image_img: {
-            if let Some(p) = &m.image {
-                // Cap the decoded bitmap to the preview box's long edge (CSS) so
-                // we don't hold a multi-MB bitmap for a small bubble thumbnail.
-                let cap = (w.max(h) as u32 * 2).max(1);
-                load_avatar_path_capped(p, cap)
-            } else {
-                SlintImage::default()
-            }
-        },
+        // Photo bubbles start empty: the caller (`load_chat_messages`) overwrites
+        // `image_img` with the small cached preview (via `load_image_cached`),
+        // so entering a chat never decodes the full bitmap and a re-switch is a
+        // cache hit. The full original is only decoded by the viewer on tap.
+        image_img: SlintImage::default(),
         avatar: {
             if let Some(a) = &m.avatar {
                 let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(a.w, a.h);

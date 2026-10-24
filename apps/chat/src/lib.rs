@@ -124,8 +124,7 @@ static PICKING_CHAT_IMAGE: std::sync::atomic::AtomicBool =
 
 /// The chat key (from `on_moment_photos_selected`'s view) armed for a chat
 /// image send, so the shared picker sink can route the selection back to it.
-static CHAT_IMAGE_PICK_KEY: std::sync::atomic::AtomicI32 =
-    std::sync::atomic::AtomicI32::new(-1);
+static CHAT_IMAGE_PICK_KEY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 static POST_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -889,36 +888,37 @@ pub fn run_app() {
     }
     {
         let weak = weak.clone();
-        ui.global::<CallState>().on_toggle_record(move || match weak.upgrade() {
-            Some(ui) => {
-                let st = ui.global::<CallState>();
-                if st.get_recording() {
-                    match record::stop() {
-                        Ok(path) => {
-                            st.set_recording(false);
-                            st.set_status(SharedString::from(format!("Saved to {path}")));
+        ui.global::<CallState>()
+            .on_toggle_record(move || match weak.upgrade() {
+                Some(ui) => {
+                    let st = ui.global::<CallState>();
+                    if st.get_recording() {
+                        match record::stop() {
+                            Ok(path) => {
+                                st.set_recording(false);
+                                st.set_status(SharedString::from(format!("Saved to {path}")));
+                            }
+                            Err(e) => {
+                                st.set_recording(false);
+                                eprintln!("[record] stop failed: {e}");
+                                st.set_status(SharedString::from(format!("Record failed: {e}")));
+                            }
                         }
-                        Err(e) => {
-                            st.set_recording(false);
-                            eprintln!("[record] stop failed: {e}");
-                            st.set_status(SharedString::from(format!("Record failed: {e}")));
-                        }
-                    }
-                } else {
-                    match record::start() {
-                        Ok(()) => {
-                            st.set_recording(true);
-                            st.set_status(SharedString::from("Recording… (tap to stop)"));
-                        }
-                        Err(e) => {
-                            eprintln!("[record] start failed: {e}");
-                            st.set_status(SharedString::from(format!("Record failed: {e}")));
+                    } else {
+                        match record::start() {
+                            Ok(()) => {
+                                st.set_recording(true);
+                                st.set_status(SharedString::from("Recording… (tap to stop)"));
+                            }
+                            Err(e) => {
+                                eprintln!("[record] start failed: {e}");
+                                st.set_status(SharedString::from(format!("Record failed: {e}")));
+                            }
                         }
                     }
                 }
-            }
-            None => {}
-        });
+                None => {}
+            });
     }
     {
         let weak = weak.clone();
@@ -1069,12 +1069,9 @@ pub fn run_app() {
                                 move || {
                                     let _ = slint::invoke_from_event_loop(move || {
                                         if let Some(ui) = weak.upgrade() {
-                                            if (ui.global::<ChatSession>()
-                                                .get_playing_idx())
-                                                == idx
+                                            if (ui.global::<ChatSession>().get_playing_idx()) == idx
                                             {
-                                                ui.global::<ChatSession>()
-                                                    .set_playing_idx(-1);
+                                                ui.global::<ChatSession>().set_playing_idx(-1);
                                             }
                                         }
                                     });
@@ -1101,14 +1098,16 @@ pub fn run_app() {
 
     {
         let weak = weak.clone();
-        ui.global::<ChatSession>()
-            .on_sent_image(move |key| { pick_chat_image(weak.clone(), key); });
+        ui.global::<ChatSession>().on_sent_image(move |key| {
+            pick_chat_image(weak.clone(), key);
+        });
     }
 
     {
         let weak = weak.clone();
-        ui.global::<ChatSession>()
-            .on_open_image(move |idx| { open_chat_image_from_index(weak.clone(), idx); });
+        ui.global::<ChatSession>().on_open_image(move |idx| {
+            open_chat_image_from_index(weak.clone(), idx);
+        });
     }
 
     {
@@ -1126,7 +1125,6 @@ pub fn run_app() {
             load_post_detail(weak.clone(), key);
         });
     }
-
 
     {
         let weak = weak.clone();
@@ -1795,7 +1793,11 @@ async fn handle_inbound_voice(
     match record::write_voice_clip(rate, ch, &data) {
         Ok(path) => {
             let path_str = path.to_string_lossy().into_owned();
-            eprintln!("[voice] inbound persisted {} ({} bytes)", path.display(), data.len());
+            eprintln!(
+                "[voice] inbound persisted {} ({} bytes)",
+                path.display(),
+                data.len()
+            );
             client
                 .persist_voice(&chat_id, peer_base58, &path_str, duration_ms)
                 .await;
@@ -1809,11 +1811,7 @@ async fn handle_inbound_voice(
 
 /// Handle an inbound photo message: write the bytes to disk, persist an image
 /// row for the DM with the sender, and refresh the current chat if visible.
-async fn handle_inbound_image(
-    weak: slint::Weak<MainWindow>,
-    peer_base58: &str,
-    data: Vec<u8>,
-) {
+async fn handle_inbound_image(weak: slint::Weak<MainWindow>, peer_base58: &str, data: Vec<u8>) {
     eprintln!(
         "[chat-image] INBOUND from={peer_base58} bytes={}",
         data.len()
@@ -1824,7 +1822,7 @@ async fn handle_inbound_image(
     };
     let me = client.peer_base58();
     let chat_id = dm_chat_id(&me, peer_base58);
-    match image::store_image_bytes(&data, None) {
+    match image::store_image_bytes(&data, None).await {
         Ok(path) => {
             let path_str = path.to_string_lossy().into_owned();
             eprintln!(
@@ -1932,7 +1930,10 @@ fn send_chat_voice(
             if cand == &me {
                 continue;
             }
-            match c.send_voice_cmd(cand, data.clone(), rate, ch, duration_ms).await {
+            match c
+                .send_voice_cmd(cand, data.clone(), rate, ch, duration_ms)
+                .await
+            {
                 Ok(()) => {
                     eprintln!("[voice] sent -> {cand}");
                     if let Some(p) = local_path.as_ref() {
@@ -2027,7 +2028,8 @@ fn toggle_record(weak: slint::Weak<MainWindow>, key: i32) {
                 let weak = weak.clone();
                 move || {
                     if let Some(ui) = weak.upgrade() {
-                        ui.global::<RecordState>().set_state(SharedString::from("idle"));
+                        ui.global::<RecordState>()
+                            .set_state(SharedString::from("idle"));
                     }
                 }
             });
@@ -2057,7 +2059,8 @@ fn toggle_record(weak: slint::Weak<MainWindow>, key: i32) {
     send_chat_voice(weak, key, rec.data, rec.rate, rec.ch, rec.duration_ms);
 }
 
-static ELAPSED_TICK_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ELAPSED_TICK_ARMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Kick off (once) a Slint timer that updates `RecordState.label` every 100 ms
 /// while recording. Computes elapsed from `RecordState.started_at` (monotonic
@@ -2076,19 +2079,22 @@ fn arm_elapsed_tick(weak: slint::Weak<MainWindow>) {
                         let elapsed_ms = record::monotonic_ms() as i32 - rs.get_started_at();
                         let label = image::format_duration_ms(elapsed_ms.max(0) as u64);
                         rs.set_label(SharedString::from(label));
-                        slint::Timer::single_shot(std::time::Duration::from_millis(100), move || {
-                            if let Some(ui) = weak.upgrade() {
-                                let rs = ui.global::<RecordState>();
-                                if rs.get_state().as_str() == "recording" {
-                                    let elapsed_ms =
-                                        record::monotonic_ms() as i32 - rs.get_started_at();
-                                    let label =
-                                        image::format_duration_ms(elapsed_ms.max(0) as u64);
-                                    rs.set_label(SharedString::from(label));
+                        slint::Timer::single_shot(
+                            std::time::Duration::from_millis(100),
+                            move || {
+                                if let Some(ui) = weak.upgrade() {
+                                    let rs = ui.global::<RecordState>();
+                                    if rs.get_state().as_str() == "recording" {
+                                        let elapsed_ms =
+                                            record::monotonic_ms() as i32 - rs.get_started_at();
+                                        let label =
+                                            image::format_duration_ms(elapsed_ms.max(0) as u64);
+                                        rs.set_label(SharedString::from(label));
+                                    }
                                 }
-                            }
-                            arm_elapsed_tick(weak.clone());
-                        });
+                                arm_elapsed_tick(weak.clone());
+                            },
+                        );
                     } else {
                         ELAPSED_TICK_ARMED.store(false, Ord::SeqCst);
                     }
@@ -2117,11 +2123,7 @@ fn pick_chat_image(weak: slint::Weak<MainWindow>, key: i32) {
 
 /// A photo was chosen for chat `key`: compress and store it, send the bytes over
 /// P2P, record it, and refresh the chat.
-fn on_chat_image_picked(
-    weak: slint::Weak<MainWindow>,
-    key: i32,
-    path: Option<String>,
-) {
+fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<String>) {
     let Some(src) = path else {
         eprintln!("[chat-image] no photo picked (cancelled)");
         return;
@@ -2181,19 +2183,22 @@ fn on_chat_image_picked(
             return;
         }
     };
-    let local_path = match image::store_image_bytes(&bytes, src_ext.as_deref()) {
-        Ok(p) => p.to_string_lossy().into_owned(),
-        Err(e) => {
-            eprintln!("[chat-image] store failed: {e}");
-            set_chat_send_error(weak.clone(), "Could not save that photo.");
-            return;
-        }
-    };
     let rt = runtime();
     let weak2 = weak.clone();
     let c = client.clone();
     let weak3 = weak.clone();
     rt.spawn(async move {
+        // Store the original + produce the preview in one blocking task (awaited
+        // so this task has a reactor). Runs before the send, so when the chat
+        // reloads its rows the on-disk photos — and their previews — are present.
+        let local_path = match image::store_image_bytes(&bytes, src_ext.as_deref()).await {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => {
+                eprintln!("[chat-image] store failed: {e}");
+                set_chat_send_error(weak3.clone(), "Could not save that photo.");
+                return;
+            }
+        };
         let mut last_err = if my_peers.is_empty() {
             "Cannot determine peer".to_string()
         } else {
@@ -2254,11 +2259,10 @@ fn open_chat_image_from_index(weak: slint::Weak<MainWindow>, idx: i32) {
 /// event-loop hop (paths are cheap + `Send`).
 fn open_image_viewer(paths: Vec<String>, start: i32) {
     let _ = slint::invoke_from_event_loop(move || {
-        let Some(ui) = call::weak_window().and_then(|w| w.upgrade()) else { return };
-        let imgs: Vec<SlintImage> = paths
-            .iter()
-            .map(|p| image::decode_image(p))
-            .collect();
+        let Some(ui) = call::weak_window().and_then(|w| w.upgrade()) else {
+            return;
+        };
+        let imgs: Vec<SlintImage> = paths.iter().map(|p| image::decode_image(p)).collect();
         let state = ui.global::<PostDetailState>();
         state.set_media(slint::ModelRc::new(slint::VecModel::from(imgs)));
         state.set_image_index(start);
@@ -2832,7 +2836,6 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 return;
             }
         };
-
         ensure_renderer();
 
         let mut rows = rows;
@@ -2914,10 +2917,9 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         }
                     };
                     let voice = match &m.kind {
-                        chatx_core::store::Kind::Voice {
-                            path,
-                            duration_ms,
-                        } => Some((path.clone(), *duration_ms)),
+                        chatx_core::store::Kind::Voice { path, duration_ms } => {
+                            Some((path.clone(), *duration_ms))
+                        }
                         _ => None,
                     };
                     let image = match &m.kind {
@@ -2951,6 +2953,23 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 .copied()
                 .unwrap_or(0.0)
         };
+        // Photo rows: produce the small preview JPEG on disk (blocking) for
+        // each, and remember the (model index, preview path) so the UI-thread
+        // model build can pull the cached image (cache hit) without a 2nd
+        // layout pass. The full original is never decoded here — only on tap
+        // in the full-screen viewer.
+        let mut image_rows: Vec<(usize, String)> = Vec::new();
+        for (i, m) in rendered.iter().enumerate() {
+            if let Some(original) = m.image.as_ref() {
+                let p = original.to_string();
+                let result =
+                    tokio::task::spawn_blocking(move || image::ensure_preview(&p, 300)).await;
+                match result {
+                    Ok(Ok(path)) => image_rows.push((i, path.to_string_lossy().into_owned())),
+                    _ => eprintln!("[chat-image] ensure_preview failed: {original}"),
+                }
+            }
+        }
         let _ = slint::invoke_from_event_loop(move || {
             let ui = match ui_weak2.upgrade() {
                 Some(ui) => ui,
@@ -2973,14 +2992,25 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 })
                 .collect();
             let sum_all: f32 = heights.iter().sum();
-            let messages: Vec<MessageData> = rendered
+            // Build rows while pulling each photo row's (tiny) cached preview
+            // via `load_image_cached` — a cache hit from the prime step — so the
+            // full original is never decoded here.
+            let image_by_row: std::collections::HashMap<usize, String> = image_rows
+                .iter()
+                .map(|(i, p)| (*i, p.clone()))
+                .collect();
+            let messages: Vec<crate::MessageData> = rendered
                 .into_iter()
                 .enumerate()
                 .map(|(i, m)| {
                     let older_sum: f32 = heights.iter().skip(i + 1).sum();
                     let rows_above = (n.saturating_sub(1).saturating_sub(i)) as f32;
                     let top = PAD + rows_above * GAP + older_sum;
-                    to_message_data(m, scale, top)
+                    let mut data = to_message_data(m, scale, top);
+                    if let Some(p) = image_by_row.get(&i) {
+                        data.image_img = image::load_image_cached(p);
+                    }
+                    data
                 })
                 .collect();
             let content_h = if n == 0 {

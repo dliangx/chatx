@@ -121,7 +121,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 tracing::warn!("re-subscribe group {group_id}: {e}");
             }
         }
-
     }
 
     pub fn connect_to_group(&self, group_id: &str) -> Result<(), anyhow::Error> {
@@ -210,9 +209,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             // Stale `connected` count would silently skip every future dial —
             // log loudly so it's diagnosable. This is the "B stops trying to
             // reconnect A after a disconnect" bug: the counter leaked to >0.
-            eprintln!(
-                "[dm] warm_dial skip {peer_base58}: already considered connected (count={conn_count})"
-            );
+            // eprintln!(
+            //     "[dm] warm_dial skip {peer_base58}: already considered connected (count={conn_count})"
+            // );
             return Ok(());
         }
         // Reach the peer by dialing every routable address it registered. A
@@ -1038,12 +1037,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let mut last_err = String::new();
         for addr in &candidates {
             let id: u64 = rand::random();
-            let req = crate::moment::PostRequest {
-                id,
-                op: op.clone(),
-            };
-            let (tx, rx) =
-                oneshot::channel::<anyhow::Result<crate::moment::PostResponse>>();
+            let req = crate::moment::PostRequest { id, op: op.clone() };
+            let (tx, rx) = oneshot::channel::<anyhow::Result<crate::moment::PostResponse>>();
             if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
                 peer: peer.clone(),
                 addr: addr.clone(),
@@ -1051,11 +1046,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 last_err = format!("cmd channel closed: {e}");
                 continue;
             }
-            if let Err(e) = self
-                .running
-                .cmd_tx
-                .send(Cmd::SendBlob { peer, req, ack_tx: tx })
-            {
+            if let Err(e) = self.running.cmd_tx.send(Cmd::SendBlob {
+                peer,
+                req,
+                ack_tx: tx,
+            }) {
                 last_err = format!("cmd channel closed: {e}");
                 continue;
             }
@@ -1071,7 +1066,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 Ok(Err(_)) => last_err = "peer dropped connection before response".to_string(),
                 Err(_) => {
                     eprintln!("[moment] no response within {timeout:?} via {addr}");
-                    last_err = format!("no response within {timeout}s", timeout = timeout.as_secs());
+                    last_err =
+                        format!("no response within {timeout}s", timeout = timeout.as_secs());
                 }
             }
         }
@@ -1331,15 +1327,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// peer's ack. The image bytes are NOT persisted by core — the caller
     /// writes them to a local path first and calls [`Self::persist_image`]
     /// after a successful ack (mirroring voice).
-    pub async fn send_image_cmd(
-        &self,
-        peer_base58: &str,
-        data: Vec<u8>,
-    ) -> anyhow::Result<()> {
-        eprintln!(
-            "[image] send_image peer={peer_base58} bytes={}",
-            data.len()
-        );
+    pub async fn send_image_cmd(&self, peer_base58: &str, data: Vec<u8>) -> anyhow::Result<()> {
+        eprintln!("[image] send_image peer={peer_base58} bytes={}", data.len());
         let rec = self
             .dir
             .resolve_device(peer_base58)
@@ -1511,13 +1500,13 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         req: &message::ChatRequest,
     ) -> anyhow::Result<Option<InboundGroup>> {
         match req.kind {
-                        message::MsgKind::Dm => Ok(None),
-                        message::MsgKind::Audio => Ok(None),
-                        message::MsgKind::Webrtc => Ok(None),
-                        // Voice messages are persisted by the application layer
-                        // once it has written the clip to disk, so core does
-                        // nothing here.
-                        message::MsgKind::Voice => Ok(None),
+            message::MsgKind::Dm => Ok(None),
+            message::MsgKind::Audio => Ok(None),
+            message::MsgKind::Webrtc => Ok(None),
+            // Voice messages are persisted by the application layer
+            // once it has written the clip to disk, so core does
+            // nothing here.
+            message::MsgKind::Voice => Ok(None),
             message::MsgKind::GroupKey => {
                 let group_id = req
                     .group_id
@@ -1776,14 +1765,18 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     pub async fn store_group_outbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
         let wire = serde_json::to_string(env)?;
         let b64 = crate::account::b64(wire.as_bytes());
-        self.store.push(&env.group_id, &env.from, &b64, true, store::Kind::Text).await;
+        self.store
+            .push(&env.group_id, &env.from, &b64, true, store::Kind::Text)
+            .await;
         Ok(())
     }
 
     pub async fn store_group_inbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
         let wire = serde_json::to_string(env)?;
         let b64 = crate::account::b64(wire.as_bytes());
-        self.store.push(&env.group_id, &env.from, &b64, true, store::Kind::Text).await;
+        self.store
+            .push(&env.group_id, &env.from, &b64, true, store::Kind::Text)
+            .await;
         Ok(())
     }
 
@@ -1882,12 +1875,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             tracing::debug!(group_id, seq, "sent group msg via server");
         } else {
             if self.p2p_all_peers_offline(group_id) {
-                eprintln!(
-                    "[group] all P2P peers offline — attempting re-dial for {group_id}"
-                );
+                eprintln!("[group] all P2P peers offline — attempting re-dial for {group_id}");
                 let _ = self.connect_to_group(group_id);
-                let deadline = std::time::Instant::now()
-                    + std::time::Duration::from_secs(6);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
                 while std::time::Instant::now() < deadline {
                     if !self.p2p_all_peers_offline(group_id) {
                         break;
@@ -2102,7 +2092,13 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         let text = req.text.clone().unwrap_or_default();
                         let chat = store::dm_chat_id(&self.peer_base58(), &peer_b58);
                         self.store
-                            .push(&chat, &peer_b58, &text, req.sealed.is_some(), store::Kind::Text)
+                            .push(
+                                &chat,
+                                &peer_b58,
+                                &text,
+                                req.sealed.is_some(),
+                                store::Kind::Text,
+                            )
                             .await;
                         Some(chat)
                     }
