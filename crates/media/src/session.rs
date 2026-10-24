@@ -212,7 +212,11 @@ impl PeerCall {
                 // It doesn't matter whether the sender currently has a track
                 // attached; replace it. Restore sendrecv direction so the new
                 // track actually transmits.
-                if sender.replace_track(Some(video_track.clone())).await.is_ok() {
+                if sender
+                    .replace_track(Some(video_track.clone()))
+                    .await
+                    .is_ok()
+                {
                     let _ = t.set_direction(RTCRtpTransceiverDirection::Sendrecv).await;
                     reused = true;
                     break;
@@ -228,7 +232,8 @@ impl PeerCall {
         let _ = self.pc().gathering_complete_promise().await;
 
         self.emit(
-            self.new_frame(SignalKind::Offer(offer.sdp.clone())).with_upgrade(kind, both_sides),
+            self.new_frame(SignalKind::Offer(offer.sdp.clone()))
+                .with_upgrade(kind, both_sides),
         );
         Ok(())
     }
@@ -303,7 +308,8 @@ impl PeerCall {
         let _ = self.pc().gathering_complete_promise().await;
 
         self.emit(
-            self.new_frame(SignalKind::Answer(answer.sdp.clone())).with_upgrade(kind, both),
+            self.new_frame(SignalKind::Answer(answer.sdp.clone()))
+                .with_upgrade(kind, both),
         );
         Ok(())
     }
@@ -328,12 +334,7 @@ impl PeerCall {
         };
         let (api, cfg_pc) = Self::built_api(cfg)?;
         let pc = Arc::new(api.new_peer_connection(cfg_pc).await?);
-        let call = Self::new(
-            offer.call_id.clone(),
-            from,
-            pc.clone(),
-            transport,
-        );
+        let call = Self::new(offer.call_id.clone(), from, pc.clone(), transport);
         call.learn_remote(&offer.from);
         call.set_local_sources(aud, cam, scr);
         call.add_local_tracks().await?;
@@ -568,11 +569,7 @@ impl PeerCall {
         // Emit the `Bye` *before* the local teardown so the transport and
         // PC are still alive to carry it.
         eprintln!("[call] hangup(): sending Bye to peer");
-        match self
-            .inner
-            .transport
-            .send(&self.new_frame(SignalKind::Bye))
-        {
+        match self.inner.transport.send(&self.new_frame(SignalKind::Bye)) {
             Ok(()) => eprintln!("[call] hangup(): Bye accepted by transport"),
             Err(e) => eprintln!("[call] hangup(): Bye send FAILED: {e}"),
         }
@@ -673,7 +670,10 @@ impl PeerCall {
             RemoteVideo::Camera
         };
         let call = self.clone();
-        eprintln!("[media] on_track: kind={:?} stream_id={stream_id}", track.kind());
+        eprintln!(
+            "[media] on_track: kind={:?} stream_id={stream_id}",
+            track.kind()
+        );
         runtime().spawn(async move {
             // One LONG-LIVED H.264 stateful decoder per track. `openh264::Decoder`
             // keeps motion/reference state across `decode` calls, which is
@@ -685,11 +685,10 @@ impl PeerCall {
             // in arrival order. SPS/PPS arrive ahead of their IDR frame and are
             // consumed (they return `None`); subsequent P/B NALs decode to
             // pictures that we forward to the remote sink.
-            let mut decoder = openh264::decoder::Decoder::new()
-                .expect("h264 decoder alloc");
+            let mut decoder = openh264::decoder::Decoder::new().expect("h264 decoder alloc");
             let mut depack = H264DePacketizer::new();
             let mut buf: Vec<u8> = vec![0u8; 8192];
-            let mut frames_decoded = 0u64;
+            // let mut frames_decoded = 0u64;
             loop {
                 match track.read(&mut buf).await {
                     Ok((pkt, _)) => {
@@ -703,15 +702,13 @@ impl PeerCall {
                             // NAL unit(s), then feed the stateful decoder.
                             let annexb = depack.depacketize(&pkt.payload);
                             if !annexb.is_empty() {
-                                if let Some((rgba, w, h)) =
-                                    decode_h264_seq(&mut decoder, &annexb)
-                                {
-                                    frames_decoded += 1;
-                                    if frames_decoded <= 3 || frames_decoded % 60 == 0 {
-                                        eprintln!(
-                                            "[media] video decoded #{frames_decoded} {w}x{h} ({remote_video:?})",
-                                        );
-                                    }
+                                if let Some((rgba, w, h)) = decode_h264_seq(&mut decoder, &annexb) {
+                                    // frames_decoded += 1;
+                                    // if frames_decoded <= 3 || frames_decoded % 60 == 0 {
+                                    //     eprintln!(
+                                    //         "[media] video decoded #{frames_decoded} {w}x{h} ({remote_video:?})",
+                                    //     );
+                                    // }
                                     match remote_video {
                                         RemoteVideo::Screen => {
                                             if let Some(cb) =
@@ -804,8 +801,7 @@ impl H264DePacketizer {
             Self::STAPA_NALU_TYPE => {
                 let mut off = 1; // skip STAP-A type byte
                 while off + 2 <= packet.len() {
-                    let nalu_size =
-                        ((packet[off] as usize) << 8) | packet[off + 1] as usize;
+                    let nalu_size = ((packet[off] as usize) << 8) | packet[off + 1] as usize;
                     off += 2;
                     if off + nalu_size > packet.len() {
                         break; // malformed / truncated
@@ -832,7 +828,8 @@ impl H264DePacketizer {
                 }
                 // Rebuild the NAL header: ref_idc | type.
                 if self.fua.is_empty() {
-                    let nalu_header = (b0 & Self::NALU_REF_IDC_BITMASK) | (b1 & Self::NALU_TYPE_BITMASK);
+                    let nalu_header =
+                        (b0 & Self::NALU_REF_IDC_BITMASK) | (b1 & Self::NALU_TYPE_BITMASK);
                     self.fua.push(nalu_header);
                 }
                 // Append this fragment's payload (after the 2-byte FU header).
@@ -895,11 +892,11 @@ mod h264_depacketize_tests {
     fn stap_a() {
         let mut d = H264DePacketizer::new();
         let stap = [
-            0x18u8,            // type 24 (STAP-A), lower 5 bits = 11000
-            0x00, 0x02,        // NALU1 size = 2
-            0x88, 0x88,        // NALU1 body
-            0x00, 0x03,        // NALU2 size = 3
-            0xC8, 0xC8, 0xC8,  // NALU2 body
+            0x18u8, // type 24 (STAP-A), lower 5 bits = 11000
+            0x00, 0x02, // NALU1 size = 2
+            0x88, 0x88, // NALU1 body
+            0x00, 0x03, // NALU2 size = 3
+            0xC8, 0xC8, 0xC8, // NALU2 body
         ];
         let out = d.depacketize(&stap);
         assert_eq!(out.len(), 4 + 2 + 4 + 3);
