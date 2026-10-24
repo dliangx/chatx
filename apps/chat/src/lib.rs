@@ -5141,10 +5141,12 @@ fn toggle_my_video(weak: slint::Weak<MainWindow>, kind: media::VKind) {
                 media::VKind::Scr => media::SignalKind::Screen(true),
             });
         }
-        // Install the local preview sink so the A slot shows *me*.
-        match kind {
-            media::VKind::Cam => call::install_local_cam_preview(),
-            media::VKind::Scr => call::install_local_scr_preview(),
+        // Install the local camera preview so the A slot shows *me*. Screen
+        // share has NO local preview (the UI shows only the remote peer; the
+        // A-slot `my-scr` thumbnail was removed to save CPU on the capture
+        // thread).
+        if kind == media::VKind::Cam {
+            call::install_local_cam_preview();
         }
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {

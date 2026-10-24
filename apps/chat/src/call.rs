@@ -278,11 +278,12 @@ pub fn start_call(
 
     wire_remote_sinks(&call, &audio, &queue);
 
+    // Local camera preview (offerer started a video call). Screen share does
+    // NOT install a local `my-scr` preview — the UI shows only the remote
+    // peer; see `bootstrap_media` caller comments. The outgoing screen encode
+    // to the peer runs through the separate `VidSource` slot.
     if opts.include_cam {
         install_local_cam_preview();
-    }
-    if opts.include_scr {
-        install_local_scr_preview();
     }
     spawn_event_drain(call.clone());
 
@@ -347,11 +348,11 @@ pub fn answer_offer(
 
     wire_remote_sinks(&call, &audio, &queue);
 
+    // Local camera preview (offerer started a video call). Screen share does
+    // NOT install a local `my-scr` preview — the UI shows only the remote
+    // peer; the outgoing encode goes through the separate `VidSource` slot.
     if opts.include_cam {
         install_local_cam_preview();
-    }
-    if opts.include_scr {
-        install_local_scr_preview();
     }
     spawn_event_drain(call.clone());
 
@@ -1037,86 +1038,6 @@ pub(crate) fn install_local_cam_preview() {
             });
         }
     })));
-}
-
-/// Install the local screen preview sink so the UI shows *my* screen in the
-/// A slot even before the peer starts receiving frames. The `call_dispatcher`
-/// forwards each screen frame to this hook in parallel with the outgoing
-/// `VidSource`. No mirror — the screen is not a mirror feed.
-pub(crate) fn install_local_scr_preview() {
-    // Gen guard: if the call is torn down between when the frame arrives on
-    // the capture thread and when we hit the UI, we skip the downscale +
-    // copy on the capture thread (the full-res desktop frame is ~14.7 MB —
-    // no point building it for a UI slot that is about to be wiped).
-    let g = CALL_GEN.load(std::sync::atomic::Ordering::Acquire);
-    // The A slot is tiny (~150x94). Ship a downscaled local screen to the UI
-    // instead of the full-resolution desktop frame (2560x1440 = ~14.7 MB each)
-    // — the full-res encode for the peer happens via the `VidSource`, not here.
-    call_dispatcher::set_scr_preview(Some(Box::new(move |rgba: &[u8], w: u32, h: u32| {
-        if !gen_live(g) {
-            return;
-        }
-        if let Some(weak) = weak_window() {
-            let (dw, dh) = fit_within(w, h, SCR_PREVIEW_MAX_W);
-            let local = if dw == w && dh == h {
-                rgba.to_vec()
-            } else {
-                downscale_rgba(rgba, w, h, dw, dh)
-            };
-            let _ = slint::invoke_from_event_loop(move || {
-                if !gen_live(g) {
-                    return;
-                }
-                if let Some(ui) = weak.upgrade() {
-                    let img = rgba_to_slint(&local, dw, dh);
-                    let cs = ui.global::<CallState>();
-                    cs.set_my_scr(img);
-                    cs.set_has_my_scr(true);
-                }
-            });
-        }
-    })));
-}
-
-/// Max width for the *local* screen preview shipped to the UI (the A slot is a
-/// small PIP). The outgoing `VidSource` for the peer is unaffected (full-res).
-const SCR_PREVIEW_MAX_W: u32 = 640;
-
-/// Fit `w`x`h` inside `max_w` (preserving aspect), never upscaling.
-fn fit_within(w: u32, h: u32, max_w: u32) -> (u32, u32) {
-    if w <= max_w || w == 0 || h == 0 {
-        return (w, h);
-    }
-    let scale = max_w as f32 / w as f32;
-    let dw = max_w;
-    let dh = (h as f32 * scale).round().max(1.0) as u32;
-    (dw, dh)
-}
-
-/// Nearest-neighbour downscale of an RGBA8888 buffer to exact `dw`x`dh`.
-fn downscale_rgba(rgba: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
-    if dw == 0 || dh == 0 || sw == 0 || sh == 0 || rgba.is_empty() {
-        return Vec::new();
-    }
-    let src_w = sw as usize;
-    let mut out = vec![0u8; (dw as usize) * (dh as usize) * 4];
-    let mut j = 0usize;
-    while (j as u32) < dw {
-        let sx = ((j as u32) * sw / dw).min(sw - 1) as usize;
-        let mut i = 0usize;
-        while (i as u32) < dh {
-            let sy = ((i as u32) * sh / dh).min(sh - 1) as usize;
-            let s = sy * src_w + sx;
-            let d = (i * (dw as usize) + j) * 4;
-            out[d] = rgba[s * 4];
-            out[d + 1] = rgba[s * 4 + 1];
-            out[d + 2] = rgba[s * 4 + 2];
-            out[d + 3] = rgba[s * 4 + 3];
-            i += 1;
-        }
-        j += 1;
-    }
-    out
 }
 
 /// Watch the `PeerCall` lifecycle events. When the peer ends the call

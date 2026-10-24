@@ -208,13 +208,12 @@ pub fn on_screen_frame(bytes: Vec<u8>, w: u32, h: u32, fmt: u32) {
     if let Some(src) = call_scr_slot().lock().unwrap().clone() {
         src.push(&rgba, w, h);
     }
-    // 2) UI preview sink (if installed by `call::install_local_scr_preview`).
-    //    Throttled: full-resolution screen frames are large, and the capture
-    //    thread can run them at 30–60fps. Unthrottled, each frame does a
-    //    multi-MB copy + an `invoke_from_event_loop`, which starves the Slint
-    //    UI thread and locks the app. Cap the local "me" screen preview to
-    //    a steady ~10fps; the peer-facing `VidSource` push above is *not*
-    //    throttled (it is just the latest-frame-wins slot the encoder drains).
+    // 2) UI preview sink, if a caller installed one. Screen share no longer
+    //    installs a local `my-scr` preview (the call UI shows only the remote
+    //    peer), so for the screen path this slot is typically `None` and the
+    //    branch below is a no-op — saving the per-frame downscale + Slint
+    //    rebake on the capture thread. Kept so other callers can still plug a
+    //    sink in. The peer-facing `VidSource` push above is *not* affected.
     let now = frame_ms();
     let last = SCR_PREVIEW_LAST_MS.load(Ordering::Relaxed);
     if now.saturating_sub(last) >= 100 {
