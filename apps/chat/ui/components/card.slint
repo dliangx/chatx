@@ -7,9 +7,7 @@ export component CardView inherits Rectangle {
     in property <string> title;
     in property <string> user;
     in property <bool> is-liked;
-    in property <int> likes;
     in property <bool> is-recommended;
-    in property <int> recommends;
     callback clicked(int);
     callback like-toggled();
     callback recommend-toggled();
@@ -76,17 +74,6 @@ export component CardView inherits Rectangle {
                 vertical-alignment: center;
                 overflow: elide;
                 color: Theme.fg-muted;
-            }
-
-            Text {
-                x: root.width - 80px;
-                width: 28px;
-                height: 16px;
-                text: root.likes;
-                font-size: 12px;
-                horizontal-alignment: right;
-                vertical-alignment: center;
-                color: root.is-liked ? Theme.like : Theme.fg-muted;
             }
 
             Icon {

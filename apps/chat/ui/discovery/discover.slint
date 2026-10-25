@@ -65,9 +65,7 @@ export component DiscoverView inherits Rectangle {
             title: card.title;
             user: card.user;
             is-liked: card.liked;
-            likes: card.likes;
             is-recommended: card.recommended;
-            recommends: card.recommends;
             id: card.id;
             image: card.image;
             clicked(id) => { AppState.push-sub(SubPageType.DiscoverDetail, id); }
