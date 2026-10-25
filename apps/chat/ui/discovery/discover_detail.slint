@@ -18,6 +18,9 @@ export global PostDetailState {
     in property <string> time;
     in property <bool> liked: false;
     in property <int> likes: 0;
+    in property <string> recommended-by;
+    in property <bool> recommended: false;
+    in property <int> recommends: 0;
     in property <int> comments: 0;
     in property <[image]> media: [];
     in property <[CommentRow]> comment-list: [];
@@ -25,6 +28,7 @@ export global PostDetailState {
 
     callback request-load(int);
     callback toggle-like(int);
+    callback toggle-recommend(int);
     callback add-comment(int, string);
     callback clear-comment();
     // Tapping a media tile opens the full-screen image viewer on this index
@@ -179,7 +183,7 @@ export component DiscoverDetailView inherits Rectangle {
                 color: Theme.fg-muted;
             }
 
-            // 4) Like row.
+            // 4) Like + Recommend row.
             HorizontalLayout {
                 alignment: start;
                 spacing: 8px;
@@ -188,19 +192,42 @@ export component DiscoverDetailView inherits Rectangle {
                     size: 22px;
                     glyph: Glyph.heart;
                     tint: PostDetailState.liked ? Theme.like : Theme.fg-muted;
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => { PostDetailState.toggle-like(root.key); }
+                    }
                 }
 
                 Text {
-                    width: 120px;
+                    width: 40px;
                     text: PostDetailState.likes;
                     font-size: 13px;
                     vertical-alignment: center;
                     color: PostDetailState.liked ? #ff2442 : Theme.fg-muted;
                 }
 
+                Icon {
+                    size: 22px;
+                    glyph: Glyph.good;
+                    tint: PostDetailState.recommended ? Theme.brand : Theme.fg-muted;
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => { PostDetailState.toggle-recommend(root.key); }
+                    }
+                }
+
+                Text {
+                    width: 40px;
+                    text: PostDetailState.recommends;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    color: PostDetailState.recommended ? Theme.brand : Theme.fg-muted;
+                }
+
                 TouchArea {
                     horizontal-stretch: 1;
-                    clicked => { PostDetailState.toggle-like(root.key); }
                 }
 
                 Text {
@@ -212,7 +239,7 @@ export component DiscoverDetailView inherits Rectangle {
                 }
             }
 
-            // 5) Liked-by (optional).
+            // 5) Liked-by / Recommended-by (optional).
             if PostDetailState.liked-by != "":
             Text {
                 height: 18px;
@@ -221,6 +248,16 @@ export component DiscoverDetailView inherits Rectangle {
                 vertical-alignment: center;
                 overflow: elide;
                 color: Theme.like;
+            }
+
+            if PostDetailState.recommended-by != "":
+            Text {
+                height: 18px;
+                text: PostDetailState.recommended-by;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+                color: Theme.brand;
             }
 
             // 6) Divider + section header.

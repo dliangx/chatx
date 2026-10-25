@@ -532,6 +532,13 @@ pub fn run_app() {
 
     {
         let weak = weak.clone();
+        ui.global::<AppState>().on_toggle_recommend(move |key| {
+            toggle_discover_recommend(weak.clone(), key);
+        });
+    }
+
+    {
+        let weak = weak.clone();
         ui.global::<AppState>().on_discover_load_more(move || {
             discover_load_more(weak.clone());
         });
@@ -1183,6 +1190,12 @@ pub fn run_app() {
         let weak = weak.clone();
         ui.global::<PostDetailState>().on_toggle_like(move |key| {
             toggle_detail_like(weak.clone(), key);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<PostDetailState>().on_toggle_recommend(move |key| {
+            toggle_detail_recommend(weak.clone(), key);
         });
     }
     {
@@ -2639,6 +2652,8 @@ fn publish_discover(state: &AppState, backend: &ArcBackend) {
             user: SharedString::from(r.author.clone()),
             likes: r.likes as i32,
             liked: r.liked,
+            recommends: r.recommends as i32,
+            recommended: r.recommended,
             image: load_image_cached(&r.cover),
         })
         .collect();
@@ -3242,6 +3257,64 @@ fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
         rt.spawn(async move {
             let _ = data::persist_like_toggle(&pool, &me, post_id, want_liked).await;
         });
+    }
+}
+
+fn toggle_discover_recommend(weak: slint::Weak<MainWindow>, key: i32) {
+    let backend = BACKEND.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
+    let (Some(backend), Some(pool)) = (backend, pool) else {
+        return;
+    };
+    let (post_id, want_recommended) = {
+        let mut g = backend.blocking_write();
+        let (recommended, _recs) = g.toggle_recommend(key);
+        (g.post_id_for(key), recommended)
+    };
+    let me = current_me();
+    if let Some(ui) = weak.upgrade() {
+        publish_to_views(&ui.global::<AppState>(), backend.clone());
+    }
+    if let Some(post_id) = post_id {
+        let rt = runtime();
+        rt.spawn(async move {
+            let _ = data::persist_recommend_toggle(&pool, &me, post_id, want_recommended).await;
+            // Propagate to my friends: bump the local copy's `timestamp` so it
+            // lands past any peer's high-water cursor, then re-notify the
+            // signal server under *my* peer/user. My friends' next sync round
+            // will see the pointer, dial me, and pull the post over the binary
+            // moment channel (existing friend-only path — no wire change).
+            propagate_recommend(&pool, post_id, want_recommended).await;
+        });
+    }
+}
+
+/// Bump `social_posts.timestamp` for `post_id` to now (so any syncing friend
+/// whose cursor is behind us will pick the row up on its next round), then
+/// notify the signal server under the current device's (user_id, peer_id).
+/// No-op when `want_recommended` is false — we only (re-)share on the way up.
+async fn propagate_recommend(pool: &sqlx::SqlitePool, post_id: i64, want_recommended: bool) {
+    if !want_recommended {
+        return;
+    }
+    let new_ts = sqlite::now_ms();
+    if let Err(e) = sqlite::social_feed::set_timestamp(pool, post_id, new_ts).await {
+        eprintln!("[moment] recommend-bump set_timestamp failed for {post_id}: {e}");
+        return;
+    }
+    let client = crate::CLIENT.lock().unwrap().clone();
+    if let Some(client) = client {
+        let my_peer = client.peer_base58().to_string();
+        let my_user = client.user_id().to_string();
+        if let Err(e) = client.dir().notify_post(&my_user, &my_peer, new_ts) {
+            eprintln!(
+                "[moment] recommend-bump notify_post failed: {e} (user={my_user}, peer={my_peer}, ts={new_ts})"
+            );
+            return;
+        }
+        eprintln!(
+            "[moment] recommend-bump notify -> server: user={my_user} peer={my_peer} ts={new_ts}"
+        );
     }
 }
 
@@ -3866,6 +3939,8 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
                     author: my_nickname,
                     likes: 0,
                     liked: false,
+                    recommends: 0,
+                    recommended: false,
                     cover,
                 };
                 g.discover.insert(0, row);
@@ -6061,6 +6136,9 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
         let i_liked = sqlite::social_feed::has_liked(&pool, post_id, me_id)
             .await
             .unwrap_or(false);
+        let i_recommended = sqlite::social_feed::has_recommended(&pool, post_id, me_id)
+            .await
+            .unwrap_or(false);
         let mut likers: Vec<String> = Vec::new();
         if let Ok(ids) = sqlite::social_feed::likers(&pool, post_id).await {
             for uid in ids.iter().cloned().take(20) {
@@ -6084,6 +6162,31 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
                 format!("{} and {} more liked this", head, likers.len())
             } else {
                 format!("{} liked this", head)
+            }
+        };
+        let mut recs: Vec<String> = Vec::new();
+        if let Ok(ids) = sqlite::social_feed::recommenders(&pool, post_id).await {
+            for uid in ids.iter().cloned().take(20) {
+                let name = match sqlite::users::get(&pool, uid).await {
+                    Ok(Some(u)) => u
+                        .nickname
+                        .clone()
+                        .unwrap_or_else(|| u.username.clone().unwrap_or_default()),
+                    _ => uid.to_string(),
+                };
+                if !name.is_empty() {
+                    recs.push(name);
+                }
+            }
+        }
+        let recs_line = if recs.is_empty() {
+            String::new()
+        } else {
+            let head = recs.join("、");
+            if recs.len() > 5 {
+                format!("{} and {} more recommended this", head, recs.len())
+            } else {
+                format!("{} recommended this", head)
             }
         };
 
@@ -6118,8 +6221,11 @@ fn load_post_detail(weak: slint::Weak<MainWindow>, key: i32) {
             ps.set_time(SharedString::from(fmt_time(post.timestamp)));
             ps.set_liked(i_liked);
             ps.set_likes(post.like_count as i32);
+            ps.set_recommended(i_recommended);
+            ps.set_recommends(post.recommend_count as i32);
             ps.set_comments(post.comment_count as i32);
             ps.set_liked_by(SharedString::from(likers_line));
+            ps.set_recommended_by(SharedString::from(recs_line));
             let media: Vec<SlintImage> = media_urls
                 .into_iter()
                 .filter(|s| !s.is_empty())
@@ -6173,6 +6279,39 @@ fn toggle_detail_like(weak: slint::Weak<MainWindow>, key: i32) {
         let me = current_me();
         rt.spawn(async move {
             let _ = data::persist_like_toggle(&pool, &me, post_id, want_liked).await;
+        });
+    }
+}
+
+fn toggle_detail_recommend(weak: slint::Weak<MainWindow>, key: i32) {
+    let backend = BACKEND.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
+    let (Some(backend), Some(pool)) = (backend, pool) else {
+        publish_detail_status(
+            weak,
+            key,
+            SharedString::from("Not signed in or backend not ready"),
+        );
+        return;
+    };
+    let post_id = detail_key_post(&backend, key);
+    let (want_recommended, recs) = {
+        let mut g = backend.blocking_write();
+        let (recommended, recs) = g.toggle_recommend(key);
+        (recommended, recs)
+    };
+    if let Some(ui) = weak.upgrade() {
+        publish_to_views(&ui.global::<AppState>(), backend.clone());
+        let ps = ui.global::<PostDetailState>();
+        ps.set_recommended(want_recommended);
+        ps.set_recommends(recs as i32);
+    }
+    if let Some(post_id) = post_id {
+        let rt = runtime();
+        let me = current_me();
+        rt.spawn(async move {
+            let _ = data::persist_recommend_toggle(&pool, &me, post_id, want_recommended).await;
+            propagate_recommend(&pool, post_id, want_recommended).await;
         });
     }
 }

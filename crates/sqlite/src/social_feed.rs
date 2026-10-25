@@ -12,6 +12,15 @@ pub struct SocialPost {
     pub timestamp: i64,
     pub like_count: i64,
     pub comment_count: i64,
+    #[sqlx(default)]
+    pub recommend_count: i64,
+}
+
+#[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
+pub struct SocialRecommend {
+    pub post_id: i64,
+    pub user_id: i64,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
@@ -96,6 +105,7 @@ pub async fn delete_post(pool: &Pool, id: i64) -> anyhow::Result<bool> {
     {
         sqlx::query("DELETE FROM social_comments WHERE post_id = ?1").bind(id).execute(trans.as_mut()).await?;
         sqlx::query("DELETE FROM social_likes WHERE post_id = ?1").bind(id).execute(trans.as_mut()).await?;
+        sqlx::query("DELETE FROM social_recommends WHERE post_id = ?1").bind(id).execute(trans.as_mut()).await?;
         let n = sqlx::query("DELETE FROM social_posts WHERE id = ?1").bind(id).execute(trans.as_mut()).await?;
         if n.rows_affected() == 0 {
             trans.rollback().await?;
@@ -166,6 +176,72 @@ pub async fn has_liked(pool: &Pool, post_id: i64, user_id: i64) -> anyhow::Resul
 pub async fn likers(pool: &Pool, post_id: i64) -> anyhow::Result<Vec<i64>> {
     let rows: Vec<(i64,)> =
         sqlx::query_as("SELECT user_id FROM social_likes WHERE post_id = ?1 ORDER BY created_at")
+            .bind(post_id)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().map(|(u,)| u).collect())
+}
+
+// --- recommends -----------------------------------------------------------
+
+pub async fn bump_recommend_count(pool: &Pool, post_id: i64, delta: i64) -> anyhow::Result<()> {
+    sqlx::query("UPDATE social_posts SET recommend_count = MAX(0, recommend_count + ?2) WHERE id = ?1")
+        .bind(post_id)
+        .bind(delta)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_timestamp(pool: &Pool, post_id: i64, ts: i64) -> anyhow::Result<()> {
+    sqlx::query("UPDATE social_posts SET timestamp = ?2 WHERE id = ?1")
+        .bind(post_id)
+        .bind(ts)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn recommend(pool: &Pool, post_id: i64, user_id: i64) -> anyhow::Result<bool> {
+    let n = sqlx::query(
+        "INSERT OR IGNORE INTO social_recommends (post_id, user_id, created_at) VALUES (?1, ?2, ?3)",
+    )
+    .bind(post_id)
+    .bind(user_id)
+    .bind(now_ms())
+    .execute(pool)
+    .await?;
+    if n.rows_affected() > 0 {
+        bump_recommend_count(pool, post_id, 1).await?;
+    }
+    Ok(n.rows_affected() > 0)
+}
+
+pub async fn unrecommend(pool: &Pool, post_id: i64, user_id: i64) -> anyhow::Result<bool> {
+    let n = sqlx::query("DELETE FROM social_recommends WHERE post_id = ?1 AND user_id = ?2")
+        .bind(post_id)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    if n.rows_affected() > 0 {
+        bump_recommend_count(pool, post_id, -1).await?;
+    }
+    Ok(n.rows_affected() > 0)
+}
+
+pub async fn has_recommended(pool: &Pool, post_id: i64, user_id: i64) -> anyhow::Result<bool> {
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT 1 FROM social_recommends WHERE post_id = ?1 AND user_id = ?2")
+            .bind(post_id)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.is_some())
+}
+
+pub async fn recommenders(pool: &Pool, post_id: i64) -> anyhow::Result<Vec<i64>> {
+    let rows: Vec<(i64,)> =
+        sqlx::query_as("SELECT user_id FROM social_recommends WHERE post_id = ?1 ORDER BY created_at")
             .bind(post_id)
             .fetch_all(pool)
             .await?;

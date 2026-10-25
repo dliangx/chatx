@@ -7,6 +7,7 @@ import { SearchBar } from "../components/search.slint";
 export component DiscoverView inherits Rectangle {
     in property <[DiscoverCard]> cards: [];
     callback like-toggled(int);
+    callback recommend-toggled(int);
 
     width: 100%;
     height: 100%;
@@ -65,10 +66,13 @@ export component DiscoverView inherits Rectangle {
             user: card.user;
             is-liked: card.liked;
             likes: card.likes;
+            is-recommended: card.recommended;
+            recommends: card.recommends;
             id: card.id;
             image: card.image;
             clicked(id) => { AppState.push-sub(SubPageType.DiscoverDetail, id); }
             like-toggled => { root.like-toggled(card.id); }
+            recommend-toggled => { root.recommend-toggled(card.id); }
         }
     }
 }

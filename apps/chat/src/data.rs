@@ -73,6 +73,8 @@ pub struct DiscoverRow {
     pub author: String,
     pub likes: i64,
     pub liked: bool,
+    pub recommends: i64,
+    pub recommended: bool,
     /// First media file path (cover) for the discover card. Empty when the
     /// post has no media.
     pub cover: String,
@@ -174,6 +176,20 @@ impl DataBackend {
                 row.liked = !row.liked;
                 row.likes += if row.liked { 1 } else { -1 };
                 result = (row.liked, row.likes);
+            }
+        }
+        result
+    }
+
+    /// Apply a recommend/unrecommend toggle. Mirrors `toggle_like` for the
+    /// separate `recommend_count` / `social_recommends` path.
+    pub fn toggle_recommend(&mut self, key: i32) -> (bool, i64) {
+        let mut result = (false, 0);
+        for row in self.discover.iter_mut() {
+            if row.key == key {
+                row.recommended = !row.recommended;
+                row.recommends += if row.recommended { 1 } else { -1 };
+                result = (row.recommended, row.recommends);
             }
         }
         result
@@ -442,6 +458,8 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
                 .unwrap_or_else(|| p.author_username.unwrap_or_default()),
             likes: p.like_count,
             liked: p.i_liked,
+            recommends: p.recommend_count,
+            recommended: p.i_recommended,
             cover: first_preview_or_media(&p.preview_urls, &p.media_urls),
         });
     }
@@ -620,6 +638,25 @@ pub async fn persist_like_toggle(pool: &SqlitePool, me: &str, post_id: i64, want
     Ok(())
 }
 
+/// Persist a discovery recommend/unrecommend toggle to SQLite (fire and forget).
+/// Mirrors `persist_like_toggle` for the separate `social_recommends` path.
+pub async fn persist_recommend_toggle(pool: &SqlitePool, me: &str, post_id: i64, want_recommended: bool) -> anyhow::Result<()> {
+    let me_id = sqlite::users::get_by_username(pool, me)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no user row for {me}; run login to create one"))?
+        .id;
+    let currently = sqlite::social_feed::has_recommended(pool, post_id, me_id).await?;
+    if currently == want_recommended {
+        return Ok(());
+    }
+    if want_recommended {
+        sqlite::social_feed::recommend(pool, post_id, me_id).await?;
+    } else {
+        sqlite::social_feed::unrecommend(pool, post_id, me_id).await?;
+    }
+    Ok(())
+}
+
 /// Resolve a group-message sender to a display name: the account's nickname,
 /// falling back to its username, falling back to the raw sender string. The
 /// sender may be a libp2p PeerId (group members are keyed by device) or, for
@@ -687,6 +724,8 @@ mod tests {
             author: "a".into(),
             likes: 3,
             liked: false,
+            recommends: 0,
+            recommended: false,
             cover: String::new(),
         });
         let (liked, likes) = b.toggle_like(key);

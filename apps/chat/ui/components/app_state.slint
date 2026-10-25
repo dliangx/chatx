@@ -80,6 +80,8 @@ export struct DiscoverCard {
     user: string,
     likes: int,
     liked: bool,
+    recommends: int,
+    recommended: bool,
     image: image,
 }
 
@@ -185,6 +187,7 @@ export global AppState {
     in-out property <length> xp: 0px;
 
     callback toggle-like(int);
+    callback toggle-recommend(int);
     callback delete-note(int);
     callback copy-note(string);
     callback delete-contact(int);

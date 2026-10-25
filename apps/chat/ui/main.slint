@@ -106,6 +106,7 @@ export component MainWindow inherits Window {
                     height: 100%;
                     cards: AppState.discover;
                     like-toggled(id) => { AppState.toggle-like(id); }
+                    recommend-toggled(id) => { AppState.toggle-recommend(id); }
                 }
 
                 MeView {
@@ -193,6 +194,7 @@ export component MainWindow inherits Window {
                     height: 100%;
                     cards: AppState.discover;
                     like-toggled(id) => { AppState.toggle-like(id); }
+                    recommend-toggled(id) => { AppState.toggle-recommend(id); }
                 }
 
                 MeView {

@@ -333,6 +333,8 @@ async fn push_nodes_to_ui(
             author: n.author,
             likes: 0,
             liked: false,
+            recommends: 0,
+            recommended: false,
             cover,
         });
     }

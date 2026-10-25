@@ -229,10 +229,13 @@ pub struct FeedItem {
     pub timestamp: i64,
     pub like_count: i64,
     pub comment_count: i64,
+    pub recommend_count: i64,
     pub author_nickname: Option<String>,
     pub author_username: Option<String>,
     pub author_avatar: Option<String>,
     pub i_liked: bool,
+    #[sqlx(default)]
+    pub i_recommended: bool,
 }
 
 /// Global public feed (optional friends-only), including the viewer's like state.
@@ -246,10 +249,12 @@ pub async fn feed(pool: &Pool, viewer: i64, include_friend_posts: bool, limit: u
         "SELECT
             p.id, p.author_id, p.content, p.media_urls, p.preview_urls, p.visibility, p.timestamp,
             p.like_count, p.comment_count,
+            COALESCE(p.recommend_count, 0) AS recommend_count,
             u.nickname    AS author_nickname,
             u.username    AS author_username,
             u.avatar_path AS author_avatar,
-            EXISTS(SELECT 1 FROM social_likes l WHERE l.post_id = p.id AND l.user_id = ?4) AS i_liked
+            EXISTS(SELECT 1 FROM social_likes l WHERE l.post_id = p.id AND l.user_id = ?4) AS i_liked,
+            EXISTS(SELECT 1 FROM social_recommends r WHERE r.post_id = p.id AND r.user_id = ?4) AS i_recommended
           FROM social_posts p
           LEFT JOIN users u ON u.id = p.author_id
           WHERE 1=1 {author_filter}
@@ -274,10 +279,12 @@ pub async fn author_feed(pool: &Pool, author_id: i64, limit: u32, offset: u32) -
         "SELECT
             p.id, p.author_id, p.content, p.media_urls, p.preview_urls, p.visibility, p.timestamp,
             p.like_count, p.comment_count,
+            COALESCE(p.recommend_count, 0) AS recommend_count,
             u.nickname    AS author_nickname,
             u.username    AS author_username,
             u.avatar_path AS author_avatar,
-            EXISTS(SELECT 1 FROM social_likes l WHERE l.post_id = p.id AND l.user_id = ?1) AS i_liked
+            EXISTS(SELECT 1 FROM social_likes l WHERE l.post_id = p.id AND l.user_id = ?1) AS i_liked,
+            EXISTS(SELECT 1 FROM social_recommends r WHERE r.post_id = p.id AND r.user_id = ?1) AS i_recommended
           FROM social_posts p
           LEFT JOIN users u ON u.id = p.author_id
           WHERE p.author_id = ?1
