@@ -2757,10 +2757,6 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 "[chat] load_chat_messages{chat_key}: no peer id resolved (chat_id={chat_id})"
             ),
         }
-    } else {
-        eprintln!(
-            "[chat] load_chat_messages{chat_key}: group chat, skipping dm warm_dial (chat_id={chat_id})"
-        );
     }
     let me_peer = client.peer_base58().to_string();
     let me = client.user_id().to_string();
@@ -2995,10 +2991,8 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             // Build rows while pulling each photo row's (tiny) cached preview
             // via `load_image_cached` — a cache hit from the prime step — so the
             // full original is never decoded here.
-            let image_by_row: std::collections::HashMap<usize, String> = image_rows
-                .iter()
-                .map(|(i, p)| (*i, p.clone()))
-                .collect();
+            let image_by_row: std::collections::HashMap<usize, String> =
+                image_rows.iter().map(|(i, p)| (*i, p.clone())).collect();
             let messages: Vec<crate::MessageData> = rendered
                 .into_iter()
                 .enumerate()

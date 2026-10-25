@@ -29,8 +29,8 @@ use crate::{AppState, CallState, GlobalOverlayType, MainWindow};
 use chatx_core::Client;
 use chatx_core::signal::HttpDirectory;
 use media::{
-    AudSource, CallMode, Config as MediaConfig, PeerCall, PeerEvent, SignalFrame, SignalKind,
-    SignalTransport, VidSource,
+    AudSource, CallMode, Config as MediaConfig, PeerCall, SignalFrame, SignalKind, SignalTransport,
+    VidSource,
 };
 use slint::ComponentHandle;
 use slint::SharedString;
