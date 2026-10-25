@@ -797,6 +797,59 @@ pub fn run_app() {
                 open_conversation_with_contact(weak.clone(), key);
             });
     }
+
+    // Forward flow: chat bubble long-press → "forward" picks a contact.
+    {
+        let wk = weak.clone();
+        let bk = BACKEND.lock().unwrap().clone();
+        ui.global::<AppState>().on_forward_text(move |text, key| {
+            let body = text.to_string();
+            let target_key = key;
+            let bk2 = bk.clone();
+            if let Some(chat_key) = send_dm_to_contact(wk.clone(), target_key, body) {
+                let wk_in = wk.clone();
+                // Navigate back to the Chat tab and open the target conversation
+                // so the user lands on the chat page they just forwarded to.
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = wk_in.upgrade() else { return };
+                    let st = ui.global::<AppState>();
+                    {
+                        let mut nav = st.get_nav_state();
+                        if nav.active_tab != 0 {
+                            nav.active_tab = 0;
+                            st.set_nav_state(nav);
+                        }
+                    }
+                    if let Some(backend) = bk2 {
+                        publish_chat_rows(&st, backend);
+                    }
+                    load_chat_messages(ui.as_weak(), chat_key);
+                    push_sub_history(
+                        &st,
+                        SubPageEntry {
+                            page: SubPageType::ChatRoom,
+                            payload: chat_key,
+                        },
+                    );
+                });
+            }
+        });
+    }
+    {
+        let wk = weak.clone();
+        ui.global::<AppState>().on_cancel_forward(move || {
+            if let Some(ui) = wk.upgrade() {
+                let st = ui.global::<AppState>();
+                st.set_forward_target(SharedString::new());
+            }
+        });
+    }
+    {
+        let wk = weak.clone();
+        ui.global::<AppState>().on_save_note(move |text| {
+            save_my_note(wk.clone(), text.to_string());
+        });
+    }
     call::set_weak_window(weak.clone());
     // Observe the *peer's* camera / screen on-off control signals. The media
     // crate fires this hook when it receives a `SignalKind::Cam`/`Screen` on
@@ -5882,6 +5935,48 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
         "[chat] open_conversation: +{}ms invoke_from_event_loop queued (not yet run)",
         t0.elapsed().as_millis()
     );
+}
+
+fn send_dm_to_contact(weak: slint::Weak<MainWindow>, key: i32, body: String) -> Option<i32> {
+    if !require_approved(weak.clone()) {
+        return None;
+    }
+    let backend = BACKEND.lock().unwrap().clone();
+    let Some(backend) = backend else {
+        return None;
+    };
+    let c = {
+        let g = backend.blocking_read();
+        g.contacts.iter().find(|r| r.key == key).cloned()
+    };
+    let Some(c) = c else {
+        return None;
+    };
+    if c.peer_id.is_empty() || body.trim().is_empty() {
+        return None;
+    }
+    let me_peer = match CLIENT.lock().unwrap().as_ref() {
+        Some(client) => client.peer_base58(),
+        None => return None,
+    };
+    let chat_id = dm_chat_id(&me_peer, &c.peer_id);
+    let chat_key = {
+        let existing = backend
+            .blocking_read()
+            .chats
+            .iter()
+            .find(|c| c.chat_id == chat_id)
+            .map(|c| c.key);
+        match existing {
+            Some(k) => k,
+            None => {
+                let mut g = backend.blocking_write();
+                g.append_chat(chat_id, c.name.clone(), false, c.peer_id.clone(), c.image.clone())
+            }
+        }
+    };
+    send_chat_message(weak, chat_key, body);
+    Some(chat_key)
 }
 
 fn publish_detail_status(weak: slint::Weak<MainWindow>, key: i32, msg: SharedString) {

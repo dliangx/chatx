@@ -198,6 +198,13 @@ export global AppState {
     // by the chat add-menu (type 1) so the audio / video call and screen-share entries can reuse the
     // ProfileState call callbacks. -1 when the peer is not a known contact.
     in-out property <int> current-chat-peer-key: -1;
+    // Forward flow: chat bubble long-press "forward" arms the picker; the
+    // contacts tab shows a "forward to" banner until forwarded or cancelled.
+    in-out property <string> forward-target: "";
+    callback forward-text(string, int);
+    callback cancel-forward();
+    // Chat bubble long-press "favorite" → save the text into the user's notes.
+    callback save-note(string);
     callback pick-group-member(int);
     callback unpick-group-member(int);
     callback create-group();
