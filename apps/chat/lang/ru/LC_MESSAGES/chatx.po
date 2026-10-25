@@ -126,6 +126,9 @@ msgstr "Я"
 msgid "Members selected"
 msgstr "Участники выбраны"
 
+msgid "MIC"
+msgstr "Микрофон"
+
 msgid "Messages"
 msgstr "Сообщения"
 

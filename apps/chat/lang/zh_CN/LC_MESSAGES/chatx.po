@@ -126,6 +126,9 @@ msgstr "我的"
 msgid "Members selected"
 msgstr "已选择成员"
 
+msgid "MIC"
+msgstr "麦克风"
+
 msgid "Messages"
 msgstr "消息"
 

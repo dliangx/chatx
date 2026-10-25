@@ -126,6 +126,9 @@ msgstr "Yo"
 msgid "Members selected"
 msgstr "Miembros seleccionados"
 
+msgid "MIC"
+msgstr "Micro"
+
 msgid "Messages"
 msgstr "Mensajes"
 

@@ -126,6 +126,9 @@ msgstr "マイページ"
 msgid "Members selected"
 msgstr "メンバー選択済み"
 
+msgid "MIC"
+msgstr "マイク"
+
 msgid "Messages"
 msgstr "メッセージ"
 

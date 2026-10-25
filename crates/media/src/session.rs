@@ -553,6 +553,15 @@ impl PeerCall {
         self.pc().connection_state()
     }
 
+    /// True if the peer connection is currently `Connected`. Used by the app
+    /// to compensate for the `async_broadcast` race where the `Connected`
+    /// event is emitted (and dropped, no receiver yet) before the drain's
+    /// receiver is created — common on the answerer side, since ICE can
+    /// complete while the user is still looking at the Accept/Decline panel.
+    pub fn is_connected(&self) -> bool {
+        self.pc().connection_state() == RTCPeerConnectionState::Connected
+    }
+
     pub fn call_id(&self) -> &str {
         &self.inner.call_id
     }
@@ -611,6 +620,7 @@ impl PeerCall {
             let pc = self.pc();
             let tx = self.inner.event_tx.clone();
             pc.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
+                tracing::trace!(?s, "peer-connection state change");
                 let ev = match s {
                     RTCPeerConnectionState::New | RTCPeerConnectionState::Connecting => {
                         PeerEvent::Connecting

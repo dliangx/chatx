@@ -126,6 +126,9 @@ msgstr "Ich"
 msgid "Members selected"
 msgstr "Mitglieder ausgewählt"
 
+msgid "MIC"
+msgstr "Mikrofon"
+
 msgid "Messages"
 msgstr "Nachrichten"
 

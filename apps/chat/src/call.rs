@@ -178,8 +178,7 @@ fn fire_ui_end() {
 /// our teardown reset — re-populating the `CallState` image slots with the
 /// peer's full-resolution pixel buffer (and a freshly-allocated local
 /// preview copy) even though the call is over.
-static CALL_GEN: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static CALL_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// `g` captured at install time is still current?
 fn gen_live(g: u64) -> bool {
@@ -232,6 +231,10 @@ pub fn start_call(
         client: Arc::clone(&client),
         peer: peer.clone(),
     });
+    let release_on_err = |e: anyhow::Error| -> anyhow::Error {
+        release_bootstrap(&audio, cam_src.as_ref(), scr_src.as_ref());
+        e
+    };
     let call_id = format!("call-{:x}", now_nanos());
     let cfg = MediaConfig::from_env();
     let call_id_c = call_id.clone();
@@ -241,7 +244,7 @@ pub fn start_call(
     let me58 = client.peer_base58();
     let me58c = me58.clone();
 
-    let (call, offer) = {
+    let (call, offer) = match {
         let t = Arc::clone(&transport);
         media_rt().block_on(async move {
             PeerCall::offer(
@@ -255,8 +258,10 @@ pub fn start_call(
             )
             .await
         })
-    }
-    .map_err(|e| anyhow::anyhow!("PeerCall::offer: {e}"))?;
+    } {
+        Ok(ot) => ot,
+        Err(e) => return Err(release_on_err(anyhow::anyhow!("PeerCall::offer: {e}"))),
+    };
 
     // Tag the initial offer with our call intent so the answerer can mirror
     // it (a video-offer and screen-offer are otherwise identical in SDP).
@@ -272,9 +277,9 @@ pub fn start_call(
     // `PeerCall::offer` returns the offer SDP frame; we are responsible for
     // sending it to the peer over the transport. (The media crate doesn't
     // auto-transmit; `Lp2pSignal::send` is invoked per frame.)
-    transport
-        .send(&offer)
-        .map_err(|e| anyhow::anyhow!("transport send: {e}"))?;
+    if let Err(e) = transport.send(&offer) {
+        return Err(release_on_err(anyhow::anyhow!("transport send: {e}")));
+    }
 
     wire_remote_sinks(&call, &audio, &queue);
 
@@ -325,6 +330,10 @@ pub fn answer_offer(
         client: Arc::clone(&client),
         peer: peer.clone(),
     });
+    let release_on_err = |e: anyhow::Error| -> anyhow::Error {
+        release_bootstrap(&audio, cam_src.as_ref(), scr_src.as_ref());
+        e
+    };
     let offer_c = offer.clone();
     let cfg = MediaConfig::from_env();
     let aud2 = Arc::clone(&aud_src);
@@ -333,18 +342,20 @@ pub fn answer_offer(
     let me58 = client.peer_base58();
     let me58c = me58.clone();
 
-    let (call, answer) = {
+    let (call, answer) = match {
         let t = Arc::clone(&transport);
         media_rt().block_on(async move {
             PeerCall::answer(&offer_c, me58c, &cfg, as_dyn(t), Some(aud2), cam2, scr2).await
         })
-    }
-    .map_err(|e| anyhow::anyhow!("PeerCall::answer: {e}"))?; // keep (answerer path)
+    } {
+        Ok(ot) => ot,
+        Err(e) => return Err(release_on_err(anyhow::anyhow!("PeerCall::answer: {e}"))), // keep (answerer path)
+    };
 
     // Send our answer SDP back to the peer.
-    transport
-        .send(&answer)
-        .map_err(|e| anyhow::anyhow!("transport send: {e}"))?;
+    if let Err(e) = transport.send(&answer) {
+        return Err(release_on_err(anyhow::anyhow!("transport send: {e}")));
+    }
 
     wire_remote_sinks(&call, &audio, &queue);
 
@@ -403,7 +414,7 @@ pub fn answer_offer(
 /// Entry point for `ChatEvent::Webrtc`. `json` is the JSON-encoded
 /// `media::SignalFrame` produced by the peer's `Lp2pSignal::send`.
 pub fn handle_signal_offer(client: Arc<ChatxClient>, peer: libp2p::PeerId, json: &str) {
-    eprintln!("[call] inbound webrtc signal: len={}", json.len());
+    // eprintln!("[call] inbound webrtc signal: len={}", json.len());
     let frame: SignalFrame = match serde_json::from_str(json) {
         Ok(f) => f,
         Err(e) => {
@@ -908,13 +919,27 @@ fn bootstrap_media(
     // single registered `VidSource` (which the camera / screen sinks push
     // into) AND starts the underlying device — no need to duplicate that
     // work on the caller side.
-    let cam_src = if opts.include_cam {
+    //
+    // IMPORTANT: these must stay LAZY `if`s. `match (flag, expr)` builds the
+    // tuple eagerly — `expr` runs even when `flag` is `false` — which would
+    // boot the Retina screen recorder (xcap/ScreenCaptureKit + TCC prompt,
+    // on the UI thread) for EVERY call and freeze the UI on accept.
+    let cam_src: Option<Arc<VidSource>> = if opts.include_cam {
         Some(crate::start_local_capture(media::VKind::Cam)?)
     } else {
         None
     };
-    let scr_src = if opts.include_scr {
-        Some(crate::start_local_capture(media::VKind::Scr)?)
+    let scr_src: Option<Arc<VidSource>> = if opts.include_scr {
+        match crate::start_local_capture(media::VKind::Scr) {
+            Ok(src) => Some(src),
+            Err(e) => {
+                // Screen bootstrap failed after camera succeeded: roll back
+                // the camera side so no encoder thread / capture device is
+                // left half-alive on a call that is about to error out.
+                release_bootstrap(&audio, cam_src.as_ref(), None);
+                return Err(e);
+            }
+        }
     } else {
         None
     };
@@ -928,6 +953,33 @@ fn bootstrap_media(
     }
 
     Ok((audio, queue, aud_src, cam_src, scr_src))
+}
+
+/// Tear everything [`bootstrap_media`] started, for the setup-failure paths
+/// (`PeerCall::offer` / `answer` error, transport send failure) where a
+/// `CallInner` was **never** stored, so `stop_common` cannot clean up for us.
+/// Without this, the video encoder threads (openh264 encoders + last full-res
+/// frame), the cpal input/output streams, and the camera / screen capture
+/// devices all stay alive after a failed call — the reported "memory left
+/// over after a call" on the error paths.
+fn release_bootstrap(
+    audio: &audio::Audio,
+    cam: Option<&Arc<VidSource>>,
+    scr: Option<&Arc<VidSource>>,
+) {
+    if let Some(src) = cam {
+        src.stop();
+    }
+    if let Some(src) = scr {
+        src.stop();
+    }
+    audio.stop_input();
+    audio.stop_output();
+    audio::clear_input_sink();
+    call_dispatcher::teardown_sources();
+    crate::stop_local_media_capture();
+    #[cfg(target_os = "android")]
+    bridge::request_mic_stop();
 }
 
 /// Install remote-side sinks on the `PeerCall`.
@@ -1046,28 +1098,60 @@ pub(crate) fn install_local_cam_preview() {
 /// (`close()` also emits `Hangup`).
 fn spawn_event_drain(call: PeerCall) {
     let mut rx = call.events();
+
+    // Ended detection still goes via the tokio event loop (receiving `Bye` /
+    // `Hangup` / `Failed` / `Disconnected` on the webrtc state machine). We
+    // no longer try to observe `Connected` here, because in practice the
+    // broadcast is dropped — the webrtc thread fires it before the receiver
+    // in this task is registered — so we just log every event we do see and
+    // act on `is_ended` only.
     media_rt().spawn(async move {
         while let Ok(ev) = rx.recv().await {
             tracing::info!(?ev, "[call] event");
-            let connected = ev == PeerEvent::Connected;
-            let ended = ev.is_ended();
-            if !ended && connected {
-                // Mark the call connected so the UI only auto-hides the
-                // controls after the peer has actually answered.
-                if let Some(weak) = weak_window() {
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.global::<CallState>().set_connected(true);
-                        }
-                    });
-                }
-            }
-            if ended {
+            if ev.is_ended() {
                 fire_ui_end();
                 break;
             }
         }
     });
+
+    // ── connected detection: plain OS-thread poller ──────────────────
+    // The `Connected` broadcast is dropped in practice (no live receiver
+    // when the webrtc thread fires it), and a tokio task did not reliably
+    // get scheduled. A plain `std::thread` always runs and `peer_state()`
+    // is synchronous, so this is the robust path: poll until Connected,
+    // then flip `CallState.connected` from a detached thread (which is safe
+    // via `slint::invoke_from_event_loop`).
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let s = call.peer_state();
+            if call.is_connected() {
+                mark_connected();
+                break;
+            }
+            if matches!(
+                s,
+                media::webrtc::RTCPeerConnectionState::Failed
+                    | media::webrtc::RTCPeerConnectionState::Disconnected
+            ) {
+                break;
+            }
+        }
+    });
+}
+
+/// Set `CallState.connected = true` from the event thread. The hop to the
+/// UI thread + the window lookup are the part that can silently no-op if the
+/// window handle is missing or dead — log which case happened.
+fn mark_connected() {
+    if let Some(weak) = weak_window() {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<CallState>().set_connected(true);
+            }
+        });
+    }
 }
 
 /// Build a `slint::Image` from an `rgba8` buffer. (Matches

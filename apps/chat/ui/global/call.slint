@@ -316,6 +316,8 @@ export component CallView inherits Rectangle {
     // ── CONTROL BAR ────────────────────────────────────────────────
     // When `ringing` (inbound offer awaiting accept/decline), show the
     // two decision buttons instead of the live-call device controls.
+    // In a live (connected) call, the whole bar auto-hides 3s after the
+    // peer answers; holding image B re-arms the 3s timer.
     Rectangle {
         x: 0px;
         y: parent.height - 218px;
@@ -389,6 +391,7 @@ export component CallView inherits Rectangle {
                 height: 26px;
                 border-radius: 13px;
                 background: #2a3340;
+                visible: !CallState.controls-hidden;
 
                 Icon {
                     x: (26px - 13px) / 2;  // center the 13px glyph
@@ -405,14 +408,16 @@ export component CallView inherits Rectangle {
                 }
             }
 
-            // Four always-on device buttons.
+            // Four always-on device buttons. Auto-hidden 3s after the
+            // call connects; END (below) stays visible.
             HorizontalLayout {
                 y: 6px;
                 alignment: center;
                 spacing: 10px;
+                visible: !CallState.controls-hidden;
 
                 CallBtn {
-                    label: @tr("VOICE");
+                    label: @tr("MIC");
                     on: !CallState.muted;
                     glyph-on: Glyph.voice;
                     glyph-off: Glyph.voice-close;
@@ -481,6 +486,8 @@ export component CallView inherits Rectangle {
         font-size: 11px;
         color: #ff8080;
     }
+
+
 
     // ── MINIMIZED WIDGET (draggable, floating over the main UI) ─────
     // A compact card: video thumbnail (left) + peer name (top-right) and

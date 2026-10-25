@@ -126,6 +126,9 @@ msgstr "أنا"
 msgid "Members selected"
 msgstr "تم اختيار الأعضاء"
 
+msgid "MIC"
+msgstr "ميكروفون"
+
 msgid "Messages"
 msgstr "الرسائل"
 
