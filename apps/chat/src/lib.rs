@@ -325,6 +325,8 @@ pub fn run_app() {
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
+    // No local keystore → nothing to log in with, default to the sign-up mode.
+    state.set_auth_register(existing_uid.is_none());
     if let Some(uid) = existing_uid {
         ui.global::<AppState>()
             .set_auth_message(SharedString::from("please logging in "));
