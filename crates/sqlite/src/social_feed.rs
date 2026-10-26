@@ -74,6 +74,19 @@ pub async fn create_post(
     row.ok_or_else(|| anyhow::anyhow!("post {id} vanished"))
 }
 
+/// True when a post with the given `(author_id, timestamp)` already exists
+/// locally. The wire protocol identifies a post by timestamp, so this is the
+/// idempotency key used to avoid re-pulling a friend's post we already have.
+pub async fn has_post_by_author_ts(pool: &Pool, author_id: i64, ts: i64) -> anyhow::Result<bool> {
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT 1 FROM social_posts WHERE author_id = ?1 AND timestamp = ?2")
+            .bind(author_id)
+            .bind(ts)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.is_some())
+}
+
 pub async fn get_post(pool: &Pool, id: i64) -> anyhow::Result<Option<SocialPost>> {
     let row = sqlx::query_as::<_, SocialPost>("SELECT * FROM social_posts WHERE id = ?1")
         .bind(id)

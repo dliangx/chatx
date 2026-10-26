@@ -203,6 +203,15 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
         let mut friend_newest: i64 = 0;
         for meta in &post_metas {
             friend_newest = friend_newest.max(meta.timestamp);
+            // Skip posts we already have locally (same author + timestamp is
+            // the stable wire identity). Prevents re-pulling and re-inserting
+            // a row we already downloaded.
+            if sqlite::social_feed::has_post_by_author_ts(&pool, f.local_users_id, meta.timestamp)
+                .await
+                .unwrap_or(false)
+            {
+                continue;
+            }
             // Per-post media folder (timestamp-suffixed) so different posts
             // never collide even though they share the friend's base group.
             let group = format!("sync_{}_{}", peer_short(&peer_id), meta.timestamp);
