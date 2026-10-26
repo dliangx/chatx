@@ -224,7 +224,8 @@ async fn load_rows(
     let rows: Vec<(i64, String, Option<String>, bool, i64, i64, Option<String>, Option<i64>)> =
         sqlx::query_as(
             "SELECT m.id, COALESCE(m.sender_peer_id, u.username, '') AS sender,
-                    m.text_content, m.is_encrypted, m.timestamp,
+                    CASE WHEN m.msg_type = 0 THEN m.text_content ELSE NULL END AS text,
+                    m.is_encrypted, m.timestamp,
                     m.msg_type, m.media_path, m.media_duration
               FROM messages m
               LEFT JOIN users u ON u.id = m.sender_user_id

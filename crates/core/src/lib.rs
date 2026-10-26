@@ -1899,17 +1899,27 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         env: &group::SealedGroupMsg,
         plain: Option<&group::GroupPlain>,
     ) -> anyhow::Result<()> {
-        let wire = serde_json::to_string(env)?;
-        let b64 = crate::account::b64(wire.as_bytes());
         let kind = match plain {
             Some(p) => self.group_media_storage(p)?.unwrap_or(store::Kind::Text),
             None => store::Kind::Text,
         };
-        // `text` is ALWAYS the sealed envelope (base64) — the group chat
-        // renderer decrypts it via `open_stored_group_message`, which works for
-        // both text and media; `kind` adds the on-disk media path for voice/image.
+        // Media rows (voice/image) keep their body in `media_path` (the on-disk
+        // file) — exactly like DMs, whose media rows store an empty `text`.
+        // We must NOT put the sealed envelope in `text` for media rows: it
+        // embeds the WHOLE original as base64, so a single `store.load(chat)`
+        // would pull tens/hundreds of MB of it into memory while the bubble
+        // renders from the tiny preview on disk and never reads this column.
+        // Text rows keep the sealed envelope in `text` so the chat window can
+        // decrypt a plaintext preview.
+        let (text_field, sealed) = match &kind {
+            store::Kind::Voice { .. } | store::Kind::Image { .. } => (String::new(), false),
+            store::Kind::Text => {
+                let wire = serde_json::to_string(env)?;
+                (crate::account::b64(wire.as_bytes()), true)
+            }
+        };
         self.store
-            .push(&env.group_id, &env.from, &b64, true, kind)
+            .push(&env.group_id, &env.from, &text_field, sealed, kind)
             .await;
         Ok(())
     }
