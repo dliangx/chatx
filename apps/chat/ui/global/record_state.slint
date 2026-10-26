@@ -1,8 +1,8 @@
 // Voice-message record/playback state shared between the input bar, the chat
 // view, and any future UI that needs to know about the mic or a playing clip.
 export global RecordState {
-    /// "idle" | "recording". Written by Rust on toggle; read by `ChatInputView`
-    /// to tint the mic icon and show the recording status bar.
+    /// "idle" | "recording". Written by Rust on press-down / press-up; read by
+    /// `ChatInputView` to tint the mic icon and show the recording status bar.
     in property <string> state: "idle";
     /// Monotonic ms timestamp captured when recording started (drives the
     /// elapsed label, computed on the Rust side).
@@ -10,5 +10,9 @@ export global RecordState {
     /// Ready-to-display status line shown above the input bar while recording,
     /// e.g. "0:07". Pre-formatted in Rust (Slint 1.18 has no int→string helper).
     in property <string> label: "";
-    callback toggle(int);
+    /// Pressing the mic button (pointer-event "down"): Rust begins capturing.
+    callback press-down(int);
+    /// Releasing the mic button (pointer-event "up"): Rust stops capturing and
+    /// sends the recorded clip.
+    callback press-up(int);
 }

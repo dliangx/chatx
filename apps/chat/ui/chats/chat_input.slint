@@ -94,8 +94,14 @@ export component ChatInputView inherits Rectangle {
                 y: 0px;
                 width: 28px;
                 height: root.btn-h;
-                clicked => {
-                    RecordState.toggle(root.chat-id);
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) {
+                        RecordState.press-down(root.chat-id);
+                    } else if (e.kind == PointerEventKind.up
+                            || e.kind == PointerEventKind.cancel) {
+                        // 松开 or 手势被中断 — 都结束录音
+                        RecordState.press-up(root.chat-id);
+                    }
                 }
             }
 

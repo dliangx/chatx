@@ -1192,8 +1192,13 @@ pub fn run_app() {
 
     {
         let weak = weak.clone();
-        ui.global::<RecordState>().on_toggle(move |key| {
-            toggle_record(weak.clone(), key);
+        let weak_down = weak.clone();
+        ui.global::<RecordState>().on_press_down(move |key| {
+            press_down(weak_down.clone(), key);
+        });
+        let weak_up = weak.clone();
+        ui.global::<RecordState>().on_press_up(move |key| {
+            press_up(weak_up.clone(), key);
         });
     }
 
@@ -2171,36 +2176,56 @@ fn cs_set_send_status(cs: &ChatSession, msg: String) {
 
 const MIN_VOICE_MS: u64 = 300;
 
-/// Toggles the voice recorder for chat `key`. Driven from `RecordState.toggle`.
+/// Drives recording from the mic button (chat `key`).
+///
+/// `press` semantics (hold-to-record):
+/// - Press **down**  → [`record_start`]  : idle → recording, start the mic.
+/// - Press **up**    → [`record_stop_send`] : stop capture and SEND the clip
+///   (if at least `MIN_VOICE_MS`), back to idle.
+///
+/// Both are idempotent w.r.t. the current `record::is_recording` state so a
+/// stuck / spurious second event can't double-start or double-send.
+fn press_down(weak: slint::Weak<MainWindow>, key: i32) {
+    if record::is_recording() {
+        return; // already capturing
+    }
+    record_start(weak, key);
+}
+
+fn press_up(weak: slint::Weak<MainWindow>, key: i32) {
+    if !record::is_recording() {
+        return; // nothing to stop
+    }
+    record_stop_send(weak, key);
+}
+
 /// idle → recording : start the mic; set `RecordState.state = "recording"`.
+fn record_start(weak: slint::Weak<MainWindow>, key: i32) {
+    match record::start() {
+        Ok(()) => {
+            eprintln!("[voice] recording started for key={key}");
+            let _ = slint::invoke_from_event_loop({
+                let weak = weak.clone();
+                move || {
+                    if let Some(ui) = weak.upgrade() {
+                        let rs = ui.global::<RecordState>();
+                        rs.set_state(SharedString::from("recording"));
+                        rs.set_started_at(record::monotonic_ms() as i32);
+                        rs.set_label(SharedString::from("0:00"));
+                    }
+                }
+            });
+            arm_elapsed_tick(weak);
+        }
+        Err(e) => {
+            eprintln!("[voice] start failed: {e}");
+        }
+    }
+}
+
 /// recording → idle : stop the mic; if the clip is at least `MIN_VOICE_MS`,
 /// send it to the peer of `key`; else discard.
-fn toggle_record(weak: slint::Weak<MainWindow>, key: i32) {
-    if !record::is_recording() {
-        // idle → recording
-        match record::start() {
-            Ok(()) => {
-                eprintln!("[voice] recording started for key={key}");
-                let _ = slint::invoke_from_event_loop({
-                    let weak = weak.clone();
-                    move || {
-                        if let Some(ui) = weak.upgrade() {
-                            let rs = ui.global::<RecordState>();
-                            rs.set_state(SharedString::from("recording"));
-                            rs.set_started_at(record::monotonic_ms() as i32);
-                            rs.set_label(SharedString::from("0:00"));
-                        }
-                    }
-                });
-                arm_elapsed_tick(weak);
-            }
-            Err(e) => {
-                eprintln!("[voice] start failed: {e}");
-            }
-        }
-        return;
-    }
-    // recording → idle
+fn record_stop_send(weak: slint::Weak<MainWindow>, key: i32) {
     let rec = match record::stop_capture() {
         Ok(r) => r,
         Err(e) => {
