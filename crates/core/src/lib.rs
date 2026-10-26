@@ -1892,6 +1892,29 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         others > 0 && !any_online
     }
 
+    /// Return the base58 peer ids of members that are *not* currently
+    /// connected (P2P mode). Server mode is always fully reachable via the
+    /// directory.
+    fn p2p_unreachable_members(&self, group_id: &str) -> Vec<String> {
+        let g = match self.get_group(group_id) {
+            Some(g) if g.mode != group::GroupMode::Server => g,
+            _ => return Vec::new(),
+        };
+        let me = self.peer_base58();
+        let conns = self.running.connected.lock().unwrap();
+        g.member_ids()
+            .into_iter()
+            .filter(|m| m != &me)
+            .filter(|m| {
+                if let Ok(pid) = m.parse::<PeerId>() {
+                    *conns.get(&pid).unwrap_or(&0) == 0
+                } else {
+                    true
+                }
+            })
+            .collect()
+    }
+
     pub async fn send_group_message(&self, group_id: &str, text: &str) -> anyhow::Result<()> {
         eprintln!(
             "[group] send_group_message group={group_id} text_len={}",
@@ -1903,22 +1926,20 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             tracing::debug!(group_id, seq, "sent group msg via server");
         } else {
             if self.p2p_all_peers_offline(group_id) {
-                eprintln!("[group] all P2P peers offline — attempting re-dial for {group_id}");
                 let _ = self.connect_to_group(group_id);
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
-                while std::time::Instant::now() < deadline {
-                    if !self.p2p_all_peers_offline(group_id) {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                }
-                if self.p2p_all_peers_offline(group_id) {
-                    anyhow::bail!(
-                        "group {group_id}: no P2P peer online — \
-                         open the chat once (or wait for the peer) and retry"
-                    );
-                }
-                eprintln!("[group] re-dial succeeded for {group_id}");
+                eprintln!("[group] all members offline for {group_id} — redial attempted");
+                anyhow::bail!(
+                    "group {group_id}: no other member online — \
+                     retry once a peer is reachable"
+                );
+            }
+            let missing: Vec<String> = self.p2p_unreachable_members(group_id);
+            if !missing.is_empty() {
+                eprintln!(
+                    "[group] async redial {group_id}: {} member(s) offline {missing:?}",
+                    missing.len()
+                );
+                let _ = self.connect_to_group(group_id);
             }
             let wire = group::msg_wire(&env)?;
             let topic = sw::IdentTopic::new(sw::group_topic_name(group_id));

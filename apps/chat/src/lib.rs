@@ -2309,6 +2309,18 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
         eprintln!("[chat-image] no chat_id for key={key}, aborting");
         return;
     };
+    if chat_id.starts_with("grp-") {
+        // Image delivery is per-peer request-response (no group fan-out yet),
+        // so a group chat would only half-send and the status bar would sit
+        // on "Sending photo…" forever — mirroring the voice guard above.
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<ChatSession>()
+                .set_send_status(SharedString::from(
+                    "Photo messages aren't supported in groups yet",
+                ));
+        }
+        return;
+    }
     if let Some(ui) = weak.upgrade() {
         ui.global::<ChatSession>()
             .set_send_status(SharedString::from("Sending photo…"));
