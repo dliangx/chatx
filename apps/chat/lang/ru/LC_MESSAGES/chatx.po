@@ -339,3 +339,9 @@ msgstr "Введите сообщение…"
 
 msgid "VOICE"
 msgstr "ГОЛОС"
+
+msgid "Delete all data of the current account and create a new one?"
+msgstr "Удалить все данные текущего аккаунта и создать новый?"
+
+msgid "Cancel"
+msgstr "Отмена"

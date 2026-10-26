@@ -339,3 +339,9 @@ msgstr "输入消息…"
 
 msgid "VOICE"
 msgstr "语音"
+
+msgid "Delete all data of the current account and create a new one?"
+msgstr "删除当前账户的所有数据并新建一个吗？"
+
+msgid "Cancel"
+msgstr "取消"

@@ -121,6 +121,8 @@ export global AppState {
     callback login(string, string);
     callback register(string, string);
     callback logout();
+    /// Wipes the currently-bound user's local data before switching to sign-up.
+    callback clear-user-data();
     /// Fired whenever the active tab changes. Backends use this (and the
     /// new index) to trigger tab-specific work without a separate UI hook
     /// (e.g. the moment sync loop kicks off when the user enters Discover).
@@ -128,6 +130,7 @@ export global AppState {
     in-out property <bool> auth-busy: false;
     in-out property <string> auth-message: "";
     in-out property <bool> auth-register: false;
+    in-out property <bool> auth-uid-locked: false;
     in-out property <bool> is-mobile: true;
     in-out property <bool> search-active: false;
     in-out property <string> user-id: "";

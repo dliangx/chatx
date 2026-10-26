@@ -339,3 +339,9 @@ msgstr "Saisir un message…"
 
 msgid "VOICE"
 msgstr "VOIX"
+
+msgid "Delete all data of the current account and create a new one?"
+msgstr "Supprimer toutes les données du compte actuel et en créer un nouveau ?"
+
+msgid "Cancel"
+msgstr "Annuler"

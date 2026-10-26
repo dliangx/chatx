@@ -79,6 +79,8 @@ export component AuthView inherits Rectangle {
     in-out property <string> uid: "";
     in-out property <string> pass: "";
 
+    in-out property <bool> show-confirm: false;
+
     width: 100%;
     height: 100%;
     background: Theme.bg;
@@ -93,7 +95,7 @@ export component AuthView inherits Rectangle {
             text: "ChatX";
             font-size: 32px;
             font-weight: 800;
-            color: Theme.fg;
+            color: Theme.brand;
             width: 100%;
             horizontal-alignment: center;
         }
@@ -112,6 +114,7 @@ export component AuthView inherits Rectangle {
                 width: min(parent.width, 420px);
                 placeholder: @tr("User");
                 text <=> root.uid;
+                enabled: AppState.auth-register || !AppState.auth-uid-locked;
                 accepted => { root.submit(); }
             }
         }
@@ -139,8 +142,8 @@ export component AuthView inherits Rectangle {
             alignment: center;
             BrandButton {
                 width: min(parent.width, 420px);
-            text: AppState.auth-busy ? @tr("Please wait…") : (AppState.auth-register ? @tr("Sign up") : @tr("Sign in"));
-            enabled: !AppState.auth-busy;
+                text: AppState.auth-busy ? @tr("Please wait…") : (AppState.auth-register ? @tr("Sign up") : @tr("Sign in"));
+                enabled: !AppState.auth-busy;
                 clicked => { root.submit(); }
             }
         }
@@ -164,7 +167,72 @@ export component AuthView inherits Rectangle {
                 TouchArea {
                     width: 100%;
                     height: 100%;
-                    clicked => { AppState.auth-register = !AppState.auth-register; }
+                    visible: !root.show-confirm;
+                    clicked => {
+                        if (AppState.auth-uid-locked && !AppState.auth-register) {
+                            root.show-confirm = true;
+                        } else {
+                            AppState.auth-register = !AppState.auth-register;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.show-confirm:
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000066;
+        clip: true;
+
+        Rectangle {
+            x: (parent.width - 320px) / 2;
+            y: (parent.height - 200px) / 2;
+            width: 320px;
+            height: 200px;
+            border-radius: 16px;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            VerticalLayout {
+                alignment: center;
+                padding: 24px;
+                spacing: 20px;
+
+                Text {
+                    width: 100%;
+                    text: @tr("Delete all data of the current account and create a new one?");
+                    font-size: 15px;
+                    color: Theme.fg;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 16px;
+
+                    BrandButton {
+                        width: 130px;
+                        text: @tr("Cancel");
+                        clicked => { root.show-confirm = false; }
+                    }
+
+                    BrandButton {
+                        width: 130px;
+                        text: @tr("Delete");
+                        clicked => {
+                            root.show-confirm = false;
+                            AppState.auth-register = true;
+                            AppState.auth-uid-locked = false;
+                            root.uid = "";
+                            root.pass = "";
+                            AppState.clear-user-data();
+                        }
+                    }
                 }
             }
         }

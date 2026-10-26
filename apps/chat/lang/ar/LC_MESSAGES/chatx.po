@@ -339,3 +339,9 @@ msgstr "اكتب رسالة…"
 
 msgid "VOICE"
 msgstr "الصوت"
+
+msgid "Delete all data of the current account and create a new one?"
+msgstr "حذف جميع بيانات الحساب الحالي وإنشاء حساب جديد؟"
+
+msgid "Cancel"
+msgstr "إلغاء"

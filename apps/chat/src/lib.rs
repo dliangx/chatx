@@ -270,6 +270,26 @@ fn autologin_path() -> std::path::PathBuf {
     keystore_path(&profile()).with_file_name("autologin")
 }
 
+/// Wipe the entire ChatX home directory (`CHATX_HOME`, or `~/.chatx`) so the
+/// user can start a fresh account: keys, messages db, groups, images, voice,
+/// cached autologin and per-profile data all live under it. Called from the
+/// confirm dialog before switching to sign-up.
+fn clear_user_data() {
+    let home = chatx_core::identity::DeviceIdentity::home_dir();
+    // Safety: only remove a real, existing, absolute directory (never the
+    // filesystem root or cwd).
+    if !home.is_absolute() || home.as_os_str().is_empty() {
+        return;
+    }
+    let Some(home_canon) = std::fs::canonicalize(&home).ok() else {
+        return;
+    };
+    if !home_canon.is_absolute() || home_canon == std::path::Path::new("/") {
+        return;
+    }
+    let _ = std::fs::remove_dir_all(&home_canon);
+}
+
 /// Persist an auto-login *unlock key* (32 random bytes), NOT the password.
 /// The key is the PBKDF2(password, keystore_salt) output used to unseal the
 /// keystore, so the plaintext password never touches disk in a recoverable form.
@@ -301,6 +321,48 @@ fn load_passphrase(_user_id: &str) -> Option<[u8; 32]> {
 
 fn clear_passphrase(_user_id: &str) {
     let _ = std::fs::remove_file(autologin_path());
+}
+
+/// Map an internal auth error to a short, user-facing message. The raw error
+/// (with paths, function names, keystore details) is still logged.
+fn friendly_auth_error(err: &anyhow::Error) -> String {
+    let s = err.to_string();
+    eprintln!("[auth] internal error: {s}");
+    let lower = s.to_lowercase();
+    if lower.contains("wrong passphrase") || lower.contains("aes-gcm auth failed") {
+        return "Wrong password. Please try again.".to_string();
+    }
+    if lower.contains("not found locally") || lower.contains("no such file") {
+        return "No such account on this device. Sign up, or copy the keystore file here."
+            .to_string();
+    }
+    if lower.contains("belongs to") || lower.contains("pick a different profile") {
+        return "This account is already bound to another user on this device. \
+                Sign in with the original username, or clear this device's ChatX data first."
+            .to_string();
+    }
+    if lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("connect")
+        || lower.contains("dial")
+        || lower.contains("unreachable")
+        || lower.contains("dns")
+        || lower.contains("http")
+        || lower.contains("server")
+        || lower.contains("tls")
+        || lower.contains("refused")
+        || lower.contains("reset")
+    {
+        return "Network problem. Check your connection and try again.".to_string();
+    }
+    if lower.contains("malformed")
+        || lower.contains("corrupt")
+        || lower.contains("parse")
+        || lower.contains("decoding")
+    {
+        return "Local data is corrupted. Try a new profile.".to_string();
+    }
+    "Couldn't sign you in. Please try again.".to_string()
 }
 
 pub fn run_app() {
@@ -348,6 +410,9 @@ pub fn run_app() {
         .ok();
     // No local keystore → nothing to log in with, default to the sign-up mode.
     state.set_auth_register(existing_uid.is_none());
+    // A bound account exists → lock the username in sign-in until the user
+    // confirms clearing data.
+    state.set_auth_uid_locked(existing_uid.is_some());
     if let Some(uid) = existing_uid {
         ui.global::<AppState>()
             .set_auth_message(SharedString::from("please logging in "));
@@ -489,6 +554,16 @@ pub fn run_app() {
                     apply_result(weak, uid, res);
                 });
             });
+        });
+    }
+
+    {
+        let w = weak.clone();
+        ui.global::<AppState>().on_clear_user_data(move || {
+            clear_user_data();
+            if let Some(ui) = w.upgrade() {
+                ui.global::<AppState>().set_auth_uid_locked(false);
+            }
         });
     }
 
@@ -1761,7 +1836,7 @@ fn apply_result(
         Err(err) => {
             if let Some(ui) = weak.upgrade() {
                 ui.global::<AppState>()
-                    .set_auth_message(SharedString::from(err.to_string()));
+                    .set_auth_message(SharedString::from(friendly_auth_error(&err)));
                 ui.set_logged_in(false);
             }
             return;

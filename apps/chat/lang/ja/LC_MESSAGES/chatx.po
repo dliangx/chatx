@@ -339,3 +339,9 @@ msgstr "メッセージを入力…"
 
 msgid "VOICE"
 msgstr "マイク"
+
+msgid "Delete all data of the current account and create a new one?"
+msgstr "現在のアカウントのデータをすべて削除して新規作成しますか？"
+
+msgid "Cancel"
+msgstr "キャンセル"
