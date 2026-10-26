@@ -384,82 +384,99 @@ export component ChatView inherits Rectangle {
                 }
             }
 
-            if root.lp-active == i && msg.voice_path == "" && msg.image_path == "":
-            menu := Rectangle {
-                out property <length> menu-w: 168px;
-                out property <length> menu-h: 50px;
-                out property <length> slot-w: menu.menu-w / 3;
-                out property <length> center-x:
-                    msg.is_self ? parent.width - 6px - msg.width / 2 : 6px + msg.width / 2;
-                out property <length> menu-x:
-                    max(6px, min(menu.center-x - menu.menu-w / 2, parent.width - menu.menu-w - 6px));
-                x: menu.menu-x;
-                y: (i > 0) ? -(menu.menu-h + 8px) : msg.height + 8px;
-                width: menu.menu-w;
-                height: menu.menu-h;
-                z: 1;
-                border-radius: menu.menu-h / 2;
-                background: Theme.surface;
-                border-width: 1px;
-                border-color: Theme.border;
+        }
 
-                TouchArea {
-                    width: 100%;
-                    height: 100%;
-                    clicked => { root.lp-active = -1; }
-                }
+        // Long-press icon menu. Rendered as the last child of the Flickable
+        // (i.e. on top of every message row) so adjacent bubbles can never
+        // cover it; positioned from the active row's geometry in content
+        // coordinates.
+        if root.lp-active >= 0:
+        menu := Rectangle {
+            out property <length> menu-w: 168px;
+            out property <length> menu-h: 50px;
+            out property <length> slot-w: menu.menu-w / 3;
+            in property <MessageData> msg: ChatSession.messages[root.lp-active];
+            out property <length> center-x:
+                menu.msg.is_self ? parent.width - 6px - menu.msg.width / 2 : 6px + menu.msg.width / 2;
+            out property <length> menu-x:
+                max(6px, min(menu.center-x - menu.menu-w / 2, parent.width - menu.menu-w - 6px));
+            x: menu.menu-x;
+            // Placement in content coordinates: prefer above the bubble; if
+            // that would clip at the viewport top, try below; if neither
+            // fits (bubble at the very bottom), clamp so the menu stays
+            // fully inside the visible viewport.
+            out property <length> vp-top: fk.content-y;
+            out property <length> vp-bottom: fk.content-y + fk.height;
+            out property <length> y-above: menu.msg.top - menu.menu-h - 8px;
+            out property <length> y-below: menu.msg.top + menu.msg.height + 8px;
+            y: max(menu.vp-top, min(
+                (menu.y-above >= menu.vp-top)
+                    ? menu.y-above
+                    : (menu.y-below + menu.menu-h <= menu.vp-bottom ? menu.y-below : menu.y-above),
+                menu.vp-bottom - menu.menu-h));
+            width: menu.menu-w;
+            height: menu.menu-h;
+            border-radius: menu.menu-h / 2;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border;
 
-                Icon {
-                    x: 12px;
-                    y: (menu.menu-h - 26px) / 2;
-                    size: 26px;
-                    glyph: Glyph.copy;
-                    tint: Theme.fg;
-                }
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { root.lp-active = -1; }
+            }
 
-                TouchArea {
-                    x: 0px;
-                    width: menu.slot-w;
-                    height: 100%;
-                    clicked => { root.lp-active = -1; AppState.copy-note(msg.text); }
-                }
+            Icon {
+                x: 12px;
+                y: (menu.menu-h - 26px) / 2;
+                size: 26px;
+                glyph: Glyph.copy;
+                tint: Theme.fg;
+            }
 
-                Icon {
-                    x: menu.slot-w + 12px;
-                    y: (menu.menu-h - 26px) / 2;
-                    size: 26px;
-                    glyph: Glyph.collection;
-                    tint: Theme.fg;
-                }
+            TouchArea {
+                x: 0px;
+                width: menu.slot-w;
+                height: 100%;
+                clicked => { root.lp-active = -1; AppState.copy-note(menu.msg.text); }
+            }
 
-                TouchArea {
-                    x: menu.slot-w;
-                    width: menu.slot-w;
-                    height: 100%;
-                    clicked => { root.lp-active = -1; AppState.save-note(msg.text); }
-                }
+            Icon {
+                x: menu.slot-w + 12px;
+                y: (menu.menu-h - 26px) / 2;
+                size: 26px;
+                glyph: Glyph.collection;
+                tint: Theme.fg;
+            }
 
-                Icon {
-                    x: menu.slot-w * 2 + 12px;
-                    y: (menu.menu-h - 26px) / 2;
-                    size: 26px;
-                    glyph: Glyph.forward;
-                    tint: Theme.fg;
-                }
+            TouchArea {
+                x: menu.slot-w;
+                width: menu.slot-w;
+                height: 100%;
+                clicked => { root.lp-active = -1; AppState.save-note(menu.msg.text); }
+            }
 
-                TouchArea {
-                    x: menu.slot-w * 2;
-                    width: menu.slot-w;
-                    height: 100%;
-                    clicked => {
-                        root.lp-active = -1;
-                        AppState.forward-target = msg.text;
-                        AppState.nav-state = {
-                            active-tab: 1,
-                            tabs: AppState.nav-state.tabs,
-                            global-overlay: AppState.nav-state.global-overlay,
-                        };
-                    }
+            Icon {
+                x: menu.slot-w * 2 + 12px;
+                y: (menu.menu-h - 26px) / 2;
+                size: 26px;
+                glyph: Glyph.forward;
+                tint: Theme.fg;
+            }
+
+            TouchArea {
+                x: menu.slot-w * 2;
+                width: menu.slot-w;
+                height: 100%;
+                clicked => {
+                    root.lp-active = -1;
+                    AppState.forward-target = menu.msg.text;
+                    AppState.nav-state = {
+                        active-tab: 1,
+                        tabs: AppState.nav-state.tabs,
+                        global-overlay: AppState.nav-state.global-overlay,
+                    };
                 }
             }
         }
