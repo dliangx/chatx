@@ -251,6 +251,12 @@ pub fn preview_path(original: &str) -> Option<std::path::PathBuf> {
     Some(p.with_file_name(format!("preview-{stem}.jpg")))
 }
 
+/// Read just the pixel dimensions of the image at `path` (no full decode),
+/// as a `(width, height)` pair. Defaults to `(1, 1)` when it can't be read.
+pub fn image_dims(path: impl AsRef<std::path::Path>) -> (u32, u32) {
+    image::image_dimensions(path).unwrap_or((1, 1))
+}
+
 /// Ensure the compressed preview for `original` exists on disk. The preview is
 /// a JPEG capped to `cap` on the long edge (never upscaled) — a few KB for a
 /// ~330px thumbnail, versus the multi-MB original the full-screen viewer opens
@@ -376,6 +382,11 @@ pub struct RenderedMsg {
     /// Present when this is a photo bubble: the disk path. When set, the pixel
     /// buffer is a 1x1 dummy and Slint draws the image (bubble + viewer).
     pub image: Option<String>,
+    /// The SMALL cached preview path (≤300px JPEG) for this photo. Used by
+    /// `to_message_data` to fill `image_img` (the bubble draws the thumb — a
+    /// memory-cached hit — and NEVER the big original). Tapping opens the
+    /// original at `image`, not here.
+    pub preview: Option<String>,
     /// Sender avatar (right for own, left for theirs) shown beside a voice
     /// bubble, mirroring the rasterised text-bubble avatar.
     pub avatar: Option<render::canvas::Image>,
@@ -395,6 +406,13 @@ pub struct ChatMsg {
     /// A photo replaces the text body with an image bubble. The `path` is the
     /// local disk copy (original, possibly downscaled); tapping opens the viewer.
     pub image: Option<String>,
+    /// Display-box dimensions derived from the small cached preview's aspect
+    /// (identical ratio to the original, but never reads the big original file).
+    /// `None` → `render_msg` falls back to measuring the original.
+    pub preview_dims: Option<(u32, u32)>,
+    /// The small cached preview path (≤300px JPEG) — what the bubble actually
+    /// draws. `image` stays the original (for the viewer on tap).
+    pub image_preview: Option<String>,
 }
 
 pub fn render_msg(
@@ -416,16 +434,22 @@ pub fn render_msg(
             text: format!("{dur}ms"),
             voice: Some((path.clone(), *dur)),
             image: None,
+            preview: None,
             avatar: msg.avatar.clone(),
             time: msg.time.clone(),
         };
     }
     // Photo bubbles are drawn by Slint (the `Image` element shows the disk file
     // and the viewer re-uses the same file), so the pixel buffer is a 1x1 dummy.
-    // We still read the file's aspect ratio so the preview box keeps the photo's
-    // proportions (capped to `IMAGE_PREVIEW_MAX` on the long edge, logical px).
+    // For the box aspect ratio we PREFER the small cached preview's dimensions
+    // (`preview_dims`) — same ratio as the original, but never touches the big
+    // original file. We only fall back to reading the original's dimensions when
+    // no preview dimensions are available (e.g. preview not yet generated).
     if let Some(path) = &msg.image {
-        let (iw, ih) = image::image_dimensions(std::path::Path::new(path)).unwrap_or((1, 1));
+        let (iw, ih) = match msg.preview_dims {
+            Some((w, h)) => (w.max(1), h.max(1)),
+            None => image::image_dimensions(std::path::Path::new(path)).unwrap_or((1, 1)),
+        };
         let max_h = 260.0;
         let iw = iw.max(1) as f64;
         let ih = ih.max(1) as f64;
@@ -442,6 +466,7 @@ pub fn render_msg(
             text: String::new(),
             voice: None,
             image: Some(path.clone()),
+            preview: msg.image_preview.clone(),
             avatar: msg.avatar.clone(),
             time: msg.time.clone(),
         };
@@ -464,6 +489,7 @@ pub fn render_msg(
             text: msg.text.clone(),
             voice: None,
             image: None,
+            preview: None,
             avatar: None,
             time: msg.time.clone(),
         }
@@ -512,11 +538,15 @@ pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageDa
             .clone()
             .map(SharedString::from)
             .unwrap_or_default(),
-        // Photo bubbles start empty: the caller (`load_chat_messages`) overwrites
-        // `image_img` with the small cached preview (via `load_image_cached`),
-        // so entering a chat never decodes the full bitmap and a re-switch is a
-        // cache hit. The full original is only decoded by the viewer on tap.
-        image_img: SlintImage::default(),
+        // The photo bubble draws the SMALL cached preview (`image_preview`), not
+        // the original. `load_image_cached` is a memory hit after the first
+        // switch, so re-entering a chat never re-decodes the big full-res file.
+        // The full original is only decoded by the viewer on tap (`open_image`).
+        image_img: m
+            .preview
+            .as_ref()
+            .map(|p| load_image_cached(p))
+            .unwrap_or_else(SlintImage::default),
         avatar: {
             if let Some(a) = &m.avatar {
                 let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(a.w, a.h);

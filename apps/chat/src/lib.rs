@@ -2652,6 +2652,32 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
         *backend.write().await = b;
     }
     touch_chat_activity(&chat_id);
+    // Group chats (unlike DM inbound, which warms in `handle_inbound_image`) only
+    // write the original when stored — the `@300` preview + in-memory cache hit
+    // would otherwise be deferred to the first time the chat is opened. Warm
+    // it here, exactly like the DM path, so the next open renders instantly.
+    if chat_id.starts_with("grp-") {
+        let client = CLIENT.lock().unwrap().clone();
+        if let Some(client) = client {
+            let key = chat_id.clone();
+            tokio::spawn(async move {
+                if let Ok(rows) = client.store().load(&key, 50, 0).await {
+                    for m in rows {
+                        if let chatx_core::store::Kind::Image { path } = m.kind {
+                            let p = path;
+                            let value = p.clone();
+                            match tokio::task::spawn_blocking(move || image::ensure_preview(&value, 300)).await {
+                                Ok(_preview) => {
+                                    image::load_image_cached(&p);
+                                }
+                                Err(e) => eprintln!("[inbound] group preview warm {p}: {e}"),
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
     let is_current = CURRENT_CHAT.read().unwrap().as_deref() == Some(chat_id.as_str());
     let key = {
         backend
@@ -3052,6 +3078,16 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 if !is_group_chat {
                     return Some(m);
                 }
+                // Media (voice/image) rows: the body is already on disk in
+                // `m.kind.path`; the bubble draws the small preview from there.
+                // We do NOT decrypt the sealed envelope — its `data_b64`
+                // re-decodes the FULL original into memory on every switch,
+                // which is exactly the "bigger original = slower" cost. DMs
+                // never decrypt, so this is the parity gap. Only TEXT rows need
+                // opening (to reveal their plaintext preview for the bubble).
+                if !matches!(m.kind, chatx_core::store::Kind::Text) {
+                    return Some(m);
+                }
                 match client.open_stored_group_message(&chat_id, &m.text) {
                     Ok(plain) => Some(chatx_core::store::StoredMsg { text: plain.text, ..m }),
                     Err(e) => {
@@ -3076,10 +3112,40 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 );
             }
         }
+        // Photo rows: ensure the small on-disk preview exists, and pull its
+        // (tiny) aspect from the PREVIEW file — never the big original — so the
+        // preview box keeps the photo's proportions without a full decode. The
+        // preview is reused across switches (idempotent `ensure_preview`), so a
+        // re-entry into the chat is a cache hit and only decodes the ≤300px
+        // thumb. The full original is only read in the viewer on tap.
+        let mut image_preview: std::collections::HashMap<usize, String> =
+            std::collections::HashMap::new();
+        let mut image_dims: std::collections::HashMap<usize, (u32, u32)> =
+            std::collections::HashMap::new();
+        for (i, m) in rows.iter().enumerate() {
+            if let chatx_core::store::Kind::Image { path } = &m.kind {
+                let p = path.clone();
+                let pv_for_task = p.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let pv = image::ensure_preview(&pv_for_task, 300).ok()?;
+                    let (w, h) = image::image_dims(&pv);
+                    Some((pv, (w, h)))
+                })
+                .await;
+                match result {
+                    Ok(Some((pv, (w, h)))) => {
+                        image_preview.insert(i, pv.to_string_lossy().into_owned());
+                        image_dims.insert(i, (w, h));
+                    }
+                    _ => eprintln!("[chat-image] ensure_preview failed: {p}"),
+                }
+            }
+        }
         let rendered: Vec<RenderedMsg> = {
             let mut r = RENDERER.get().unwrap().lock().unwrap();
             rows.iter()
-                .map(|m| {
+                .enumerate()
+                .map(|(i, m)| {
                     let is_self = m.sender == me_peer || m.sender == me;
                     let time = time_label(m.t as i64);
                     let sender = if is_self {
@@ -3132,6 +3198,8 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         chatx_core::store::Kind::Image { path } => Some(path.clone()),
                         _ => None,
                     };
+                    let preview = image_preview.get(&i).cloned();
+                    let preview_dims = image_dims.get(&i).copied();
                     let msg = ChatMsg {
                         sender,
                         side: if is_self { Side::SelfSide } else { Side::Other },
@@ -3140,6 +3208,8 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         avatar: Some(avatar),
                         voice,
                         image,
+                        preview_dims,
+                        image_preview: preview,
                     };
                     render_msg(
                         &mut r,
@@ -3159,23 +3229,6 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 .copied()
                 .unwrap_or(0.0)
         };
-        // Photo rows: produce the small preview JPEG on disk (blocking) for
-        // each, and remember the (model index, preview path) so the UI-thread
-        // model build can pull the cached image (cache hit) without a 2nd
-        // layout pass. The full original is never decoded here — only on tap
-        // in the full-screen viewer.
-        let mut image_rows: Vec<(usize, String)> = Vec::new();
-        for (i, m) in rendered.iter().enumerate() {
-            if let Some(original) = m.image.as_ref() {
-                let p = original.to_string();
-                let result =
-                    tokio::task::spawn_blocking(move || image::ensure_preview(&p, 300)).await;
-                match result {
-                    Ok(Ok(path)) => image_rows.push((i, path.to_string_lossy().into_owned())),
-                    _ => eprintln!("[chat-image] ensure_preview failed: {original}"),
-                }
-            }
-        }
         let _ = slint::invoke_from_event_loop(move || {
             let ui = match ui_weak2.upgrade() {
                 Some(ui) => ui,
@@ -3198,11 +3251,9 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 })
                 .collect();
             let sum_all: f32 = heights.iter().sum();
-            // Build rows while pulling each photo row's (tiny) cached preview
-            // via `load_image_cached` — a cache hit from the prime step — so the
-            // full original is never decoded here.
-            let image_by_row: std::collections::HashMap<usize, String> =
-                image_rows.iter().map(|(i, p)| (*i, p.clone())).collect();
+            // `to_message_data` already fills `image_img` from each photo's small
+            // cached preview (a memory hit after the first switch), so the full
+            // original is never decoded here — only in the viewer on tap.
             let messages: Vec<crate::MessageData> = rendered
                 .into_iter()
                 .enumerate()
@@ -3210,11 +3261,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                     let older_sum: f32 = heights.iter().skip(i + 1).sum();
                     let rows_above = (n.saturating_sub(1).saturating_sub(i)) as f32;
                     let top = PAD + rows_above * GAP + older_sum;
-                    let mut data = to_message_data(m, scale, top);
-                    if let Some(p) = image_by_row.get(&i) {
-                        data.image_img = image::load_image_cached(p);
-                    }
-                    data
+                    to_message_data(m, scale, top)
                 })
                 .collect();
             let content_h = if n == 0 {
