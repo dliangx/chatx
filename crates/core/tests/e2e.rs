@@ -142,6 +142,22 @@ async fn keystore_password_roundtrip() {
 }
 
 #[tokio::test]
+async fn keystore_key_roundtrip_matches_password() {
+    use chatx_core::account::derive_keystore_key;
+    let acct = Account::generate("kara");
+    let ks = acct
+        .to_keystore("s3cret!", KDF_ITERATIONS)
+        .expect("to_keystore");
+    let salt = chatx_core::account::from_b64(&ks.salt).expect("salt");
+    let derived = derive_keystore_key("s3cret!", &salt, ks.iterations);
+    let via_key = ks.open_key(&derived).expect("open with derived key");
+    assert_eq!(via_key.e2e_public(), acct.e2e_public());
+    assert_eq!(via_key.sign_pk(), acct.sign_pk());
+    let wrong = [0u8; 32];
+    assert!(ks.open_key(&wrong).is_err(), "wrong key should fail");
+}
+
+#[tokio::test]
 async fn only_approved_can_attest() {
     let base = TmpBase::new("only-approved");
     let base_p = base.path().to_path_buf();

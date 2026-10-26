@@ -484,6 +484,20 @@ impl Keystore {
         Ok(Account::from_secret(&self.user_id, secret))
     }
 
+    /// Open the keystore with a pre-derived 32-byte key (already the PBKDF2
+    /// output of the password). Skips the password-based KDF so an unlock key
+    /// can be cached without ever storing the password itself.
+    pub fn open_key(&self, key: &[u8; 32]) -> KsResult<Account> {
+        let nonce_b = from_b64(&self.nonce).ok_or_else(|| KsError::Malformed("nonce".into()))?;
+        let ct = from_b64(&self.ciphertext).ok_or_else(|| KsError::Malformed("ciphertext".into()))?;
+        let nonce: [u8; 12] = nonce_b
+            .as_slice()
+            .try_into()
+            .map_err(|_| KsError::Malformed("nonce len".into()))?;
+        let secret = decrypt_secret(key, &ct, &nonce)?;
+        Ok(Account::from_secret(&self.user_id, secret))
+    }
+
     pub fn save(&self, path: &std::path::Path) -> KsResult<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

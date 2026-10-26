@@ -270,12 +270,33 @@ fn autologin_path() -> std::path::PathBuf {
     keystore_path(&profile()).with_file_name("autologin")
 }
 
+/// Persist an auto-login *unlock key* (32 random bytes), NOT the password.
+/// The key is the PBKDF2(password, keystore_salt) output used to unseal the
+/// keystore, so the plaintext password never touches disk in a recoverable form.
 fn save_passphrase(_user_id: &str, pass: &str) {
-    let _ = std::fs::write(autologin_path(), pass.as_bytes());
+    let Some(ks) = chatx_core::account::Keystore::load(&keystore_path(&profile())).ok() else {
+        return;
+    };
+    let salt = match chatx_core::account::from_b64(&ks.salt) {
+        Some(s) => s,
+        None => return,
+    };
+    let key = chatx_core::account::derive_keystore_key(pass, &salt, ks.iterations);
+    let mut hex = String::with_capacity(64);
+    for b in key {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    let _ = std::fs::write(autologin_path(), hex);
 }
 
-fn load_passphrase(_user_id: &str) -> Option<String> {
-    std::fs::read_to_string(autologin_path()).ok()
+/// Returns the cached auto-login unlock key (Option of exactly 32 bytes).
+fn load_passphrase(_user_id: &str) -> Option<[u8; 32]> {
+    let s = std::fs::read_to_string(autologin_path()).ok()?;
+    let mut key = [0u8; 32];
+    for (i, b) in key.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(key)
 }
 
 fn clear_passphrase(_user_id: &str) {
@@ -332,14 +353,14 @@ pub fn run_app() {
             .set_auth_message(SharedString::from("please logging in "));
         state.set_user_id(SharedString::from(uid.clone()));
 
-        if let Some(pass) = load_passphrase(&uid) {
+        if let Some(key) = load_passphrase(&uid) {
             ui.set_logged_in(true);
             let profile = profile();
             let dir = default_server();
             let weak = weak.clone();
             let rt = runtime();
             rt.spawn(async move {
-                let res = Client::login(&profile, &pass, uid.clone(), dir).await;
+                let res = Client::login_key(&profile, &key, uid.clone(), dir).await;
                 if res.is_err() {
                     clear_passphrase(&uid);
                 }

@@ -455,6 +455,34 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok((c, acct))
     }
 
+    /// Like `login`, but unseals the keystore with a pre-derived 32-byte key
+    /// (the PBKDF2 output of the password) instead of the password string.
+    /// Used by auto-login so the plaintext password never needs to be cached.
+    pub async fn login_key(
+        profile: &str,
+        key: &[u8; 32],
+        label: impl Into<String>,
+        dir: Arc<D>,
+    ) -> anyhow::Result<(Self, Account)> {
+        let keystore_path = DeviceIdentity::keystore_path(profile);
+        let ks = account::Keystore::load(&keystore_path)
+            .map_err(|e| anyhow::anyhow!("keystore load: {e}"))?;
+        let acct = ks
+            .open_key(key)
+            .map_err(|e| anyhow::anyhow!("keystore open: {e}"))?;
+        let device = DeviceIdentity::load_or_create(profile)?;
+        let c = Self::from_parts(
+            acct.clone(),
+            device,
+            dir,
+            &DeviceIdentity::home_dir(),
+            profile,
+        )
+        .await?;
+        c.refresh_directory_auto(label).await?;
+        Ok((c, acct))
+    }
+
     pub async fn bootstrap_in(
         base: &std::path::Path,
         profile: &str,
