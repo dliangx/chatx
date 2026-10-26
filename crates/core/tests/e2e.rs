@@ -323,7 +323,7 @@ async fn member_receives_group_key_and_msg() {
         "bob should have the new secret"
     );
     assert_eq!(
-        chatx_core::group::open_message(&now_group.secret(), &sealed_post).unwrap(),
+        chatx_core::group::open_message(&now_group.secret(), &sealed_post).unwrap().text,
         "after rotate"
     );
 }
@@ -407,7 +407,7 @@ async fn client_group_flow() {
     assert_eq!(bob_secret, s0, "bob should open the same group secret");
 
     let env = c1b.seal_group_message(gid, "hello team").expect("seal msg");
-    let text = chatx_core::group::open_message(&bob_secret, &env).expect("bob open msg");
+    let text = chatx_core::group::open_message(&bob_secret, &env).expect("bob open msg").text;
     assert_eq!(text, "hello team");
     c2.store_group_inbound(&env).await.expect("store inbound");
     c1b.store_group_outbound(&env)
@@ -422,7 +422,7 @@ async fn client_group_flow() {
     });
     let reply = chatx_core::group::seal_message(&bobg, &bob_acct, &c2.peer_base58(), "got it")
         .expect("bob seal");
-    let rt = chatx_core::group::open_message(&s0, &reply).expect("alice open reply");
+    let rt = chatx_core::group::open_message(&s0, &reply).expect("alice open reply").text;
     assert_eq!(rt, "got it");
 
     let g3 = c1b.rotate_group(gid).expect("rotate");
@@ -435,7 +435,7 @@ async fn client_group_flow() {
         "old secret must not open new message after rotation (kick)"
     );
     assert_eq!(
-        chatx_core::group::open_message(&g3.secret(), &secret_env).unwrap(),
+        chatx_core::group::open_message(&g3.secret(), &secret_env).unwrap().text,
         "post-rot"
     );
 
@@ -449,7 +449,7 @@ async fn client_group_flow() {
     let cross = chatx_core::group::seal_message(&other, c1b.account(), &c1.peer_base58(), "x")
         .expect("cross seal");
     assert_eq!(
-        chatx_core::group::open_message(&same_secret, &cross).unwrap(),
+        chatx_core::group::open_message(&same_secret, &cross).unwrap().text,
         "x"
     );
     let team_msg_key = chatx_core::group::message_key(&same_secret, gid);
@@ -685,7 +685,7 @@ async fn group_messages_flow_over_gossipsub() {
         .expect("b64");
     let env: chatx_core::group::SealedGroupMsg = serde_json::from_slice(&env_bytes).expect("env");
     assert_eq!(
-        chatx_core::group::open_message(&secret, &env).unwrap(),
+        chatx_core::group::open_message(&secret, &env).unwrap().text,
         "hi over gossipsub"
     );
 }
@@ -782,7 +782,7 @@ async fn add_member_receives_group_key() {
         .unwrap();
     let env: chatx_core::group::SealedGroupMsg = serde_json::from_slice(&env_bytes).unwrap();
     assert_eq!(
-        chatx_core::group::open_message(&secret, &env).unwrap(),
+        chatx_core::group::open_message(&secret, &env).unwrap().text,
         "bob joined via add_member"
     );
 }
@@ -880,7 +880,7 @@ async fn group_messages_flow_over_server() {
         .unwrap();
     let alice_env: chatx_core::group::SealedGroupMsg = serde_json::from_slice(&alice_wire).unwrap();
     assert_eq!(
-        chatx_core::group::open_message(&alice_group.secret(), &alice_env).unwrap(),
+        chatx_core::group::open_message(&alice_group.secret(), &alice_env).unwrap().text,
         "hi over server"
     );
 
@@ -912,7 +912,7 @@ async fn group_messages_flow_over_server() {
         .unwrap();
     let bob_env: chatx_core::group::SealedGroupMsg = serde_json::from_slice(&bob_wire).unwrap();
     assert_eq!(
-        chatx_core::group::open_message(&bob_group.secret(), &bob_env).unwrap(),
+        chatx_core::group::open_message(&bob_group.secret(), &bob_env).unwrap().text,
         "hi over server",
     );
 
@@ -969,7 +969,7 @@ async fn group_messages_flow_over_server() {
     let alice_recv_env: chatx_core::group::SealedGroupMsg =
         serde_json::from_slice(&alice_wire).unwrap();
     assert_eq!(
-        chatx_core::group::open_message(&alice_group.secret(), &alice_recv_env).unwrap(),
+        chatx_core::group::open_message(&alice_group.secret(), &alice_recv_env).unwrap().text,
         "pong via server",
     );
 }

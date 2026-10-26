@@ -1583,12 +1583,12 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 let env: group::SealedGroupMsg =
                     serde_json::from_slice(&wire).map_err(|e| anyhow::anyhow!("group msg: {e}"))?;
                 let from = env.from.clone();
-                let text = self.open_group_message(&group_id, &env)?;
+                let plain = self.open_group_message(&group_id, &env)?;
                 self.store_group_inbound(&env).await?;
                 Ok(Some(InboundGroup::Message {
                     group_id,
                     from,
-                    text,
+                    text: plain.text,
                 }))
             }
         }
@@ -1768,7 +1768,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         &self,
         group_id: &str,
         env: &group::SealedGroupMsg,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<group::GroupPlain> {
         if env.group_id != group_id {
             anyhow::bail!("group id mismatch");
         }
@@ -1782,7 +1782,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         &self,
         group_id: &str,
         stored_b64: &str,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<group::GroupPlain> {
         let bytes = crate::account::from_b64(stored_b64)
             .ok_or_else(|| anyhow::anyhow!("stored group msg is not base64"))?;
         let env: group::SealedGroupMsg =
@@ -1790,22 +1790,138 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         self.open_group_message(group_id, &env)
     }
 
-    pub async fn store_group_outbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
+    fn seal_group_message_typed(
+        &self,
+        group_id: &str,
+        kind: &group::GroupMsgKind,
+        text: &str,
+        data: Option<&[u8]>,
+    ) -> anyhow::Result<group::SealedGroupMsg> {
+        let g = self
+            .get_group(group_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        let me = self.peer_base58();
+        group::seal_message_typed(&g, &self.account, &me, kind, text, data)
+            .map_err(|e| anyhow::anyhow!("seal group msg: {e}"))
+    }
+
+    /// Write a group media body to the app's local media dir and return its
+    /// on-disk path. Mirrors the DM voice/image layout (`CHAV`+rate/ch PCM,
+    /// `img-{ts}.<ext>` photo) so the chat renderer + viewer handle both
+    /// identically regardless of whether it arrived by DM or group.
+    fn write_group_media(
+        &self,
+        kind: &group::GroupMsgKind,
+        data: &[u8],
+    ) -> anyhow::Result<std::path::PathBuf> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let home = DeviceIdentity::home_dir();
+        match kind {
+            group::GroupMsgKind::Voice { rate, ch, .. } => {
+                let ch = u32::max(*ch, 1);
+                let dir = home.join("voice");
+                std::fs::create_dir_all(&dir)?;
+                let path = dir.join(format!("v-{ts}.pcm"));
+                let mut out = Vec::with_capacity(12 + data.len());
+                out.extend_from_slice(b"CHAV");
+                out.extend_from_slice(&rate.to_le_bytes());
+                out.extend_from_slice(&ch.to_le_bytes());
+                out.extend_from_slice(data);
+                std::fs::write(&path, out)?;
+                Ok(path)
+            }
+            group::GroupMsgKind::Image => {
+                let dir = home.join("images");
+                std::fs::create_dir_all(&dir)?;
+                // Slint decodes by extension, so sniff the real format from
+                // the magic bytes (PNG/JPEG/WebP) instead of blindly .jpg.
+                let ext = if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+                    "png"
+                } else if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 {
+                    "jpg"
+                } else if data
+                    .starts_with(b"RIFF")
+                    && data.get(8..12) == Some(b"WEBP")
+                {
+                    "webp"
+                } else {
+                    "jpg"
+                };
+                let path = dir.join(format!("img-{ts}.{ext}"));
+                std::fs::write(&path, data)?;
+                Ok(path)
+            }
+            group::GroupMsgKind::Text => anyhow::bail!("text has no media body"),
+        }
+    }
+
+    /// Derive a `store::Kind` + local path for a group media body (or `None`
+    /// for text). Writes the media file to disk and returns the Kind so the
+    /// chat row renders a voice/image bubble instead of text.
+    fn group_media_storage(
+        &self,
+        plain: &group::GroupPlain,
+    ) -> anyhow::Result<Option<store::Kind>> {
+        let Some(data) = &plain.data else {
+            return Ok(None);
+        };
+        match &plain.kind {
+            group::GroupMsgKind::Voice {
+                duration_ms,
+                ..
+            } => {
+                let path = self.write_group_media(&plain.kind, data)?;
+                Ok(Some(store::Kind::Voice {
+                    path: path.to_string_lossy().into_owned(),
+                    duration_ms: *duration_ms,
+                }))
+            }
+            group::GroupMsgKind::Image => {
+                let path = self.write_group_media(&plain.kind, data)?;
+                Ok(Some(store::Kind::Image {
+                    path: path.to_string_lossy().into_owned(),
+                }))
+            }
+            group::GroupMsgKind::Text => Ok(None),
+        }
+    }
+
+    /// Persist one group message row. Best-effort: if we can't open the
+    /// envelope (e.g. group key not known yet), we still store it as an opaque
+    /// Text envelope so the message is not lost and can be decrypted later
+    /// once we hold the group.
+    async fn store_group_row(
+        &self,
+        env: &group::SealedGroupMsg,
+        plain: Option<&group::GroupPlain>,
+    ) -> anyhow::Result<()> {
         let wire = serde_json::to_string(env)?;
         let b64 = crate::account::b64(wire.as_bytes());
+        let kind = match plain {
+            Some(p) => self.group_media_storage(p)?.unwrap_or(store::Kind::Text),
+            None => store::Kind::Text,
+        };
+        // `text` is ALWAYS the sealed envelope (base64) — the group chat
+        // renderer decrypts it via `open_stored_group_message`, which works for
+        // both text and media; `kind` adds the on-disk media path for voice/image.
         self.store
-            .push(&env.group_id, &env.from, &b64, true, store::Kind::Text)
+            .push(&env.group_id, &env.from, &b64, true, kind)
             .await;
         Ok(())
     }
 
+    pub async fn store_group_outbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
+        let plain = self.open_group_message(&env.group_id, env).ok();
+        self.store_group_row(env, plain.as_ref()).await
+    }
+
     pub async fn store_group_inbound(&self, env: &group::SealedGroupMsg) -> anyhow::Result<()> {
-        let wire = serde_json::to_string(env)?;
-        let b64 = crate::account::b64(wire.as_bytes());
-        self.store
-            .push(&env.group_id, &env.from, &b64, true, store::Kind::Text)
-            .await;
-        Ok(())
+        let plain = self.open_group_message(&env.group_id, env).ok();
+        self.store_group_row(env, plain.as_ref()).await
     }
 
     pub fn announce_group(&self, group_id: &str) -> anyhow::Result<group::GroupPublic> {
@@ -1916,11 +2032,37 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     pub async fn send_group_message(&self, group_id: &str, text: &str) -> anyhow::Result<()> {
+        self.send_group_typed(group_id, &group::GroupMsgKind::Text, text, None)
+            .await
+    }
+
+    /// Send a group voice / image body over the same sealed + broadcast path as
+    /// text. `data` is the raw payload (s16le PCM for voice, photo bytes for
+    /// image); `kind` must match.
+    pub async fn send_group_media(
+        &self,
+        group_id: &str,
+        kind: &group::GroupMsgKind,
+        data: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        self.send_group_typed(group_id, kind, "", Some(data.as_slice()))
+            .await
+    }
+
+    async fn send_group_typed(
+        &self,
+        group_id: &str,
+        kind: &group::GroupMsgKind,
+        text: &str,
+        data: Option<&[u8]>,
+    ) -> anyhow::Result<()> {
+        let bytes = data.map(|d| d.len()).unwrap_or(0);
         eprintln!(
-            "[group] send_group_message group={group_id} text_len={}",
+            "[group] send_group group={group_id} kind={:?} text_len={} bytes={bytes}",
+            kind,
             text.len()
         );
-        let env = self.seal_group_message(group_id, text)?;
+        let env = self.seal_group_message_typed(group_id, kind, text, data)?;
         if self.group_mode(group_id) == group::GroupMode::Server {
             let seq = self.dir.post_group_message(group_id, &env)?;
             tracing::debug!(group_id, seq, "sent group msg via server");

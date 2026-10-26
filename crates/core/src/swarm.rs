@@ -332,6 +332,10 @@ pub async fn boot(
     let my_peer = device.peer_id();
     let gossip_cfg = libp2p::gossipsub::ConfigBuilder::default()
         .allow_self_origin(true)
+        // Group voice clips / photos travel on the gossipsub group topic; the
+        // stock 1 MiB cap would reject them. Match the DM voice/photo channel
+        // budget so a clip/image that fits a DM also fits a group broadcast.
+        .max_transmit_size(IMAGE_REQ_MAX as usize)
         .build()
         .map_err(|e| anyhow::anyhow!("gossipsub config: {e}"))?;
     let mdns = Mdns::new(MdnsConfig::default(), my_peer)?;

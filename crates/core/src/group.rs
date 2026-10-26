@@ -189,13 +189,74 @@ impl SealedGroupMsg {
     }
 }
 
+/// What kind of content a group message carries. `Text` is the classic case;
+/// `Voice`/`Image` ride the same sealed envelope but carry a binary payload in
+/// the sibling `GroupPayload::data_b64` field (base64 so it stays JSON-safe and
+/// fits the existing `GroupMailEntry.wire` / gossipsub data path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupMsgKind {
+    #[default]
+    Text,
+    Voice {
+        rate: u32,
+        #[serde(default)]
+        ch: u32,
+        #[serde(default)]
+        duration_ms: u64,
+    },
+    Image,
+}
+
+impl GroupMsgKind {
+    /// Compact stable representation for the signature canonical form.
+    fn tag(&self) -> String {
+        match self {
+            GroupMsgKind::Text => "text".to_string(),
+            GroupMsgKind::Voice {
+                rate,
+                ch,
+                duration_ms,
+            } => format!("voice:{rate}:{ch}:{duration_ms}"),
+            GroupMsgKind::Image => "image".to_string(),
+        }
+    }
+}
+
+/// The fully opened body of a group message: what to render + (for media) the
+/// raw bytes to persist.
+#[derive(Debug, Clone, Default)]
+pub struct GroupPlain {
+    pub kind: GroupMsgKind,
+    /// Human text (empty for pure media, unless paired like a caption).
+    pub text: String,
+    /// Decoded media payload for `Voice` (raw s16le PCM) / `Image` (photo
+    /// bytes). `None` for `Text`.
+    pub data: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GroupPayload {
     from: String,
     from_sign_pk: String,
     t: u64,
+    /// Wire format version. `v=1` = legacy text-only message whose signature
+    /// did NOT cover body/media — its canonical is exactly the old form so an
+    /// unsigned old message still verifies. `v>=2` includes `kind` + `data` in
+    /// the signature so the kind and body are tamper-evident together.
+    #[serde(default = "default_payload_version")]
+    v: u32,
+    #[serde(default)]
+    kind: GroupMsgKind,
     text: String,
+    #[serde(default)]
+    data_b64: Option<String>,
     signature: String,
+}
+
+fn default_payload_version() -> u32 {
+    // Absent `v` (pre-media wire) means legacy text format.
+    1
 }
 
 impl GroupPayload {
@@ -207,7 +268,19 @@ impl GroupPayload {
         v.push(b'|');
         v.extend_from_slice(&self.t.to_le_bytes());
         v.push(b'|');
-        v.extend_from_slice(self.text.as_bytes());
+        if self.v >= 2 {
+            // kind tag + text + data signed together so a member cannot swap,
+            // rewrite, or downgrade the body (any edit breaks verification).
+            v.extend_from_slice(self.kind.tag().as_bytes());
+            v.push(b'|');
+            v.extend_from_slice(self.text.as_bytes());
+            v.push(b'|');
+            v.extend_from_slice(self.data_b64.as_deref().unwrap_or("").as_bytes());
+        } else {
+            // v1 legacy form — must byte-match the pre-media canonical so an
+            // unsigned old message still verifies: `group|from|t|text`.
+            v.extend_from_slice(self.text.as_bytes());
+        }
         v
     }
 }
@@ -282,13 +355,35 @@ pub fn seal_message(
     sender_peer: &str,
     text: &str,
 ) -> GmResult<SealedGroupMsg> {
+    seal_message_typed(
+        group,
+        sender,
+        sender_peer,
+        &GroupMsgKind::Text,
+        text,
+        None,
+    )
+}
+
+pub fn seal_message_typed(
+    group: &Group,
+    sender: &Account,
+    sender_peer: &str,
+    kind: &GroupMsgKind,
+    text: &str,
+    data: Option<&[u8]>,
+) -> GmResult<SealedGroupMsg> {
     let t = crate::message::now_ms();
     let from_sign_pk = sender.sign_pk().to_string();
+    let data_b64 = data.map(|b| crate::account::b64(b));
     let mut payload = GroupPayload {
         from: sender_peer.to_string(),
         from_sign_pk,
         t,
+        v: 2,
+        kind: kind.clone(),
         text: text.to_string(),
+        data_b64,
         signature: String::new(),
     };
     let msg = payload.canonical(&group.group_id);
@@ -312,7 +407,7 @@ pub fn seal_message(
     })
 }
 
-pub fn open_message(my_secret: &[u8; 32], env: &SealedGroupMsg) -> GmResult<String> {
+pub fn open_message(my_secret: &[u8; 32], env: &SealedGroupMsg) -> GmResult<GroupPlain> {
     let key = message_key(my_secret, &env.group_id);
     let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).expect("32B key");
     let plaintext = cipher
@@ -330,7 +425,15 @@ pub fn open_message(my_secret: &[u8; 32], env: &SealedGroupMsg) -> GmResult<Stri
     if payload.from != env.from {
         return Err(AcctError::BadSignature("group msg from mismatch".into()));
     }
-    Ok(payload.text)
+    let data = payload.data_b64.as_deref().and_then(|b| crate::account::from_b64(b));
+    if !matches!(payload.kind, GroupMsgKind::Text) && data.is_none() {
+        return Err(AcctError::Crypto("group media message lacks payload".into()));
+    }
+    Ok(GroupPlain {
+        kind: payload.kind,
+        text: payload.text,
+        data,
+    })
 }
 
 #[cfg(test)]
@@ -369,10 +472,55 @@ mod tests {
         );
 
         let sealed_bob = seal_message(&group, &bob, bob_p, "hello group").unwrap();
-        assert_eq!(open_message(&s0, &sealed_bob).unwrap(), "hello group");
-        assert_eq!(open_message(&s0, &sealed_bob).unwrap(), "hello group");
+        let plain = open_message(&s0, &sealed_bob).unwrap();
+        assert_eq!(plain.text, "hello group");
+        assert!(matches!(plain.kind, GroupMsgKind::Text));
 
         assert!(open_message(&[9u8; 32], &sealed_bob).is_err());
+
+        // v2 media (image) round-trips with bytes intact.
+        let img: Vec<u8> = (0u32..2048).map(|i| (i % 251) as u8).collect();
+        let sealed_img = seal_message_typed(
+            &group,
+            &bob,
+            bob_p,
+            &GroupMsgKind::Image,
+            "",
+            Some(img.as_slice()),
+        )
+        .unwrap();
+        let plain_img = open_message(&s0, &sealed_img).unwrap();
+        assert!(matches!(plain_img.kind, GroupMsgKind::Image));
+        assert_eq!(plain_img.data, Some(img.clone()));
+        assert!(open_message(&[9u8; 32], &sealed_img).is_err());
+
+        // Voice round-trips with rate/ch/duration + PCM bytes intact.
+        let pcm: Vec<u8> = (0u32..4096).map(|i| (i % 32_000) as u16).flat_map(|x| x.to_le_bytes()).collect();
+        let vkind = GroupMsgKind::Voice { rate: 48_000, ch: 2, duration_ms: 425 };
+        let sealed_voice = seal_message_typed(&group, &bob, bob_p, &vkind, "", Some(pcm.as_slice())).unwrap();
+        let pv = open_message(&s0, &sealed_voice).unwrap();
+        assert!(matches!(pv.kind, GroupMsgKind::Voice { rate: 48_000, ch: 2, .. }));
+        assert_eq!(pv.data, Some(pcm.clone()));
+
+        // A media envelope forged with the wrong sender must be rejected
+        // (signature / from-mismatch). Re-seal the same body as carol but claim
+        // bob sent it.
+        let sealed_carol = seal_message_typed(
+            &group,
+            &carol,
+            carol_p,
+            &GroupMsgKind::Image,
+            "",
+            Some(img.as_slice()),
+        )
+        .unwrap();
+        // Claim a different sender than the one that actually signed -> reject.
+        let mut forged = sealed_carol.clone();
+        forged.from = bob_p.into();
+        assert!(
+            open_message(&s0, &forged).is_err(),
+            "forged sender on a media body must fail"
+        );
 
         group.rotate();
         let s1 = group.secret();
@@ -382,12 +530,15 @@ mod tests {
             open_message(&s0, &sealed_after).is_err(),
             "old secret must not open new message"
         );
-        assert_eq!(open_message(&s1, &sealed_after).unwrap(), "secret msg");
+        assert_eq!(open_message(&s1, &sealed_after).unwrap().text, "secret msg");
 
         let mut other = Group::with_secret("grp-2", alice_p, s1);
         other.set_member(mem(alice_p, &alice));
         let sealed_cross = seal_message(&other, &alice, alice_p, "other group").unwrap();
-        assert_eq!(open_message(&s1, &sealed_cross).unwrap(), "other group");
+        assert_eq!(
+            open_message(&s1, &sealed_cross).unwrap().text,
+            "other group"
+        );
         assert!(open_message(&[7u8; 32], &sealed_cross).is_err());
 
         let mut tampered = sealed_bob.clone();

@@ -2029,21 +2029,7 @@ fn send_chat_voice(
         eprintln!("[voice] no chat_id for key={key}, aborting");
         return;
     };
-    if chat_id.starts_with("grp-") {
-        let _ = slint::invoke_from_event_loop({
-            let weak = weak.clone();
-            move || {
-                if let Some(ui) = weak.upgrade() {
-                    ui.global::<ChatSession>()
-                        .set_send_status(SharedString::from(
-                            "Voice messages aren't supported in groups yet",
-                        ));
-                }
-            }
-        });
-        return;
-    }
-
+    let is_group = chat_id.starts_with("grp-");
     if let Some(ui) = weak.upgrade() {
         ui.global::<ChatSession>()
             .set_send_status(SharedString::from("Sending voice…"));
@@ -2077,6 +2063,37 @@ fn send_chat_voice(
     let c = client.clone();
     let weak3 = weak.clone();
     rt.spawn(async move {
+        // Group path: core seals, broadcasts over gossipsub, and stores the
+        // row (including writing the media file) via `send_group_media` +
+        // `store_group_outbound`. No DM peer resolution / per-clip file needed.
+        if is_group {
+            let kind = chatx_core::group::GroupMsgKind::Voice {
+                rate,
+                ch,
+                duration_ms,
+            };
+            match c.send_group_media(&chat_id, &kind, data).await {
+                Ok(()) => {
+                    eprintln!("[voice] group sent -> {chat_id}");
+                    touch_chat_activity(&chat_id);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak3.upgrade() {
+                            cs_set_send_status(&ui.global::<ChatSession>(), String::new());
+                        }
+                    });
+                    load_chat_messages(weak2, key);
+                }
+                Err(e) => {
+                    eprintln!("[voice] group send FAILED: {e}");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak3.upgrade() {
+                            cs_set_send_status(&ui.global::<ChatSession>(), format!("Send failed: {e}"));
+                        }
+                    });
+                }
+            }
+            return;
+        }
         let local_path = match record::write_voice_clip(rate, ch, &data) {
             Ok(p) => Some(p.to_string_lossy().into_owned()),
             Err(e) => {
@@ -2309,18 +2326,7 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
         eprintln!("[chat-image] no chat_id for key={key}, aborting");
         return;
     };
-    if chat_id.starts_with("grp-") {
-        // Image delivery is per-peer request-response (no group fan-out yet),
-        // so a group chat would only half-send and the status bar would sit
-        // on "Sending photo…" forever — mirroring the voice guard above.
-        if let Some(ui) = weak.upgrade() {
-            ui.global::<ChatSession>()
-                .set_send_status(SharedString::from(
-                    "Photo messages aren't supported in groups yet",
-                ));
-        }
-        return;
-    }
+    let is_group = chat_id.starts_with("grp-");
     if let Some(ui) = weak.upgrade() {
         ui.global::<ChatSession>()
             .set_send_status(SharedString::from("Sending photo…"));
@@ -2364,6 +2370,32 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
     let c = client.clone();
     let weak3 = weak.clone();
     rt.spawn(async move {
+        if is_group {
+            match c
+                .send_group_media(&chat_id, &chatx_core::group::GroupMsgKind::Image, bytes)
+                .await
+            {
+                Ok(()) => {
+                    eprintln!("[chat-image] group sent -> {chat_id}");
+                    touch_chat_activity(&chat_id);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak3.upgrade() {
+                            cs_set_send_status(&ui.global::<ChatSession>(), String::new());
+                        }
+                    });
+                    load_chat_messages(weak2, key);
+                }
+                Err(e) => {
+                    eprintln!("[chat-image] group send FAILED: {e}");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak3.upgrade() {
+                            cs_set_send_status(&ui.global::<ChatSession>(), format!("Send failed: {e}"));
+                        }
+                    });
+                }
+            }
+            return;
+        }
         // Store the original + produce the preview in one blocking task (awaited
         // so this task has a reactor). Runs before the send, so when the chat
         // reloads its rows the on-disk photos — and their previews — are present.
@@ -3021,7 +3053,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                     return Some(m);
                 }
                 match client.open_stored_group_message(&chat_id, &m.text) {
-                    Ok(plain) => Some(chatx_core::store::StoredMsg { text: plain, ..m }),
+                    Ok(plain) => Some(chatx_core::store::StoredMsg { text: plain.text, ..m }),
                     Err(e) => {
                         eprintln!("[chat] failed to open group msg in {chat_id}: {e}; hiding it");
                         None
