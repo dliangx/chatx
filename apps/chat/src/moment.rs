@@ -29,7 +29,8 @@ use chatx_core::Client;
 /// so this struct only carries the fields we actually look up on each round.
 #[derive(Debug, Clone)]
 struct FriendCursor {
-    username: String,
+    /// Best display name for the friend (nickname, falling back to username).
+    display: String,
     local_users_id: i64,
     since_ts: i64,
 }
@@ -117,7 +118,12 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
         if peer.is_empty() {
             continue;
         }
-        let username = f.username.unwrap_or_else(|| me.clone());
+        let display = f
+            .nickname
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| f.username.clone().filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| me.clone());
         let since_ts = sqlite::moment_sync::read(&pool, &peer)
             .await
             .ok()
@@ -126,7 +132,7 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
         friend_by_peer.insert(
             peer,
             FriendCursor {
-                username,
+                display,
                 local_users_id: f.user_id,
                 since_ts,
             },
@@ -210,6 +216,7 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
             let created = match sqlite::social_feed::create_post(
                 &pool,
                 f.local_users_id,
+                meta.user_name.as_deref().or(Some(f.display.as_str())),
                 meta.content.as_deref(),
                 if media_json.is_empty() {
                     None
@@ -238,7 +245,11 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
             let media: Vec<String> = serde_json::from_str(&media_json).unwrap_or_default();
             let previews: Vec<String> = serde_json::from_str(&preview_json).unwrap_or_default();
             nodes.push(SyncedNode {
-                author: f.username.clone(),
+                author: meta
+                    .user_name
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| f.display.clone()),
                 content: meta.content.clone().unwrap_or_default(),
                 media,
                 previews,

@@ -14,6 +14,11 @@ pub struct SocialPost {
     pub comment_count: i64,
     #[sqlx(default)]
     pub recommend_count: i64,
+    /// Denormalized display name of the original author (at post time), used
+    /// for wire transport and as a fallback when the author has no local
+    /// `users` row.
+    #[sqlx(default)]
+    pub user_name: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
@@ -43,6 +48,7 @@ pub struct SocialComment {
 pub async fn create_post(
     pool: &Pool,
     author_id: i64,
+    user_name: Option<&str>,
     content: Option<&str>,
     media_urls: Option<&str>,
     preview_urls: Option<&str>,
@@ -51,11 +57,12 @@ pub async fn create_post(
     let id = new_id();
     let ts = now_ms();
     sqlx::query(
-        "INSERT INTO social_posts (id, author_id, content, media_urls, preview_urls, visibility, timestamp)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO social_posts (id, author_id, user_name, content, media_urls, preview_urls, visibility, timestamp)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )
     .bind(id)
     .bind(author_id)
+    .bind(user_name)
     .bind(content)
     .bind(media_urls)
     .bind(preview_urls)
@@ -314,7 +321,7 @@ mod tests {
     #[tokio::test]
     async fn post_like_comment_roundtrip() {
         let pool = open_memory().await.unwrap();
-        let post = create_post(&pool, 1, Some("hello world"), None, None, 0).await.unwrap();
+        let post = create_post(&pool, 1, Some("u1"), Some("hello world"), None, None, 0).await.unwrap();
         assert_eq!(post.preview_urls, None);
         assert_eq!(post.like_count, 0);
         assert_eq!(post.comment_count, 0);
@@ -348,7 +355,8 @@ mod tests {
         let pool = open_memory().await.unwrap();
         let media = r#"["/h/media/posts/p_1/1.jpg"]"#;
         let preview = r#"["/h/media/posts/p_1/preview/1.jpg"]"#;
-        let post = create_post(&pool, 1, Some("with photos"), Some(media), Some(preview), 0).await.unwrap();
+        let post = create_post(&pool, 1, Some("u1"), Some("with photos"), Some(media), Some(preview), 0).await.unwrap();
+        assert_eq!(post.user_name.as_deref(), Some("u1"));
         assert_eq!(post.preview_urls.as_deref(), Some(preview));
         let back = get_post(&pool, post.id).await.unwrap().unwrap();
         assert_eq!(back.preview_urls, post.preview_urls);

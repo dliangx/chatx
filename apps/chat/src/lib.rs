@@ -3812,9 +3812,16 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
     let rt = runtime();
     let weak2 = weak.clone();
     rt.spawn(async move {
-        // Resolve me_id
-        let me_id = match sqlite::users::get_by_username(&pool, &me).await {
-            Ok(Some(u)) => u.id,
+        // Resolve me_id + my display name (denormalized into the post).
+        let (me_id, my_name) = match sqlite::users::get_by_username(&pool, &me).await {
+            Ok(Some(u)) => (
+                u.id,
+                u.nickname
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| u.username.clone().filter(|s| !s.trim().is_empty()))
+                    .unwrap_or_else(|| me.clone()),
+            ),
             _ => {
                 set_moment_status(weak2.clone(), "Failed to look up user".to_string());
                 if let Some(ui) = weak2.upgrade() {
@@ -3885,6 +3892,7 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
         let created = match sqlite::social_feed::create_post(
             &pool,
             me_id,
+            Some(my_name.as_str()),
             Some(body.as_str()),
             Some(media_json.as_str()),
             preview_json.as_deref(),

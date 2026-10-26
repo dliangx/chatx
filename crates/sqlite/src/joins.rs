@@ -222,6 +222,9 @@ pub async fn group_roster(pool: &Pool, group_id: i64) -> anyhow::Result<Vec<Grou
 pub struct FeedItem {
     pub id: i64,
     pub author_id: i64,
+    /// Denormalized original-author name stamped at post time (fallback when
+    /// the author has no usable local `users` profile).
+    pub user_name: Option<String>,
     pub content: Option<String>,
     pub media_urls: Option<String>,
     pub preview_urls: Option<String>,
@@ -247,7 +250,7 @@ pub async fn feed(pool: &Pool, viewer: i64, include_friend_posts: bool, limit: u
     };
     let sql = format!(
         "SELECT
-            p.id, p.author_id, p.content, p.media_urls, p.preview_urls, p.visibility, p.timestamp,
+            p.id, p.author_id, p.user_name, p.content, p.media_urls, p.preview_urls, p.visibility, p.timestamp,
             p.like_count, p.comment_count,
             COALESCE(p.recommend_count, 0) AS recommend_count,
             u.nickname    AS author_nickname,
@@ -277,7 +280,7 @@ pub async fn feed(pool: &Pool, viewer: i64, include_friend_posts: bool, limit: u
 pub async fn author_feed(pool: &Pool, author_id: i64, limit: u32, offset: u32) -> anyhow::Result<Vec<FeedItem>> {
     let rows = sqlx::query_as::<_, FeedItem>(
         "SELECT
-            p.id, p.author_id, p.content, p.media_urls, p.preview_urls, p.visibility, p.timestamp,
+            p.id, p.author_id, p.user_name, p.content, p.media_urls, p.preview_urls, p.visibility, p.timestamp,
             p.like_count, p.comment_count,
             COALESCE(p.recommend_count, 0) AS recommend_count,
             u.nickname    AS author_nickname,
@@ -512,7 +515,7 @@ mod tests {
         assert!(!me_follows.they_follow_me);
 
         // Feed with i_liked
-        let post = crate::social_feed::create_post(&pool, 2, Some("hello feed"), None, None, 0).await.unwrap();
+        let post = crate::social_feed::create_post(&pool, 2, Some("One"), Some("hello feed"), None, None, 0).await.unwrap();
         crate::social_feed::like(&pool, post.id, 1).await.unwrap();
         let items = feed(&pool, 1, true, 10, 0).await.unwrap();
         assert_eq!(items.len(), 1);

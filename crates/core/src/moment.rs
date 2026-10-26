@@ -9,7 +9,8 @@
 //!
 //! We never carry our own device-local `social_posts.id` or `author_id` —
 //! those are only meaningful on the device that created them. The receiver
-//! resolves the remote author (by friend username) to a local `users` row id
+            //! resolves the remote author (by friend username) to a local `users` row id
+            //! (and stamps the post's `user_name` from the wire metadata)
 //! and generates its own post `id`.
 
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,9 @@ pub enum PostPayload {
 /// issues separate `Image` requests per index).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostMeta {
+    /// Display name of the original author (at post time).
+    #[serde(default)]
+    pub user_name: Option<String>,
     pub content: Option<String>,
     pub timestamp: i64,
     /// Number of original images for this post.
@@ -93,6 +97,7 @@ pub async fn serve(req: PostRequest, pool: Option<SqlitePool>) -> anyhow::Result
                         .map(json_arr_len)
                         .unwrap_or(0) as u32;
                     PostMeta {
+                        user_name: p.user_name,
                         content: p.content,
                         timestamp: p.timestamp,
                         n_media,

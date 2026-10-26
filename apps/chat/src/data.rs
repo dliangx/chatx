@@ -455,7 +455,15 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
             post_id: p.id,
             title: p.content.unwrap_or_default(),
             author: p.author_nickname
-                .unwrap_or_else(|| p.author_username.unwrap_or_default()),
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| p.author_username.clone().filter(|s| !s.trim().is_empty()))
+                .or_else(|| {
+                    p.user_name
+                        .clone()
+                        .filter(|s| !s.trim().is_empty())
+                })
+                .unwrap_or_default(),
             likes: p.like_count,
             liked: p.i_liked,
             recommends: p.recommend_count,
@@ -762,7 +770,7 @@ mod tests {
         .await
         .unwrap();
         sqlite::social::add(&pool, 1, 2).await.unwrap();
-        let post = sqlite::social_feed::create_post(&pool, 2, Some("hello"), None, None, 0).await.unwrap();
+        let post = sqlite::social_feed::create_post(&pool, 2, Some("One"), Some("hello"), None, None, 0).await.unwrap();
         sqlite::social_feed::like(&pool, post.id, 1).await.unwrap();
 
         let (b, _nickname) = load(&pool, me).await.unwrap();
