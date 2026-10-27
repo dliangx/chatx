@@ -56,7 +56,9 @@ mod apple {
             out
         };
         if let Some(slot) = PHOTOS_SINK.get() {
-            if let Ok(g) = slot.lock() { (g)(out) }
+            if let Ok(g) = slot.lock() {
+                (g)(out)
+            }
         }
     }
 
@@ -67,14 +69,20 @@ mod apple {
 
     pub fn set_photos_sink<F: Fn(Vec<String>) + Send + 'static>(sink: F) {
         if let Some(slot) = PHOTOS_SINK.get() {
-            if let Ok(mut g) = slot.lock() { *g = Box::new(sink) }
+            if let Ok(mut g) = slot.lock() {
+                *g = Box::new(sink)
+            }
         } else {
             let _ = PHOTOS_SINK.set(Mutex::new(Box::new(sink)));
         }
     }
     pub fn pick_photos(max: u32) -> Result<(), String> {
         let r = unsafe { chatx_photos_pick(max as i32) };
-        if r == 0 { Ok(()) } else { Err("Failed to open system album (check album permission / Info.plist)".to_string()) }
+        if r == 0 {
+            Ok(())
+        } else {
+            Err("Failed to open system album (check album permission / Info.plist)".to_string())
+        }
     }
     pub fn cancel() {
         unsafe { chatx_photos_pick_cancel() }
@@ -91,26 +99,45 @@ mod desktop {
 
     pub fn set_photos_sink<F: Fn(Vec<String>) + Send + 'static>(sink: F) {
         if let Some(slot) = SINK.get() {
-            if let Ok(mut g) = slot.lock() { *g = Box::new(sink) }
+            if let Ok(mut g) = slot.lock() {
+                *g = Box::new(sink)
+            }
         } else {
             let _ = SINK.set(Mutex::new(Box::new(sink)));
         }
     }
 
     fn deliver(paths: Vec<String>) {
-        if let Some(slot) = SINK.get() { if let Ok(g) = slot.lock() { (g)(paths) } }
+        if let Some(slot) = SINK.get() {
+            if let Ok(g) = slot.lock() {
+                (g)(paths)
+            }
+        }
     }
 
     pub fn pick_photos(max: u32) -> Result<(), String> {
         let max = (max as usize).max(1).min(9);
         let (cmd, args) = if cfg!(target_os = "linux") {
-            let bin = if std::path::Path::new("/usr/bin/zenity").exists() { "/usr/bin/zenity" }
-                else if std::path::Path::new("/usr/bin/kdialog").exists() { "/usr/bin/kdialog" }
-                else { "/usr/bin/zenity" };
-            let args: Vec<String> = if bin.ends_with("zenity") {
-                vec!["--file-selection".into(), "--multiple".into(), "--title=Select photos".into()]
+            let bin = if std::path::Path::new("/usr/bin/zenity").exists() {
+                "/usr/bin/zenity"
+            } else if std::path::Path::new("/usr/bin/kdialog").exists() {
+                "/usr/bin/kdialog"
             } else {
-                vec!["--getopenfile".into(), "*".into(), "--multiple".into(), "--title=Select photos".into()]
+                "/usr/bin/zenity"
+            };
+            let args: Vec<String> = if bin.ends_with("zenity") {
+                vec![
+                    "--file-selection".into(),
+                    "--multiple".into(),
+                    "--title=Select photos".into(),
+                ]
+            } else {
+                vec![
+                    "--getopenfile".into(),
+                    "*".into(),
+                    "--multiple".into(),
+                    "--title=Select photos".into(),
+                ]
             };
             (bin, args)
         } else {
@@ -123,28 +150,28 @@ mod desktop {
                 ],
             )
         };
-        let mut child = std::process::Command::new(cmd)
+        let child = std::process::Command::new(cmd)
             .args(&args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| format!("Failed to launch image picker: {e}"))?;
-        std::thread::spawn(move || {
-            match child.wait_with_output() {
-                Ok(o) => {
-                    let mut paths: Vec<String> = String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .take(max)
-                        .collect();
-                    if paths.len() > max { paths.truncate(max) }
-                    deliver(paths);
+        std::thread::spawn(move || match child.wait_with_output() {
+            Ok(o) => {
+                let mut paths: Vec<String> = String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .take(max)
+                    .collect();
+                if paths.len() > max {
+                    paths.truncate(max)
                 }
-                Err(e) => {
-                    tracing::warn!("[album] picker exit error: {e}");
-                    deliver(Vec::new());
-                }
+                deliver(paths);
+            }
+            Err(e) => {
+                tracing::warn!("[album] picker exit error: {e}");
+                deliver(Vec::new());
             }
         });
         Ok(())
@@ -168,7 +195,10 @@ use stub as backend;
 mod stub {
     pub fn set_photos_sink<F: Fn(Vec<String>) + Send + 'static>(_sink: F) {}
     pub fn pick_photos(_max: u32) -> Result<(), String> {
-        Err("Album image picking is not supported on this platform; use the camera instead".to_string())
+        Err(
+            "Album image picking is not supported on this platform; use the camera instead"
+                .to_string(),
+        )
     }
     pub fn cancel() {}
 }

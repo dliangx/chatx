@@ -12,6 +12,10 @@
 #        brew install x86_64-unknown-linux-gnu          # glibc target (default)
 #        #   or:  brew install x86_64-unknown-linux-musl   # for --musl
 #        CX_ARCH=x86_64 ./scripts/build_linux.sh   # from an arm64 Mac
+#   
+#   3. Cross from Windows (WSL2):
+#        sed -i 's/\r$//' ./scripts/build_linux.sh
+#        ./scripts/build_linux.sh
 #
 # Produces `chatx` + a portable `chatx-<arch>-linux-<mode>.tar.gz` (glibc
 # build by default, musl with `--musl`) in `build/linux/`.
