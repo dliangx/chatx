@@ -3790,6 +3790,11 @@ fn delete_my_note(weak: slint::Weak<MainWindow>, key: i32) {
 }
 
 fn copy_note_to_clipboard(text: String) {
+    #[cfg(target_os = "android")]
+    {
+        let _ = text;
+    }
+    #[cfg(not(target_os = "android"))]
     if let Ok(mut cb) = arboard::Clipboard::new() {
         let _ = cb.set_text(text);
     }
