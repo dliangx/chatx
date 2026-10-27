@@ -345,3 +345,21 @@ msgstr "現在のアカウントのデータをすべて削除して新規作成
 
 msgid "Cancel"
 msgstr "キャンセル"
+
+msgid "Add members"
+msgstr "メンバー追加"
+
+msgid "Group members"
+msgstr "グループメンバー"
+
+msgid "Group name"
+msgstr "グループ名"
+
+msgid "Save name"
+msgstr "名前を保存"
+
+msgid "My nickname in this group"
+msgstr "このグループでの自分のニックネーム"
+
+msgid "Pin chat"
+msgstr "チャットを固定"

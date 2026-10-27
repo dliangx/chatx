@@ -345,3 +345,21 @@ msgstr "حذف جميع بيانات الحساب الحالي وإنشاء حس
 
 msgid "Cancel"
 msgstr "إلغاء"
+
+msgid "Add members"
+msgstr "إضافة أعضاء"
+
+msgid "Group members"
+msgstr "أعضاء المجموعة"
+
+msgid "Group name"
+msgstr "اسم المجموعة"
+
+msgid "Save name"
+msgstr "حفظ الاسم"
+
+msgid "My nickname in this group"
+msgstr "الاسم المستعار لي في هذه المجموعة"
+
+msgid "Pin chat"
+msgstr "تثبيت الدردشة"

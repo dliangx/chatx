@@ -345,3 +345,21 @@ msgstr "Alle Daten des aktuellen Kontos löschen und ein neues erstellen?"
 
 msgid "Cancel"
 msgstr "Abbrechen"
+
+msgid "Add members"
+msgstr "Mitglieder hinzufügen"
+
+msgid "Group members"
+msgstr "Gruppenmitglieder"
+
+msgid "Group name"
+msgstr "Gruppenname"
+
+msgid "Save name"
+msgstr "Name speichern"
+
+msgid "My nickname in this group"
+msgstr "Mein Spitzname in dieser Gruppe"
+
+msgid "Pin chat"
+msgstr "Chat anheften"

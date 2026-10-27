@@ -345,3 +345,21 @@ msgstr "Удалить все данные текущего аккаунта и 
 
 msgid "Cancel"
 msgstr "Отмена"
+
+msgid "Add members"
+msgstr "Добавить участников"
+
+msgid "Group members"
+msgstr "Участники группы"
+
+msgid "Group name"
+msgstr "Название группы"
+
+msgid "Save name"
+msgstr "Сохранить название"
+
+msgid "My nickname in this group"
+msgstr "Мой псевдоним в этой группе"
+
+msgid "Pin chat"
+msgstr "Закрепить чат"

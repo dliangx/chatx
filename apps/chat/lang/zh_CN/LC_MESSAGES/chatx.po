@@ -345,3 +345,21 @@ msgstr "删除当前账户的所有数据并新建一个吗？"
 
 msgid "Cancel"
 msgstr "取消"
+
+msgid "Add members"
+msgstr "添加成员"
+
+msgid "Group members"
+msgstr "群成员"
+
+msgid "Group name"
+msgstr "群名称"
+
+msgid "Save name"
+msgstr "保存名称"
+
+msgid "My nickname in this group"
+msgstr "我在本群的昵称"
+
+msgid "Pin chat"
+msgstr "置顶聊天"
