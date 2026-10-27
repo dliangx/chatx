@@ -312,6 +312,9 @@ fn save_passphrase(_user_id: &str, pass: &str) {
 /// Returns the cached auto-login unlock key (Option of exactly 32 bytes).
 fn load_passphrase(_user_id: &str) -> Option<[u8; 32]> {
     let s = std::fs::read_to_string(autologin_path()).ok()?;
+    if s.len() != 64 {
+        return None;
+    }
     let mut key = [0u8; 32];
     for (i, b) in key.iter_mut().enumerate() {
         *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
