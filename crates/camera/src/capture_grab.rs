@@ -67,7 +67,7 @@ pub(crate) fn grab(gray: &[u8], w: u32, h: u32) {
             .as_ref()
             .map(|p| format!("saved → {p}"))
             .unwrap_or_else(|e| format!("failed: {e}"));
-        eprintln!("[camera] still {msg}");
+        tracing::debug!("[camera] still {msg}");
         let Some(slot) = SINK.get() else { return };
         let Ok(g) = slot.lock() else { return };
         (g)(res);

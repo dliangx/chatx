@@ -41,7 +41,7 @@ pub fn scan_frame(bytes: &[u8], w: u32, h: u32, fmt: u32, on_qr: &dyn Fn(String)
     let gray: Vec<u8> = match fmt {
         FMT_GRAY8 => {
             if bytes.len() < (w as usize) * (h as usize) {
-                eprintln!(
+                tracing::debug!(
                     "[camera] scan: gray buffer {}B < w*h={} — dropped",
                     bytes.len(),
                     (w as usize) * (h as usize)
@@ -53,7 +53,7 @@ pub fn scan_frame(bytes: &[u8], w: u32, h: u32, fmt: u32, on_qr: &dyn Fn(String)
         FMT_RGBA8888 => match rgba8888_to_greyscale(bytes, w, h) {
             Some(g) => g,
             None => {
-                eprintln!(
+                tracing::warn!(
                     "[camera] scan: rgba8888 conversion failed {}x{} {}B",
                     w,
                     h,
@@ -63,7 +63,7 @@ pub fn scan_frame(bytes: &[u8], w: u32, h: u32, fmt: u32, on_qr: &dyn Fn(String)
             }
         },
         _ => {
-            eprintln!(
+            tracing::warn!(
                 "[camera] scan: unsupported pixel fmt={} ({}x{} {}B) — dropped",
                 fmt,
                 w,
@@ -109,7 +109,7 @@ pub fn decode_local_photo(path: &str, target: Option<(u32, u32)>) -> Option<Stri
 /// required to decode small / low-res codes.
 pub fn scan_gray(gray: &[u8], w: u32, h: u32, on_qr: &dyn Fn(String)) {
     if gray.len() < (w as usize) * (h as usize) {
-        eprintln!(
+        tracing::debug!(
             "[camera] scan: buffer {}B < w*h={} — dropped",
             gray.len(),
             (w as usize) * (h as usize)
@@ -118,7 +118,7 @@ pub fn scan_gray(gray: &[u8], w: u32, h: u32, on_qr: &dyn Fn(String)) {
     }
 
     let Ok(source) = Luma8LuminanceSource::new(gray.to_vec(), w, h) else {
-        eprintln!(
+        tracing::warn!(
             "[camera] scan: Luma8LuminanceSource rejected {}x{} {}B",
             w,
             h,
@@ -132,10 +132,10 @@ pub fn scan_gray(gray: &[u8], w: u32, h: u32, on_qr: &dyn Fn(String)) {
         Ok(result) => {
             let text = result.getText().trim().to_string();
             if text.is_empty() {
-                eprintln!("[camera] scan: decoded but payload empty");
+                tracing::debug!("[camera] scan: decoded but payload empty");
                 return;
             }
-            eprintln!("[camera] scan: QR detected = \"{}\"", text);
+            tracing::debug!("[camera] scan: QR detected = \"{}\"", text);
             on_qr(text);
         }
         Err(_) => {}

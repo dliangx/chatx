@@ -9,6 +9,7 @@ name = "camera"
 path = "src/lib.rs"
 
 [dependencies]
+tracing = { workspace = true }
 # Image (de)coding for the `posts` module (originals + JPEG previews) and
 # `scan::decode_local_photo`. jpeg/png only — no C toolchain required.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

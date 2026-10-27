@@ -150,7 +150,7 @@ pub unsafe extern "C" fn bridge_audio_play_pcm(
 pub extern "C" fn bridge_permission_changed(perm: i32, granted: i32) -> i32 {
     match perm {
         1 | 2 | 3 => {
-            eprintln!("[bridge] permission perm={perm} granted={granted}");
+            tracing::debug!("[bridge] permission perm={perm} granted={granted}");
             ERR_OK
         }
         _ => ERR_INVALID_ARG,

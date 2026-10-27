@@ -807,13 +807,13 @@ pub async fn persist_group(
     let num = chat_id.strip_prefix("grp-")?.parse::<i64>().ok()?;
     // `groups.create` upserts on id and adds me as the owner member.
     if let Err(e) = sqlite::groups::create(pool, num, name, owner_user_id, None).await {
-        eprintln!("[persist_group] groups.create({num}) failed: {e}");
+        tracing::warn!("[persist_group] groups.create({num}) failed: {e}");
     }
     if !peer_id.is_empty() {
         if let Err(e) =
             sqlite::groups::add_member(pool, num, peer_id, sqlite::groups::ROLE_OWNER).await
         {
-            eprintln!("[persist_group] groups.add_member({num}) failed: {e}");
+            tracing::warn!("[persist_group] groups.add_member({num}) failed: {e}");
         }
     }
     // Ensure exactly ONE conversation row is keyed by the string chat id (so
@@ -833,7 +833,7 @@ pub async fn persist_group(
             )
             .await
             {
-                eprintln!("[persist_group] conversations.upsert({cid}) failed: {e}");
+                tracing::warn!("[persist_group] conversations.upsert({cid}) failed: {e}");
             }
         }
         Ok(None) => {
@@ -850,10 +850,10 @@ pub async fn persist_group(
             )
             .await
             {
-                eprintln!("[persist_group] conversations.upsert failed: {e}");
+                tracing::warn!("[persist_group] conversations.upsert failed: {e}");
             }
         }
-        Err(e) => eprintln!("[persist_group] resolve_id failed: {e}"),
+        Err(e) => tracing::warn!("[persist_group] resolve_id failed: {e}"),
     }
     Some(num)
 }

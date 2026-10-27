@@ -184,12 +184,12 @@ private final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate {
             return
         }
         guard let data = photo.fileDataRepresentation() else {
-            report(ok: 0, path: nil, message: "照片数据为空")
+            report(ok: 0, path: nil, message: "Photo data is empty")
             return
         }
         let path = PhotoDelegate.takePending()
         if path.isEmpty {
-            report(ok: 0, path: nil, message: "未指定目标路径")
+            report(ok: 0, path: nil, message: "No target path specified")
             return
         }
         do {
@@ -284,12 +284,12 @@ private final class CameraShim {
             if status == .notDetermined {
                 FileHandle.standardError.write(Data("[camera] notDetermined → prompting TCC (wait 20s)\n".utf8))
                 if !self.requestCameraAccessWithPrompt(timeout: 20) {
-                    err = "未授权摄像头访问，请前往 系统设置 › 隐私与安全性 › 摄像头 为本应用授权后重试"
+                    err = "Camera access is not authorized. Grant it in Settings > Privacy & Security > Camera, then retry."
                     return
                 }
                 FileHandle.standardError.write(Data("[camera] TCC granted\n".utf8))
             } else if status == .denied || status == .restricted {
-                err = "未授权摄像头访问，请前往 系统设置 › 隐私与安全性 › 摄像头 为本应用授权后重试"
+                err = "Camera access is not authorized. Grant it in Settings > Privacy & Security > Camera, then retry."
                 return
             }
 
@@ -321,16 +321,16 @@ private final class CameraShim {
             session.beginConfiguration()
             do {
                 guard let device = AVCaptureDevice.default(for: .video) else {
-                    throw ShErr("未找到可用的摄像头设备")
+                    throw ShErr("No camera device found")
                 }
                 FileHandle.standardError.write(Data("[camera] using device: \(device.localizedName)\n".utf8))
                 let input = try AVCaptureDeviceInput(device: device)
                 guard session.canAddInput(input) else {
-                    throw ShErr("摄像头无法加入会话（请确认已授权访问权限）")
+                    throw ShErr("Camera input cannot be added to the session (ensure camera access is authorized)")
                 }
                 session.addInput(input)
                 guard session.canAddOutput(mdOut) else {
-                    throw ShErr("添加二维码识别输出失败")
+                    throw ShErr("Failed to add QR code output")
                 }
                 session.addOutput(mdOut)
                 if session.canAddOutput(vOut) {
@@ -349,7 +349,7 @@ private final class CameraShim {
                 return
             } catch {
                 session.commitConfiguration()
-                err = "配置会话失败: \(error.localizedDescription)"
+                err = "Failed to configure session: \(error.localizedDescription)"
                 return
             }
 

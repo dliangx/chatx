@@ -162,7 +162,7 @@ impl Audio {
                         }
                     }
                 },
-                |err| eprintln!("[audio] input stream error: {err}"),
+                |err| tracing::warn!("[audio] input stream error: {err}"),
                 None,
             )
             .map_err(|e| format!("build_input_stream: {e}"))?;
@@ -227,7 +227,7 @@ impl Audio {
                         *slot = 0.0;
                     }
                 },
-                |err| eprintln!("[audio] output stream error: {err}"),
+                |err| tracing::warn!("[audio] output stream error: {err}"),
                 None,
             )
             .map_err(|e| format!("build_output_stream: {e}"))?;

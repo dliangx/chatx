@@ -139,7 +139,7 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
         );
     }
     if friend_by_peer.is_empty() {
-        eprintln!("[moment] no friends with a dialable device — nothing to sync");
+        tracing::debug!("[moment] no friends with a dialable device — nothing to sync");
         return Ok(());
     }
 
@@ -186,7 +186,7 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
         let posts = match client.request_post_list(&peer_id, f.since_ts, _upper).await {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[moment] request_post_list({peer_id}) failed: {e}");
+                tracing::warn!("[moment] request_post_list({peer_id}) failed: {e}");
                 continue;
             }
         };
@@ -243,7 +243,7 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
             {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!(
+                    tracing::warn!(
                         "[moment] create_post for friend={peer_id} ts={} failed: {e}",
                         meta.timestamp
                     );

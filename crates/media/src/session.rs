@@ -577,10 +577,10 @@ impl PeerCall {
     pub fn hangup(&self) -> Result<()> {
         // Emit the `Bye` *before* the local teardown so the transport and
         // PC are still alive to carry it.
-        eprintln!("[call] hangup(): sending Bye to peer");
+        tracing::debug!("[call] hangup(): sending Bye to peer");
         match self.inner.transport.send(&self.new_frame(SignalKind::Bye)) {
-            Ok(()) => eprintln!("[call] hangup(): Bye accepted by transport"),
-            Err(e) => eprintln!("[call] hangup(): Bye send FAILED: {e}"),
+            Ok(()) => tracing::debug!("[call] hangup(): Bye accepted by transport"),
+            Err(e) => tracing::warn!("[call] hangup(): Bye send FAILED: {e}"),
         }
         self.close()
     }
@@ -680,7 +680,7 @@ impl PeerCall {
             RemoteVideo::Camera
         };
         let call = self.clone();
-        eprintln!(
+        tracing::debug!(
             "[media] on_track: kind={:?} stream_id={stream_id}",
             track.kind()
         );
@@ -715,7 +715,7 @@ impl PeerCall {
                                 if let Some((rgba, w, h)) = decode_h264_seq(&mut decoder, &annexb) {
                                     // frames_decoded += 1;
                                     // if frames_decoded <= 3 || frames_decoded % 60 == 0 {
-                                    //     eprintln!(
+                                    //     tracing::debug!(
                                     //         "[media] video decoded #{frames_decoded} {w}x{h} ({remote_video:?})",
                                     //     );
                                     // }

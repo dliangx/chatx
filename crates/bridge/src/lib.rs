@@ -86,11 +86,11 @@ pub fn request_screen_share_stop() {
 }
 #[cfg(all(target_os = "ios", not(feature = "has-ios-shim")))]
 pub fn request_screen_share_start() {
-    eprintln!("[bridge] screen-share start: no iOS shim linked (enable feature `has-ios-shim`)");
+    tracing::warn!("[bridge] screen-share start: no iOS shim linked (enable feature `has-ios-shim`)");
 }
 #[cfg(all(target_os = "ios", not(feature = "has-ios-shim")))]
 pub fn request_screen_share_stop() {
-    eprintln!("[bridge] screen-share stop: no iOS shim linked");
+    tracing::warn!("[bridge] screen-share stop: no iOS shim linked");
 }
 
 /// Register the consumer that receives **incoming camera frames**.
@@ -155,7 +155,7 @@ pub fn set_audio_sink(
 #[cfg(debug_assertions)]
 pub fn install_debug_camera_consumer() {
     set_camera_consumer(Box::new(|bytes, w, h, fmt| {
-        eprintln!(
+        tracing::debug!(
             "[bridge.debug] camera {}x{} {}B fmt={}",
             w,
             h,
@@ -168,6 +168,6 @@ pub fn install_debug_camera_consumer() {
 #[cfg(debug_assertions)]
 pub fn install_debug_audio_consumer() {
     set_audio_consumer(Box::new(|bytes, rate, ch| {
-        eprintln!("[bridge.debug] mic audio {}B @{}Hz/{}ch", bytes.len(), rate, ch);
+        tracing::debug!("[bridge.debug] mic audio {}B @{}Hz/{}ch", bytes.len(), rate, ch);
     }));
 }

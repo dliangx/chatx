@@ -69,7 +69,7 @@ pub fn start() -> anyhow::Result<()> {
         rate,
         ch: ch as u32,
     };
-    eprintln!("[record] start: rate={rate} Hz, ch={ch}");
+    tracing::debug!("[record] start: rate={rate} Hz, ch={ch}");
 
     let frames = frames_inner().clone();
     let stream = device
@@ -90,7 +90,7 @@ pub fn start() -> anyhow::Result<()> {
                     }
                 }
             },
-            |err| eprintln!("[record] input stream error: {err}"),
+            |err| tracing::warn!("[record] input stream error: {err}"),
             None,
         )
         .map_err(|e| anyhow::anyhow!("build_input_stream: {e}"))?;
@@ -168,7 +168,7 @@ pub fn stop() -> anyhow::Result<String> {
     let path = format!("{home}/chatx-audio-test-{ts}.wav");
     std::fs::write(&path, wav_encode(&rec.data, rec.rate, rec.ch))
         .map_err(|e| anyhow::anyhow!("write {path}: {e}"))?;
-    eprintln!(
+    tracing::debug!(
         "[record] wrote {path} ({} raw bytes @ {}Hz/{}ch, {}ms)",
         rec.data.len(),
         rec.rate,

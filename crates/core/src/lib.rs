@@ -1,4 +1,5 @@
 pub mod account;
+pub mod logging;
 pub mod friendq;
 pub mod group;
 pub mod identity;
@@ -182,7 +183,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
         }
         if dials > 0 {
-            eprintln!("[group] connect_group {group_id}: dialed {dials} peers");
+            tracing::debug!("[group] connect_group {group_id}: dialed {dials} peers");
         }
         Ok(())
     }
@@ -190,11 +191,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     pub fn warm_dial_peer(&self, peer_base58: &str) -> Result<(), anyhow::Error> {
         let me = self.peer_base58();
         if peer_base58 == me {
-            eprintln!("[dm] warm_dial skip: target is self");
+            tracing::debug!("[dm] warm_dial skip: target is self");
             return Ok(());
         }
         let Ok(pid) = peer_base58.parse::<PeerId>() else {
-            eprintln!("[dm] warm_dial skip: bad peer id {peer_base58}");
+            tracing::warn!("[dm] warm_dial skip: bad peer id {peer_base58}");
             return Ok(());
         };
         let conn_count = self
@@ -209,7 +210,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             // Stale `connected` count would silently skip every future dial —
             // log loudly so it's diagnosable. This is the "B stops trying to
             // reconnect A after a disconnect" bug: the counter leaked to >0.
-            // eprintln!(
+            // tracing::debug!(
             //     "[dm] warm_dial skip {peer_base58}: already considered connected (count={conn_count})"
             // );
             return Ok(());
@@ -238,7 +239,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             let rec = match self.dir.resolve_device(peer_base58) {
                 Ok(rec) => rec,
                 Err(e) => {
-                    eprintln!("[dm] warm_dial resolve {peer_base58} failed: {e}");
+                    tracing::warn!("[dm] warm_dial resolve {peer_base58} failed: {e}");
                     break;
                 }
             };
@@ -248,7 +249,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     continue;
                 };
                 if let Some(reason) = unroutable_reason(&addr) {
-                    eprintln!("[dm] warm_dial skip unroutable ({reason}): {addr}");
+                    tracing::debug!("[dm] warm_dial skip unroutable ({reason}): {addr}");
                     continue;
                 }
                 if !candidates.iter().any(|a| a == &addr) {
@@ -256,10 +257,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 }
             }
             if candidates.is_empty() {
-                eprintln!("[dm] warm_dial skip {peer_base58}: no routable endpoints");
+                tracing::warn!("[dm] warm_dial skip {peer_base58}: no routable endpoints");
                 break;
             }
-            eprintln!(
+            tracing::debug!(
                 "[dm] warm_dial {peer_base58} pass={pass} candidates={}",
                 candidates.len()
             );
@@ -278,11 +279,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 {
                     continue;
                 }
-                eprintln!("[dm] warm_dial {peer_base58} -> {addr}");
+                tracing::debug!("[dm] warm_dial {peer_base58} -> {addr}");
                 let deadline = std::time::Instant::now() + PER_ATTEMPT;
                 while std::time::Instant::now() < deadline {
                     if self.peer_connected(&pid) {
-                        eprintln!("[dm] warm_dial {peer_base58} connected via {addr}");
+                        tracing::debug!("[dm] warm_dial {peer_base58} connected via {addr}");
                         return Ok(());
                     }
                     std::thread::sleep(POLL);
@@ -345,7 +346,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
         }
         if n > 0 {
-            eprintln!("[group] disconnect {group_id}: closed {n} peers");
+            tracing::debug!("[group] disconnect {group_id}: closed {n} peers");
         }
     }
 
@@ -690,7 +691,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             match port {
                 Some(p) => v.insert(0, format!("/ip4/{ip}/tcp/{p}")),
                 None => {
-                    eprintln!("[dir] no listening port found; not advertising egress {ip}");
+                    tracing::warn!("[dir] no listening port found; not advertising egress {ip}");
                 }
             }
         }
@@ -1049,11 +1050,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let mut candidates: Vec<Multiaddr> = Vec::new();
         for endpoint in &rec.endpoints {
             let Ok(addr) = endpoint.parse::<Multiaddr>() else {
-                eprintln!("[moment] skip unparseable endpoint: {endpoint}");
+                tracing::debug!("[moment] skip unparseable endpoint: {endpoint}");
                 continue;
             };
             if let Some(reason) = unroutable_reason(&addr) {
-                eprintln!("[moment] skip unroutable endpoint ({reason}): {addr}");
+                tracing::debug!("[moment] skip unroutable endpoint ({reason}): {addr}");
                 continue;
             }
             candidates.push(addr);
@@ -1084,16 +1085,16 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(Ok(resp))) => {
-                    eprintln!("[moment] blob ok id={id} via {addr}");
+                    tracing::debug!("[moment] blob ok id={id} via {addr}");
                     return Ok(resp);
                 }
                 Ok(Ok(Err(e))) => {
-                    eprintln!("[moment] blob to {addr} failed: {e}");
+                    tracing::warn!("[moment] blob to {addr} failed: {e}");
                     last_err = e.to_string();
                 }
                 Ok(Err(_)) => last_err = "peer dropped connection before response".to_string(),
                 Err(_) => {
-                    eprintln!("[moment] no response within {timeout:?} via {addr}");
+                    tracing::warn!("[moment] no response within {timeout:?} via {addr}");
                     last_err =
                         format!("no response within {timeout}s", timeout = timeout.as_secs());
                 }
@@ -1150,7 +1151,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     pub async fn send_dm(&self, peer_base58: &str, text: &str) -> anyhow::Result<String> {
-        eprintln!("[dm] send_dm peer={peer_base58} text_len={}", text.len());
+        tracing::debug!("[dm] send_dm peer={peer_base58} text_len={}", text.len());
         let rec = self
             .dir
             .resolve_device(peer_base58)
@@ -1165,11 +1166,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let mut candidates: Vec<Multiaddr> = Vec::new();
         for endpoint in &rec.endpoints {
             let Ok(addr) = endpoint.parse::<Multiaddr>() else {
-                eprintln!("[dm] skip unparseable endpoint: {endpoint}");
+                tracing::debug!("[dm] skip unparseable endpoint: {endpoint}");
                 continue;
             };
             if let Some(reason) = unroutable_reason(&addr) {
-                eprintln!("[dm] skip unroutable endpoint ({reason}): {addr}");
+                tracing::debug!("[dm] skip unroutable endpoint ({reason}): {addr}");
                 continue;
             }
             candidates.push(addr);
@@ -1186,7 +1187,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
         let mut last_err = String::new();
         for addr in &candidates {
-            eprintln!("[dm] attempting send -> {addr}");
+            tracing::debug!("[dm] attempting send -> {addr}");
             if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
                 peer: peer.clone(),
                 addr: addr.clone(),
@@ -1208,23 +1209,23 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(Ok(()))) => {
-                    eprintln!("[dm] acked via {addr}");
+                    tracing::debug!("[dm] acked via {addr}");
                     let chat = store::dm_chat_id(&self.peer_base58(), peer_base58);
                     self.store
                         .push(&chat, &self.peer_base58(), text, false, store::Kind::Text)
                         .await;
-                    eprintln!("[dm] send_dm done, chat={chat}");
+                    tracing::debug!("[dm] send_dm done, chat={chat}");
                     return Ok(chat);
                 }
                 Ok(Ok(Err(e))) => {
-                    eprintln!("[dm] send to {addr} failed: {e}");
+                    tracing::warn!("[dm] send to {addr} failed: {e}");
                     last_err = e.to_string();
                 }
                 Ok(Err(_)) => {
                     last_err = "peer connection dropped before ack".to_string();
                 }
                 Err(_) => {
-                    eprintln!("[dm] no ack from {addr} within {timeout:?}");
+                    tracing::warn!("[dm] no ack from {addr} within {timeout:?}");
                     last_err = format!(
                         "no ack from peer within {timeout_secs}s",
                         timeout_secs = timeout.as_secs()
@@ -1248,7 +1249,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         ch: u32,
         duration_ms: u64,
     ) -> anyhow::Result<()> {
-        eprintln!(
+        tracing::debug!(
             "[voice] send_voice peer={peer_base58} bytes={} rate={rate} ch={ch} dur={duration_ms}ms",
             data.len()
         );
@@ -1297,7 +1298,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(Ok(()))) => {
-                    eprintln!("[voice] acked via {addr}");
+                    tracing::debug!("[voice] acked via {addr}");
                     return Ok(());
                 }
                 Ok(Ok(Err(e))) => {
@@ -1356,7 +1357,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// writes them to a local path first and calls [`Self::persist_image`]
     /// after a successful ack (mirroring voice).
     pub async fn send_image_cmd(&self, peer_base58: &str, data: Vec<u8>) -> anyhow::Result<()> {
-        eprintln!("[image] send_image peer={peer_base58} bytes={}", data.len());
+        tracing::debug!("[image] send_image peer={peer_base58} bytes={}", data.len());
         let rec = self
             .dir
             .resolve_device(peer_base58)
@@ -1397,7 +1398,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(Ok(()))) => {
-                    eprintln!("[image] acked via {addr}");
+                    tracing::debug!("[image] acked via {addr}");
                     return Ok(());
                 }
                 Ok(Ok(Err(e))) => {
@@ -1435,7 +1436,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 continue;
             };
             if let Some(reason) = unroutable_reason(&addr) {
-                eprintln!("[friendq] skip unroutable endpoint ({reason}): {addr}");
+                tracing::debug!("[friendq] skip unroutable endpoint ({reason}): {addr}");
                 continue;
             }
             candidates.push(addr);
@@ -1449,7 +1450,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let timeout = std::time::Duration::from_secs(8);
         let mut last_err = String::new();
         for addr in &candidates {
-            eprintln!("[friendq] send -> {peer_base58} via {addr}");
+            tracing::debug!("[friendq] send -> {peer_base58} via {addr}");
             if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
                 peer: peer.clone(),
                 addr: addr.clone(),
@@ -1470,11 +1471,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(Ok(()))) => {
-                    eprintln!("[friendq] acked via {addr}");
+                    tracing::debug!("[friendq] acked via {addr}");
                     return Ok(());
                 }
                 Ok(Ok(Err(e))) => {
-                    eprintln!("[friendq] send to {addr} failed: {e}");
+                    tracing::warn!("[friendq] send to {addr} failed: {e}");
                     last_err = e.to_string();
                 }
                 Ok(Err(_)) => last_err = "peer connection dropped before ack".to_string(),
@@ -2067,7 +2068,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         data: Option<&[u8]>,
     ) -> anyhow::Result<()> {
         let bytes = data.map(|d| d.len()).unwrap_or(0);
-        eprintln!(
+        tracing::debug!(
             "[group] send_group group={group_id} kind={:?} text_len={} bytes={bytes}",
             kind,
             text.len()
@@ -2079,7 +2080,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         } else {
             if self.p2p_all_peers_offline(group_id) {
                 let _ = self.connect_to_group(group_id);
-                eprintln!("[group] all members offline for {group_id} — redial attempted");
+                tracing::warn!("[group] all members offline for {group_id} — redial attempted");
                 anyhow::bail!(
                     "group {group_id}: no other member online — \
                      retry once a peer is reachable"
@@ -2087,7 +2088,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             let missing: Vec<String> = self.p2p_unreachable_members(group_id);
             if !missing.is_empty() {
-                eprintln!(
+                tracing::warn!(
                     "[group] async redial {group_id}: {} member(s) offline {missing:?}",
                     missing.len()
                 );
@@ -2101,7 +2102,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 .map_err(|e| anyhow::anyhow!("publish group msg: {e}"))?;
         }
         self.store_group_outbound(&env).await?;
-        eprintln!("[group] send_group_message done group={group_id}");
+        tracing::debug!("[group] send_group_message done group={group_id}");
         Ok(())
     }
 

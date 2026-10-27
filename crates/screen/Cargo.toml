@@ -7,6 +7,9 @@ description = "Desktop screen-capture streaming (xcap). Mobile shells capture na
 [lib]
 name = "screen"
 
+[dependencies]
+tracing = { workspace = true }
+
 # xcap 0.9 targets macOS (ScreenCaptureKit / CGDisplay),
 # Windows (Graphics Capture), Linux (Pipewire / wayland / X11). It is NOT
 # compiled for iOS / Android — those platforms capture in the native shell

@@ -310,9 +310,9 @@ fn parse_relay_env() -> Vec<(PeerId, Multiaddr)> {
         match s.parse::<Multiaddr>() {
             Ok(addr) => match split_relay_addr(&addr) {
                 Some(pair) => out.push(pair),
-                None => eprintln!("[relay] {s} has no /p2p/.../ component; ignored"),
+                None => tracing::debug!("[relay] {s} has no /p2p/.../ component; ignored"),
             },
-            Err(e) => eprintln!("[relay] {s}: {e}"),
+            Err(e) => tracing::debug!("[relay] {s}: {e}"),
         }
     }
     out
@@ -423,7 +423,7 @@ pub async fn boot(
             .with(libp2p::multiaddr::Protocol::P2pCircuit)
             .with(libp2p::multiaddr::Protocol::P2p(me));
         match swarm.listen_on(circuit.clone()) {
-            Ok(_) => eprintln!("[swarm] reserving relay slot on {circuit}"),
+            Ok(_) => tracing::debug!("[swarm] reserving relay slot on {circuit}"),
             Err(e) => tracing::warn!("reserve relay {peer}: {e}"),
         }
     }
@@ -477,19 +477,19 @@ async fn swarm_loop(
                         .unwrap()
                         .insert(id, (peer.clone(), ack_tx));
                     let _rid = swarm.behaviour_mut().blob.send_request(&peer, req);
-                    eprintln!("[swarm] SEND BLOB id={id} peer={peer}");
+                    tracing::debug!("[swarm] SEND BLOB id={id} peer={peer}");
                 }
                 Some(Cmd::Connect { peer, addr }) => {
                     let own = is_own_address(&addr, &running);
                     if peer == *swarm.local_peer_id() {
-                        eprintln!("[swarm] DIAL SKIPPED self peer={peer} addr={addr}");
+                        tracing::debug!("[swarm] DIAL SKIPPED self peer={peer} addr={addr}");
                     } else if own {
                         // Dialing one of our own listen / confirmed-external
                         // addresses (e.g. a sibling device on this host, or a
                         // stale self endpoint in the directory) — skip.
-                        eprintln!("[swarm] DIAL SKIPPED own addr={addr} peer={peer}");
+                        tracing::debug!("[swarm] DIAL SKIPPED own addr={addr} peer={peer}");
                     } else {
-                        eprintln!("[swarm] DIAL peer={peer} addr={addr}");
+                        tracing::debug!("[swarm] DIAL peer={peer} addr={addr}");
                         // Fresh endpoint comes from the directory (i.e. the peer
                         // just reported a possibly-changed NAT mapping). Reset
                         // our local dial backoff so we actually try — otherwise
@@ -624,7 +624,7 @@ async fn swarm_loop(
                             .unwrap()
                             .insert(id, (peer, tx));
                     }
-                    eprintln!(
+                    tracing::debug!(
                         "[swarm] IMAGE OUTBOUND peer={peer} id={} {} bytes",
                         id,
                         data.len()
@@ -675,7 +675,7 @@ async fn swarm_loop(
                     if let Err(e) = swarm.listen_on(circuit.clone()) {
                         tracing::warn!("reserve relay {relay_peer}: {e}");
                     } else {
-                        eprintln!("[swarm] reserve relay via {circuit}");
+                        tracing::debug!("[swarm] reserve relay via {circuit}");
                     }
                 }
                 Some(Cmd::Disconnect { peer }) => {
@@ -685,8 +685,8 @@ async fn swarm_loop(
                     // the peer from the address book, so mDNS / identify can
                     // rediscover them if the user re-enters the chat.
                     match swarm.disconnect_peer_id(peer) {
-                        Ok(()) => eprintln!("[swarm] DISCONNECTED {peer} (via cmd)"),
-                        Err(()) => eprintln!("[swarm] DISCONNECT {peer}: was not connected"),
+                        Ok(()) => tracing::debug!("[swarm] DISCONNECTED {peer} (via cmd)"),
+                        Err(()) => tracing::debug!("[swarm] DISCONNECT {peer}: was not connected"),
                     }
                 }
                 None => return,
@@ -698,7 +698,7 @@ async fn swarm_loop(
                     // itself has stopped (the rest of the runtime is alive
                     // because the loop still spins and we still see other
                     // events).
-                    eprintln!("[swarm] INCOMING conn on {local_addr:?}");
+                    tracing::debug!("[swarm] INCOMING conn on {local_addr:?}");
                 }
                 SwarmEvent::NewListenAddr { address, .. } => {
                     running.listen_addrs.lock().unwrap().push(address.clone());
@@ -713,7 +713,7 @@ async fn swarm_loop(
                     if !addrs.iter().any(|a| a == &address) {
                         addrs.push(address.clone());
                     }
-                    eprintln!("[swarm] EXTERNAL ADDR {address}");
+                    tracing::debug!("[swarm] EXTERNAL ADDR {address}");
                 }
                 SwarmEvent::ExternalAddrExpired { address } => {
                     running
@@ -721,16 +721,16 @@ async fn swarm_loop(
                         .lock()
                         .unwrap()
                         .retain(|a| a != &address);
-                    eprintln!("[swarm] EXTERNAL ADDR EXPIRED {address}");
+                    tracing::debug!("[swarm] EXTERNAL ADDR EXPIRED {address}");
                 }
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    eprintln!("[swarm] CONNECTED to {peer_id}");
+                    tracing::debug!("[swarm] CONNECTED to {peer_id}");
                     *running.connected.lock().unwrap().entry(peer_id).or_insert(0) += 1;
                     running.dial_backoff.lock().unwrap().remove(&peer_id.to_base58()); // reachable again — clear backoff
                     let _ = ev.send(ChatEvent::Connected(peer_id));
                 }
                 SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                    eprintln!("[swarm] DISCONNECTED from {peer_id}");
+                    tracing::debug!("[swarm] DISCONNECTED from {peer_id}");
                     // Hold the `connected` guard ONCE. Re-locking the same
                     // std::sync::Mutex while the `if let` guard is still alive
                     // is a self-deadlock (Mutex is not re-entrant): it used to
@@ -771,7 +771,7 @@ async fn swarm_loop(
                                 .lock()
                                 .unwrap()
                                 .insert(key.clone(), now);
-                            eprintln!("[swarm] DIAL FAILED peer={key} err={error:?}");
+                            tracing::warn!("[swarm] DIAL FAILED peer={key} err={error:?}");
                         }
                     }
                 }
@@ -794,7 +794,7 @@ async fn swarm_loop(
                             relay_peer_id, ..
                         } = r
                         {
-                            eprintln!("[swarm] RELAY reservation accepted from {relay_peer_id}");
+                            tracing::debug!("[swarm] RELAY reservation accepted from {relay_peer_id}");
                         }
                     }
                     NetEvent::Mdns(m) => {
@@ -846,7 +846,7 @@ async fn swarm_loop(
                                 if let Some((_peer, tx)) =
                                     pending_acks.lock().unwrap().remove(&response.id)
                                 {
-                                    eprintln!("[swarm] ACKED id={}", response.id);
+                                    tracing::debug!("[swarm] ACKED id={}", response.id);
                                     let _ = tx.send(Ok(()));
                                 }
                                 let _ = ev.send(ChatEvent::Acked {
@@ -856,7 +856,7 @@ async fn swarm_loop(
                             }
                         },
                             RrEvent::OutboundFailure { peer, error, .. } => {
-                                eprintln!("[swarm] SEND FAILED peer={peer} err={error:?}");
+                                tracing::warn!("[swarm] SEND FAILED peer={peer} err={error:?}");
                                 // Fail every in-flight waiter addressed to this peer.
                                 let mut m = pending_acks.lock().unwrap();
                                 let ids: Vec<u64> = m
@@ -899,7 +899,7 @@ async fn swarm_loop(
                     NetEvent::Voice(v) => match v {
                         RrEvent::Message { peer, message, .. } => match message {
                             RrMessage::Request { request, channel, .. } => {
-                                eprintln!(
+                                tracing::debug!(
                                     "[swarm] VOICE INBOUND from peer={peer} id={} {} bytes rate={} ch={} dur={}ms",
                                     request.id, request.data.len(),
                                     request.rate, request.ch, request.duration_ms
@@ -917,7 +917,7 @@ async fn swarm_loop(
                                 });
                             }
                             RrMessage::Response { response, .. } => {
-                                eprintln!("[swarm] VOICE ACKED id={}", response.id);
+                                tracing::debug!("[swarm] VOICE ACKED id={}", response.id);
                                 if let Some((_peer, tx)) =
                                     pending_acks.lock().unwrap().remove(&response.id)
                                 {
@@ -926,7 +926,7 @@ async fn swarm_loop(
                             }
                         },
                         RrEvent::OutboundFailure { peer, error, .. } => {
-                            eprintln!("[swarm] VOICE OUTBOUND FAILED peer={peer} err={error:?}");
+                            tracing::warn!("[swarm] VOICE OUTBOUND FAILED peer={peer} err={error:?}");
                             let mut m = pending_acks.lock().unwrap();
                             let ids: Vec<u64> = m
                                 .iter()
@@ -949,7 +949,7 @@ async fn swarm_loop(
                     NetEvent::Image(img) => match img {
                         RrEvent::Message { peer, message, .. } => match message {
                             RrMessage::Request { request, channel, .. } => {
-                                eprintln!(
+                                tracing::debug!(
                                     "[swarm] IMAGE INBOUND from peer={peer} id={} {} bytes",
                                     request.id,
                                     request.data.len()
@@ -962,7 +962,7 @@ async fn swarm_loop(
                                 });
                             }
                             RrMessage::Response { response, .. } => {
-                                eprintln!("[swarm] IMAGE ACKED id={}", response.id);
+                                tracing::debug!("[swarm] IMAGE ACKED id={}", response.id);
                                 if let Some((_peer, tx)) =
                                     pending_acks.lock().unwrap().remove(&response.id)
                                 {
@@ -971,7 +971,7 @@ async fn swarm_loop(
                             }
                         },
                         RrEvent::OutboundFailure { peer, error, .. } => {
-                            eprintln!("[swarm] IMAGE OUTBOUND FAILED peer={peer} err={error:?}");
+                            tracing::warn!("[swarm] IMAGE OUTBOUND FAILED peer={peer} err={error:?}");
                             let mut m = pending_acks.lock().unwrap();
                             let ids: Vec<u64> = m
                                 .iter()
@@ -1002,7 +1002,7 @@ async fn swarm_loop(
                                     match crate::moment::serve(request, pool).await {
                                         Ok(p) => p,
                                         Err(e) => {
-                                            eprintln!("[swarm] SERVE FAIL id={req_id}: {e}");
+                                            tracing::warn!("[swarm] SERVE FAIL id={req_id}: {e}");
                                             crate::moment::PostPayload::Err {
                                                 msg: e.to_string(),
                                             }
@@ -1014,18 +1014,18 @@ async fn swarm_loop(
                                 };
                                 let _ =
                                     swarm.behaviour_mut().blob.send_response(channel, resp);
-                                eprintln!("[swarm] SERVED blob id={req_id}");
+                                tracing::debug!("[swarm] SERVED blob id={req_id}");
                             }
                             RrMessage::Response { response, .. } => {
                                 let mut m = pending_blobs.lock().unwrap();
                                 if let Some((_peer, tx)) = m.remove(&response.id) {
-                                    eprintln!("[swarm] BLOB ACKED id={}", response.id);
+                                    tracing::debug!("[swarm] BLOB ACKED id={}", response.id);
                                     let _ = tx.send(Ok(response));
                                 }
                             }
                         },
                         RrEvent::OutboundFailure { peer, error, .. } => {
-                            eprintln!("[swarm] BLOB OUTBOUND FAILED peer={peer} err={error:?}");
+                            tracing::warn!("[swarm] BLOB OUTBOUND FAILED peer={peer} err={error:?}");
                             let mut m = pending_blobs.lock().unwrap();
                             let ids: Vec<u64> = m
                                 .iter()

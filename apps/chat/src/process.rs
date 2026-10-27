@@ -41,7 +41,7 @@ pub fn group_conn_enter(chat_id: &str) {
 
     std::thread::spawn(move || {
         if let Err(e) = client.connect_to_group(&gid) {
-            eprintln!("[group] enter {gid} failed: {e}");
+            tracing::warn!("[group] enter {gid} failed: {e}");
         }
     });
 }
@@ -88,7 +88,7 @@ pub fn start_group_conn_sweeper() {
             }
             for gid in &expired {
                 GROUP_CONNS.lock().unwrap().remove(gid);
-                eprintln!("[group] grace expired for {gid} — dropping bookkeeping (conn kept)");
+                tracing::warn!("[group] grace expired for {gid} — dropping bookkeeping (conn kept)");
             }
         }
     });

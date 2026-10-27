@@ -53,7 +53,7 @@ static FRAME_SEEN: AtomicBool = AtomicBool::new(false);
 /// Callback installed into the bridge. Runs on the JNI caller thread.
 fn on_bridge_frame(bytes: &[u8], w: u32, h: u32, fmt: u32) {
     if !FRAME_SEEN.swap(true, Ordering::SeqCst) {
-        eprintln!("[camera] android: first frame {}x{} fmt={} {}B", w, h, fmt, bytes.len());
+        tracing::debug!("[camera] android: first frame {}x{} fmt={} {}B", w, h, fmt, bytes.len());
     }
     // Reduce every frame to the grey Y-plane the QR decoder, preview sink,
     // and still-capture grabber all consume. GRAY8 is already that plane
@@ -65,7 +65,7 @@ fn on_bridge_frame(bytes: &[u8], w: u32, h: u32, fmt: u32) {
             None => return,
         },
         _ => {
-            eprintln!(
+            tracing::warn!(
                 "[camera] android: unsupported pixel format {} ({}x{} {}B) — dropped",
                 fmt, w, h, bytes.len()
             );

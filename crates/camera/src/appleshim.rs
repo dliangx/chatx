@@ -51,7 +51,7 @@ pub unsafe extern "C" fn _chatx_rust_qr(payload: *const u8, len: i32) {
     if s.trim().is_empty() {
         return;
     }
-    eprintln!("[camera] apple: QR detected = \"{}\"", s);
+    tracing::debug!("[camera] apple: QR detected = \"{}\"", s);
     if let Some(slot) = SINK.get() {
         if let Ok(g) = slot.lock() {
             (g)(s);

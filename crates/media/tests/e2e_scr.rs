@@ -108,7 +108,7 @@ async fn e2e_screen_share_5k_loopback() {
 
     let bv = b_video.load(Ordering::Relaxed);
     let (rw, rh) = *b_video_dim.lock().unwrap();
-    eprintln!("5K RESULT: B received remote-screen bytes={bv} last_dim={}x{}", rw, rh);
+    tracing::debug!("5K RESULT: B received remote-screen bytes={bv} last_dim={}x{}", rw, rh);
     assert!(bv > 0, "BUG: 5120x2880 screen frames must still be delivered");
     // The encoder must have downscaled ≤ 3840×2160 (openh264's hard limit).
     assert!(rw <= 3840 && rh <= 2160, "downscaled dim {}x{} exceeds 3840x2160", rw, rh);
@@ -174,7 +174,7 @@ async fn e2e_screen_share_loopback() {
         pumping = !is_connected(&call_a) || !is_connected(&call_b);
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    eprintln!(
+    tracing::debug!(
         "after ICE: A state={:?} B state={:?}",
         call_a.peer_state(),
         call_b.peer_state()
@@ -192,7 +192,7 @@ async fn e2e_screen_share_loopback() {
 
     let bv = b_video.load(Ordering::Relaxed);
     let (rw, rh) = *b_video_dim.lock().unwrap();
-    eprintln!(
+    tracing::debug!(
         "RESULT: B received remote-screen bytes={bv} last_dim={}x{}",
         rw, rh
     );

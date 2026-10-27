@@ -16,6 +16,7 @@ default = []
 has-ios-shim = []
 
 [dependencies]
+tracing = { workspace = true }
 
 # Android JNI wrapper. Target-gated so iOS / desktop never resolve it.
 [target.'cfg(target_os = "android")'.dependencies.jni]

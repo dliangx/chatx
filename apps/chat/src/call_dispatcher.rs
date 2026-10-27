@@ -306,7 +306,7 @@ fn to_rgba8(bytes: &[u8], w: u32, h: u32, fmt: u32) -> Vec<u8> {
         // raw RGBA to avoid dropping the frame entirely; log so a misreport is
         // surfaced.
         f => {
-            eprintln!("[dispatcher] camera frame with unexpected fmt={f} ({w}x{h}) — copying raw");
+            tracing::debug!("[dispatcher] camera frame with unexpected fmt={f} ({w}x{h}) — copying raw");
             let l = (n * 4).min(bytes.len()).min(out.len());
             out[..l].copy_from_slice(&bytes[..l]);
         }

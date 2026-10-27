@@ -112,7 +112,7 @@ impl Screen {
         self.recorder = Some(recorder);
         self.pump = Some(pump);
         self.running.store(true, Ordering::SeqCst);
-        eprintln!("[screen] capture started {w}x{h}");
+        tracing::debug!("[screen] capture started {w}x{h}");
         Ok(())
     }
 
@@ -127,7 +127,7 @@ impl Screen {
         if let Some(p) = self.pump.take() {
             let _ = p.join();
         }
-        eprintln!("[screen] capture stopped");
+        tracing::debug!("[screen] capture stopped");
     }
 }
 

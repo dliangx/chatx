@@ -56,9 +56,9 @@ impl SignalTransport for Lp2pSignal {
         // the peer's address + circuit, so the `Bye` actually has a route.
         if matches!(frame.kind, SignalKind::Bye) {
             let base58 = self.peer.to_base58();
-            eprintln!("[media] Bye → {base58}; re-dialing to refresh route");
+            tracing::debug!("[media] Bye → {base58}; re-dialing to refresh route");
             if let Err(e) = self.client.dial_peer(&base58) {
-                eprintln!("[media] pre-Bye dial failed (still sending): {e}");
+                tracing::warn!("[media] pre-Bye dial failed (still sending): {e}");
             }
         }
         let json = serde_json::to_string(frame)
@@ -304,7 +304,7 @@ pub fn start_call(
         });
     });
 
-    eprintln!(
+    tracing::debug!(
         "[call] offerer started: peer={peer} cam={} scr={}",
         opts.include_cam, opts.include_scr
     );
@@ -405,7 +405,7 @@ pub fn answer_offer(
         }
         crate::show_call_overlay(weak, overlay);
     }
-    eprintln!("[call] answerer started (ui=on)");
+    tracing::debug!("[call] answerer started (ui=on)");
     Ok(())
 }
 
@@ -414,15 +414,15 @@ pub fn answer_offer(
 /// Entry point for `ChatEvent::Webrtc`. `json` is the JSON-encoded
 /// `media::SignalFrame` produced by the peer's `Lp2pSignal::send`.
 pub fn handle_signal_offer(client: Arc<ChatxClient>, peer: libp2p::PeerId, json: &str) {
-    // eprintln!("[call] inbound webrtc signal: len={}", json.len());
+    // tracing::debug!("[call] inbound webrtc signal: len={}", json.len());
     let frame: SignalFrame = match serde_json::from_str(json) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("[call] bad SignalFrame: {e}");
+            tracing::warn!("[call] bad SignalFrame: {e}");
             return;
         }
     };
-    eprintln!("[call] inbound {:?} call_id={}", frame.kind, frame.call_id);
+    tracing::debug!("[call] inbound {:?} call_id={}", frame.kind, frame.call_id);
     match &frame.kind {
         SignalKind::Offer(_) => {
             if is_active() {
@@ -470,7 +470,7 @@ pub fn handle_signal_offer(client: Arc<ChatxClient>, peer: libp2p::PeerId, json:
                 // below is airtight. We still keep `handle_inbound` available for
                 // other kinds (MuteMic, Cam, Screen) — for those the state is
                 // applied on the local PeerCall, no UI mutation is required.
-                eprintln!(
+                tracing::debug!(
                     "[call] Bye from peer: active={} → tearing down synchronously",
                     is_active()
                 );
@@ -486,7 +486,7 @@ pub fn handle_signal_offer(client: Arc<ChatxClient>, peer: libp2p::PeerId, json:
             }
             if let Some(call) = active_call() {
                 if let Err(e) = call.handle_inbound(&frame) {
-                    eprintln!("[call] handle_inbound: {e}");
+                    tracing::debug!("[call] handle_inbound: {e}");
                 }
             }
         }
@@ -559,7 +559,7 @@ fn ring_inbound(
         crate::publish_call_state_with(weak.clone(), Some(peer_b58), peer_name, false, true);
         crate::show_call_overlay(weak, overlay);
     }
-    eprintln!("[call] inbound offer: {call_id}");
+    tracing::debug!("[call] inbound offer: {call_id}");
 }
 
 /// Spawn a 30-second timeout task that declines the offer if the user
@@ -576,7 +576,7 @@ fn ring_inbound_spawn_timeout(g: u64) {
         if !still_current {
             return;
         }
-        eprintln!("[call] inbound offer timed out");
+        tracing::warn!("[call] inbound offer timed out");
         let _ = slint::invoke_from_event_loop(move || decline_inbound());
     });
 }
@@ -590,7 +590,7 @@ pub fn accept_inbound() {
     RINGING.lock().unwrap().generation += 1;
 
     let Some(p) = taken else {
-        eprintln!("[call] accept_inbound: no pending offer");
+        tracing::warn!("[call] accept_inbound: no pending offer");
         return;
     };
 
@@ -607,7 +607,7 @@ pub fn accept_inbound() {
             }
         }
         Err(e) => {
-            eprintln!("[call] answer_offer: {e}");
+            tracing::debug!("[call] answer_offer: {e}");
             if let Some(weak) = weak_window() {
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
@@ -628,7 +628,7 @@ pub fn decline_inbound() {
     RINGING.lock().unwrap().generation += 1;
 
     let Some(p) = taken else {
-        eprintln!("[call] decline_inbound: no pending offer");
+        tracing::warn!("[call] decline_inbound: no pending offer");
         return;
     };
 
@@ -637,10 +637,10 @@ pub fn decline_inbound() {
     let json = serde_json::to_string(&bye);
     if let Ok(json) = json {
         if let Err(e) = p.client.send_webrtc_signal(p.peer.clone(), &json) {
-            eprintln!("[call] decline: send_webrtc: {e}");
+            tracing::debug!("[call] decline: send_webrtc: {e}");
         }
     }
-    eprintln!(
+    tracing::debug!(
         "[call] inbound offer declined: {call_id}",
         call_id = p.call_id
     );
@@ -729,7 +729,7 @@ fn stop_common(send_bye: bool) {
         // terminates and the next `startMic()` call will start a fresh one.
         bridge::request_mic_stop();
     }
-    eprintln!("[call] stopped");
+    tracing::debug!("[call] stopped");
 }
 
 pub fn mute_mic(on: bool) {
@@ -799,14 +799,14 @@ pub fn apply_incoming_upgrade(frame: &SignalFrame) {
         let kind = match frame.upgrade_kind {
             Some(k) => k,
             None => {
-                eprintln!("[call] upgrade frame missing kind");
+                tracing::warn!("[call] upgrade frame missing kind");
                 return;
             }
         };
         match crate::start_local_capture(kind) {
             Ok(s) => Some(s),
             Err(e) => {
-                eprintln!("[call] start_local_capture: {e}");
+                tracing::debug!("[call] start_local_capture: {e}");
                 None
             }
         }
@@ -816,12 +816,12 @@ pub fn apply_incoming_upgrade(frame: &SignalFrame) {
     let call = match active_call() {
         Some(c) => c,
         None => {
-            eprintln!("[call] apply_incoming_upgrade: no active call");
+            tracing::warn!("[call] apply_incoming_upgrade: no active call");
             return;
         }
     };
     if let Err(e) = media_rt().block_on(call.upgrade_answer(frame, own_src)) {
-        eprintln!("[call] upgrade_answer: {e}");
+        tracing::debug!("[call] upgrade_answer: {e}");
     }
     // Surface the new remote video presence on the UI (B image slot starts
     // rendering + the has-remote-* flag flips green on the peer-side state).

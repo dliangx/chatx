@@ -63,21 +63,21 @@ fn call_native_bridge_void(method: &str) -> bool {
     let vm = match VM.get() {
         Some(v) => v,
         None => {
-            eprintln!("[bridge] {method}: no JVM handle cached yet; skipping");
+            tracing::warn!("[bridge] {method}: no JVM handle cached yet; skipping");
             return false;
         }
     };
     let mut env = match vm.attach_current_thread_as_daemon() {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("[bridge] {method}: attach current thread failed: {e}");
+            tracing::warn!("[bridge] {method}: attach current thread failed: {e}");
             return false;
         }
     };
     match env.call_static_method::<_, _, _>("com.chatx.NativeBridge", method, "()V", &[]) {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("[bridge] {method}: Java static call failed: {e}");
+            tracing::warn!("[bridge] {method}: Java static call failed: {e}");
             false
         }
     }
@@ -220,7 +220,7 @@ pub extern "system" fn Java_com_chatx_NativeBridge_permissionChanged(
 ) -> jint {
     match perm {
         1 | 2 | 3 => {
-            eprintln!("[bridge] permission perm={perm} granted={granted}");
+            tracing::debug!("[bridge] permission perm={perm} granted={granted}");
             ERR_OK
         }
         _ => ERR_INVALID_ARG,

@@ -8,6 +8,7 @@ description = "Cross-platform mic/speaker I/O around cpal, normalised to s16le m
 name = "audio"
 
 [dependencies]
+tracing = { workspace = true }
 # cpal provides Core Audio (macOS/iOS) / WASAPI (Windows) / AAudio (Android)
 # / ALSA (Linux). 0.16 has the modern sample-host API.
 cpal = "0.16"

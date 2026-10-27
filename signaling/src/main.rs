@@ -676,9 +676,7 @@ pub(crate) fn make_router(app: App) -> Router {
 
 #[tokio::main]
 async fn main() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "chatx_signal=info".into()))
-        .try_init();
+    let _ = chatx_core::logging::init_default();
 
     let addr: SocketAddr = std::env::var("CHATX_SIGNAL_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8787".into())

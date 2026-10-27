@@ -237,7 +237,7 @@ pub fn decode_image(path: &str) -> SlintImage {
             SlintImage::from_rgba8(buf)
         }
         Err(e) => {
-            eprintln!("[image] decode failed for {path}: {e}");
+            tracing::warn!("[image] decode failed for {path}: {e}");
             SlintImage::default()
         }
     }

@@ -352,7 +352,7 @@ impl VidSource {
         if !self.muted.load(std::sync::atomic::Ordering::Relaxed) {
             let n = self.push_n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if n == 1 || n % 50 == 0 {
-                eprintln!(
+                tracing::debug!(
                     "[media] {} push #{} WxH={w}x{h} gate={}",
                     self.tag,
                     n,
@@ -436,7 +436,7 @@ fn encode_loop(
         if frame.is_none() {
             let n = enc_tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if n == 1 || n % 50 == 0 {
-                eprintln!("[media] {tag} venc #{}: no frame pending (latest empty)", n);
+                tracing::debug!("[media] {tag} venc #{}: no frame pending (latest empty)", n);
             }
             continue;
         }
@@ -484,7 +484,7 @@ fn encode_loop(
             Err(e) => {
                 let n = enc_tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 if n == 1 || n % 10 == 0 {
-                    eprintln!("[media] {tag} venc #{}: encode ERROR {e} ({}x{})", n, w, h);
+                    tracing::warn!("[media] {tag} venc #{}: encode ERROR {e} ({}x{})", n, w, h);
                 }
                 tracing::warn!(err = %e, "{tag} h264 encode failed");
                 continue;
@@ -494,7 +494,7 @@ fn encode_loop(
         if data.is_empty() {
             let n = enc_tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if n == 1 || n % 10 == 0 {
-                eprintln!("[media] {tag} venc #{}: encode EMPTY ({}x{})", n, w, h);
+                tracing::debug!("[media] {tag} venc #{}: encode EMPTY ({}x{})", n, w, h);
             }
             continue;
         }
@@ -509,7 +509,7 @@ fn encode_loop(
         };
         let n_w = sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         if n_w == 1 || n_w % 50 == 0 {
-            eprintln!(
+            tracing::debug!(
                 "[media] {tag} before write_sample #{} enc={}B ({}x{})",
                 n_w, data_len, w, h
             );
@@ -518,7 +518,7 @@ fn encode_loop(
             tracing::warn!(err = %e, "{tag} write_sample video failed");
         }
         if n_w == 1 || n_w % 50 == 0 {
-            eprintln!("[media] {tag} video sent #{} enc={}B ({}x{})", n_w, data_len, w, h);
+            tracing::debug!("[media] {tag} video sent #{} enc={}B ({}x{})", n_w, data_len, w, h);
         }
     }
 }

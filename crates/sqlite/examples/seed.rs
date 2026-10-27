@@ -80,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(db_path);
     let pool = sqlite::open(std::path::Path::new(db_path)).await?;
     seed(&pool, me).await?;
-    println!("seeded {db_path} for user {me}");
+    tracing::debug!("seeded {db_path} for user {me}");
     Ok(())
 }
 

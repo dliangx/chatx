@@ -327,7 +327,7 @@ fn clear_passphrase(_user_id: &str) {
 /// (with paths, function names, keystore details) is still logged.
 fn friendly_auth_error(err: &anyhow::Error) -> String {
     let s = err.to_string();
-    eprintln!("[auth] internal error: {s}");
+    tracing::warn!("[auth] internal error: {s}");
     let lower = s.to_lowercase();
     if lower.contains("wrong passphrase") || lower.contains("aes-gcm auth failed") {
         return "Wrong password. Please try again.".to_string();
@@ -366,6 +366,10 @@ fn friendly_auth_error(err: &anyhow::Error) -> String {
 }
 
 pub fn run_app() {
+    // Install the global tracing subscriber (WARN+ to stderr and
+    // ~/.chatx/chatx.log). Idempotent; cheap no-op if already initialised.
+    let _ = chatx_core::logging::init_default();
+
     #[cfg(any(target_os = "android", target_os = "ios"))]
     install_bridge_sinks();
 
@@ -809,7 +813,7 @@ pub fn run_app() {
         ui.global::<AppState>()
             .on_show_qr_code(move |peer: SharedString| {
                 let peer = peer.to_string();
-                eprintln!("[qr] on_show_qr_code: target={peer}");
+                tracing::debug!("[qr] on_show_qr_code: target={peer}");
                 if let Some(ui) = w.upgrade() {
                     let st = ui.global::<AppState>();
                     st.set_qr_target_id(SharedString::from(peer.clone()));
@@ -915,7 +919,7 @@ pub fn run_app() {
         let weak = weak.clone();
         ui.global::<ProfileState>()
             .on_open_conversation(move |key| {
-                eprintln!("[chat] on_open_conversation: got key={key}");
+                tracing::debug!("[chat] on_open_conversation: got key={key}");
                 open_conversation_with_contact(weak.clone(), key);
             });
     }
@@ -1125,7 +1129,7 @@ pub fn run_app() {
                             }
                             Err(e) => {
                                 st.set_recording(false);
-                                eprintln!("[record] stop failed: {e}");
+                                tracing::warn!("[record] stop failed: {e}");
                                 st.set_status(SharedString::from(format!("Record failed: {e}")));
                             }
                         }
@@ -1136,7 +1140,7 @@ pub fn run_app() {
                                 st.set_status(SharedString::from("Recording… (tap to stop)"));
                             }
                             Err(e) => {
-                                eprintln!("[record] start failed: {e}");
+                                tracing::warn!("[record] start failed: {e}");
                                 st.set_status(SharedString::from(format!("Record failed: {e}")));
                             }
                         }
@@ -1276,12 +1280,12 @@ pub fn run_app() {
                 let cs = ui.global::<ChatSession>();
                 use slint::Model as _;
                 let Some(msg) = cs.get_messages().row_data(idx as usize) else {
-                    eprintln!("[play] idx {idx} out of range");
+                    tracing::debug!("[play] idx {idx} out of range");
                     return;
                 };
                 let path = msg.voice_path.clone();
                 if path.is_empty() {
-                    eprintln!("[play] idx {idx} has no voice_path");
+                    tracing::debug!("[play] idx {idx} has no voice_path");
                     return;
                 }
                 // Stop any previously-playing row, then start this one.
@@ -1308,9 +1312,9 @@ pub fn run_app() {
                                 },
                             );
                         }
-                        Err(e) => eprintln!("[play] play failed: {e}"),
+                        Err(e) => tracing::warn!("[play] play failed: {e}"),
                     },
-                    Err(e) => eprintln!("[play] read failed: {e}"),
+                    Err(e) => tracing::warn!("[play] read failed: {e}"),
                 }
             }
         });
@@ -1433,11 +1437,11 @@ pub fn run_app() {
                 m.row_count()
             };
             if n >= 9 {
-                eprintln!("[moment] photo cap reached (9); ignoring pick");
+                tracing::debug!("[moment] photo cap reached (9); ignoring pick");
                 return;
             }
             if let Err(e) = camera::album::pick_photos(9) {
-                eprintln!("[moment] pick photos failed: {e}");
+                tracing::warn!("[moment] pick photos failed: {e}");
                 if let Some(ui) = weak.upgrade() {
                     let st = ui.global::<MomentState>();
                     st.set_status(SharedString::from(format!("Failed to pick image: {e}")));
@@ -1460,7 +1464,7 @@ pub fn run_app() {
     {
         let w = weak.clone();
         ui.global::<AppState>().on_scanner_start(move || {
-            eprintln!("[scan] on_scanner_start → opening camera");
+            tracing::debug!("[scan] on_scanner_start → opening camera");
             let Some(ui) = w.upgrade() else {
                 return;
             };
@@ -1515,7 +1519,7 @@ fn install_bridge_sinks() {
     bridge::set_audio_consumer(Box::new(move |bytes, rate, ch| {
         let n = AUDIO_N.fetch_add(1, Ordering::Relaxed);
         if n % 100 == 0 {
-            eprintln!("[bridge] mic #{n} {}B @{}Hz/{}ch", bytes.len(), rate, ch);
+            tracing::debug!("[bridge] mic #{n} {}B @{}Hz/{}ch", bytes.len(), rate, ch);
         }
         call_dispatcher::on_audio_frame(bytes, rate);
     }));
@@ -1687,13 +1691,13 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
         let mut guard = slot.borrow_mut();
         let cam = guard.as_mut().expect("camera inited");
         if cam.is_running() {
-            eprintln!("[scan] camera already running, skipping start");
+            tracing::warn!("[scan] camera already running, skipping start");
             return;
         }
-        eprintln!("[scan] calling cam.start() …");
+        tracing::debug!("[scan] calling cam.start() …");
         match cam.start() {
             Ok(_) => {
-                eprintln!("[scan] cam.start() OK — installing QR sink + preview sink");
+                tracing::debug!("[scan] cam.start() OK — installing QR sink + preview sink");
                 let wsink = weak.clone();
                 let wsink2 = weak.clone();
                 cam.set_sink(move |text: String| {
@@ -1708,7 +1712,7 @@ fn start_camera_scanner(weak: slint::Weak<MainWindow>, state: AppState) {
                     {
                         return;
                     }
-                    eprintln!(
+                    tracing::debug!(
                         "[scan] resolved: \"{}\" — stopping camera + opening add contact",
                         text
                     );
@@ -1780,7 +1784,7 @@ fn apply_result(
                 .ok()
                 .map(|s| s == chatx_core::account::DeviceStatus::Approved)
                 .unwrap_or(false);
-            eprintln!("[login] device status approved={approved}");
+            tracing::debug!("[login] device status approved={approved}");
             DEVICE_APPROVED.with(|c| c.set(approved));
             *CLIENT.lock().unwrap() = Some(client);
             set_current_me(&user_id);
@@ -2017,12 +2021,12 @@ async fn handle_inbound_voice(
     data: Vec<u8>,
     duration_ms: u64,
 ) {
-    eprintln!(
+    tracing::debug!(
         "[voice] INBOUND from={peer_base58} bytes={} rate={rate} ch={ch} dur={duration_ms}ms",
         data.len()
     );
     let Some(client) = CLIENT.lock().unwrap().clone() else {
-        eprintln!("[voice] inbound: no client yet, dropping");
+        tracing::warn!("[voice] inbound: no client yet, dropping");
         return;
     };
     let me = client.peer_base58();
@@ -2030,7 +2034,7 @@ async fn handle_inbound_voice(
     match record::write_voice_clip(rate, ch, &data) {
         Ok(path) => {
             let path_str = path.to_string_lossy().into_owned();
-            eprintln!(
+            tracing::debug!(
                 "[voice] inbound persisted {} ({} bytes)",
                 path.display(),
                 data.len()
@@ -2041,7 +2045,7 @@ async fn handle_inbound_voice(
             refresh_inbound_chat(weak, chat_id).await;
         }
         Err(e) => {
-            eprintln!("[voice] inbound write failed: {e}");
+            tracing::warn!("[voice] inbound write failed: {e}");
         }
     }
 }
@@ -2049,12 +2053,12 @@ async fn handle_inbound_voice(
 /// Handle an inbound photo message: write the bytes to disk, persist an image
 /// row for the DM with the sender, and refresh the current chat if visible.
 async fn handle_inbound_image(weak: slint::Weak<MainWindow>, peer_base58: &str, data: Vec<u8>) {
-    eprintln!(
+    tracing::debug!(
         "[chat-image] INBOUND from={peer_base58} bytes={}",
         data.len()
     );
     let Some(client) = CLIENT.lock().unwrap().clone() else {
-        eprintln!("[chat-image] inbound: no client yet, dropping");
+        tracing::warn!("[chat-image] inbound: no client yet, dropping");
         return;
     };
     let me = client.peer_base58();
@@ -2062,7 +2066,7 @@ async fn handle_inbound_image(weak: slint::Weak<MainWindow>, peer_base58: &str, 
     match image::store_image_bytes(&data, None).await {
         Ok(path) => {
             let path_str = path.to_string_lossy().into_owned();
-            eprintln!(
+            tracing::debug!(
                 "[chat-image] inbound persisted {} ({} bytes)",
                 path.display(),
                 data.len()
@@ -2071,7 +2075,7 @@ async fn handle_inbound_image(weak: slint::Weak<MainWindow>, peer_base58: &str, 
             refresh_inbound_chat(weak, chat_id).await;
         }
         Err(e) => {
-            eprintln!("[chat-image] inbound write failed: {e}");
+            tracing::warn!("[chat-image] inbound write failed: {e}");
         }
     }
 }
@@ -2099,7 +2103,7 @@ fn send_chat_voice(
         g.chat_id_for(key).map(|s| s.to_string())
     };
     let Some(chat_id) = chat_id else {
-        eprintln!("[voice] no chat_id for key={key}, aborting");
+        tracing::debug!("[voice] no chat_id for key={key}, aborting");
         return;
     };
     let is_group = chat_id.starts_with("grp-");
@@ -2147,7 +2151,7 @@ fn send_chat_voice(
             };
             match c.send_group_media(&chat_id, &kind, data).await {
                 Ok(()) => {
-                    eprintln!("[voice] group sent -> {chat_id}");
+                    tracing::debug!("[voice] group sent -> {chat_id}");
                     touch_chat_activity(&chat_id);
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak3.upgrade() {
@@ -2157,7 +2161,7 @@ fn send_chat_voice(
                     load_chat_messages(weak2, key);
                 }
                 Err(e) => {
-                    eprintln!("[voice] group send FAILED: {e}");
+                    tracing::warn!("[voice] group send FAILED: {e}");
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak3.upgrade() {
                             cs_set_send_status(
@@ -2173,7 +2177,7 @@ fn send_chat_voice(
         let local_path = match record::write_voice_clip(rate, ch, &data) {
             Ok(p) => Some(p.to_string_lossy().into_owned()),
             Err(e) => {
-                eprintln!("[voice] local write failed: {e}");
+                tracing::warn!("[voice] local write failed: {e}");
                 None
             }
         };
@@ -2192,7 +2196,7 @@ fn send_chat_voice(
                 .await
             {
                 Ok(()) => {
-                    eprintln!("[voice] sent -> {cand}");
+                    tracing::debug!("[voice] sent -> {cand}");
                     if let Some(p) = local_path.as_ref() {
                         // Sender MUST be our own peer id (mirrors the text
                         // path, which stores the local peer for outbound DMs):
@@ -2205,7 +2209,7 @@ fn send_chat_voice(
                     break 'outer;
                 }
                 Err(e) => {
-                    eprintln!("[voice] peer={cand} failed: {e}");
+                    tracing::warn!("[voice] peer={cand} failed: {e}");
                     last_err = e.to_string();
                 }
             }
@@ -2274,7 +2278,7 @@ fn press_up(weak: slint::Weak<MainWindow>, key: i32) {
 fn record_start(weak: slint::Weak<MainWindow>, key: i32) {
     match record::start() {
         Ok(()) => {
-            eprintln!("[voice] recording started for key={key}");
+            tracing::debug!("[voice] recording started for key={key}");
             let _ = slint::invoke_from_event_loop({
                 let weak = weak.clone();
                 move || {
@@ -2289,7 +2293,7 @@ fn record_start(weak: slint::Weak<MainWindow>, key: i32) {
             arm_elapsed_tick(weak);
         }
         Err(e) => {
-            eprintln!("[voice] start failed: {e}");
+            tracing::warn!("[voice] start failed: {e}");
         }
     }
 }
@@ -2300,7 +2304,7 @@ fn record_stop_send(weak: slint::Weak<MainWindow>, key: i32) {
     let rec = match record::stop_capture() {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[voice] stop failed: {e}");
+            tracing::warn!("[voice] stop failed: {e}");
             let _ = slint::invoke_from_event_loop({
                 let weak = weak.clone();
                 move || {
@@ -2323,14 +2327,14 @@ fn record_stop_send(weak: slint::Weak<MainWindow>, key: i32) {
         }
     });
     if rec.duration_ms < MIN_VOICE_MS {
-        eprintln!(
+        tracing::warn!(
             "[voice] clip too short ({}ms < {}ms), discarding",
             rec.duration_ms, MIN_VOICE_MS
         );
         return;
     }
     if key < 0 {
-        eprintln!("[voice] no key bound, discarding clip");
+        tracing::warn!("[voice] no key bound, discarding clip");
         return;
     }
     send_chat_voice(weak, key, rec.data, rec.rate, rec.ch, rec.duration_ms);
@@ -2389,7 +2393,7 @@ fn pick_chat_image(weak: slint::Weak<MainWindow>, key: i32) {
     PICKING_CHAT_IMAGE.store(true, std::sync::atomic::Ordering::SeqCst);
     CHAT_IMAGE_PICK_KEY.store(key, std::sync::atomic::Ordering::SeqCst);
     if let Err(e) = camera::album::pick_photos(1) {
-        eprintln!("[chat-image] pick failed: {e}");
+        tracing::warn!("[chat-image] pick failed: {e}");
         PICKING_CHAT_IMAGE.store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(ui) = weak.upgrade() {
             ui.global::<ChatSession>()
@@ -2402,11 +2406,11 @@ fn pick_chat_image(weak: slint::Weak<MainWindow>, key: i32) {
 /// P2P, record it, and refresh the chat.
 fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<String>) {
     let Some(src) = path else {
-        eprintln!("[chat-image] no photo picked (cancelled)");
+        tracing::debug!("[chat-image] no photo picked (cancelled)");
         return;
     };
     if key < 0 {
-        eprintln!("[chat-image] no chat bound, discarding");
+        tracing::warn!("[chat-image] no chat bound, discarding");
         return;
     }
     let client = CLIENT.lock().unwrap().clone();
@@ -2419,7 +2423,7 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
         g.chat_id_for(key).map(|s| s.to_string())
     };
     let Some(chat_id) = chat_id else {
-        eprintln!("[chat-image] no chat_id for key={key}, aborting");
+        tracing::debug!("[chat-image] no chat_id for key={key}, aborting");
         return;
     };
     let is_group = chat_id.starts_with("grp-");
@@ -2456,7 +2460,7 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
     let bytes = match image::derive_chat_image_bytes(&src) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("[chat-image] read failed: {e}");
+            tracing::warn!("[chat-image] read failed: {e}");
             set_chat_send_error(weak.clone(), "Could not read that photo.");
             return;
         }
@@ -2472,7 +2476,7 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
                 .await
             {
                 Ok(()) => {
-                    eprintln!("[chat-image] group sent -> {chat_id}");
+                    tracing::debug!("[chat-image] group sent -> {chat_id}");
                     touch_chat_activity(&chat_id);
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak3.upgrade() {
@@ -2482,7 +2486,7 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
                     load_chat_messages(weak2, key);
                 }
                 Err(e) => {
-                    eprintln!("[chat-image] group send FAILED: {e}");
+                    tracing::warn!("[chat-image] group send FAILED: {e}");
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak3.upgrade() {
                             cs_set_send_status(
@@ -2501,7 +2505,7 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
         let local_path = match image::store_image_bytes(&bytes, src_ext.as_deref()).await {
             Ok(p) => p.to_string_lossy().into_owned(),
             Err(e) => {
-                eprintln!("[chat-image] store failed: {e}");
+                tracing::warn!("[chat-image] store failed: {e}");
                 set_chat_send_error(weak3.clone(), "Could not save that photo.");
                 return;
             }
@@ -2520,11 +2524,11 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
                 Ok(_) => {
                     c.persist_image(&chat_id, &me, &local_path).await;
                     sent = true;
-                    eprintln!("[chat-image] sent -> {cand}");
+                    tracing::debug!("[chat-image] sent -> {cand}");
                     break 'outer;
                 }
                 Err(e) => {
-                    eprintln!("[chat-image] peer={cand} failed: {e}");
+                    tracing::warn!("[chat-image] peer={cand} failed: {e}");
                     last_err = e.to_string();
                 }
             }
@@ -2554,7 +2558,7 @@ fn open_chat_image_from_index(weak: slint::Weak<MainWindow>, idx: i32) {
     use slint::Model as _;
     let msgs = cs.get_messages();
     let Some(row) = msgs.row_data(idx) else {
-        eprintln!("[chat-image] index {idx} out of range");
+        tracing::debug!("[chat-image] index {idx} out of range");
         return;
     };
     let path = row.image_path.as_str().to_string();
@@ -2604,7 +2608,7 @@ fn set_chat_send_error(weak: slint::Weak<MainWindow>, msg: &str) {
 /// over P2P). Persists the local copy, refreshes the UI, and sends any
 /// required local contact update on acceptance.
 async fn handle_inbound_friendq(weak: slint::Weak<MainWindow>, from_peer: &str, q: FriendQ) {
-    eprintln!(
+    tracing::debug!(
         "[friendq] INBOUND action={:?} from={from_peer} req={} rec={}",
         q.action, q.requester, q.recipient
     );
@@ -2638,7 +2642,7 @@ async fn handle_inbound_friendq(weak: slint::Weak<MainWindow>, from_peer: &str, 
             if let Some(p) = &q.profile {
                 if !p.is_empty() {
                     if let Err(e) = persist_inbound_profile(&pool, &note, p).await {
-                        eprintln!("[friendq] inbound inquire: persist profile failed: {e}");
+                        tracing::warn!("[friendq] inbound inquire: persist profile failed: {e}");
                     }
                 }
             }
@@ -2683,7 +2687,7 @@ async fn handle_inbound_friendq(weak: slint::Weak<MainWindow>, from_peer: &str, 
                 q.sender_name.clone()
             };
             if let Err(e) = do_add(&pool, &me, &other, &name, &backend, q.profile.as_ref()).await {
-                eprintln!("[friendq] inbound accept failed to add contact: {e}");
+                tracing::warn!("[friendq] inbound accept failed to add contact: {e}");
             }
             {
                 let mut g = backend.write().await;
@@ -2741,10 +2745,10 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
     };
     let me = current_me();
     if me.is_empty() {
-        eprintln!("[inbound] abort: no client/me yet");
+        tracing::debug!("[inbound] abort: no client/me yet");
         return;
     }
-    eprintln!("[inbound] refresh chat_id={chat_id} me={me}");
+    tracing::debug!("[inbound] refresh chat_id={chat_id} me={me}");
     {
         let mut b: data::DataBackend = backend.read().await.clone();
         let _ = data::refresh_chat_row(&pool, &me, &mut b, &chat_id).await;
@@ -2773,7 +2777,7 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
                                 Ok(_preview) => {
                                     image::load_image_cached(&p);
                                 }
-                                Err(e) => eprintln!("[inbound] group preview warm {p}: {e}"),
+                                Err(e) => tracing::debug!("[inbound] group preview warm {p}: {e}"),
                             }
                         }
                     }
@@ -2791,7 +2795,7 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
             .find(|r| r.chat_id == chat_id)
             .map(|r| r.key)
     };
-    eprintln!("[inbound] chat_id={chat_id} key={key:?} is_current={is_current}");
+    tracing::debug!("[inbound] chat_id={chat_id} key={key:?} is_current={is_current}");
     let weak2 = weak.clone();
     let backend2 = backend.clone();
     let k = key;
@@ -2968,9 +2972,9 @@ fn discover_load_more(weak: slint::Weak<MainWindow>) {
 
 fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
     let t0 = std::time::Instant::now();
-    eprintln!("[chat] publish_chat_rows: enter");
+    tracing::debug!("[chat] publish_chat_rows: enter");
     let snapshot = backend.blocking_read().clone();
-    eprintln!(
+    tracing::debug!(
         "[chat] publish_chat_rows: +{}ms snapshot chats={}",
         t0.elapsed().as_millis(),
         snapshot.chats.len()
@@ -3014,7 +3018,7 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
                         {
                             Ok(id) => id,
                             Err(e) => {
-                                eprintln!("[chat] ensure_dm({chat_id}) failed: {e}");
+                                tracing::warn!("[chat] ensure_dm({chat_id}) failed: {e}");
                                 continue;
                             }
                         };
@@ -3063,7 +3067,7 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
-    eprintln!(
+    tracing::debug!(
         "[chat] publish_chat_rows: +{}ms done (chats={})",
         t0.elapsed().as_millis(),
         snapshot.chats.len()
@@ -3089,7 +3093,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
         g.chat_id_for(chat_key).map(|s| s.to_string())
     };
     let Some(chat_id) = chat_id else {
-        eprintln!("[chat] load_chat_messages{chat_key}: chat_id_for returned None");
+        tracing::debug!("[chat] load_chat_messages{chat_key}: chat_id_for returned None");
         return;
     };
     set_current_chat_id(&chat_id);
@@ -3122,7 +3126,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                     let _ = client.warm_dial_peer(&p);
                 });
             }
-            None => eprintln!(
+            None => tracing::debug!(
                 "[chat] load_chat_messages{chat_key}: no peer id resolved (chat_id={chat_id})"
             ),
         }
@@ -3227,7 +3231,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         ..m
                     }),
                     Err(e) => {
-                        eprintln!("[chat] failed to open group msg in {chat_id}: {e}; hiding it");
+                        tracing::warn!("[chat] failed to open group msg in {chat_id}: {e}; hiding it");
                         None
                     }
                 }
@@ -3273,7 +3277,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         image_preview.insert(i, pv.to_string_lossy().into_owned());
                         image_dims.insert(i, (w, h));
                     }
-                    _ => eprintln!("[chat-image] ensure_preview failed: {p}"),
+                    _ => tracing::warn!("[chat-image] ensure_preview failed: {p}"),
                 }
             }
         }
@@ -3428,11 +3432,11 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         g.chat_id_for(key).map(|s| s.to_string())
     };
     let Some(chat_id) = chat_id else {
-        eprintln!("[send] no chat_id for key={key}, aborting");
+        tracing::debug!("[send] no chat_id for key={key}, aborting");
         return;
     };
     let is_group = chat_id.starts_with("grp-");
-    eprintln!(
+    tracing::debug!(
         "[send] key={key} chat_id={chat_id} is_group={is_group} body_len={}",
         body.len()
     );
@@ -3445,10 +3449,10 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         let rt = runtime();
         let weak2 = weak.clone();
         rt.spawn(async move {
-            eprintln!("[send] group message -> chat_id={chat_id}");
+            tracing::debug!("[send] group message -> chat_id={chat_id}");
             match client.send_group_message(&chat_id, &body).await {
                 Ok(_) => {
-                    eprintln!("[send] group message ok");
+                    tracing::debug!("[send] group message ok");
                     touch_chat_activity(&chat_id);
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
@@ -3460,7 +3464,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                     load_chat_messages(weak2, key);
                 }
                 Err(e) => {
-                    eprintln!("[send] group message FAILED: {e}");
+                    tracing::warn!("[send] group message FAILED: {e}");
                     let msg = e.to_string();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
@@ -3501,14 +3505,14 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
             }
         }
         if v.is_empty() {
-            eprintln!("[send] no known peer for chat {chat_id}; cannot send");
+            tracing::warn!("[send] no known peer for chat {chat_id}; cannot send");
         }
         v
     };
     let rt = runtime();
     let weak2 = weak.clone();
     let my_peer = client.peer_base58();
-    eprintln!("[send] dm candidates: {me_peers:?}, me={my_peer}");
+    tracing::debug!("[send] dm candidates: {me_peers:?}, me={my_peer}");
     rt.spawn(async move {
         let mut last_err: String = if me_peers.is_empty() {
             "Cannot determine peer (conversation missing peer id)".to_string()
@@ -3518,19 +3522,19 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         let mut sent = false;
         'outer: for cand in &me_peers {
             if cand == &my_peer {
-                eprintln!("[send] skip self {cand}");
+                tracing::debug!("[send] skip self {cand}");
                 continue;
             }
-            eprintln!("[send] dm trying peer={cand}");
+            tracing::debug!("[send] dm trying peer={cand}");
             match client.send_dm(cand, &body).await {
                 Ok(_) => {
-                    eprintln!("[send] dm ok -> {cand}");
+                    tracing::debug!("[send] dm ok -> {cand}");
                     touch_chat_activity(&chat_id);
                     sent = true;
                     break 'outer;
                 }
                 Err(e) => {
-                    eprintln!("[send] dm peer={cand} failed: {e}");
+                    tracing::warn!("[send] dm peer={cand} failed: {e}");
                     last_err = e.to_string();
                 }
             }
@@ -3541,7 +3545,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
             } else {
                 last_err
             };
-            eprintln!("[send] dm ALL candidates failed: {msg}");
+            tracing::warn!("[send] dm ALL candidates failed: {msg}");
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<ChatSession>()
@@ -3624,7 +3628,7 @@ async fn propagate_recommend(pool: &sqlx::SqlitePool, post_id: i64, want_recomme
     }
     let new_ts = sqlite::now_ms();
     if let Err(e) = sqlite::social_feed::set_timestamp(pool, post_id, new_ts).await {
-        eprintln!("[moment] recommend-bump set_timestamp failed for {post_id}: {e}");
+        tracing::warn!("[moment] recommend-bump set_timestamp failed for {post_id}: {e}");
         return;
     }
     let client = crate::CLIENT.lock().unwrap().clone();
@@ -3632,12 +3636,12 @@ async fn propagate_recommend(pool: &sqlx::SqlitePool, post_id: i64, want_recomme
         let my_peer = client.peer_base58().to_string();
         let my_user = client.user_id().to_string();
         if let Err(e) = client.dir().notify_post(&my_user, &my_peer, new_ts) {
-            eprintln!(
+            tracing::warn!(
                 "[moment] recommend-bump notify_post failed: {e} (user={my_user}, peer={my_peer}, ts={new_ts})"
             );
             return;
         }
-        eprintln!(
+        tracing::debug!(
             "[moment] recommend-bump notify -> server: user={my_user} peer={my_peer} ts={new_ts}"
         );
     }
@@ -3821,12 +3825,12 @@ fn start_camera_capturer(weak: slint::Weak<MainWindow>) {
                 let wk2 = weak.clone();
                 match res {
                     Ok(path) => {
-                        eprintln!("[cap] capture saved → {path}");
+                        tracing::debug!("[cap] capture saved → {path}");
                         append_moment_media(wk.clone(), path);
                         on_cap_done(wk2);
                     }
                     Err(err) => {
-                        eprintln!("[cap] capture failed: {err}");
+                        tracing::warn!("[cap] capture failed: {err}");
                         set_cap_status(wk.clone(), format!("Failed to take photo: {err}"));
                         on_cap_done(wk2);
                     }
@@ -3862,7 +3866,7 @@ fn start_camera_capturer(weak: slint::Weak<MainWindow>) {
 
         match cam.start() {
             Ok(()) => {
-                eprintln!("[cap] camera running");
+                tracing::debug!("[cap] camera running");
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.global::<CameraState>().set_status(SharedString::new());
@@ -3870,7 +3874,7 @@ fn start_camera_capturer(weak: slint::Weak<MainWindow>) {
                 });
             }
             Err(err) => {
-                eprintln!("[cap] start failed: {err}");
+                tracing::warn!("[cap] start failed: {err}");
                 set_cap_status(weak, format!("Failed to start camera: {err}"));
             }
         }
@@ -3982,7 +3986,7 @@ fn append_moment_media(weak: slint::Weak<MainWindow>, path: String) {
         let mut m = MOMENT_MEDIA.lock().unwrap();
         if m.len() >= 9 {
             // Cap; drop the newest (we keep the first 9).
-            eprintln!("[moment] draft already has 9 photos; ignoring {path}");
+            tracing::debug!("[moment] draft already has 9 photos; ignoring {path}");
         } else {
             m.push(path.clone());
         }
@@ -4038,7 +4042,7 @@ fn refresh_moment_media_ui(weak: slint::Weak<MainWindow>) {
 /// cancel / nothing picked.
 fn on_moment_photos_selected(paths: Vec<String>) {
     if paths.is_empty() {
-        eprintln!("[moment] empty selection (cancelled)");
+        tracing::debug!("[moment] empty selection (cancelled)");
         if PICKING_AVATAR.load(std::sync::atomic::Ordering::SeqCst) {
             PICKING_AVATAR.store(false, std::sync::atomic::Ordering::SeqCst);
             let weak = match call::weak_window() {
@@ -4196,7 +4200,7 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
                     stored_previews.push(preview);
                 }
                 Err(e) => {
-                    eprintln!("[moment] store_original failed for {src}: {e}");
+                    tracing::warn!("[moment] store_original failed for {src}: {e}");
                     any_failed = true;
                 }
             }
@@ -4227,7 +4231,7 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
         {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[moment] create_post failed: {e}");
+                tracing::warn!("[moment] create_post failed: {e}");
                 set_moment_status(weak2.clone(), "Publish failed".to_string());
                 if let Some(ui) = weak2.upgrade() {
                     ui.global::<MomentState>().set_publishing(false);
@@ -4244,7 +4248,7 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
             let my_user = client.user_id().to_string();
             let created_ts = created.timestamp;
             let _ = client.dir().notify_post(&my_user, &my_peer, created_ts);
-            eprintln!(
+            tracing::debug!(
                 "[moment] notify_post -> server: user={my_user} peer={my_peer} ts={created_ts}"
             );
         }
@@ -4399,14 +4403,14 @@ fn delete_chat(weak: slint::Weak<MainWindow>, key: i32) {
                     let _ = sqlite::conversations::delete(&pool, conv_id).await;
                 }
                 Ok(None) => {}
-                Err(e) => eprintln!("[delete_chat] resolve conversation failed: {e}"),
+                Err(e) => tracing::warn!("[delete_chat] resolve conversation failed: {e}"),
             }
             // Groups live in `groups`/`group_members` too; the chat id is
             // `grp-<id>`, so clean up that row as well (idempotent for DMs).
             if let Some(num) = chat_id.strip_prefix("grp-") {
                 if let Ok(id) = num.parse::<i64>() {
                     if let Err(e) = sqlite::groups::delete(&pool, id).await {
-                        eprintln!("[delete_chat] delete group failed: {e}");
+                        tracing::warn!("[delete_chat] delete group failed: {e}");
                     }
                 }
             }
@@ -4489,7 +4493,7 @@ fn load_group_settings(weak: slint::Weak<MainWindow>, key: i32) {
                     };
                     let my_libp2p = client_peer();
                     if let Err(e) = sqlite::groups::create(&pool, num, &seed, me_id, None).await {
-                        eprintln!("[load_group_settings] groups.create({num}) failed: {e}");
+                        tracing::warn!("[load_group_settings] groups.create({num}) failed: {e}");
                     }
                     if !my_libp2p.is_empty() {
                         let _ = sqlite::groups::add_member(
@@ -4888,7 +4892,7 @@ fn set_group_pinned(weak: slint::Weak<MainWindow>, key: i32, pinned: bool) {
     {
         let mut g = backend.blocking_write();
         if !g.set_chat_pinned(key, pinned) {
-            eprintln!("[set_pinned] no in-memory chat row for key={key}");
+            tracing::debug!("[set_pinned] no in-memory chat row for key={key}");
         }
     }
     if let Some(chat_id) = chat_id {
@@ -4913,7 +4917,7 @@ fn set_group_pinned(weak: slint::Weak<MainWindow>, key: i32, pinned: bool) {
 /// chat-id key used by `resolve_id`, not the display name.
 fn rename_group(weak: slint::Weak<MainWindow>, key: i32, name: String) {
     if name.trim().is_empty() {
-        eprintln!("[rename_group] empty name ignored");
+        tracing::debug!("[rename_group] empty name ignored");
         return;
     }
     let backend = BACKEND.lock().unwrap().clone();
@@ -4951,14 +4955,14 @@ fn rename_group(weak: slint::Weak<MainWindow>, key: i32, name: String) {
             // `groups.create` upserts on id, so this renames existing rows and
             // creates them for legacy groups.
             if let Err(e) = sqlite::groups::create(&pool, num, &name_owned, me_id, None).await {
-                eprintln!("[rename_group] groups.create({num}) failed: {e}");
+                tracing::warn!("[rename_group] groups.create({num}) failed: {e}");
             }
             if !me_peer.is_empty() {
                 if let Err(e) =
                     sqlite::groups::add_member(&pool, num, &me_peer, sqlite::groups::ROLE_OWNER)
                         .await
                 {
-                    eprintln!("[rename_group] groups.add_member failed: {e}");
+                    tracing::warn!("[rename_group] groups.add_member failed: {e}");
                 }
             }
         }
@@ -5081,7 +5085,7 @@ fn add_group_member(weak: slint::Weak<MainWindow>, key: i32) {
             let ur = match client.resolve_user_registered(username) {
                 Ok(ur) => ur,
                 Err(e) => {
-                    eprintln!("[add_group_member] resolve_user({username}) failed: {e}");
+                    tracing::warn!("[add_group_member] resolve_user({username}) failed: {e}");
                     continue;
                 }
             };
@@ -5095,7 +5099,7 @@ fn add_group_member(weak: slint::Weak<MainWindow>, key: i32) {
                 e2e_public: ur.user.e2e_public.clone(),
             };
             if let Err(e) = client.add_member(&chat_id, info) {
-                eprintln!("[add_group_member] add_member({username}) failed: {e}");
+                tracing::warn!("[add_group_member] add_member({username}) failed: {e}");
                 failed += 1;
                 continue;
             }
@@ -5143,15 +5147,15 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
     if !require_approved(weak.clone()) {
         return false;
     }
-    eprintln!("[create_group_flow] picked={picked:?}");
+    tracing::debug!("[create_group_flow] picked={picked:?}");
     let client = CLIENT.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
     let (Some(client), Some(backend)) = (client, backend) else {
-        eprintln!("[create_group_flow] missing client/backend");
+        tracing::warn!("[create_group_flow] missing client/backend");
         return false;
     };
     if picked.is_empty() {
-        eprintln!("[create_group_flow] picked is empty");
+        tracing::debug!("[create_group_flow] picked is empty");
         return false;
     }
     let mut members: Vec<MemberInfo> = Vec::new();
@@ -5185,7 +5189,7 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
                 });
             }
             Err(e) => {
-                eprintln!("[create_group_flow] resolve_user({username}) failed: {e}");
+                tracing::warn!("[create_group_flow] resolve_user({username}) failed: {e}");
                 failed.push(format!("{username}({e})"));
             }
         }
@@ -5195,12 +5199,12 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
             "Cannot resolve user device: {}\nMake sure their account is registered in the directory.",
             failed.join(", ")
         );
-        eprintln!("[create_group_flow] {msg}");
+        tracing::debug!("[create_group_flow] {msg}");
         show_app_error(weak.clone(), String::from("Cannot resolve user device"));
         return false;
     }
     if !failed.is_empty() {
-        eprintln!(
+        tracing::warn!(
             "[create_group_flow] some members failed: {} (continuing with {} resolved)",
             failed.join(", "),
             members.len()
@@ -5288,8 +5292,8 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
         }
         Err(e) => {
             let msg = "Failed to create group".to_string();
-            eprintln!("{e}");
-            eprintln!("[create_group_flow] {msg}");
+            tracing::debug!("{e}");
+            tracing::debug!("[create_group_flow] {msg}");
             show_app_error(weak.clone(), msg);
             false
         }
@@ -5360,10 +5364,10 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
             rt.spawn(async move {
                 let ur = client.resolve_user(&q);
                 match &ur {
-                    Ok(ur) => eprintln!("[search] resolve_user OK: user_id={} e2e_public={} sign_pk={} | peer_id={} label={} endpoints={:?}",
+                    Ok(ur) => tracing::debug!("[search] resolve_user OK: user_id={} e2e_public={} sign_pk={} | peer_id={} label={} endpoints={:?}",
                         ur.user.user_id, ur.user.e2e_public, ur.user.sign_pk,
                         ur.device.peer_id, ur.device.label, ur.device.endpoints),
-                    Err(e) => eprintln!("[search] resolve_user ERR: {e}"),
+                    Err(e) => tracing::warn!("[search] resolve_user ERR: {e}"),
                 }
                 if let Ok(ur) = ur {
                     let uname = ur.user.user_id;
@@ -5372,7 +5376,7 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
                     // both `Send`) on this worker thread. The non-`Send`
                     // `slint::Image` is built inside the UI-thread closure.
                     let avatar_src = resolve_search_avatar_source(&client, &uname).await;
-                    eprintln!("[search] -> result name={uname} username={uname} peer_id={peer} avatar={:?}", avatar_src.0.is_some() || avatar_src.1.is_some());
+                    tracing::debug!("[search] -> result name={uname} username={uname} peer_id={peer} avatar={:?}", avatar_src.0.is_some() || avatar_src.1.is_some());
                     let weak2 = weak.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak2.upgrade() {
@@ -5389,7 +5393,7 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
                     return;
                 }
 
-                eprintln!("[search] NOT FOUND: {q2}");
+                tracing::debug!("[search] NOT FOUND: {q2}");
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.global::<AppState>().set_add_status(SharedString::from(format!("User not found: {q2}")));
@@ -5422,9 +5426,9 @@ fn search_users_by_peer_id(weak: slint::Weak<MainWindow>, q_raw: String) {
             rt.spawn(async move {
                 let dev = client.dir().resolve_device(&q);
                 match &dev {
-                    Ok(dev) => eprintln!("[search] resolve_device OK: user_id={} peer_id={} label={} endpoints={:?} status={:?}",
+                    Ok(dev) => tracing::debug!("[search] resolve_device OK: user_id={} peer_id={} label={} endpoints={:?} status={:?}",
                         dev.user_id, dev.peer_id, dev.label, dev.endpoints, dev.status),
-                    Err(e) => eprintln!("[search] resolve_device ERR: {e}"),
+                    Err(e) => tracing::warn!("[search] resolve_device ERR: {e}"),
                 }
                 if let Ok(dev) = dev {
                     let uname = dev.user_id;
@@ -5432,7 +5436,7 @@ fn search_users_by_peer_id(weak: slint::Weak<MainWindow>, q_raw: String) {
                     // Avatar source resolved on the worker thread; the
                     // non-`Send` `slint::Image` is built on the UI thread.
                     let avatar_src = resolve_search_avatar_source(&client, &uname).await;
-                    eprintln!("[search] -> result name={uname} username={uname} peer_id={peer} avatar={:?}", avatar_src.0.is_some() || avatar_src.1.is_some());
+                    tracing::debug!("[search] -> result name={uname} username={uname} peer_id={peer} avatar={:?}", avatar_src.0.is_some() || avatar_src.1.is_some());
                     let weak2 = weak.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak2.upgrade() {
@@ -5449,7 +5453,7 @@ fn search_users_by_peer_id(weak: slint::Weak<MainWindow>, q_raw: String) {
                     return;
                 }
 
-                eprintln!("[search] NOT FOUND: {q2}");
+                tracing::debug!("[search] NOT FOUND: {q2}");
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.global::<AppState>().set_add_status(SharedString::from(format!("User not found: {q2}")));
@@ -5730,7 +5734,7 @@ fn accept_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
             display
         };
         if let Err(e) = do_add(&pool, &me, &other_peer, &name, &backend, None).await {
-            eprintln!("[friendq] accept failed: {e}");
+            tracing::warn!("[friendq] accept failed: {e}");
         }
 
         // 3. Refresh UI.
@@ -5863,12 +5867,12 @@ fn approve_device(weak: slint::Weak<MainWindow>, peer: String) {
     }
     match client.approve_device(&peer) {
         Ok(_) => {
-            eprintln!("[approve] device {peer} approved");
+            tracing::debug!("[approve] device {peer} approved");
             refresh_devices(weak.clone());
             show_app_notice(weak, "This device was approved".to_string(), true);
         }
         Err(e) => {
-            eprintln!("[approve] device {peer} failed: {e}");
+            tracing::warn!("[approve] device {peer} failed: {e}");
             show_app_error(weak, format!("Failed to approve: {e}"));
         }
     }
@@ -5885,12 +5889,12 @@ fn revoke_device(weak: slint::Weak<MainWindow>, peer: String) {
     }
     match client.revoke_device(&peer) {
         Ok(_) => {
-            eprintln!("[revoke] device {peer} revoked");
+            tracing::debug!("[revoke] device {peer} revoked");
             refresh_devices(weak.clone());
             show_app_notice(weak, "This device was revoked".to_string(), true);
         }
         Err(e) => {
-            eprintln!("[revoke] device {peer} failed: {e}");
+            tracing::warn!("[revoke] device {peer} failed: {e}");
             show_app_error(weak, format!("Failed to revoke: {e}"));
         }
     }
@@ -6053,11 +6057,11 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
     if !require_approved(weak.clone()) {
         return;
     }
-    eprintln!("[audio.call] begin_voice_call: enter key={key}");
+    tracing::debug!("[audio.call] begin_voice_call: enter key={key}");
     let client = CLIENT.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
     let (Some(client), Some(backend)) = (client, backend) else {
-        eprintln!("[audio.call] begin_voice_call: CLIENT or BACKEND not ready — abort");
+        tracing::debug!("[audio.call] begin_voice_call: CLIENT or BACKEND not ready — abort");
         publish_call_state(weak.clone(), None, None, false);
         show_app_error(
             weak,
@@ -6070,7 +6074,7 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
     let (peer_base58, peer_name) = {
         let g = backend.blocking_read();
         let Some(pid) = g.peer_id_for(key).map(|s| s.to_string()) else {
-            eprintln!("[audio.call] begin_voice_call: no peer_id for key={key} — abort");
+            tracing::debug!("[audio.call] begin_voice_call: no peer_id for key={key} — abort");
             show_app_error(
                 weak,
                 format!("Contact is invalid (key={key}); cannot start a call"),
@@ -6083,11 +6087,11 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
             .find(|r| r.key == key)
             .map(|r| r.name.clone())
             .unwrap_or_else(|| pid.clone());
-        eprintln!("[audio.call] begin_voice_call: resolving peer_base58={pid} name={name}");
+        tracing::debug!("[audio.call] begin_voice_call: resolving peer_base58={pid} name={name}");
         (pid, name)
     };
 
-    eprintln!("[audio.call] begin_voice_call: about to call::start_call");
+    tracing::debug!("[audio.call] begin_voice_call: about to call::start_call");
     match call::start_call(
         Arc::clone(&client),
         &peer_base58,
@@ -6097,12 +6101,12 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
         },
     ) {
         Ok(()) => {
-            eprintln!("[audio.call] begin_voice_call: start_call OK — showing AudioCall overlay");
+            tracing::debug!("[audio.call] begin_voice_call: start_call OK — showing AudioCall overlay");
             publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
             show_call_overlay(weak, GlobalOverlayType::AudioCall);
         }
         Err(e) => {
-            eprintln!("[audio.call] begin_voice_call: start_call FAILED: {e}");
+            tracing::warn!("[audio.call] begin_voice_call: start_call FAILED: {e}");
             show_app_error(weak, format!("Failed to start call: {e}"));
         }
     }
@@ -6313,7 +6317,7 @@ fn toggle_my_video(weak: slint::Weak<MainWindow>, kind: media::VKind) {
             None => match capture_source(kind) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("[call] toggle_video: capture_source({:?}): {e}", kind);
+                    tracing::debug!("[call] toggle_video: capture_source({:?}): {e}", kind);
                     return;
                 }
             },
@@ -6329,7 +6333,7 @@ fn toggle_my_video(weak: slint::Weak<MainWindow>, kind: media::VKind) {
             c.set_video_mute(kind, false);
         }
         if let Err(e) = call::upgrade_outgoing(kind, false, src) {
-            eprintln!("[call] toggle_video: upgrade_outgoing({:?}): {e}", kind);
+            tracing::debug!("[call] toggle_video: upgrade_outgoing({:?}): {e}", kind);
             // `upgrade_outgoing` moved/recorded `src` into `PeerCall.inner`;
             // just detach the dispatcher slot. Keep the source alive (no
             // stop) so a retry can reuse it.
@@ -6420,7 +6424,7 @@ pub(crate) fn start_local_device(kind: media::VKind) {
                 if !cam.is_running() {
                     cam.set_frame_sink(call_dispatcher::on_camera_frame);
                     if let Err(e) = cam.start() {
-                        eprintln!("[video.call] cam.start: {e}");
+                        tracing::debug!("[video.call] cam.start: {e}");
                     }
                 }
             });
@@ -6437,19 +6441,19 @@ pub(crate) fn start_local_device(kind: media::VKind) {
                     if !scr.is_running() {
                         scr.set_sink(screen_sink_adapter);
                         if let Err(e) = scr.start() {
-                            eprintln!("[screen] start failed: {e}");
+                            tracing::warn!("[screen] start failed: {e}");
                         }
                     }
                 });
             }
             #[cfg(target_os = "android")]
             {
-                eprintln!("[screen] requesting MediaProjection from Java shell");
+                tracing::debug!("[screen] requesting MediaProjection from Java shell");
                 bridge::request_screen_share_start();
             }
             #[cfg(target_os = "ios")]
             {
-                eprintln!("[screen] requesting RPScreenRecorder from ObjC shim");
+                tracing::debug!("[screen] requesting RPScreenRecorder from ObjC shim");
                 bridge::request_screen_share_start();
             }
         }
@@ -6677,7 +6681,7 @@ fn open_avatar_picker(weak: slint::Weak<MainWindow>) {
     });
     PICKING_AVATAR.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Err(e) = camera::album::pick_photos(1) {
-        eprintln!("[profile] avatar pick failed: {e}");
+        tracing::warn!("[profile] avatar pick failed: {e}");
         PICKING_AVATAR.store(false, std::sync::atomic::Ordering::SeqCst);
         let weak = weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -6950,14 +6954,14 @@ fn new_username_of(u: &sqlite::users::User) -> String {
 
 fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
     let t0 = std::time::Instant::now();
-    eprintln!("[chat] open_conversation_with_contact: enter key={key}");
+    tracing::debug!("[chat] open_conversation_with_contact: enter key={key}");
     let client = CLIENT.lock().unwrap().clone();
-    eprintln!(
+    tracing::debug!(
         "[chat] open_conversation: +{}ms grabbed CLIENT",
         t0.elapsed().as_millis()
     );
     let backend = BACKEND.lock().unwrap().clone();
-    eprintln!(
+    tracing::debug!(
         "[chat] open_conversation: +{}ms grabbed BACKEND",
         t0.elapsed().as_millis()
     );
@@ -6971,7 +6975,7 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
         drop(g);
         row
     };
-    eprintln!(
+    tracing::debug!(
         "[chat] open_conversation: +{}ms backend row_clone ok={}",
         t0.elapsed().as_millis(),
         row_clone.is_some()
@@ -6989,21 +6993,21 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
     }
     let peer_id = c.peer_id;
     let title = c.name;
-    eprintln!(
+    tracing::debug!(
         "[chat] open_conversation: +{}ms peer_id={peer_id}",
         t0.elapsed().as_millis()
     );
     let me_peer = client.peer_base58();
-    eprintln!(
+    tracing::debug!(
         "[chat] open_conversation: +{}ms self peer={me_peer}",
         t0.elapsed().as_millis()
     );
     let chat_id = dm_chat_id(&me_peer, &peer_id);
-    eprintln!(
+    tracing::debug!(
         "[chat] open_conversation: +{}ms chat_id={chat_id}",
         t0.elapsed().as_millis()
     );
-    eprintln!(
+    tracing::debug!(
         "[chat] open_conversation: +{}ms THREAD {:?} about to acquire READ lock (2nd time, after row_clone)",
         t0.elapsed().as_millis(),
         std::thread::current().id()
@@ -7014,7 +7018,7 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
         .iter()
         .find(|c| c.chat_id == chat_id)
         .map(|c| c.key);
-    eprintln!(
+    tracing::debug!(
         "[chat] open_conversation: +{}ms THREAD {:?} READ lock released, existing={:?}",
         t0.elapsed().as_millis(),
         std::thread::current().id(),
@@ -7023,7 +7027,7 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
     let new_key = match existing_key {
         Some(k) => k,
         None => {
-            eprintln!(
+            tracing::debug!(
                 "[chat] open_conversation: +{}ms THREAD {:?} about to acquire WRITE lock (append_chat)",
                 t0.elapsed().as_millis(),
                 std::thread::current().id()
@@ -7034,7 +7038,7 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
             let mut g = backend.blocking_write();
             let k = g.append_chat(chat_id, title, false, peer_id.clone(), avatar_path);
             drop(g);
-            eprintln!(
+            tracing::debug!(
                 "[chat] open_conversation: +{}ms THREAD {:?} WRITE lock released, appended new chat key={k}",
                 t0.elapsed().as_millis(),
                 std::thread::current().id()
@@ -7042,30 +7046,30 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
             k
         }
     };
-    eprintln!(
+    tracing::debug!(
         "[chat] open_conversation: +{}ms new_key={new_key}, about to invoke_from_event_loop",
         t0.elapsed().as_millis()
     );
     let _ = slint::invoke_from_event_loop(move || {
-        eprintln!(
+        tracing::debug!(
             "[chat] open_conversation: +{}ms eventloop cb enter",
             t0.elapsed().as_millis()
         );
         let Some(ui) = weak.upgrade() else {
-            eprintln!(
+            tracing::warn!(
                 "[chat] open_conversation: +{}ms weak upgrade failed",
                 t0.elapsed().as_millis()
             );
             return;
         };
-        eprintln!("[chat] open_conversation: eventloop cb calling publish_chat_rows");
+        tracing::debug!("[chat] open_conversation: eventloop cb calling publish_chat_rows");
         let state = ui.global::<AppState>();
         publish_chat_rows(&state, backend.clone());
-        eprintln!(
+        tracing::debug!(
             "[chat] open_conversation: eventloop cb publish_chat_rows done, calling load_chat_messages"
         );
         load_chat_messages(ui.as_weak(), new_key);
-        eprintln!(
+        tracing::debug!(
             "[chat] open_conversation: eventloop cb load_chat_messages spawned, calling push_sub_history"
         );
         {
@@ -7082,12 +7086,12 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
                 payload: new_key,
             },
         );
-        eprintln!(
+        tracing::debug!(
             "[chat] open_conversation: +{}ms eventloop cb done",
             t0.elapsed().as_millis()
         );
     });
-    eprintln!(
+    tracing::debug!(
         "[chat] open_conversation: +{}ms invoke_from_event_loop queued (not yet run)",
         t0.elapsed().as_millis()
     );

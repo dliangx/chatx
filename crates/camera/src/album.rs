@@ -142,7 +142,7 @@ mod desktop {
                     deliver(paths);
                 }
                 Err(e) => {
-                    eprintln!("[album] picker exit error: {e}");
+                    tracing::warn!("[album] picker exit error: {e}");
                     deliver(Vec::new());
                 }
             }
