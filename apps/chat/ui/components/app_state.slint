@@ -60,6 +60,7 @@ export struct ConversationRow {
     is-group: bool,
     time-label: string,
     image: image,
+    is-pinned: bool,
 }
 
 export struct ContactRow {
@@ -111,6 +112,16 @@ export struct MyDevice {
     online: bool,
     approved: bool,
     self_device: bool,
+}
+
+export struct GroupMemberRow {
+    name: string,
+    image: image,
+    is-self: bool,
+    // The libp2p base58 peer id behind this member. Used for identity (e.g.
+    // "is-self"), matching contacts (avatars), and dedup in the inline
+    // add-candidate list.
+    peer: string,
 }
 
 export global AppState {
@@ -215,6 +226,13 @@ export global AppState {
     callback pick-group-member(int);
     callback unpick-group-member(int);
     callback create-group();
+
+    // ── Chat settings (group chat) ─────────────────────────────────────────
+    in-out property <int> current-chat-key: -1;
+    in-out property <bool> current-chat-is-group: false;
+    in property <[GroupMemberRow]> existing-members: [];
+    in property <[string]> existing-member-peers: [];
+    callback add-group-member();
 
     // QR scanner (camera overlay)
     in property <bool> scan-found: false;

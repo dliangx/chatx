@@ -457,9 +457,26 @@ pub fn run_app() {
                 // Voice / video call and screen share can route through the same
                 // ProfileState callbacks the profile page uses.
                 let k = chat_key_to_contact_key(payload);
+                // Expose the open chat's key + group-ness so the chat header can
+                // show the group "settings" icon (groups only).
+                let is_group = {
+                    let backend = BACKEND.lock().unwrap();
+                    backend
+                        .as_ref()
+                        .and_then(|b| {
+                            b.blocking_read()
+                                .chats
+                                .iter()
+                                .find(|r| r.key == payload)
+                                .map(|r| r.is_group)
+                        })
+                        .unwrap_or(false)
+                };
                 if let Some(ui) = w.upgrade() {
                     let s = ui.global::<AppState>();
                     s.set_current_chat_peer_key(k);
+                    s.set_current_chat_key(payload);
+                    s.set_current_chat_is_group(is_group);
                 }
             }
             if page == SubPageType::MyNote {
@@ -1031,13 +1048,63 @@ pub fn run_app() {
             },
         );
     }
+
+    // ── Chat settings (group chat ⚙ page) ───────────────────────────────────
+    {
+        let weak = weak.clone();
+        ui.global::<GroupState>().on_request_load(move |key| {
+            load_group_settings(weak.clone(), key);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<GroupState>().on_set_pinned(move |key, pinned| {
+            set_group_pinned(weak.clone(), key, pinned);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<GroupState>()
+            .on_save_group_name(move |key, name| {
+                rename_group(weak.clone(), key, name.to_string());
+            });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<GroupState>()
+            .on_save_my_nickname(move |key, nick| {
+                set_group_nickname(weak.clone(), key, nick.to_string());
+            });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<GroupState>().on_add_candidate(move |peer| {
+            add_group_candidate(weak.clone(), peer.to_string());
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<GroupState>().on_refresh_members(move |key| {
+            refresh_group_members(weak.clone(), key);
+        });
+    }
+    {
+        let weak = weak.clone();
+        ui.global::<AppState>().on_add_group_member(move || {
+            let key = if let Some(ui) = weak.upgrade() {
+                ui.global::<AppState>().get_current_chat_key()
+            } else {
+                -1
+            };
+            add_group_member(weak.clone(), key);
+        });
+    }
     {
         let weak = weak.clone();
         ui.global::<AppState>().on_stop_screen_share(move || {
             end_screen_share(weak.clone());
         });
     }
-
     {
         let weak = weak.clone();
         ui.global::<CallState>().on_end_call(move || {
@@ -1297,9 +1364,10 @@ pub fn run_app() {
     }
     {
         let weak = weak.clone();
-        ui.global::<PostDetailState>().on_toggle_recommend(move |key| {
-            toggle_detail_recommend(weak.clone(), key);
-        });
+        ui.global::<PostDetailState>()
+            .on_toggle_recommend(move |key| {
+                toggle_detail_recommend(weak.clone(), key);
+            });
     }
     {
         let weak = weak.clone();
@@ -2092,7 +2160,10 @@ fn send_chat_voice(
                     eprintln!("[voice] group send FAILED: {e}");
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak3.upgrade() {
-                            cs_set_send_status(&ui.global::<ChatSession>(), format!("Send failed: {e}"));
+                            cs_set_send_status(
+                                &ui.global::<ChatSession>(),
+                                format!("Send failed: {e}"),
+                            );
                         }
                     });
                 }
@@ -2414,7 +2485,10 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
                     eprintln!("[chat-image] group send FAILED: {e}");
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak3.upgrade() {
-                            cs_set_send_status(&ui.global::<ChatSession>(), format!("Send failed: {e}"));
+                            cs_set_send_status(
+                                &ui.global::<ChatSession>(),
+                                format!("Send failed: {e}"),
+                            );
                         }
                     });
                 }
@@ -2691,7 +2765,11 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
                         if let chatx_core::store::Kind::Image { path } = m.kind {
                             let p = path;
                             let value = p.clone();
-                            match tokio::task::spawn_blocking(move || image::ensure_preview(&value, 300)).await {
+                            match tokio::task::spawn_blocking(move || {
+                                image::ensure_preview(&value, 300)
+                            })
+                            .await
+                            {
                                 Ok(_preview) => {
                                     image::load_image_cached(&p);
                                 }
@@ -2741,7 +2819,22 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
     });
 
     let mut chats_sorted = snapshot.chats.clone();
-    chats_sorted.sort_by(|a, b| b.time_ms.cmp(&a.time_ms).then(b.key.cmp(&a.key)));
+    chats_sorted.sort_by(|a, b| {
+        // Pinned chats float above unpinned; inside each bucket, latest-activity
+        // first. `pinned_at` breaks ties between pinned rows (newest pin first).
+        b.is_pinned
+            .cmp(&a.is_pinned)
+            .then_with(|| {
+                if b.is_pinned && a.is_pinned {
+                    b.pinned_at
+                        .cmp(&a.pinned_at)
+                        .then(a.time_ms.cmp(&b.time_ms))
+                } else {
+                    b.time_ms.cmp(&a.time_ms)
+                }
+            })
+            .then(b.key.cmp(&a.key))
+    });
     let chats: Vec<ConversationRow> = chats_sorted
         .iter()
         .map(|r| ConversationRow {
@@ -2751,6 +2844,7 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
             is_group: r.is_group,
             time_label: SharedString::from(fmt_time(r.time_ms)),
             image: load_avatar_path_capped(&r.avatar_path, 40),
+            is_pinned: r.is_pinned,
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
@@ -2942,7 +3036,20 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
     }
 
     let mut chats_sorted = snapshot.chats.clone();
-    chats_sorted.sort_by(|a, b| b.time_ms.cmp(&a.time_ms).then(b.key.cmp(&a.key)));
+    chats_sorted.sort_by(|a, b| {
+        b.is_pinned
+            .cmp(&a.is_pinned)
+            .then_with(|| {
+                if b.is_pinned && a.is_pinned {
+                    b.pinned_at
+                        .cmp(&a.pinned_at)
+                        .then(a.time_ms.cmp(&b.time_ms))
+                } else {
+                    b.time_ms.cmp(&a.time_ms)
+                }
+            })
+            .then(b.key.cmp(&a.key))
+    });
     let chats: Vec<ConversationRow> = chats_sorted
         .iter()
         .map(|r| ConversationRow {
@@ -2952,6 +3059,7 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
             is_group: r.is_group,
             time_label: SharedString::from(fmt_time(r.time_ms)),
             image: load_avatar_path_capped(&r.avatar_path, 40),
+            is_pinned: r.is_pinned,
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
@@ -3114,7 +3222,10 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                     return Some(m);
                 }
                 match client.open_stored_group_message(&chat_id, &m.text) {
-                    Ok(plain) => Some(chatx_core::store::StoredMsg { text: plain.text, ..m }),
+                    Ok(plain) => Some(chatx_core::store::StoredMsg {
+                        text: plain.text,
+                        ..m
+                    }),
                     Err(e) => {
                         eprintln!("[chat] failed to open group msg in {chat_id}: {e}; hiding it");
                         None
@@ -4312,6 +4423,722 @@ fn should_use_server_fanout(member_count: usize) -> bool {
     return member_count >= chatx_core::GROUP_P2P_MAX;
 }
 
+/// Load the ChatSetting page state for the open group: its name, my nickname
+/// in the group, and the pin flag. `key` is the open chat's UI key; on
+/// success the values are pushed onto `GroupState` (which mirrors them into the
+/// edit buffers once `loaded` flips true).
+fn load_group_settings(weak: slint::Weak<MainWindow>, key: i32) {
+    // Reset the prior page's draft so the page starts clean.
+    if let Some(ui) = weak.upgrade() {
+        let gs = ui.global::<GroupState>();
+        gs.set_pinned(false);
+        gs.set_group_name(SharedString::new());
+        gs.set_my_nickname(SharedString::new());
+        gs.set_loaded(false);
+    }
+    let backend = BACKEND.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
+    let (Some(backend), Some(pool)) = (backend, pool) else {
+        return;
+    };
+    let chat_id: Option<String> = {
+        backend
+            .blocking_read()
+            .chat_id_for(key)
+            .map(|s| s.to_string())
+    };
+    let Some(chat_id) = chat_id else {
+        return;
+    };
+    // Resolve the numeric group id (grp-<num>) so we can read `groups.name`
+    // and my `group_members` nickname.
+    let num = match chat_id.strip_prefix("grp-") {
+        Some(n) => n.parse::<i64>().ok(),
+        None => None,
+    };
+    let me_peer = current_me();
+    let rt = runtime();
+    let weak2 = weak.clone();
+    // Snapshot the in-memory chat title so we can use it as a fallback when
+    // `groups.name` is empty (older groups predate `persist_group`).
+    let in_mem_title: Option<String> = {
+        backend
+            .blocking_read()
+            .chats
+            .iter()
+            .find(|r| r.key == key)
+            .map(|r| r.title.clone())
+    };
+    rt.spawn(async move {
+        let mut name = String::new();
+        let mut nickname = String::new();
+        let mut pinned = false;
+        if let Some(num) = num {
+            if let Ok(Some(g)) = sqlite::groups::get(&pool, num).await {
+                name = g.name.clone();
+            }
+            // If this group was created before the `groups` row existed (legacy),
+            // lazily create one from the in-memory title so future renames &
+            // re-opens work consistently.
+            if name.is_empty() {
+                if let Some(seed) = in_mem_title.clone() {
+                    name = seed.clone();
+                    let me_id = match sqlite::users::get_by_username(&pool, &me_peer).await {
+                        Ok(Some(u)) => u.id,
+                        _ => 0,
+                    };
+                    let my_libp2p = client_peer();
+                    if let Err(e) = sqlite::groups::create(&pool, num, &seed, me_id, None).await {
+                        eprintln!("[load_group_settings] groups.create({num}) failed: {e}");
+                    }
+                    if !my_libp2p.is_empty() {
+                        let _ = sqlite::groups::add_member(
+                            &pool,
+                            num,
+                            &my_libp2p,
+                            sqlite::groups::ROLE_OWNER,
+                        )
+                        .await;
+                    }
+                }
+            }
+            // My nickname in this group: prefer the group-member row keyed by
+            // my libp2p peer id; if unknown, fall back to my account nickname.
+            let my_libp2p_peer = client_peer();
+            if let Ok(members) = sqlite::groups::list_members(&pool, num).await {
+                if let Some(m) = members.iter().find(|m| m.peer_id == my_libp2p_peer) {
+                    if let Some(nk) = m.nickname.clone().filter(|s| !s.is_empty()) {
+                        nickname = nk;
+                    }
+                }
+            }
+            if nickname.is_empty() {
+                if let Ok(Some(u)) = sqlite::users::get_by_username(&pool, &me_peer).await {
+                    nickname = u
+                        .nickname
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| me_peer.clone());
+                }
+            }
+        }
+        // Pin flag comes from the conversation row keyed by the string chat id.
+        if let Ok(Some(conv_id)) = sqlite::conversations::resolve_id(&pool, &chat_id).await {
+            if let Ok(Some(c)) = sqlite::conversations::get(&pool, conv_id).await {
+                pinned = c.is_pinned;
+            }
+        }
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak2.upgrade() {
+                let gs = ui.global::<GroupState>();
+                gs.set_pinned(pinned);
+                gs.set_group_name(SharedString::from(name));
+                gs.set_my_nickname(SharedString::from(nickname));
+                gs.set_loaded(true);
+            }
+        });
+    });
+}
+
+/// Refresh the inline "group members" icon strip on the settings page: load
+/// the current members of group chat `key` and push avatars + names onto
+/// `GroupState.members`. Called when the page first loads and after a
+/// successful add, so the strip always mirrors the group.
+///
+/// The authoritative member list is the core client's in-memory `Group`
+/// (it sees every member added via `create_group` / `add_member`, including
+/// ones not yet persisted to sqlite). We fall back to the sqlite
+/// `group_members` table only when the core doesn't currently hold the group
+/// (e.g. pre-reconnect), and sync the table to the core set so future reads
+/// work.
+fn refresh_group_members(weak: slint::Weak<MainWindow>, key: i32) {
+    let client = CLIENT.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
+    let (Some(client), Some(pool), Some(backend)) = (client, pool, backend) else {
+        return;
+    };
+    let chat_id = backend
+        .blocking_read()
+        .chat_id_for(key)
+        .map(|s| s.to_string());
+    let chat_id = match chat_id {
+        Some(c) => c,
+        None => return,
+    };
+    let num = match chat_id
+        .strip_prefix("grp-")
+        .and_then(|n| n.parse::<i64>().ok())
+    {
+        Some(n) => n,
+        None => {
+            // Not a group: clear any stale strip.
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.global::<GroupState>().set_members(slint::ModelRc::new(
+                        slint::VecModel::from(Vec::<GroupMemberRow>::new()),
+                    ));
+                }
+            });
+            return;
+        }
+    };
+    let me_peer = client_peer();
+    // Snapshot the in-memory contacts so we can (a) pull each member's avatar
+    // from the known contact rows and (b) build the "still-to-add" candidate
+    // list.
+    let contacts: Vec<(String, String, String)> = backend
+        .blocking_read()
+        .contacts
+        .iter()
+        .map(|c| (c.peer_id.clone(), c.name.clone(), c.image.clone()))
+        .collect();
+    let rt = runtime();
+    let weak2 = weak.clone();
+    rt.spawn(async move {
+        // Resolve the authoritative member peer ids: the core client's
+        // in-memory group (source of truth) if present, otherwise the sqlite
+        // `group_members` table. Scope the guard tightly so it is dropped
+        // before any `.await` (MutexGuard is !Send).
+        let core_peer_ids: Option<Vec<String>> = {
+            CLIENT
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|c| c.get_group(&chat_id))
+                .map(|g| g.member_ids())
+        };
+        let from_core = core_peer_ids
+            .clone()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let member_peers: Vec<String> = if let Some(ids) = core_peer_ids {
+            ids
+        } else {
+            match sqlite::groups::list_members(&pool, num).await {
+                Ok(members) => members.into_iter().map(|m| m.peer_id).collect(),
+                Err(_) => Vec::new(),
+            }
+        };
+        // If the core held the group, mirror its members into sqlite so the
+        // table (and the "already in" guard) stays consistent across restarts.
+        if from_core {
+            let all: Vec<String> = member_peers.clone();
+            let my = me_peer.clone();
+            if sqlite::groups::get(&pool, num)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                if let Ok(Some(u)) = sqlite::users::get_by_username(&pool, &my).await {
+                    let _ = sqlite::groups::create(&pool, num, &chat_id, u.id, None).await;
+                }
+            }
+            for p in &all {
+                let role = if *p == my {
+                    sqlite::groups::ROLE_OWNER
+                } else {
+                    sqlite::groups::ROLE_MEMBER
+                };
+                let _ = sqlite::groups::add_member(&pool, num, p, role).await;
+            }
+        }
+        // Resolve each member's name + avatar from the signaling server
+        // (peer_id → device → user → profile) — the source of truth, which
+        // works even for members who are not one of my local contacts. We
+        // still keep the local contact list for the candidate list below and
+        // as an avatar fallback.
+        let member_set: std::collections::HashSet<&str> =
+            member_peers.iter().map(String::as_str).collect();
+        let mut raws: Vec<(String, Option<String>, Option<Vec<u8>>, bool, String)> = Vec::new();
+        for peer in &member_peers {
+            let (srv_name, bytes) = resolve_member_profile_client(&client, peer).await;
+            // Local contact (if any) as a fast avatar + name fallback.
+            let local = contacts.iter().find(|(p, _, _)| p == peer);
+            let name = if !srv_name.is_empty() {
+                srv_name
+            } else if let Some((_, n, _)) = local {
+                n.clone()
+            } else {
+                peer.clone()
+            };
+            let path = local.and_then(|(_, _, img)| (!img.is_empty()).then(|| img.clone()));
+            raws.push((name, path, bytes, peer == &me_peer, peer.clone()));
+        }
+        // Candidates = contacts not yet a member and not myself.
+        let candidates: Vec<(String, String, Option<String>)> = contacts
+            .into_iter()
+            .filter(|(p, _, _)| !member_set.contains(p.as_str()) && *p != me_peer)
+            .map(|(p, n, img)| (p, n, (!img.is_empty()).then_some(img)))
+            .collect::<Vec<_>>();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak2.upgrade() {
+                let built: Vec<GroupMemberRow> = raws
+                    .into_iter()
+                    .map(|(name, path, bytes, is_self, peer)| GroupMemberRow {
+                        name: SharedString::from(name.clone()),
+                        image: member_image(&name, path.as_deref(), bytes.as_deref()),
+                        is_self,
+                        peer: SharedString::from(peer),
+                    })
+                    .collect();
+                let peers: Vec<SharedString> = built.iter().map(|r| r.peer.clone()).collect();
+                let cand: Vec<GroupMemberRow> = candidates
+                    .into_iter()
+                    .map(|(p, n, img)| GroupMemberRow {
+                        name: SharedString::from(n.clone()),
+                        image: member_image(&n, img.as_deref(), None),
+                        is_self: false,
+                        peer: SharedString::from(p),
+                    })
+                    .collect();
+                let gs = ui.global::<GroupState>();
+                gs.set_members(slint::ModelRc::new(slint::VecModel::from(built)));
+                gs.set_member_peers(slint::ModelRc::new(slint::VecModel::from(peers.clone())));
+                gs.set_add_candidates(slint::ModelRc::new(slint::VecModel::from(cand)));
+                let st = ui.global::<AppState>();
+                st.set_existing_member_peers(slint::ModelRc::new(slint::VecModel::from(peers)));
+            }
+        });
+    });
+}
+
+/// Add a single contact directly to the currently-open group chat — no
+/// navigation. `peer` is the libp2p base58 id of the contact (matches
+/// `GroupState.add-candidates[].peer`). Resolves the contact's
+/// `MemberInfo`, calls `client.add_member`, persists a `group_members` row,
+/// then refreshes the inline member strip and the remaining-candidates list.
+fn add_group_candidate(weak: slint::Weak<MainWindow>, peer: String) {
+    let client = CLIENT.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
+    let (Some(client), Some(pool), Some(backend)) = (client, pool, backend) else {
+        show_app_error(weak, "Not ready".to_string());
+        return;
+    };
+    let Some(ui) = weak.upgrade() else {
+        return;
+    };
+    let chat_key = ui.global::<AppState>().get_current_chat_key();
+    if chat_key < 0 {
+        show_app_error(weak, "Not a group chat".to_string());
+        return;
+    }
+    let chat_id: Option<String> = {
+        backend
+            .blocking_read()
+            .chat_id_for(chat_key)
+            .map(|s| s.to_string())
+    };
+    let Some(chat_id) = chat_id else {
+        show_app_error(weak, "No group chat for this key".to_string());
+        return;
+    };
+    // Resolve the candidate's username from the in-memory contact table by
+    // libp2p peer id. Fall back to the raw peer id so the directory lookup
+    // can still succeed.
+    let username: Option<String> = {
+        let g = backend.blocking_read();
+        g.contacts
+            .iter()
+            .find(|c| c.peer_id == peer)
+            .map(|c| c.name.clone())
+            .or_else(|| Some(peer.clone()))
+    };
+    let Some(username) = username else {
+        show_app_error(weak, "Unknown contact".to_string());
+        return;
+    };
+    let me_peer = client_peer();
+    let rt = runtime();
+    rt.spawn(async move {
+        let ur = match client.resolve_user_registered(&username) {
+            Ok(ur) => ur,
+            Err(e) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    show_app_error(
+                        weak.clone(),
+                        format!("resolve_user({username}) failed: {e}"),
+                    );
+                });
+                return;
+            }
+        };
+        let member_peer = ur.device.peer_id.clone();
+        if member_peer == me_peer {
+            let _ = slint::invoke_from_event_loop(move || {
+                show_app_notice(
+                    weak.clone(),
+                    "You are already in this group".to_string(),
+                    false,
+                );
+            });
+            return;
+        }
+        let info = MemberInfo {
+            peer_id: ur.device.peer_id.clone(),
+            sign_pk: ur.user.sign_pk.clone(),
+            e2e_public: ur.user.e2e_public.clone(),
+        };
+        if let Err(e) = client.add_member(&chat_id, info) {
+            let _ = slint::invoke_from_event_loop(move || {
+                show_app_error(weak.clone(), format!("add_member failed: {e}"));
+            });
+            return;
+        }
+        if let Some(num) = chat_id
+            .strip_prefix("grp-")
+            .and_then(|n| n.parse::<i64>().ok())
+        {
+            if !member_peer.is_empty() {
+                let _ = sqlite::groups::add_member(
+                    &pool,
+                    num,
+                    &member_peer,
+                    sqlite::groups::ROLE_MEMBER,
+                )
+                .await;
+            }
+        }
+        let _ = slint::invoke_from_event_loop(move || {
+            refresh_group_members(weak.clone(), chat_key);
+        });
+    });
+}
+
+/// Build a capped avatar `slint::Image` for name+optionally-a-stored-avatar
+/// path. Uses the path when present (decoding on disk), otherwise falls
+/// back to a colored initials avatar synthesized from `name`. Must run on
+/// the main slint thread (not `Send`).
+fn member_image(name: &str, path: Option<&str>, bytes: Option<&[u8]>) -> SlintImage {
+    if let Some(p) = path {
+        if !p.is_empty() {
+            return load_avatar_path_capped(p, 40);
+        }
+    }
+    if let Some(b) = bytes {
+        if !b.is_empty() {
+            return image::image_from_bytes(b, 40);
+        }
+    }
+    let av = make_avatar(name, 40);
+    let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(av.w, av.h);
+    buf.make_mut_bytes().copy_from_slice(av.rgba.as_slice());
+    SlintImage::from_rgba8(buf)
+}
+
+/// Resolve a group member's display name + avatar **from the signaling
+/// server** (the source of truth — every user publishes their profile there,
+/// so this works even for members who are not one of my contacts). Chain:
+/// `peer_id` → `resolve_device` → `user_id` → `fetch_profile` → {nickname,
+/// avatar b64}. Returns `(name, avatar_bytes?)`; on the main slint thread
+/// these are folded into a `slint::Image`.
+async fn resolve_member_profile_client(
+    client: &std::sync::Arc<Client<Directory>>,
+    peer_id: &str,
+) -> (String, Option<Vec<u8>>) {
+    let (user_id, profile) = match client.dir().resolve_device(peer_id) {
+        Ok(dev) => {
+            let uid = dev.user_id.clone();
+            let prof = client.dir().fetch_profile(&uid).ok().flatten();
+            (uid, prof)
+        }
+        Err(_) => (String::new(), None),
+    };
+    let name = profile
+        .as_ref()
+        .and_then(|p| p.nickname.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| (!user_id.is_empty()).then_some(user_id))
+        .unwrap_or_else(|| peer_id.to_string());
+    let avatar = profile
+        .as_ref()
+        .and_then(|p| p.avatar.clone())
+        .filter(|a| !a.is_empty())
+        .and_then(|b64| {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.decode(b64).ok()
+        });
+    (name, avatar)
+}
+
+/// Convenience: my libp2p peer id (base58), empty when no client is bound.
+fn client_peer() -> String {
+    CLIENT
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.peer_base58())
+        .unwrap_or_default()
+}
+
+/// Pin / unpin chat `key` and republish the (reordered) chat list.
+fn set_group_pinned(weak: slint::Weak<MainWindow>, key: i32, pinned: bool) {
+    let backend = BACKEND.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
+    let (Some(backend), Some(pool)) = (backend, pool) else {
+        return;
+    };
+    let chat_id: Option<String> = backend
+        .blocking_read()
+        .chat_id_for(key)
+        .map(|s| s.to_string());
+    // Flip the in-memory row so the toggle reflects immediately.
+    {
+        let mut g = backend.blocking_write();
+        if !g.set_chat_pinned(key, pinned) {
+            eprintln!("[set_pinned] no in-memory chat row for key={key}");
+        }
+    }
+    if let Some(chat_id) = chat_id {
+        let rt = runtime();
+        rt.spawn(async move {
+            if let Ok(Some(conv_id)) = sqlite::conversations::resolve_id(&pool, &chat_id).await {
+                let _ = sqlite::conversations::set_pinned(&pool, conv_id, pinned).await;
+            }
+        });
+    }
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            // Mirror the new flag onto the toggle so it flips immediately.
+            ui.global::<GroupState>().set_pinned(pinned);
+            publish_to_views(&ui.global::<AppState>(), backend);
+        }
+    });
+}
+
+/// Rename chat `key`: update `groups.name` (upsert), and the in-memory row
+/// title. Does NOT touch `conversations.name` — that column holds the string
+/// chat-id key used by `resolve_id`, not the display name.
+fn rename_group(weak: slint::Weak<MainWindow>, key: i32, name: String) {
+    if name.trim().is_empty() {
+        eprintln!("[rename_group] empty name ignored");
+        return;
+    }
+    let backend = BACKEND.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
+    let (Some(backend), Some(pool)) = (backend, pool) else {
+        return;
+    };
+    let chat_id: Option<String> = backend
+        .blocking_read()
+        .chat_id_for(key)
+        .map(|s| s.to_string());
+    let Some(chat_id) = chat_id else {
+        return;
+    };
+    // Update the in-memory title immediately.
+    {
+        let mut g = backend.blocking_write();
+        g.set_chat_title(key, &name);
+    }
+    // Resolve my user id + peer id so `groups.create` can upsert a valid row
+    // for older groups that were never persisted via `persist_group`.
+    let me_username = current_me();
+    let me_peer = client_peer();
+    let rt = runtime();
+    let name_owned = name.clone();
+    rt.spawn(async move {
+        if let Some(num) = chat_id
+            .strip_prefix("grp-")
+            .and_then(|n| n.parse::<i64>().ok())
+        {
+            let me_id = match sqlite::users::get_by_username(&pool, &me_username).await {
+                Ok(Some(u)) => u.id,
+                _ => 0,
+            };
+            // `groups.create` upserts on id, so this renames existing rows and
+            // creates them for legacy groups.
+            if let Err(e) = sqlite::groups::create(&pool, num, &name_owned, me_id, None).await {
+                eprintln!("[rename_group] groups.create({num}) failed: {e}");
+            }
+            if !me_peer.is_empty() {
+                if let Err(e) =
+                    sqlite::groups::add_member(&pool, num, &me_peer, sqlite::groups::ROLE_OWNER)
+                        .await
+                {
+                    eprintln!("[rename_group] groups.add_member failed: {e}");
+                }
+            }
+        }
+    });
+    let w = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = w.upgrade() {
+            publish_to_views(&ui.global::<AppState>(), backend);
+        }
+    });
+    show_app_notice(weak, "Group name updated".to_string(), true);
+}
+
+/// Set my own nickname inside group chat `key` (`group_members.nickname`).
+fn set_group_nickname(weak: slint::Weak<MainWindow>, key: i32, nickname: String) {
+    let backend = BACKEND.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
+    let (Some(backend), Some(pool)) = (backend, pool) else {
+        return;
+    };
+    let chat_id: Option<String> = backend
+        .blocking_read()
+        .chat_id_for(key)
+        .map(|s| s.to_string());
+    let Some(chat_id) = chat_id else {
+        return;
+    };
+    let my_peer = client_peer();
+    let rt = runtime();
+    let nick = nickname.clone();
+    rt.spawn(async move {
+        if let Some(num) = chat_id
+            .strip_prefix("grp-")
+            .and_then(|n| n.parse::<i64>().ok())
+        {
+            if !my_peer.is_empty() {
+                let _ =
+                    sqlite::groups::set_member_nickname(&pool, num, &my_peer, Some(&nick)).await;
+            }
+        }
+    });
+    let w = weak.clone();
+    let nick2 = nickname.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = w.upgrade() {
+            let gs = ui.global::<GroupState>();
+            gs.set_my_nickname(SharedString::from(nick2));
+        }
+    });
+    show_app_notice(weak, "Nickname updated".to_string(), true);
+}
+
+/// Add the currently `group-picked` members (from the shared picker) to group
+/// chat `key`: update the core group, persist the member rows to sqlite, then
+/// clear the selection.
+fn add_group_member(weak: slint::Weak<MainWindow>, key: i32) {
+    let client = CLIENT.lock().unwrap().clone();
+    let pool = POOL.lock().unwrap().clone();
+    let (Some(client), Some(pool)) = (client, pool) else {
+        return;
+    };
+    let Some(ui) = weak.upgrade() else {
+        return;
+    };
+    use slint::Model;
+    let st = ui.global::<AppState>();
+    let m = st.get_group_picked();
+    let picked: Vec<i32> = (0..m.row_count()).filter_map(|i| m.row_data(i)).collect();
+    if picked.is_empty() {
+        show_app_error(weak, "No members selected".to_string());
+        return;
+    }
+    // Snapshot the existing member peer ids (from AppState) so the confirm
+    // step can skip any picked contacts that are already in the group (the
+    // picker intentionally lists them so the user can SEE them, but we should
+    // never re-add them).
+    let existing_peers: Vec<String> = {
+        let peers = st.get_existing_member_peers();
+        (0..peers.row_count())
+            .filter_map(|i| peers.row_data(i))
+            .map(|s| s.to_string())
+            .collect()
+    };
+    let backend = BACKEND.lock().unwrap().clone();
+    let backend2 = backend.clone();
+    let Some(backend2) = backend2 else {
+        return;
+    };
+    let chat_id: Option<String> = backend2
+        .blocking_read()
+        .chat_id_for(key)
+        .map(|s| s.to_string());
+    let Some(chat_id) = chat_id else {
+        return;
+    };
+    // Resolve picked contact keys to MemberInfo (needs the core member keys).
+    let usernames: Vec<String> = {
+        let g = backend2.blocking_read();
+        let mut v: Vec<String> = Vec::new();
+        for k in &picked {
+            if let Some(u) = g
+                .username_for(*k)
+                .map(|s| s.to_string())
+                .or_else(|| g.peer_id_for(*k).map(|s| s.to_string()))
+            {
+                v.push(u);
+            }
+        }
+        v
+    };
+    let rt = runtime();
+    let weak2 = weak.clone();
+    rt.spawn(async move {
+        let mut added = 0usize;
+        let mut failed = 0usize;
+        for username in &usernames {
+            // Resolve first to learn the peer id, then skip if already a member
+            // (the picker shows existing members so they're visible, but the
+            // confirm step must not re-add them).
+            let ur = match client.resolve_user_registered(username) {
+                Ok(ur) => ur,
+                Err(e) => {
+                    eprintln!("[add_group_member] resolve_user({username}) failed: {e}");
+                    continue;
+                }
+            };
+            let member_peer = ur.device.peer_id.clone();
+            if existing_peers.iter().any(|p| p == &member_peer) {
+                continue;
+            }
+            let info = MemberInfo {
+                peer_id: ur.device.peer_id.clone(),
+                sign_pk: ur.user.sign_pk.clone(),
+                e2e_public: ur.user.e2e_public.clone(),
+            };
+            if let Err(e) = client.add_member(&chat_id, info) {
+                eprintln!("[add_group_member] add_member({username}) failed: {e}");
+                failed += 1;
+                continue;
+            }
+            added += 1;
+            if let Some(num) = chat_id
+                .strip_prefix("grp-")
+                .and_then(|n| n.parse::<i64>().ok())
+            {
+                if !member_peer.is_empty() {
+                    let _ = sqlite::groups::add_member(
+                        &pool,
+                        num,
+                        &member_peer,
+                        sqlite::groups::ROLE_MEMBER,
+                    )
+                    .await;
+                }
+            }
+        }
+        let msg = if added > 0 {
+            format!("{} member(s) added", added)
+        } else if failed > 0 {
+            "Failed to add members".to_string()
+        } else {
+            "Nothing to add".to_string()
+        };
+        let ok = added > 0;
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak2.upgrade() {
+                let st = ui.global::<AppState>();
+                st.set_group_picked(slint::ModelRc::new(
+                    slint::VecModel::from(Vec::<i32>::new()),
+                ));
+            }
+            // Refresh the inline member strip so the newly added avatars show.
+            if ok {
+                refresh_group_members(weak.clone(), key);
+            }
+            show_app_notice(weak.clone(), msg, ok);
+        });
+    });
+}
+
 fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
     if !require_approved(weak.clone()) {
         return false;
@@ -4344,6 +5171,10 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
         }
         v
     };
+    // Resolve MY OWN identity (user id + peer id) once, for the sqlite group
+    // rows we persist below.
+    let my_peer: String = client.peer_base58();
+
     for username in usernames {
         match client.resolve_user_registered(&username) {
             Ok(ur) => {
@@ -4407,12 +5238,40 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
         Ok(_) => {
             let new_key = {
                 let mut g = backend.blocking_write();
-                g.append_chat(group_id.clone(), title, true, String::new(), String::new())
+                g.append_chat(
+                    group_id.clone(),
+                    title.clone(),
+                    true,
+                    String::new(),
+                    String::new(),
+                )
             };
+            // Persist the group to the local sqlite so it has a stable integer
+            // id, a rename-able `groups.name`, and a `conversations.is_pinned`
+            // pin flag (used by the ChatSetting "rename"/"pin" features).
+            {
+                let me_username = client.user_id().to_string();
+                let me_peer2 = my_peer.clone();
+                let pool = POOL.lock().unwrap().clone();
+                if let Some(pool) = pool {
+                    let rt = runtime();
+                    let title2 = title.clone();
+                    let g_id = group_id.clone();
+                    rt.spawn(async move {
+                        let me_id = match sqlite::users::get_by_username(&pool, &me_username).await
+                        {
+                            Ok(Some(u)) => u.id,
+                            _ => 0,
+                        };
+                        crate::data::persist_group(&pool, &g_id, &title2, me_id, &me_peer2).await;
+                    });
+                }
+            }
             let w = weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
                     let state = ui.global::<AppState>();
+                    state.set_current_chat_key(new_key);
                     state.set_group_status(SharedString::new());
                     publish_to_views(&state, backend.clone());
                     load_chat_messages(ui.as_weak(), new_key);
@@ -6268,7 +7127,13 @@ fn send_dm_to_contact(weak: slint::Weak<MainWindow>, key: i32, body: String) -> 
             Some(k) => k,
             None => {
                 let mut g = backend.blocking_write();
-                g.append_chat(chat_id, c.name.clone(), false, c.peer_id.clone(), c.image.clone())
+                g.append_chat(
+                    chat_id,
+                    c.name.clone(),
+                    false,
+                    c.peer_id.clone(),
+                    c.image.clone(),
+                )
             }
         }
     };

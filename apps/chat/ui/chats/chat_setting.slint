@@ -1,3 +1,391 @@
+import { Header } from "../components/header.slint";
+import { Glyph, Icon, Variant } from "../components/icon.slint";
+import { GroupMemberRow } from "../components/app_state.slint";
+import { Theme } from "../theme.slint";
+import { VerticalBox } from "std-widgets.slint";
+
+export global GroupState {
+    in property <bool> loaded: false;
+    in-out property <bool> pinned: false;
+    in-out property <string> group-name: "";
+    in-out property <string> my-nickname: "";
+    // Current group members (avatar + display name). Rendered as an inline
+    // icon strip in the settings page.
+    in property <[GroupMemberRow]> members: [];
+    // Contacts still-to-add — rendered as a list below the member strip.
+    // Tapping a row calls `add-candidate(peer)`, which adds the contact to
+    // this group and refreshes both lists (no navigation).
+    in property <[GroupMemberRow]> add-candidates: [];
+    // The group's member peer ids (mirrored onto AppState for re-add guard).
+    in property <[string]> member-peers: [];
+    callback request-load(int);
+    callback set-pinned(int, bool);
+    callback save-group-name(int, string);
+    callback save-my-nickname(int, string);
+    // Add the contact (identified by libp2p peer id) to this group chat.
+    callback add-candidate(string);
+    // Reload the member strip + the add-candidate list (e.g. after a
+    // successful add).
+    callback refresh-members(int);
+}
+
+component FieldBox inherits Rectangle {
+    in-out property <string> text;
+
+    width: 100%;
+    height: 42px;
+    background: Theme.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    input := TextInput {
+        x: 10px;
+        vertical-alignment: center;
+        horizontal-alignment: left;
+        width: parent.width - 20px;
+        height: parent.height;
+        text <=> root.text;
+        single-line: true;
+        font-size: 14px;
+        color: Theme.fg;
+        selection-background-color: Theme.brand;
+        selection-foreground-color: white;
+    }
+}
+
 export component ChatSettingView inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: Theme.bg;
+
     in property <int> chat-id;
+
+    in-out property <string> g-name: "";
+    in-out property <string> g-nickname: "";
+    in-out property <bool> requested: false;
+
+    out property <int> member-cap: 12;
+    out property <int> member-shown:GroupState.members.length < root.member-cap ? GroupState.members.length : root.member-cap;
+
+    // Top of the name/nickname section. Pushed down below the inline
+    // add-member list when candidates are shown.
+    out property <length> panel-bottom:
+        GroupState.add-candidates.length > 0 ? 262px : 96px;
+
+    // Fire the backend load once the first time this page is visible.
+    Timer {
+        interval: 60ms;
+        running: root.visible && !root.requested;
+        triggered => {
+            root.requested = true;
+            GroupState.request-load(root.chat-id);
+            GroupState.refresh-members(root.chat-id);
+        }
+    }
+
+    // Load name / nickname / pin state once the backend signals ready.
+    Timer {
+        interval: 60ms;
+        running: root.visible && GroupState.loaded;
+        triggered => {
+            if (root.g-name == "" && GroupState.group-name != "") {
+                root.g-name = GroupState.group-name;
+            }
+            if (root.g-nickname == "" && GroupState.my-nickname != "") {
+                root.g-nickname = GroupState.my-nickname;
+            }
+            GroupState.loaded = false;
+        }
+    }
+
+    Header {
+        name: @tr("Chat settings");
+        back-vis: true;
+    }
+
+    VerticalBox {
+        y: 48px;
+        padding: 12px;
+        // ── Members ────────────────────────────────────────────────────────────
+        Text {
+            width: parent.width - 24px;
+            height: 18px;
+            text: @tr("Group members");
+            font-size: 12px;
+            font-weight: 600;
+            color: Theme.fg-muted;
+            vertical-alignment: center;
+        }
+
+        // Member avatar strip, capped at 12; extras collapse into a "+N" tile.
+
+        HorizontalLayout {
+            width: parent.width - 24px;
+            height: 32px;
+            spacing: 8px;
+
+            for i in root.member-shown: Rectangle {
+                width: 32px;
+                height: 32px;
+                border-radius: 8px;
+                background: Theme.surface;
+                clip: true;
+
+                Image {
+                    width: 100%;
+                    height: 100%;
+                    source: GroupState.members[i].image;
+                }
+            }
+
+            if GroupState.members.length > root.member-cap:
+        Rectangle {
+                width: 32px;
+                height: 32px;
+                border-radius: 8px;
+                background: Theme.surface-2;
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: "+{GroupState.members.length - root.member-cap + 1}";
+                    font-size: 10px;
+                    font-weight: 700;
+                    color: Theme.fg-muted;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // ── Inline add-member list ─────────────────────────────────────────────
+        if GroupState.add-candidates.length > 0:
+        Text {
+
+            width: parent.width - 24px;
+            height: 18px;
+            text: @tr("Add members");
+            font-size: 12px;
+            font-weight: 600;
+            color: Theme.fg-muted;
+            vertical-alignment: center;
+        }
+
+        if GroupState.add-candidates.length > 0:
+        Rectangle {
+            width: parent.width - 24px;
+            height: 240px;
+            clip: true;
+            border-radius: 8px;
+            background: Theme.surface;
+
+            Flickable {
+                width: parent.width;
+                height: parent.height;
+                content-height: GroupState.add-candidates.length * 44px;
+
+                for c[i] in GroupState.add-candidates: Rectangle {
+                    x: 0px;
+                    y: 44px * i;
+                    width: parent.width;
+                    height: 44px;
+                    background: touch.pressed ? Theme.brand : transparent;
+                    clip: true;
+
+                    Rectangle {
+                        x: 36px;
+                        y: 44px;
+                        width: parent.width - 48px;
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    Rectangle {
+                        x: 8px;
+                        y: 8px;
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 8px;
+                        background: Theme.surface-2;
+                        clip: true;
+
+                        Image {
+                            width: 100%;
+                            height: 100%;
+                            source: c.image;
+                        }
+                    }
+
+                    Text {
+                        x: 46px;
+                        y: 0px;
+                        width: parent.width - 112px;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        text: c.name;
+                        font-size: 14px;
+                        color: touch.pressed ? Theme.brand-soft : Theme.fg;
+                        overflow: elide;
+                    }
+
+                    Icon {
+                        x: parent.width - 36px;
+                        y: 12px;
+                        size: 20px;
+                        glyph: Glyph.add;
+                        variant: Variant.stroked;
+                        tint: touch.pressed ? Theme.brand-soft : Theme.brand;
+                    }
+
+                    touch := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => { GroupState.add-candidate(c.peer); }
+                    }
+                }
+            }
+        }
+
+        // ── Name / nickname ───────────────────────────────────────────────────
+        Text {
+            width: parent.width - 24px;
+            height: 18px;
+            text: @tr("Group name");
+            font-size: 12px;
+            color: Theme.fg-muted;
+            vertical-alignment: center;
+        }
+
+        gn := FieldBox {
+
+            width: parent.width - 24px;
+            height: 42px;
+            text <=> root.g-name;
+        }
+
+        Rectangle {
+            width: 132px;
+            height: 36px;
+            border-radius: 18px;
+            background: Theme.brand;
+
+            Text {
+                width: 100%;
+                height: 100%;
+                text: @tr("Save name");
+                font-size: 13px;
+                font-weight: 600;
+                color: white;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { GroupState.save-group-name(root.chat-id, root.g-name); }
+            }
+        }
+
+        Text {
+            width: parent.width - 24px;
+            height: 18px;
+            text: @tr("My nickname in this group");
+            font-size: 12px;
+            color: Theme.fg-muted;
+            vertical-alignment: center;
+        }
+
+        gn2 := FieldBox {
+            width: parent.width - 24px;
+            height: 42px;
+            text <=> root.g-nickname;
+        }
+
+        Rectangle {
+            width: 132px;
+            height: 36px;
+            border-radius: 18px;
+            background: Theme.brand;
+
+            Text {
+                width: 100%;
+                height: 100%;
+                text: @tr("Save nickname");
+                font-size: 13px;
+                font-weight: 600;
+                color: white;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { GroupState.save-my-nickname(root.chat-id, root.g-nickname); }
+            }
+        }
+
+        Rectangle {
+
+            width: parent.width - 24px;
+            height: 1px;
+            background: Theme.border;
+        }
+
+        // 4) Pin chat — title + right-side indicator, styled like the Dark mode
+        // row.
+        Rectangle {
+            width: 100%;
+            height: 48px;
+            background: transparent;
+            clip: true;
+
+            Text {
+                x: 12px;
+                y: 0px;
+                width: parent.width - 96px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: @tr("Pin chat");
+                font-size: 14px;
+                color: ta.pressed ? Theme.brand-soft : Theme.fg;
+            }
+
+            Rectangle {
+                x: parent.width - 40px;
+                y: 14px;
+                width: 28px;
+                height: 20px;
+                border-radius: 10px;
+                background: GroupState.pinned ? Theme.brand : Theme.surface-2;
+                border-width: 1px;
+                border-color: GroupState.pinned ? Theme.brand : Theme.disabled;
+
+                Rectangle {
+                    x: GroupState.pinned ? 10px : 2px;
+                    y: 2px;
+                    width: 16px;
+                    height: 16px;
+                    border-radius: 8px;
+                    background: GroupState.pinned ? Theme.fg-on-accent : Theme.disabled;
+                }
+            }
+
+            Rectangle {
+                x: 40px;
+                y: 48px;
+                width: 100%;
+                height: 1px;
+                background: Theme.border;
+            }
+
+            ta := TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { GroupState.set-pinned(root.chat-id, !GroupState.pinned); }
+            }
+        }
+    }
 }

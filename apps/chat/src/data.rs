@@ -17,6 +17,8 @@ pub struct ChatRow {
     pub peer_id: String,
     /// Peer/group avatar file path (empty when none).
     pub avatar_path: String,
+    pub is_pinned: bool,
+    pub pinned_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +40,12 @@ pub fn contact_letter(name: &str) -> char {
             return c.to_ascii_uppercase();
         }
         if let Some(p) = c.to_pinyin() {
-            return p.first_letter().chars().next().unwrap_or('#').to_ascii_uppercase();
+            return p
+                .first_letter()
+                .chars()
+                .next()
+                .unwrap_or('#')
+                .to_ascii_uppercase();
         }
     }
     '#'
@@ -130,13 +137,19 @@ impl DataBackend {
     /// Resolve a contact list key to its stored peer/user id text (the value
     /// used for directory lookups), if the contact still exists.
     pub fn peer_id_for(&self, key: i32) -> Option<&str> {
-        self.contacts.iter().find(|r| r.key == key).map(|r| r.peer_id.as_str())
+        self.contacts
+            .iter()
+            .find(|r| r.key == key)
+            .map(|r| r.peer_id.as_str())
     }
 
     /// Resolve a contact list key to its directory username (the value used
     /// for `/v1/users/` lookups), if the contact still exists.
     pub fn username_for(&self, key: i32) -> Option<&str> {
-        self.contacts.iter().find(|r| r.key == key).map(|r| r.name.as_str())
+        self.contacts
+            .iter()
+            .find(|r| r.key == key)
+            .map(|r| r.name.as_str())
     }
 
     pub fn post_id_for(&self, key: i32) -> Option<i64> {
@@ -208,17 +221,52 @@ impl DataBackend {
         self.chat_key_to_id.remove(&key);
     }
 
+    /// Change the display title of a chat row by its UI key (e.g. after a
+    /// group rename). Returns true when a matching row was updated.
+    pub fn set_chat_title(&mut self, key: i32, title: &str) -> bool {
+        if let Some(row) = self.chats.iter_mut().find(|r| r.key == key) {
+            row.title = title.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Flip the pinned flag + stamp the pin time on a chat row.
+    pub fn set_chat_pinned(&mut self, key: i32, pinned: bool) -> bool {
+        if let Some(row) = self.chats.iter_mut().find(|r| r.key == key) {
+            row.is_pinned = pinned;
+            row.pinned_at = if pinned {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            true
+        } else {
+            false
+        }
+    }
+
     /// Remove a contact from the list by its UI key.
     pub fn remove_contact(&mut self, key: i32) {
         self.contact_key_to_id.remove(&key);
         self.contacts.retain(|r| r.key != key);
     }
 
-
     /// Append a new chat row to the in-memory chat list. `avatar_path` is the
     /// local path of the counterparty's 40×40 avatar (may be empty for groups
     /// or peers without one); the chat list renders it next to the title.
-    pub fn append_chat(&mut self, chat_id: String, title: String, is_group: bool, peer_id: String, avatar_path: String) -> i32 {
+    pub fn append_chat(
+        &mut self,
+        chat_id: String,
+        title: String,
+        is_group: bool,
+        peer_id: String,
+        avatar_path: String,
+    ) -> i32 {
         let key = self.bump();
         self.chat_key_to_id.insert(key, chat_id.clone());
         let now_ms = std::time::SystemTime::now()
@@ -235,12 +283,20 @@ impl DataBackend {
             unread: 0,
             peer_id,
             avatar_path,
+            is_pinned: false,
+            pinned_at: 0,
         });
         key
     }
 
     /// Append a new friend to the in-memory contact list.
-    pub fn append_contact(&mut self, user_id: i64, peer_id: String, name: String, image: String) -> i32 {
+    pub fn append_contact(
+        &mut self,
+        user_id: i64,
+        peer_id: String,
+        name: String,
+        image: String,
+    ) -> i32 {
         let key = self.bump();
         self.contact_key_to_id.insert(key, user_id);
         self.contacts.push(ContactRow {
@@ -258,7 +314,9 @@ impl DataBackend {
 
     /// True if a contact already exists for `peer_id` or `name`.
     pub fn has_contact(&self, peer_id: &str, name: &str) -> bool {
-        self.contacts.iter().any(|c| c.peer_id == peer_id || c.name == name)
+        self.contacts
+            .iter()
+            .any(|c| c.peer_id == peer_id || c.name == name)
     }
 
     /// Record a friend request in the UI state and return its stable key.
@@ -344,7 +402,11 @@ pub async fn name_for_peer(pool: &SqlitePool, peer: &str) -> String {
 }
 
 /// Load the friend-request state (inbox + sent) for `me_peer` into `b`.
-pub async fn load_fr_requests(pool: &SqlitePool, me_peer: &str, b: &mut DataBackend) -> anyhow::Result<()> {
+pub async fn load_fr_requests(
+    pool: &SqlitePool,
+    me_peer: &str,
+    b: &mut DataBackend,
+) -> anyhow::Result<()> {
     b.friend_requests.clear();
     b.frq_key_to.clear();
 
@@ -356,7 +418,12 @@ pub async fn load_fr_requests(pool: &SqlitePool, me_peer: &str, b: &mut DataBack
 
     let sent = sqlite::social::frq_sent(pool, me_peer).await?;
     for r in sent {
-        b.add_friend_request(&r.recipient, r.note.unwrap_or_else(|| r.recipient.clone()), r.created_at, FrqDir::Sent);
+        b.add_friend_request(
+            &r.recipient,
+            r.note.unwrap_or_else(|| r.recipient.clone()),
+            r.created_at,
+            FrqDir::Sent,
+        );
     }
     Ok(())
 }
@@ -386,7 +453,9 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
         // be trusted for groups. Fall back to it for legacy rows.
         let is_group = chat_key.starts_with("grp-") || c.type_ == 1;
         let title = if is_group {
-            "Group".to_string()
+            group_display_name(pool, &chat_key)
+                .await
+                .unwrap_or_else(|| "Group".to_string())
         } else {
             c.peer_nickname
                 .clone()
@@ -413,6 +482,12 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
             unread: c.unread_count,
             peer_id: c.peer_id.unwrap_or_default(),
             avatar_path: c.avatar_path.clone().unwrap_or_default(),
+            is_pinned: c.is_pinned,
+            pinned_at: if c.is_pinned {
+                c.last_message_time.unwrap_or(0)
+            } else {
+                0
+            },
         });
     }
 
@@ -420,9 +495,7 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
     let friends = sqlite::joins::friends_with_profile(pool, me_id, 500).await?;
     for f in friends {
         let key = b.bump();
-        let name = f.username
-            .clone()
-            .unwrap_or_else(|| f.user_id.to_string());
+        let name = f.username.clone().unwrap_or_else(|| f.user_id.to_string());
         let user_id = f.user_id;
         b.contact_key_to_id.insert(key, user_id);
         let image = f.avatar_path.clone().unwrap_or_default();
@@ -442,9 +515,11 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
 
     // WeChat-style ordering: group by letter ('#' last), alphabetical inside.
     let rank = |c: char| if c == '#' { '[' } else { c }; // '[' sorts just after 'Z'
-    b.contacts.sort_by(|a, b| rank(a.letter)
-        .cmp(&rank(b.letter))
-        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    b.contacts.sort_by(|a, b| {
+        rank(a.letter)
+            .cmp(&rank(b.letter))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
 
     // ---- discovery feed ----
     let posts = sqlite::joins::feed(pool, me_id, true, 200, 0).await?;
@@ -454,15 +529,12 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
             key,
             post_id: p.id,
             title: p.content.unwrap_or_default(),
-            author: p.author_nickname
+            author: p
+                .author_nickname
                 .clone()
                 .filter(|s| !s.trim().is_empty())
                 .or_else(|| p.author_username.clone().filter(|s| !s.trim().is_empty()))
-                .or_else(|| {
-                    p.user_name
-                        .clone()
-                        .filter(|s| !s.trim().is_empty())
-                })
+                .or_else(|| p.user_name.clone().filter(|s| !s.trim().is_empty()))
                 .unwrap_or_default(),
             likes: p.like_count,
             liked: p.i_liked,
@@ -478,7 +550,10 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
 /// Card cover path: prefer the (small) preview of a post; fall back to the
 /// full-resolution original (e.g. old rows that predate `preview_urls` or
 /// posts whose previews failed to generate).
-pub fn first_preview_or_media(preview_urls: &Option<String>, media_urls: &Option<String>) -> String {
+pub fn first_preview_or_media(
+    preview_urls: &Option<String>,
+    media_urls: &Option<String>,
+) -> String {
     let p = first_media(preview_urls);
     if !p.is_empty() {
         return p;
@@ -490,7 +565,11 @@ pub fn first_preview_or_media(preview_urls: &Option<String>, media_urls: &Option
 /// bare path), for the discover card cover. Empty string when the post has
 /// no media.
 pub fn first_media(media_urls: &Option<String>) -> String {
-    let Some(s) = media_urls.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+    let Some(s) = media_urls
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    else {
         return String::new();
     };
     if let Ok(v) = serde_json::from_str::<Vec<String>>(s) {
@@ -505,7 +584,12 @@ pub fn first_media(media_urls: &Option<String>) -> String {
     String::new()
 }
 
-pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, chat_id: &str) -> anyhow::Result<bool> {
+pub async fn refresh_chat_row(
+    pool: &SqlitePool,
+    me: &str,
+    b: &mut DataBackend,
+    chat_id: &str,
+) -> anyhow::Result<bool> {
     // Use full chat_list to find the matching entry (cheap for a local sqlite on a single user).
     let items = sqlite::joins::chat_list(pool, me, 200).await?;
     let Some(src) = items.iter().find(|c| c.name.as_deref() == Some(chat_id)) else {
@@ -540,6 +624,8 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
             unread: 0,
             peer_id: String::new(),
             avatar_path: String::new(),
+            is_pinned: false,
+            pinned_at: 0,
         });
         return Ok(true);
     };
@@ -550,7 +636,9 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
         // first message landed) but no in-memory row yet: materialize it now.
         let is_group = chat_id.starts_with("grp-") || src.type_ == 1;
         let title = if is_group {
-            "Group".to_string()
+            group_display_name(pool, &chat_id)
+                .await
+                .unwrap_or_else(|| "Group".to_string())
         } else {
             src.peer_nickname
                 .clone()
@@ -575,6 +663,12 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
             unread: src.unread_count,
             peer_id: src.peer_id.clone().unwrap_or_default(),
             avatar_path: src.avatar_path.clone().unwrap_or_default(),
+            is_pinned: src.is_pinned,
+            pinned_at: if src.is_pinned {
+                src.last_message_time.unwrap_or(0)
+            } else {
+                0
+            },
         });
         return Ok(true);
     }
@@ -585,13 +679,20 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
     // `conversations.type` — `insert_row` always writes type=0 via
     // `ensure_dm`, so a group's type column is unreliable.
     let is_group = chat_id.starts_with("grp-");
-    // Title: same fallback chain as initial build (load_backend) — peer
-    // display niceness should survive in-place refreshes.
+    // Title: for groups use `groups.name` (authoritative, kept on create /
+    // rename) else fall back to the existing row title so a rename survives an
+    // in-place refresh; for DMs use the peer display-name chain.
     let title = if is_group {
-        // Group messages are stored as ciphertext; a generic label is what the
-        // receiving side has (the creator's `append_chat` already set a real
-        // title for their own copy).
-        "Group".to_string()
+        group_display_name(pool, &chat_id)
+            .await
+            .or_else(|| {
+                if !row.title.is_empty() && row.title != "Group" {
+                    Some(row.title.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "Group".to_string())
     } else {
         src.peer_nickname
             .clone()
@@ -601,6 +702,9 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
             .unwrap_or_else(|| src.id.to_string())
     };
     let peer_id = src.peer_id.clone().unwrap_or_default();
+    // Preserve the local pin state — pinning is a per-user preference that the
+    // refresh source (network/DB mirror) does not authoritatively carry, so we
+    // keep whatever value the row already had instead of clobbering it.
     let new = ChatRow {
         key: row.key,
         chat_id: src_chat_key.clone(),
@@ -617,6 +721,8 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
         unread: src.unread_count,
         peer_id: peer_id.clone(),
         avatar_path: src.avatar_path.clone().unwrap_or_default(),
+        is_pinned: row.is_pinned,
+        pinned_at: row.pinned_at,
     };
     let changed = new.title != row.title
         || new.preview != row.preview
@@ -629,7 +735,12 @@ pub async fn refresh_chat_row(pool: &SqlitePool, me: &str, b: &mut DataBackend, 
 }
 
 /// Persist a discovery like/unlike toggle to SQLite (fire and forget).
-pub async fn persist_like_toggle(pool: &SqlitePool, me: &str, post_id: i64, want_liked: bool) -> anyhow::Result<()> {
+pub async fn persist_like_toggle(
+    pool: &SqlitePool,
+    me: &str,
+    post_id: i64,
+    want_liked: bool,
+) -> anyhow::Result<()> {
     let me_id = sqlite::users::get_by_username(pool, me)
         .await?
         .ok_or_else(|| anyhow::anyhow!("no user row for {me}; run login to create one"))?
@@ -648,7 +759,12 @@ pub async fn persist_like_toggle(pool: &SqlitePool, me: &str, post_id: i64, want
 
 /// Persist a discovery recommend/unrecommend toggle to SQLite (fire and forget).
 /// Mirrors `persist_like_toggle` for the separate `social_recommends` path.
-pub async fn persist_recommend_toggle(pool: &SqlitePool, me: &str, post_id: i64, want_recommended: bool) -> anyhow::Result<()> {
+pub async fn persist_recommend_toggle(
+    pool: &SqlitePool,
+    me: &str,
+    post_id: i64,
+    want_recommended: bool,
+) -> anyhow::Result<()> {
     let me_id = sqlite::users::get_by_username(pool, me)
         .await?
         .ok_or_else(|| anyhow::anyhow!("no user row for {me}; run login to create one"))?
@@ -663,6 +779,83 @@ pub async fn persist_recommend_toggle(pool: &SqlitePool, me: &str, post_id: i64,
         sqlite::social_feed::unrecommend(pool, post_id, me_id).await?;
     }
     Ok(())
+}
+
+/// Resolve a group's display name directly from the local `groups.name` (set
+/// on create / rename) using the numeric `grp-<num>` id. `None` when the group
+/// row is absent or unnamed. Independent of the `conversations` join so it
+/// works even when the `groups.id`/`conversations.id` linkage is missing.
+pub async fn group_display_name(pool: &SqlitePool, chat_id: &str) -> Option<String> {
+    let num = chat_id.strip_prefix("grp-")?.parse::<i64>().ok()?;
+    let name = sqlite::groups::get(pool, num).await.ok().flatten()?.name;
+    (!name.is_empty()).then_some(name)
+}
+
+/// Persist a group to the local `groups` / `group_members` / `conversations`
+/// tables so it has a stable integer id, a rename-able `groups.name`, and a
+/// `conversations.is_pinned` pin flag. The numeric `grp-<num>` part is used as
+/// BOTH the `groups.id` and the `conversations.id`, matching the convention
+/// the `joins::chat_list` query relies on (`LEFT JOIN groups g ON g.id = c.id`).
+/// `owner_user_id` and `peer_id` are my user id + libp2p peer id.
+pub async fn persist_group(
+    pool: &SqlitePool,
+    chat_id: &str,
+    name: &str,
+    owner_user_id: i64,
+    peer_id: &str,
+) -> Option<i64> {
+    let num = chat_id.strip_prefix("grp-")?.parse::<i64>().ok()?;
+    // `groups.create` upserts on id and adds me as the owner member.
+    if let Err(e) = sqlite::groups::create(pool, num, name, owner_user_id, None).await {
+        eprintln!("[persist_group] groups.create({num}) failed: {e}");
+    }
+    if !peer_id.is_empty() {
+        if let Err(e) =
+            sqlite::groups::add_member(pool, num, peer_id, sqlite::groups::ROLE_OWNER).await
+        {
+            eprintln!("[persist_group] groups.add_member({num}) failed: {e}");
+        }
+    }
+    // Ensure exactly ONE conversation row is keyed by the string chat id (so
+    // pin / rename / message-loading all resolve it). Reuse an existing one if
+    // present (avoids a second row sharing `name`); otherwise create one.
+    match sqlite::conversations::resolve_id(pool, chat_id).await {
+        Ok(Some(cid)) => {
+            if let Err(e) = sqlite::conversations::upsert(
+                pool,
+                cid,
+                &sqlite::conversations::ConversationPatch {
+                    type_: Some(1),
+                    name: Some(chat_id.to_string()),
+                    peer_id: None,
+                    avatar_path: None,
+                },
+            )
+            .await
+            {
+                eprintln!("[persist_group] conversations.upsert({cid}) failed: {e}");
+            }
+        }
+        Ok(None) => {
+            let id = sqlite::new_id();
+            if let Err(e) = sqlite::conversations::upsert(
+                pool,
+                id,
+                &sqlite::conversations::ConversationPatch {
+                    type_: Some(1),
+                    name: Some(chat_id.to_string()),
+                    peer_id: None,
+                    avatar_path: None,
+                },
+            )
+            .await
+            {
+                eprintln!("[persist_group] conversations.upsert failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("[persist_group] resolve_id failed: {e}"),
+    }
+    Some(num)
 }
 
 /// Resolve a group-message sender to a display name: the account's nickname,
@@ -770,7 +963,10 @@ mod tests {
         .await
         .unwrap();
         sqlite::social::add(&pool, 1, 2).await.unwrap();
-        let post = sqlite::social_feed::create_post(&pool, 2, Some("One"), Some("hello"), None, None, 0).await.unwrap();
+        let post =
+            sqlite::social_feed::create_post(&pool, 2, Some("One"), Some("hello"), None, None, 0)
+                .await
+                .unwrap();
         sqlite::social_feed::like(&pool, post.id, 1).await.unwrap();
 
         let (b, _nickname) = load(&pool, me).await.unwrap();
@@ -815,7 +1011,9 @@ mod tests {
         .await
         .unwrap();
         // Bind a device for the peer so chat_list resolves the join → title.
-        sqlite::devices::bind_device(&pool, their_id, "them-peer").await.unwrap();
+        sqlite::devices::bind_device(&pool, their_id, "them-peer")
+            .await
+            .unwrap();
 
         // The sender side already pushed a message into the shared store:
         // `insert_row` ensures the conversation exists in sqlite.
@@ -843,7 +1041,11 @@ mod tests {
         let _me_user = me_id;
         let changed = refresh_chat_row(&pool, me, &mut b, &dm).await.unwrap();
         assert!(changed, "inbound first message must produce a new chat row");
-        let row = b.chats.iter().find(|r| r.chat_id == dm).expect("chat row present");
+        let row = b
+            .chats
+            .iter()
+            .find(|r| r.chat_id == dm)
+            .expect("chat row present");
         assert!(!row.is_group);
         assert_eq!(row.peer_id, "them-peer");
         assert_eq!(row.title, "Them");

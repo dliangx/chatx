@@ -2,7 +2,11 @@ import { Button } from "std-widgets.slint";
 import { ChatInputView } from "chat_input.slint";
 import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
-import { GlobalOverlayType, AppState } from "../components/app_state.slint";
+import {
+    GlobalOverlayType,
+    AppState,
+    SubPageType,
+} from "../components/app_state.slint";
 import { Header } from "../components/header.slint";
 
 export struct MessageData {
@@ -102,9 +106,31 @@ export component ChatView inherits Rectangle {
     Header {
         name: @tr("chat");
 
+        // Group chat settings "⚙" — shown only for group chats (left of the call
+        // icon). `current-chat-key` is set by Rust on chat open; -1 means "not
+        // set / DM" so the icon is hidden for 1:1 chats.
+        if AppState.current-chat-key >= 0 && AppState.current-chat-is-group:
+
         Icon {
-            width: 32px;
-            height: 32px;
+            x: 12px;
+            y: 0px;
+            width: 48px;
+            height: 48px;
+            size: 18px;
+            glyph: Glyph.setting;
+            tint: Theme.fg;
+            TouchArea {
+                width: 48px;
+                height: 48px;
+                clicked => { AppState.push-sub(SubPageType.ChatSetting, AppState.current-chat-key); }
+            }
+        }
+
+        Icon {
+            x: 48px;
+            y: 0px;
+            width: 48px;
+            height: 48px;
             size: 18px;
             glyph: Glyph.call;
             tint: Theme.fg;
@@ -383,7 +409,6 @@ export component ChatView inherits Rectangle {
                     height: msg.height;
                 }
             }
-
         }
 
         // Long-press icon menu. Rendered as the last child of the Flickable
@@ -411,8 +436,8 @@ export component ChatView inherits Rectangle {
             out property <length> y-below: menu.msg.top + menu.msg.height + 8px;
             y: max(menu.vp-top, min(
                 (menu.y-above >= menu.vp-top)
-                    ? menu.y-above
-                    : (menu.y-below + menu.menu-h <= menu.vp-bottom ? menu.y-below : menu.y-above),
+                ? menu.y-above
+                : (menu.y-below + menu.menu-h <= menu.vp-bottom ? menu.y-below : menu.y-above),
                 menu.vp-bottom - menu.menu-h));
             width: menu.menu-w;
             height: menu.menu-h;
