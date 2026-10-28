@@ -142,8 +142,8 @@ fn effective_dark(mode: ThemeMode, system_dark: bool) -> bool {
 /// rather than an unexpectedly light one.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn detect_system_dark(window: &slint::Window) -> bool {
-    use slint::winit_030::winit::window::Theme as WTheme;
     use slint::winit_030::WinitWindowAccessor as _;
+    use slint::winit_030::winit::window::Theme as WTheme;
     window
         .with_winit_window(|winit_window| match winit_window.theme() {
             Some(WTheme::Dark) => true,
@@ -803,7 +803,8 @@ pub fn run_app() {
             // `AppState.lang` (e.g. the inline Language Dropdown in Settings)
             // reflects the change.
             if let Some(ui) = weak_lang.upgrade() {
-                ui.global::<AppState>().set_lang(slint::SharedString::from(lang.clone()));
+                ui.global::<AppState>()
+                    .set_lang(slint::SharedString::from(lang.clone()));
             }
             // Persist for the next launch (read back from the `settings` table on startup).
             let pool = POOL.lock().unwrap().clone();
@@ -818,21 +819,20 @@ pub fn run_app() {
 
     {
         let weak = weak.clone();
-        ui.global::<AppState>()
-            .on_select_theme(move |mode| {
-                if let Some(ui) = weak.upgrade() {
-                    apply_theme_mode(&ui, mode);
-                }
-                // Persist the preference for the next launch (read back from the
-                // `settings` table on startup, mirroring how `lang` is handled).
-                let pool = POOL.lock().unwrap().clone();
-                let db = theme_mode_to_db(&mode);
-                if let Some(pool) = pool {
-                    runtime().spawn(async move {
-                        let _ = sqlite::settings::set(&pool, "theme", &db).await;
-                    });
-                }
-            });
+        ui.global::<AppState>().on_select_theme(move |mode| {
+            if let Some(ui) = weak.upgrade() {
+                apply_theme_mode(&ui, mode);
+            }
+            // Persist the preference for the next launch (read back from the
+            // `settings` table on startup, mirroring how `lang` is handled).
+            let pool = POOL.lock().unwrap().clone();
+            let db = theme_mode_to_db(&mode);
+            if let Some(pool) = pool {
+                runtime().spawn(async move {
+                    let _ = sqlite::settings::set(&pool, "theme", &db).await;
+                });
+            }
+        });
     }
 
     {
@@ -960,6 +960,11 @@ pub fn run_app() {
                 let mut nav = st.get_nav_state();
                 nav.global_overlay = GlobalOverlayType::None;
                 st.set_nav_state(nav);
+                let ps = ui.global::<PostDetailState>();
+                if ps.get_key() < 0 {
+                    let empty: Vec<SlintImage> = Vec::new();
+                    ps.set_media(slint::ModelRc::new(slint::VecModel::from(empty)));
+                }
             }
         });
     }
@@ -2423,7 +2428,8 @@ fn record_stop_send(weak: slint::Weak<MainWindow>, key: i32) {
     if rec.duration_ms < MIN_VOICE_MS {
         tracing::warn!(
             "[voice] clip too short ({}ms < {}ms), discarding",
-            rec.duration_ms, MIN_VOICE_MS
+            rec.duration_ms,
+            MIN_VOICE_MS
         );
         return;
     }
@@ -2704,7 +2710,9 @@ fn set_chat_send_error(weak: slint::Weak<MainWindow>, msg: &str) {
 async fn handle_inbound_friendq(weak: slint::Weak<MainWindow>, from_peer: &str, q: FriendQ) {
     tracing::debug!(
         "[friendq] INBOUND action={:?} from={from_peer} req={} rec={}",
-        q.action, q.requester, q.recipient
+        q.action,
+        q.requester,
+        q.recipient
     );
     let pool = POOL.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
@@ -3325,7 +3333,9 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         ..m
                     }),
                     Err(e) => {
-                        tracing::warn!("[chat] failed to open group msg in {chat_id}: {e}; hiding it");
+                        tracing::warn!(
+                            "[chat] failed to open group msg in {chat_id}: {e}; hiding it"
+                        );
                         None
                     }
                 }
@@ -6200,7 +6210,9 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
         },
     ) {
         Ok(()) => {
-            tracing::debug!("[audio.call] begin_voice_call: start_call OK — showing AudioCall overlay");
+            tracing::debug!(
+                "[audio.call] begin_voice_call: start_call OK — showing AudioCall overlay"
+            );
             publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
             show_call_overlay(weak, GlobalOverlayType::AudioCall);
         }
