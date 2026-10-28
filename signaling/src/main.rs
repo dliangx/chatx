@@ -674,18 +674,31 @@ pub(crate) fn make_router(app: App) -> Router {
         .with_state(app)
 }
 
+/// Signal-server state lives under `~/.chatx-signal/` (log + sqlite),
+/// separate from the client's `~/.chatx/`.
+fn signal_home() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    let dir = home.join(".chatx-signal");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 #[tokio::main]
 async fn main() {
-    let _ = chatx_core::logging::init_default();
+    let home = signal_home();
+    let log_path = home.join("chatx-signal.log");
+
+    let _ = chatx_core::logging::init_at(&log_path);
+    eprintln!("chatx-signal log file: {}", log_path.display());
 
     let addr: SocketAddr = std::env::var("CHATX_SIGNAL_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8787".into())
         .parse()
         .expect("CHATX_SIGNAL_ADDR must be a socket address");
 
-    let db_path = std::env::var("CHATX_SIGNAL_DB")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("signal.db"));
+    let db_path = home.join("signal.db");
     let db = Arc::new(db::open(&db_path).await.expect("open sqlite db"));
     tracing::info!(path = %db_path.display(), "signaling db ready");
 

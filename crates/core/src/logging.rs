@@ -52,7 +52,16 @@ impl<'a> MakeWriter<'a> for SharedFile {
 /// Idempotent subscriber init. Returns Ok(()) on success, or if a global
 /// subscriber is already installed (in which case we leave it alone).
 pub fn init_default() -> Result<(), Box<dyn std::error::Error>> {
-    let log_path = default_log_path();
+    init_at(&default_log_path())
+}
+
+/// Same as [`init_default`], but writes to an explicit `log_path` (its parent
+/// directory is created if needed). Lets a binary — e.g. `chatx-signal` — log
+/// to its own location without touching the shared default.
+pub fn init_at(log_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let file = std::fs::File::options()
         .create(true)
         .append(true)
