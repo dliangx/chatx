@@ -2,6 +2,12 @@
 
 A cross-platform P2P chat application written in Rust. Private messaging, group chat, voice/video calls, screen sharing, and a social "moment" feed — with end-to-end encryption (X25519 + AES-GCM) and **no media server**: peers connect directly over libp2p (TCP / QUIC / mDNS / NAT traversal).
 
+## Screenshots
+
+| Desktop | Mobile |
+|---|---|
+| <img src="docs/screenshots/desktop-group-chat.png" width="320" /> | <img src="docs/screenshots/mobile-group-chat.png" width="160" /> <img src="docs/screenshots/mobile-chat-list.png" width="160" /> |
+
 ## Features
 
 - **P2P messaging** — a libp2p swarm (TCP, QUIC, mDNS, UPNP, relay) for 1:1 and group chat (up to 15 members); end-to-end encryption, so the directory server never sees message contents
