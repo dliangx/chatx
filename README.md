@@ -127,18 +127,19 @@ When the app needs a platform-specific flow (e.g. to ask the user to consent to 
 
 ### Roadmap — WASM as an X extension (planned)
 
-Slint already supports the Web platform: the UI runs on the browser via WebAssembly, drawing into a single HTML canvas through a GPU-accelerated path — see [Slint Web](https://docs.slint.dev/latest/docs/slint/guide/platforms/web/) and [Backends & Renderers](https://docs.slint.dev/latest/docs/slint/guide/backends-and-renderers/backends_and_renderers/). ChatX builds on this for a larger **"X extension" story**:
+**Detailed planning for the X mini-program runtime: [`x/README.md`](x/README.md)** — wasmer-based WASM host runtime, built-in mini-programs (pdfview / sheetview / docview / pptview / map) under `x/`, build artifacts under `x-t/`, and the mini-program management server at `x/x-m`.
 
-- **Web build of the client** — the chat UI (plus the platform-independent core) can be shipped to the browser for demos and lightweight access, with no native build step.
-- **Sandboxed plugin runtime inside the host** — the same WebAssembly target is reused to host **user extensions ("X")**: custom message renderers and bubble themes, bot/automation logic, and third-party widgets. The host keeps full platform access (camera, microphone, storage, networking) while extension code runs inside the WebAssembly sandbox, with capability-based permissions (network, file, audio) enforced by the host rather than trusted in the plugin.
-- **Why this architecture is ready for it**
-  - The custom bubble compositor is renderer-agnostic, pure-Rust code, so it compiles cleanly to WebAssembly and can hand the host an RGBA buffer to blit into the UI.
+Mini-programs (document viewers, map & location, later games) run in a WebAssembly sandbox **inside the native client** — loaded on demand, torn down on close. The host keeps full platform access (camera, microphone, storage, networking) and enforces capability-based permissions (network, files, geolocation, export) on each plugin:
+
+- **Sandboxed runtime** — wasmer (Cranelift) on desktop/Android, WAMR interpreter on iOS; both behind one trait with one import ABI, so a plugin is a single `app.wasm` artifact for all platforms.
+- **Why the codebase is ready for it**
+  - The custom bubble compositor is renderer-agnostic, pure-Rust code — it compiles cleanly to WebAssembly and hands the host an RGBA buffer to blit into the UI.
   - The Rust↔shell boundary is already a plain-C surface with raw buffers and integer codes — the same shape as a WebAssembly import, so a WASM guest can slot in with no redesign.
-  - The messaging/crypto/store core is platform-agnostic Rust; gating the few OS-specific pieces behind capability flags is the only change needed to produce a WASM build.
+  - The messaging/crypto/store core is platform-agnostic Rust; gating the few OS-specific pieces behind capability flags is the only change needed.
 - **Open items to land**
-  - an extension manifest and loader in the client
-  - capability/permission scoping on the core and the native bridge (an allowlist of what a guest may call)
-  - a build flag that enables the plugin runtime only for WebAssembly targets
+  - extension manifest + loader (AppRegistry) in the client
+  - capability/permission scoping on the core and the native bridge (an allowlist of what a plugin may call)
+  - signed plugin distribution via `x/x-m`
 
 ## Quick start
 
