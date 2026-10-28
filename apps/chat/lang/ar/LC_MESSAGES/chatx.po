@@ -183,6 +183,9 @@ msgstr "لم يتم اختيار أعضاء بعد"
 msgid "No notes yet"
 msgstr "لا توجد ملاحظات بعد"
 
+msgid "No results"
+msgstr "لا توجد نتائج"
+
 msgid "Note"
 msgstr "ملاحظة"
 

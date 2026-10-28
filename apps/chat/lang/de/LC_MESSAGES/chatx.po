@@ -183,6 +183,9 @@ msgstr "Noch keine Mitglieder ausgewählt"
 msgid "No notes yet"
 msgstr "Noch keine Notizen"
 
+msgid "No results"
+msgstr "Keine Ergebnisse"
+
 msgid "Note"
 msgstr "Notiz"
 

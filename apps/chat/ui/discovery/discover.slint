@@ -15,6 +15,7 @@ export component DiscoverView inherits Rectangle {
 
     out property <length> gap: 8px;
     out property <int> n-cols:  2;
+    out property <bool> searching: AppState.search-q != "";
     out property <length> col-w: (root.width - (root.n-cols + 1) * root.gap) / root.n-cols;
     out property <length> card-h: root.col-w * 4 / 3 + 90px;
     out property <int> n-rows: (root.cards.length > 0)
@@ -28,10 +29,19 @@ export component DiscoverView inherits Rectangle {
         y: 0px;
     }
 
-    if root.cards.length == 0:
+    if root.cards.length == 0 && !root.searching:
     Text {
         y: 180px;
         text: @tr("Nothing here yet");
+        horizontal-alignment: center;
+        font-size: 14px;
+        color: Theme.fg-muted;
+    }
+
+    if root.searching && root.cards.length == 0:
+    Text {
+        y: 180px;
+        text: @tr("No results");
         horizontal-alignment: center;
         font-size: 14px;
         color: Theme.fg-muted;

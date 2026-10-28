@@ -183,6 +183,9 @@ msgstr "Участники ещё не выбраны"
 msgid "No notes yet"
 msgstr "Заметок пока нет"
 
+msgid "No results"
+msgstr "Ничего не найдено"
+
 msgid "Note"
 msgstr "Заметка"
 

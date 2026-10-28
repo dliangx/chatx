@@ -183,6 +183,9 @@ msgstr "尚未选择成员"
 msgid "No notes yet"
 msgstr "暂无笔记"
 
+msgid "No results"
+msgstr "未找到结果"
+
 msgid "Note"
 msgstr "笔记"
 

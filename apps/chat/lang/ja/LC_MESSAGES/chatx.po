@@ -183,6 +183,9 @@ msgstr "メンバーが選択されていません"
 msgid "No notes yet"
 msgstr "ノートがありません"
 
+msgid "No results"
+msgstr "結果はありません"
+
 msgid "Note"
 msgstr "ノートを追加"
 

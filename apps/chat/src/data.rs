@@ -547,6 +547,39 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
     Ok((b, my_nickname))
 }
 
+/// Trim `text` to a short, human-readable snippet centred on the first
+/// (ASCII-case-insensitive) occurrence of `needle`, within `radius` chars of
+/// it, with `…` marks at elided ends. When `needle` is empty or absent the
+/// head of the string is returned, so the result is always a bounded
+/// preview.
+pub fn snippet_around(text: &str, needle: &str, radius: usize) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let needle_l: Vec<char> = needle.chars().map(|c| c.to_ascii_lowercase()).collect();
+    let pos = if needle_l.is_empty() {
+        0
+    } else {
+        lower
+            .windows(needle_l.len())
+            .position(|w| w == needle_l.as_slice())
+            .unwrap_or(0)
+    };
+    let start = pos.saturating_sub(radius);
+    let end = (pos + needle_l.len()).saturating_add(radius).min(chars.len());
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.push_str(&chars[start..end].iter().collect::<String>());
+    if end < chars.len() {
+        out.push('…');
+    }
+    out
+}
+
 /// Card cover path: prefer the (small) preview of a post; fall back to the
 /// full-resolution original (e.g. old rows that predate `preview_urls` or
 /// posts whose previews failed to generate).
@@ -910,6 +943,22 @@ mod tests {
         // Reusing the same note id returns the same key.
         assert_eq!(b.key_for_note(id_a), k1);
         assert_eq!(b.note_id_for(999), None);
+    }
+
+    #[test]
+    fn snippet_around_centres_on_match() {
+        assert_eq!(snippet_around("abcdefghij", "ef", 1), "…defg…");
+        assert_eq!(snippet_around("abcdef", "zz", 2), "abcd…"); // absent -> head
+        assert_eq!(snippet_around("ab", "ab", 9), "ab"); // shorter than radius
+    }
+
+    #[test]
+    fn snippet_around_is_case_and_script_safe() {
+        // Case-insensitive on ASCII…
+        assert!(snippet_around("Hello World", "world", 2).contains("World"));
+        // …and exact on multichar scripts (char-count based, no UTF-8 splits).
+        assert_eq!(snippet_around("苹果香蕉芒果", "香蕉", 1), "…果香蕉芒…");
+        assert_eq!(snippet_around("", "x", 3), "");
     }
 
     #[test]

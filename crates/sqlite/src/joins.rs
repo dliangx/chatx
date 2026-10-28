@@ -397,6 +397,51 @@ pub async fn search(pool: &Pool, q: &str, limit: u32) -> anyhow::Result<Vec<Sear
     Ok(out)
 }
 
+/// One 1:1 message hit from [`search_messages`].
+#[derive(Debug, Clone)]
+pub struct MessageSearchHit {
+    /// The string chat id (the `conversations.name` the app keys chats by).
+    pub chat_id: String,
+    /// The matched plaintext body.
+    pub text: String,
+    /// Send time in ms.
+    pub ts: i64,
+}
+
+/// Search 1:1 (DM) message bodies for `q`.
+///
+/// Only rows stored in plaintext match: group messages are E2E — their body is
+/// a sealed envelope (`is_encrypted = 1`), and `LIKE` on that ciphertext is
+/// meaningless, so those rows are excluded rather than surfacing base64 junk.
+pub async fn search_messages(pool: &Pool, q: &str, limit: u32) -> anyhow::Result<Vec<MessageSearchHit>> {
+    let q = q.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let like = format!("%{}%", q);
+    let rows: Vec<(String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT c.name, m.text_content, COALESCE(m.timestamp, 0)
+           FROM messages m
+           JOIN conversations c ON c.id = m.conversation_id
+          WHERE m.msg_type = 0
+            AND m.is_encrypted = 0
+            AND m.text_content LIKE ?1
+          ORDER BY m.timestamp DESC
+          LIMIT ?2",
+    )
+    .bind(&like)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(chat_id, text, ts)| {
+            let text = text?;
+            (!text.trim().is_empty()).then_some(MessageSearchHit { chat_id, text, ts })
+        })
+        .collect())
+}
+
 /// Convenience: everything a UI needs to render "who is online in this group".
 pub async fn group_online_snapshot(pool: &Pool, group_id: i64) -> anyhow::Result<Vec<GroupRosterEntry>> {
     group_roster(pool, group_id).await
@@ -545,5 +590,88 @@ mod tests {
         assert!(hits.iter().any(|h| h.kind == "group" && h.text == "Squadron"));
 
         assert!(search(&pool, "", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn message_search_matches_plaintext_dms_and_skips_sealed_rows() {
+        let pool = open_memory().await.unwrap();
+        users::upsert(&pool, 1, &UserPatch { username: Some("me".into()), ..Default::default() }).await.unwrap();
+
+        // DM: the shim keys the conversation by the string chat id, stores the
+        // body in plaintext (sealed = false) → searchable.
+        let dm = "c-dm-1";
+        messages::insert_row(
+            &pool,
+            &crate::MsgRow {
+                id: 0,
+                chat_id: dm.into(),
+                sender: "peer-a".into(),
+                text: "the meeting code is 1234".into(),
+                sealed: false,
+                t: 1000,
+                mine: false,
+                media_kind: crate::MediaKind::None,
+                media_path: None,
+                media_duration_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // A media row for the same chat carries a non-text payload → must not
+        // match text search even if the body column held something.
+        let _ = messages::insert_row(
+            &pool,
+            &crate::MsgRow {
+                id: 0,
+                chat_id: dm.into(),
+                sender: "peer-a".into(),
+                text: "should be ignored by text search".into(),
+                sealed: false,
+                t: 2000,
+                mine: false,
+                media_kind: crate::MediaKind::Image,
+                media_path: Some("/tmp/pic.jpg".into()),
+                media_duration_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Group: the body is a sealed E2E envelope (sealed = true) → must not
+        // surface, and the group's string id must not resurface either.
+        let grp = "grp-7";
+        let _ = messages::insert_row(
+            &pool,
+            &crate::MsgRow {
+                id: 0,
+                chat_id: grp.into(),
+                sender: "peer-b".into(),
+                text: "v2 sealed envelope 1234".into(),
+                sealed: true,
+                t: 3000,
+                mine: false,
+                media_kind: crate::MediaKind::None,
+                media_path: None,
+                media_duration_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let hits = search_messages(&pool, "code", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chat_id, dm);
+        assert!(hits[0].text.contains("1234"));
+
+        // A term only present in the sealed group envelope matches nothing.
+        let hits = search_messages(&pool, "envelope", 10).await.unwrap();
+        assert!(hits.is_empty());
+
+        // Media rows never match.
+        let hits = search_messages(&pool, "ignored by text", 10).await.unwrap();
+        assert!(hits.is_empty());
+
+        assert!(search_messages(&pool, "", 10).await.unwrap().is_empty());
     }
 }

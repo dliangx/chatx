@@ -123,6 +123,7 @@ export struct MyDevice {
     self_device: bool,
 }
 
+
 export struct GroupMemberRow {
     name: string,
     image: image,
@@ -153,6 +154,12 @@ export global AppState {
     in-out property <bool> auth-uid-locked: false;
     in-out property <bool> is-mobile: true;
     in-out property <bool> search-active: false;
+    /// Current text in the active tab's search bar (all three boxes bind to
+    /// this single shared box; the handler dispatches by active tab).
+    in-out property <string> search-q: "";
+    /// Fired from the shared SearchBar on every keystroke (incl. clears);
+    /// an empty string restores each tab's full list.
+    callback local-search(string);
     in-out property <string> user-id: "";
     in-out property <string> nickname: "";
     in-out property <string> peer-id: "";

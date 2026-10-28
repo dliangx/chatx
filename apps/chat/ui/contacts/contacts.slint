@@ -154,6 +154,7 @@ export component ContactListView inherits Rectangle {
     out property <bool> forwarding: AppState.forward-target != "";
     out property <length> fwd-block-h: root.forwarding ? root.fwd-h : 0px;
     out property <length> bottom: AppState.is-mobile ? 58px : 0px;
+    out property <bool> searching: AppState.search-q != "";
 
     // Forward banner: shown only when a chat bubble's "forward" action armed it.
     if root.forwarding:
@@ -210,7 +211,7 @@ export component ContactListView inherits Rectangle {
         y: 0px;
     }
 
-    if root.requests.length > 0:
+    if root.requests.length > 0 && !root.searching:
     Text {
         x: 12px;
         y: root.list-top - 2px;
@@ -226,12 +227,13 @@ export component ContactListView inherits Rectangle {
         x: 0px;
         y: root.list-top + 18px + root.req-h * i;
         width: parent.width;
+        visible: !root.searching;
         key: fq.key;
         name: fq.name;
         time-label: fq.time-label;
     }
 
-    if root.requests.length == 0 && root.rows.length == 0:
+    if root.requests.length == 0 && root.rows.length == 0 && !root.searching:
     Text {
         y: 180px;
         width: parent.width;
@@ -240,6 +242,16 @@ export component ContactListView inherits Rectangle {
         font-size: 14px;
         horizontal-alignment: center;
         wrap: word-wrap;
+    }
+
+    if root.searching && root.rows.length == 0:
+    Text {
+        y: 180px;
+        width: parent.width;
+        text: @tr("No results");
+        color: Theme.fg-muted;
+        font-size: 14px;
+        horizontal-alignment: center;
     }
 
     fk := Flickable {
@@ -278,6 +290,7 @@ export component ContactListView inherits Rectangle {
         y: root.list-top + 18px + root.req-block-h + 6px + j * ((parent.height - root.list-top - 18px - root.req-block-h - root.bottom - 12px) / root.letters.length);
         width: root.bar-w;
         height: (parent.height - root.list-top - 18px - root.req-block-h - root.bottom - 12px) / root.letters.length;
+        visible: !root.searching;
         background: transparent;
 
         out property <bool> active:

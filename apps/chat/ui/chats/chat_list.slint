@@ -17,11 +17,34 @@ export component ChatListView inherits Rectangle {
     out property <length> row-h: 56px;
     out property <length> viewport-h: root.rows.length * root.row-h;
 
+    out property <bool> searching: AppState.search-q != "";
+
     SearchBar {
         y: 0px;
     }
 
-    if root.status != "":
+    if root.rows.length == 0 && !root.searching:
+    Text {
+        y: 180px;
+        width: parent.width;
+        text: @tr("No conversations yet. Messages will appear here.");
+        color: Theme.fg-muted;
+        font-size: 14px;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+
+    if root.searching && root.rows.length == 0:
+    Text {
+        y: 180px;
+        width: parent.width;
+        text: @tr("No results");
+        color: Theme.fg-muted;
+        font-size: 14px;
+        horizontal-alignment: center;
+    }
+
+    if root.status != "" && !root.searching:
     Text {
         y: 48px;
         width: parent.width;
@@ -33,22 +56,15 @@ export component ChatListView inherits Rectangle {
         vertical-alignment: center;
     }
 
-    if root.rows.length == 0:
-    Text {
-        y: 180px;
-        width: parent.width;
-        text: @tr("No conversations yet. Messages will appear here.");
-        color: Theme.fg-muted;
-        font-size: 14px;
-        horizontal-alignment: center;
-        wrap: word-wrap;
-    }
-
     Flickable {
         x: 0px;
-        y: root.status == "" ? 48px : 74px;
+        // The status banner is hidden while searching, so the list always
+        // starts right under the search bar in that mode.
+        y: (root.status == "" || root.searching) ? 48px : 74px;
         width: parent.width;
-        height: root.status == "" ? (parent.height - 48px - (AppState.is-mobile ? 58px : 0px)) : (parent.height - 74px - (AppState.is-mobile ? 58px : 0px));
+        height: (root.status == "" || root.searching)
+            ? (parent.height - 48px - (AppState.is-mobile ? 58px : 0px))
+            : (parent.height - 74px - (AppState.is-mobile ? 58px : 0px));
         content-height: root.viewport-h;
         interactive: true;
 

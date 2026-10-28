@@ -710,6 +710,9 @@ pub fn run_app() {
     {
         let w = weak.clone();
         ui.global::<AppState>().on_tab_changed(move |tab: i32| {
+            // Local search results are tab-specific (each box searches its own
+            // data), so a stale query/hit list must not survive a tab switch.
+            reset_local_search(&w);
             // "Discover" (tab index 2) — kick off the moment sync round.
             if tab == 2 {
                 moment::trigger_round(w.clone());
@@ -752,6 +755,7 @@ pub fn run_app() {
             st.set_device_approved(true);
             st.set_notice_text(SharedString::new());
             st.set_data_status(SharedString::new());
+            reset_local_search(&w);
             let cs = ui.global::<ChatSession>();
             cs.set_messages(slint::ModelRc::new(slint::VecModel::from(
                 Vec::<MessageData>::new(),
@@ -973,6 +977,12 @@ pub fn run_app() {
         let w = weak.clone();
         ui.global::<AppState>().on_search_users(move |q| {
             search_users(w.clone(), q.to_string());
+        });
+    }
+    {
+        let w = weak.clone();
+        ui.global::<AppState>().on_local_search(move |q| {
+            local_search(w.clone(), q.to_string());
         });
     }
     {
@@ -3012,6 +3022,10 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
     publish_discover(state, &backend);
 
     state.set_data_status(SharedString::new());
+
+    // A local search active on the visible tab must survive the full-data
+    // restore above — re-derive its filtered rows from the new snapshot.
+    refresh_active_search(state);
 }
 
 /// Bottom-lazy loading: decode and surface only the first `DISCOVER_INITIAL`
@@ -3174,6 +3188,10 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
         t0.elapsed().as_millis(),
         snapshot.chats.len()
     );
+
+    // An active chat-tab search must survive this refresh (e.g. opening a
+    // conversation from its own results re-publishes the full list).
+    refresh_active_search(state);
 }
 
 fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
@@ -5457,6 +5475,303 @@ fn build_search_avatar(path: Option<String>, bytes: Option<Vec<u8>>) -> slint::I
         return image::image_from_bytes(&b, 40);
     }
     slint::Image::default()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Local (in-app) search — the shared SearchBar of the three tabs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Re-entrance guard for [`reset_local_search`]: clearing `search-q`
+/// programmatically can synchronously re-fire the shared SearchBar's
+/// `changed => local-search("")`; the nested call must bail out instead of
+/// republishing forever.
+static SEARCH_RESET_IN_PROGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Monotonic sequence for local-search publishes: an async result is dropped
+/// when a newer search started before the DB work finished (fast typing).
+static SEARCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_search_seq() -> u64 {
+    SEARCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+/// Reset local search state: clear the shared query and republish every tab's
+/// full list from the authoritative in-memory backend (`DataBackend` — the
+/// full data always lives there, even while a search filters it on screen).
+/// Called when the user clears the box, on tab switch, and on sign-out, so
+/// stale filtered rows never survive into the next context.
+fn reset_local_search(weak: &slint::Weak<MainWindow>) {
+    if SEARCH_RESET_IN_PROGRESS
+        .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    struct ResetGuard;
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            SEARCH_RESET_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _guard = ResetGuard;
+
+    let Some(ui) = weak.upgrade() else { return };
+    let st = ui.global::<AppState>();
+    st.set_search_q(SharedString::new());
+    st.set_search_active(false);
+    if let Some(backend) = BACKEND.lock().unwrap().clone() {
+        publish_to_views(&st, backend);
+    }
+}
+
+/// Entry point for the shared `SearchBar` (bound to `AppState.local-search`,
+/// fired on every keystroke, clears included). Dispatches to the visible tab
+/// — each tab filters its own data; an empty query restores the full lists.
+fn local_search(weak: slint::Weak<MainWindow>, q: String) {
+    let q = q.trim().to_string();
+    if q.is_empty() {
+        reset_local_search(&weak);
+        return;
+    }
+    let Some(ui) = weak.upgrade() else { return };
+    let tab = ui.global::<AppState>().get_nav_state().active_tab;
+    match tab {
+        0 => search_chat(weak, q),
+        1 => search_contacts(weak, q),
+        2 => search_moments(weak, q),
+        _ => {}
+    }
+}
+
+/// Filter the in-memory conversation list by title / last preview (the
+/// 1:1 message-body matches come from SQLite — see [`search_chat`]).
+fn filter_chats_for_query(q: &str) -> Vec<data::ChatRow> {
+    let Some(backend) = BACKEND.lock().unwrap().clone() else {
+        return Vec::new();
+    };
+    let ql = q.to_lowercase();
+    let snapshot = backend.blocking_read().clone();
+    snapshot
+        .chats
+        .iter()
+        .filter(|r| {
+            r.title.to_lowercase().contains(&ql)
+                || r.preview.to_lowercase().contains(&ql)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Filter the in-memory contact list by name.
+fn filter_contacts_for_query(q: &str) -> Vec<data::ContactRow> {
+    let Some(backend) = BACKEND.lock().unwrap().clone() else {
+        return Vec::new();
+    };
+    let ql = q.to_lowercase();
+    let snapshot = backend.blocking_read().clone();
+    snapshot
+        .contacts
+        .iter()
+        .filter(|r| r.name.to_lowercase().contains(&ql))
+        .cloned()
+        .collect()
+}
+
+/// Filter the in-memory moment feed by post content and author.
+fn filter_discover_for_query(q: &str) -> Vec<data::DiscoverRow> {
+    let Some(backend) = BACKEND.lock().unwrap().clone() else {
+        return Vec::new();
+    };
+    let ql = q.to_lowercase();
+    let snapshot = backend.blocking_read().clone();
+    snapshot
+        .discover
+        .iter()
+        .filter(|r| {
+            r.title.to_lowercase().contains(&ql)
+                || r.author.to_lowercase().contains(&ql)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Publish `rows` (already filtered by the query) into the chat tab's list
+/// model, in the usual tab order (pinned first, latest activity second).
+fn publish_chat_searched(state: &AppState, rows: &[data::ChatRow]) {
+    let mut sorted: Vec<&data::ChatRow> = rows.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.is_pinned
+            .cmp(&a.is_pinned)
+            .then_with(|| {
+                if b.is_pinned && a.is_pinned {
+                    b.pinned_at
+                        .cmp(&a.pinned_at)
+                        .then(a.time_ms.cmp(&b.time_ms))
+                } else {
+                    b.time_ms.cmp(&a.time_ms)
+                }
+            })
+            .then(b.key.cmp(&a.key))
+    });
+    let out: Vec<ConversationRow> = sorted
+        .into_iter()
+        .map(|r| ConversationRow {
+            chat_id: r.key,
+            title: SharedString::from(r.title.clone()),
+            preview: SharedString::from(r.preview.clone()),
+            is_group: r.is_group,
+            time_label: SharedString::from(fmt_time(r.time_ms)),
+            image: load_avatar_path_capped(&r.avatar_path, 40),
+            is_pinned: r.is_pinned,
+        })
+        .collect();
+    state.set_chats(slint::ModelRc::new(slint::VecModel::from(out)));
+}
+
+/// Publish `rows` (already filtered) into the contacts tab's model; the A–Z
+/// quick index is hidden while searching (see `contacts.slint`) and restored
+/// with the full list on clear.
+fn publish_contacts_searched(state: &AppState, rows: &[data::ContactRow]) {
+    let out: Vec<ContactRow> = rows
+        .iter()
+        .map(|r| ContactRow {
+            id: r.key,
+            image: load_avatar_path_capped(&r.image, 40),
+            peer_id: SharedString::from(r.peer_id.clone()),
+            name: SharedString::from(r.name.clone()),
+        })
+        .collect();
+    state.set_contacts(slint::ModelRc::new(slint::VecModel::from(out)));
+    let letters: Vec<LetterEntry> = Vec::new();
+    state.set_contact_letters(slint::ModelRc::new(slint::VecModel::from(letters)));
+}
+
+/// Publish `rows` (already filtered) into the moments tab's model.
+/// `discover-has-more` is disabled while searching so the lazy-load timer can
+/// never clobber the filtered set; it is restored with the full feed when
+/// the search clears.
+fn publish_discover_searched(state: &AppState, rows: &[data::DiscoverRow]) {
+    let out: Vec<DiscoverCard> = rows
+        .iter()
+        .map(|r| DiscoverCard {
+            id: r.key,
+            title: SharedString::from(r.title.clone()),
+            user: SharedString::from(r.author.clone()),
+            likes: r.likes as i32,
+            liked: r.liked,
+            recommends: r.recommends as i32,
+            recommended: r.recommended,
+            image: load_image_cached(&r.cover),
+        })
+        .collect();
+    state.set_discover(slint::ModelRc::new(slint::VecModel::from(out)));
+    state.set_discover_has_more(false);
+}
+
+/// Re-apply the active local-search filter to the visible tab after any
+/// full-data refresh: every background path (inbound chat, the moment sync
+/// timer, like toggles) funnels through [`publish_to_views`], which would
+/// otherwise silently swap the search results back to the full list.
+/// (The async 1:1 message-body merge is not part of the refresh — the next
+/// keystroke re-runs the full chat search.)
+fn refresh_active_search(state: &AppState) {
+    let q = state.get_search_q().trim().to_string();
+    if q.is_empty() {
+        return;
+    }
+    match state.get_nav_state().active_tab {
+        0 => publish_chat_searched(state, &filter_chats_for_query(&q)),
+        1 => publish_contacts_searched(state, &filter_contacts_for_query(&q)),
+        2 => publish_discover_searched(state, &filter_discover_for_query(&q)),
+        _ => {}
+    }
+}
+
+/// Tab 0 (chat): filter the conversation list in memory (title / last
+/// preview) and publish it into `AppState.chats` (replacing what the tab's
+/// list model points at), then merge the 1:1 message bodies found in SQLite
+/// (plaintext at rest) into the list with a match-centred snippet as preview.
+/// Group bodies are E2E-sealed and therefore unsearchable — the chat row
+/// (group name) is how a group is found.
+fn search_chat(weak: slint::Weak<MainWindow>, q: String) {
+    let matched = filter_chats_for_query(&q);
+
+    // Instant feedback for the in-memory matches; when the DB message-body
+    // search lands, its rows are merged in (deduped by key) and republished.
+    if let Some(ui) = weak.upgrade() {
+        publish_chat_searched(&ui.global::<AppState>(), &matched);
+    }
+
+    let pool = POOL.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
+    let me = current_me();
+    if pool.is_none() || backend.is_none() || me.is_empty() {
+        return;
+    }
+    let rt = runtime();
+    let seq = next_search_seq();
+    rt.spawn(async move {
+        let mut merged = matched;
+        if let Ok(hits) = sqlite::joins::search_messages(pool.as_ref().unwrap(), &q, 20).await {
+            for h in hits {
+                let row = {
+                    let mut g = backend.as_ref().unwrap().write().await;
+                    // Materialise the row when the conversation is not in the
+                    // in-memory list yet (an older DM that was never opened
+                    // only exists in SQLite), so the hit stays clickable back
+                    // to its conversation.
+                    let _ =
+                        data::refresh_chat_row(pool.as_ref().unwrap(), &me, &mut g, &h.chat_id).await;
+                    g.chats
+                        .iter()
+                        .find(|r| r.chat_id == h.chat_id)
+                        .cloned()
+                };
+                let Some(row) = row else { continue };
+                let snippet = data::snippet_around(&h.text, &q, 24);
+                // Dedup by key: a row already on screen just gets the richer
+                // snippet preview; otherwise append it.
+                if let Some(existing) = merged.iter_mut().find(|r| r.key == row.key) {
+                    existing.preview = snippet;
+                } else {
+                    merged.push(data::ChatRow {
+                        preview: snippet,
+                        ..row
+                    });
+                }
+            }
+        }
+        // Discard if a newer search started while this was in flight.
+        if SEARCH_SEQ
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != seq
+        {
+            return;
+        }
+        if let Some(ui) = weak.upgrade() {
+            publish_chat_searched(&ui.global::<AppState>(), &merged);
+        }
+    });
+}
+
+/// Tab 1 (users): filter the in-memory contact list by name and publish it
+/// into `AppState.contacts` — instant, no DB. Rows and the A–Z quick index
+/// are both restored on clear via `publish_to_views`.
+fn search_contacts(weak: slint::Weak<MainWindow>, q: String) {
+    let rows = filter_contacts_for_query(&q);
+    if let Some(ui) = weak.upgrade() {
+        publish_contacts_searched(&ui.global::<AppState>(), &rows);
+    }
+}
+
+/// Tab 2 (moments): filter the in-memory feed by post content and author and
+/// publish it into `AppState.discover` — instant, no DB.
+fn search_moments(weak: slint::Weak<MainWindow>, q: String) {
+    let rows = filter_discover_for_query(&q);
+    if let Some(ui) = weak.upgrade() {
+        publish_discover_searched(&ui.global::<AppState>(), &rows);
+    }
 }
 
 fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
