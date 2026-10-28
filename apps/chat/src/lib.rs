@@ -75,12 +75,14 @@ fn current_me() -> String {
     CURRENT_ME.read().unwrap().clone()
 }
 
-/// Read the persisted light/dark theme (stored in the `settings` table) before
-/// login. `apply_result` — where login side-effects kick in — runs after the
-/// auth screen is already visible, so this restores the saved scheme early
-/// enough for the auth screen to render in it. The DB lives at
+/// Read the persisted appearance preference (stored in the `settings` table)
+/// before login. `apply_result` — where login side-effects kick in — runs
+/// after the auth screen is already visible, so this restores the saved
+/// scheme early enough for the auth screen to render in it. The DB lives at
 /// `~/.config/chatx/<profile>/messages.db`. `None` means "no DB / no value".
-async fn load_persisted_theme() -> Option<bool> {
+/// The stored value is a mode: "light", "dark" or "system" (older builds
+/// stored only "light"/"dark"; both are still recognised).
+async fn load_persisted_theme() -> Option<ThemeMode> {
     let base = chatx_core::identity::DeviceIdentity::home_dir();
     let profile = profile().trim().to_lowercase();
     let dir = if profile.is_empty() {
@@ -101,7 +103,108 @@ async fn load_persisted_theme() -> Option<bool> {
         return None;
     };
     let v = sqlite::settings::get(&pool, "theme").await.ok().flatten()?;
-    Some(v == "dark")
+    theme_mode_from_db(&v)
+}
+
+/// `ThemeMode` ↔ DB string, using the lowercase variant names. The `ThemeMode`
+/// enum is Slint-generated (a `#[derive(...)]` type, not `Display`-bearing),
+/// so the conversions live here. Unknown values return `None` so callers can
+/// fall back to a sensible default (usually `ThemeMode::System`).
+fn theme_mode_from_db(raw: &str) -> Option<ThemeMode> {
+    match raw {
+        "light" => Some(ThemeMode::Light),
+        "dark" => Some(ThemeMode::Dark),
+        "system" => Some(ThemeMode::System),
+        _ => None,
+    }
+}
+fn theme_mode_to_db(mode: &ThemeMode) -> String {
+    match mode {
+        ThemeMode::Light => "light".to_string(),
+        ThemeMode::Dark => "dark".to_string(),
+        ThemeMode::System => "system".to_string(),
+    }
+}
+
+/// Resolve the appearance mode into an effective light/dark choice.
+/// `System` folds in the live OS signal (`Theme.system-dark`).
+fn effective_dark(mode: ThemeMode, system_dark: bool) -> bool {
+    match mode {
+        ThemeMode::Light => false,
+        ThemeMode::Dark => true,
+        ThemeMode::System => system_dark,
+    }
+}
+
+/// Detect whether the host OS is currently in dark mode, by asking the
+/// underlying winit window for its live `theme()`. Falls back to `true` when
+/// it cannot be determined, so a "follow system" user gets a coherent dark UI
+/// rather than an unexpectedly light one.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn detect_system_dark(window: &slint::Window) -> bool {
+    use slint::winit_030::winit::window::Theme as WTheme;
+    use slint::winit_030::WinitWindowAccessor as _;
+    window
+        .with_winit_window(|winit_window| match winit_window.theme() {
+            Some(WTheme::Dark) => true,
+            Some(WTheme::Light) => false,
+            None => true,
+        })
+        .unwrap_or(true)
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn detect_system_dark(_window: &slint::Window) -> bool {
+    // No OS-appearance bridge installed for mobile yet; default to light UI.
+    false
+}
+
+/// Drive the whole UI (Slint `Theme` global + the Rust chat renderer + any
+/// open chat) to reflect a requested appearance mode. The live OS signal is
+/// fetched from the winit window so "System" mode tracks the host.
+fn apply_theme_mode(ui: &MainWindow, mode: ThemeMode) {
+    let system_dark = detect_system_dark(ui.window());
+    let dark = effective_dark(mode, system_dark);
+    {
+        let t = ui.global::<Theme>();
+        t.set_mode(mode);
+        t.set_system_dark(system_dark);
+        t.set_dark(dark);
+    }
+    {
+        let palette = if dark {
+            render::theme::Theme::dark()
+        } else {
+            render::theme::Theme::default()
+        };
+        if let Some(r) = RENDERER.get() {
+            r.lock().unwrap().set_theme(palette);
+        }
+    }
+    let active = ui.global::<AppState>().get_current_chat_peer_key();
+    if active >= 0 {
+        load_chat_messages(ui.as_weak(), active);
+    }
+}
+
+/// Re-run appearance resolution, only re-applying when the effective scheme
+/// actually flipped. Driven by a timer so we pick up OS light/dark changes
+/// live while mode is "System" (Slint does not expose a change callback for
+/// the OS theme; a 1s poll is cheap — detection is a single winit query and
+/// the apply path no-ops unless the value flipped).
+fn refresh_theme_on_change(weak: &slint::Weak<MainWindow>) {
+    let Some(ui) = weak.upgrade() else {
+        return;
+    };
+    let theme = ui.global::<Theme>();
+    if theme.get_mode() != ThemeMode::System {
+        return;
+    }
+    let now_dark = effective_dark(ThemeMode::System, detect_system_dark(ui.window()));
+    if theme.get_dark() == now_dark {
+        return;
+    }
+    apply_theme_mode(&ui, ThemeMode::System);
 }
 
 static CURRENT_CHAT: std::sync::LazyLock<std::sync::RwLock<Option<String>>> =
@@ -384,28 +487,41 @@ pub fn run_app() {
     // component exists (created above), so we can select the initial language now.
     let _ = slint::select_bundled_translation(&state.get_lang());
 
-    // Restore the persisted light/dark theme before the login block runs.
-    // `apply_result` (called from the login flow below) is too late — the
-    // auth screen is already visible by then. Reading is async so we spawn a
-    // task; the UI call hops onto the event-loop thread via `invoke_from_event_loop`.
+    // Restore the persisted appearance preference before the login block
+    // runs. `apply_result` (called from the login flow below) is too late —
+    // the auth screen is already visible by then. Reading is async so we
+    // spawn a task; the UI change hops onto the event-loop thread via
+    // `invoke_from_event_loop`. Defaults to "system" (match the OS) when
+    // nothing is stored yet.
     {
         let w2 = weak.clone();
         runtime().spawn(async move {
-            let Some(dark) = load_persisted_theme().await else {
-                return;
-            };
+            let mode = load_persisted_theme().await.unwrap_or(ThemeMode::System);
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w2.upgrade() {
-                    ui.global::<Theme>().set_dark(dark);
-                }
-                if let Some(r) = RENDERER.get() {
-                    r.lock().unwrap().set_theme(if dark {
-                        render::theme::Theme::dark()
-                    } else {
-                        render::theme::Theme::default()
-                    });
+                    apply_theme_mode(&ui, mode);
                 }
             });
+        });
+    }
+
+    // Keep the UI tracking the host OS light/dark while the user is in
+    // "follow system" mode. Slint does not deliver a change callback for the
+    // OS appearance, so poll: sleep off the event loop, then hop on it to run
+    // `refresh_theme_on_change` (a no-op unless the effective scheme flipped).
+    // Skipped on mobile — no OS-appearance bridge there yet.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let w2 = weak.clone();
+        runtime().spawn(async move {
+            let mut beat = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                beat.tick().await;
+                let w3 = w2.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    refresh_theme_on_change(&w3);
+                });
+            }
         });
     }
 
@@ -666,73 +782,57 @@ pub fn run_app() {
         });
     }
 
-    ui.global::<AppState>().on_select_language(move |lang| {
-        let lang = lang.to_string();
-        // Switch the bundled translation, then force every component to re-render
-        // so reactive bindings pick up the newly selected catalog.
-        if lang.is_empty() || lang == "en" {
-            let _ = slint::select_bundled_translation("");
-        } else {
-            let _ = slint::select_bundled_translation(&lang);
-        }
-        // Keep the Rust-side "X ago" labels in lock-step with the Slint catalog
-        // (the time labels baked into previously-rendered rows stay put until
-        // the user re-enters the view; new ones will pick up the new language).
-        set_time_lang(&lang);
-        slint::update_all_translations();
-        // Persist for the next launch (read back from the `settings` table on startup).
-        let pool = POOL.lock().unwrap().clone();
-        if let Some(pool) = pool {
-            let lang = lang.clone();
-            runtime().spawn(async move {
-                let _ = sqlite::settings::set(&pool, "lang", &lang).await;
-            });
-        }
-    });
-
     {
-        let weak = weak.clone();
-        ui.global::<AppState>().on_toggle_theme(move |dark| {
-            // 1) Flip the Slint theme global — every `Theme.*` in the UI is a
-            //    computed brush tied to `Theme.dark`, so the whole tree re-tints
-            //    reactively.
-            if let Some(ui) = weak.upgrade() {
-                ui.global::<Theme>().set_dark(dark);
+        let weak_lang = weak.clone();
+        ui.global::<AppState>().on_select_language(move |lang| {
+            let lang = lang.to_string();
+            // Switch the bundled translation, then force every component to
+            // re-render so reactive bindings pick up the newly selected catalog.
+            if lang.is_empty() || lang == "en" {
+                let _ = slint::select_bundled_translation("");
+            } else {
+                let _ = slint::select_bundled_translation(&lang);
             }
-
-            // 2) Update the Rust-side chat renderer so future bubble draws use
-            //    the new palette (theme_version bump also invalidates the cache).
-            {
-                let theme = if dark {
-                    render::theme::Theme::dark()
-                } else {
-                    render::theme::Theme::default()
-                };
-                if let Some(r) = RENDERER.get() {
-                    r.lock().unwrap().set_theme(theme);
-                }
+            // Keep the Rust-side "X ago" labels in lock-step with the Slint
+            // catalog (the time labels baked into previously-rendered rows stay
+            // put until the user re-enters the view; new ones will pick up the
+            // new language).
+            set_time_lang(&lang);
+            slint::update_all_translations();
+            // Publish the new language to the UI state so any view that reads
+            // `AppState.lang` (e.g. the inline Language Dropdown in Settings)
+            // reflects the change.
+            if let Some(ui) = weak_lang.upgrade() {
+                ui.global::<AppState>().set_lang(slint::SharedString::from(lang.clone()));
             }
-
-            // 3) Re-render the currently-viewed chat (if any) so the already-
-            //    baked bubble images in the list pick up the new palette without
-            //    the user having to leave and re-enter the chat.
-            if let Some(ui) = weak.upgrade() {
-                let active = ui.global::<AppState>().get_current_chat_peer_key();
-                if active >= 0 {
-                    load_chat_messages(ui.as_weak(), active);
-                }
-            }
-
-            // 4) Persist for the next launch (read back from the `settings` table
-            //    on startup, mirroring how `lang` is handled).
+            // Persist for the next launch (read back from the `settings` table on startup).
             let pool = POOL.lock().unwrap().clone();
             if let Some(pool) = pool {
+                let lang = lang.clone();
                 runtime().spawn(async move {
-                    let v = if dark { "dark" } else { "light" };
-                    let _ = sqlite::settings::set(&pool, "theme", v).await;
+                    let _ = sqlite::settings::set(&pool, "lang", &lang).await;
                 });
             }
         });
+    }
+
+    {
+        let weak = weak.clone();
+        ui.global::<AppState>()
+            .on_select_theme(move |mode| {
+                if let Some(ui) = weak.upgrade() {
+                    apply_theme_mode(&ui, mode);
+                }
+                // Persist the preference for the next launch (read back from the
+                // `settings` table on startup, mirroring how `lang` is handled).
+                let pool = POOL.lock().unwrap().clone();
+                let db = theme_mode_to_db(&mode);
+                if let Some(pool) = pool {
+                    runtime().spawn(async move {
+                        let _ = sqlite::settings::set(&pool, "theme", &db).await;
+                    });
+                }
+            });
     }
 
     {
@@ -1837,30 +1937,21 @@ fn apply_result(
                         });
                     });
                 }
-                // Restore the persisted theme (light/dark). Applied on the
+                // Restore the persisted appearance preference. Applied on the
                 // event-loop thread alongside the Slint global + Rust renderer.
                 {
                     let theme_pool = pool.clone();
                     let theme_weak = weak.clone();
                     runtime().spawn(async move {
-                        let Some(theme) = sqlite::settings::get(&theme_pool, "theme")
+                        let mode = sqlite::settings::get(&theme_pool, "theme")
                             .await
                             .ok()
                             .flatten()
-                        else {
-                            return;
-                        };
-                        let dark = theme == "dark";
+                            .and_then(|v| theme_mode_from_db(&v))
+                            .unwrap_or(ThemeMode::System);
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = theme_weak.upgrade() {
-                                ui.global::<Theme>().set_dark(dark);
-                            }
-                            if let Some(r) = RENDERER.get() {
-                                r.lock().unwrap().set_theme(if dark {
-                                    render::theme::Theme::dark()
-                                } else {
-                                    render::theme::Theme::default()
-                                });
+                                apply_theme_mode(&ui, mode);
                             }
                         });
                     });

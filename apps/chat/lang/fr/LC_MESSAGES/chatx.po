@@ -4,6 +4,18 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
+msgid "Appearance"
+msgstr "Apparence"
+
+msgid "Light"
+msgstr "Clair"
+
+msgid "Dark"
+msgstr "Sombre"
+
+msgid "Follow system"
+msgstr "Suivre le système"
+
 msgid " (this device)"
 msgstr " (cet appareil)"
 

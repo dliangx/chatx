@@ -6,6 +6,16 @@ export enum PageType {
     Me,
 }
 
+// User-chosen appearance preference. The inline wheel in Settings maps index
+// 0/1/2 to these variants in this order; the Rust handler persists them as
+// "light" / "dark" / "system" and resolves `system` against the live OS
+// signal on every UI tick.
+export enum ThemeMode {
+    Light,
+    Dark,
+    System,
+}
+
 export enum SubPageType {
     ChatRoom,
     ChatSetting,
@@ -20,7 +30,6 @@ export enum SubPageType {
     Settings,
     MyNote,
     MyDevices,
-    LanguagePicker,
     EditProfile,
 }
 
@@ -163,7 +172,7 @@ export global AppState {
     callback accept-friend-request(int);
     callback reject-friend-request(int);
     callback select-language(string);
-    callback toggle-theme(bool);
+    callback select-theme(ThemeMode);
     in property <image> qr-image;
     in property <string> qr-target-id: "";
     callback open-image-viewer();

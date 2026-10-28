@@ -1,0 +1,113 @@
+import { Theme } from "../theme.slint";
+import { Icon, Glyph } from "./icon.slint";
+
+/// A theme-aware dropdown, in the spirit of Slint's `ComboBox` but coloured
+/// with the app's `Theme.*` brushes instead of the stock `FluentPalette` so it
+/// always matches the active light/dark scheme.
+///
+/// - `model` is the list of display strings (the trigger shows `current-value`;
+///   the popup lists them in order).
+/// - `current-value` is the displayed value.
+/// - `selected(value)` fires after the user picks a different entry.
+///
+/// The popup is a Slint `PopupWindow` placed directly below the trigger, so it
+/// floats above the row even when the row itself is clipped. It is always in
+/// the tree and opened with `show()`; `close-policy` closes it on outside
+/// clicks, and picking an item closes it.
+export component Dropdown {
+    in property <[string]> model;
+    in-out property <string> current-value;
+    callback selected(value: string);
+
+    out property <bool> open <=> popup.is-open;
+
+    // Trigger (current value + chevron).
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 8px;
+        background: root.open ? Theme.surface-2 : Theme.surface;
+        border-width: 1px;
+        border-color: root.open ? Theme.brand : Theme.border;
+        clip: true;
+
+        Text {
+            x: 12px;
+            width: parent.width - 38px;
+            height: parent.height;
+            vertical-alignment: center;
+            text: root.current-value;
+            font-size: 14px;
+            color: Theme.fg;
+            overflow: elide;
+        }
+        Icon {
+            x: parent.width - 24px;
+            y: (parent.height - 14px) / 2;
+            size: 14px;
+            glyph: root.open ? Glyph.up : Glyph.under;
+            tint: Theme.fg-muted;
+        }
+        trigger-ta := TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { if (!root.open) { popup.show(); } else { popup.close(); } }
+        }
+    }
+
+    // Popup — a real `PopupWindow` so the dropdown can be taller than the row
+    // it sits in without being clipped.
+    popup := PopupWindow {
+        x: 0;
+        y: root.height;
+        width: root.width;
+        height: root.model.length * 32px + 8px;
+        close-policy: close-on-click-outside;
+
+        // PopupWindow has no styling props of its own, so the card is a child
+        // Rectangle carrying the Theme colours.
+        card := Rectangle {
+            width: parent.width;
+            height: parent.height;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.surface;
+            clip: true;
+
+            for value[i] in root.model :
+            Rectangle {
+                x: 4px;
+                width: parent.width - 8px;
+                height: 32px;
+                y: 4px + i * 32px;
+                background: value == root.current-value
+                    ? Theme.brand-soft
+                    : (ra.has-hover ? Theme.surface-2 : transparent);
+                clip: true;
+
+                Text {
+                    x: 12px;
+                    width: parent.width - 24px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    text: value;
+                    font-size: 14px;
+                    color: value == root.current-value ? Theme.brand : Theme.fg;
+                    font-weight: value == root.current-value ? 700 : 400;
+                }
+                ra := TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => {
+                        if (root.current-value != value) {
+                            root.current-value = value;
+                            root.selected(value);
+                        }
+                        popup.close();
+                    }
+                }
+            }
+        }
+    }
+}

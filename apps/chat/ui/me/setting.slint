@@ -1,8 +1,9 @@
 import { Header } from "../components/header.slint";
 import { SettingItem } from "../components/item.slint";
 import { Glyph, Icon, Variant } from "../components/icon.slint";
-import { SubPageType, AppState } from "../components/app_state.slint";
+import { SubPageType, AppState, ThemeMode } from "../components/app_state.slint";
 import { Theme } from "../theme.slint";
+import { Dropdown } from "../components/dropdown.slint";
 
 export component SettingView inherits Rectangle {
     width: 100%;
@@ -13,24 +14,15 @@ export component SettingView inherits Rectangle {
         name: @tr("setting");
     }
 
-    SettingItem {
-        y: 49px;
-        width: 100%;
-        id: 2;
-        icon: Glyph.configuration;
-        title: @tr("Language");
-        clicked => { AppState.push-sub(SubPageType.LanguagePicker, 0); }
-    }
-
-    // Dark mode row: title + right-side indicator. The whole 48px strip acts
-    // as the tap target; the indicator is a 4×20 bar that's brand-soft when
-    // active and surface-2 when off, mirroring the `SettingItem` look.
+    // Language row: title + icon on the left, a theme-aware Dropdown on the
+    // right that lists every bundled language. Selecting one updates
+    // `AppState.lang` and fires `select-language` so the Rust handler
+    // re-selects the bundled catalog.
     Rectangle {
-        y: 97px;
+        y: 49px;
         width: 100%;
         height: 48px;
         background: transparent;
-        clip: true;
 
         Icon {
             x: 8px;
@@ -38,37 +30,52 @@ export component SettingView inherits Rectangle {
             size: 24px;
             glyph: Glyph.configuration;
             variant: Variant.raw;
-            tint: ta.pressed ? Theme.brand-soft : Theme.fg;
+            tint: Theme.fg;
         }
-
         Text {
             x: 40px;
             y: 0px;
-            width: parent.width - 96px;
+            width: parent.width - 216px;
             height: parent.height;
             vertical-alignment: center;
-            text: @tr("Dark mode");
+            text: @tr("Language");
             font-size: 14px;
-            color: ta.pressed ? Theme.brand-soft : Theme.fg;
+            color: Theme.fg;
         }
 
-        Rectangle {
-            x: parent.width - 40px;
-            y: 14px;
-            width: 28px;
-            height: 20px;
-            border-radius: 10px;
-            background: Theme.dark ? Theme.brand : Theme.surface-2;
-            border-width: 1px;
-            border-color: Theme.dark ? Theme.brand : Theme.disabled;
-
-            Rectangle {
-                x: Theme.dark ? 10px : 2px;
-                y: 2px;
-                width: 16px;
-                height: 16px;
-                border-radius: 8px;
-                background: Theme.dark ? Theme.fg-on-accent : Theme.disabled;
+        Dropdown {
+            x: parent.width - 180px;
+            y: 8px;
+            width: 168px;
+            height: 32px;
+            model: ["English", "中文", "Deutsch", "français", "русский",
+                    "Español", "العربية", "日本語"];
+            current-value:
+                AppState.lang == "en" ? "English"
+                : AppState.lang == "zh_CN" ? "中文"
+                : AppState.lang == "de" ? "Deutsch"
+                : AppState.lang == "fr" ? "français"
+                : AppState.lang == "ru" ? "русский"
+                : AppState.lang == "es" ? "Español"
+                : AppState.lang == "ar" ? "العربية"
+                : AppState.lang == "ja" ? "日本語"
+                : "English";
+            selected(value) => {
+                let code = value == "English" ? "en"
+                    : value == "中文" ? "zh_CN"
+                    : value == "Deutsch" ? "de"
+                    : value == "français" ? "fr"
+                    : value == "русский" ? "ru"
+                    : value == "Español" ? "es"
+                    : value == "العربية" ? "ar"
+                    : value == "日本語" ? "ja"
+                    : "en";
+                if (AppState.lang != code) {
+                    // `select-language` owns the string it receives; pass it
+                    // in, and let the handler publish the new language into
+                    // `AppState.lang`.
+                    AppState.select-language(code);
+                }
             }
         }
 
@@ -79,11 +86,60 @@ export component SettingView inherits Rectangle {
             height: 1px;
             background: Theme.border;
         }
+    }
 
-        ta := TouchArea {
+    // Appearance row: title + icon on the left, a theme-aware Dropdown on the
+    // right that shows the current choice and drops down the three options.
+    // Selecting one fires `select-theme(ThemeMode)` which the Rust handler
+    // applies (Slint `Theme` global + bubble renderer + persistence).
+    Rectangle {
+        y: 97px;
+        width: 100%;
+        height: 48px;
+        background: transparent;
+
+        Icon {
+            x: 8px;
+            y: 12px;
+            size: 24px;
+            glyph: Glyph.configuration;
+            variant: Variant.raw;
+            tint: Theme.fg;
+        }
+        Text {
+            x: 40px;
+            y: 0px;
+            width: parent.width - 216px;
+            height: parent.height;
+            vertical-alignment: center;
+            text: @tr("Appearance");
+            font-size: 14px;
+            color: Theme.fg;
+        }
+
+        Dropdown {
+            x: parent.width - 180px;
+            y: 8px;
+            width: 168px;
+            height: 32px;
+            model: [@tr("Light"), @tr("Dark"), @tr("Follow system")];
+            current-value: Theme.mode == ThemeMode.Light ? @tr("Light")
+                : (Theme.mode == ThemeMode.Dark ? @tr("Dark") : @tr("Follow system"));
+            selected(value) => {
+                let m = value == @tr("Light") ? ThemeMode.Light
+                    : (value == @tr("Dark") ? ThemeMode.Dark : ThemeMode.System);
+                if (Theme.mode != m) {
+                    AppState.select-theme(m);
+                }
+            }
+        }
+
+        Rectangle {
+            x: 40px;
+            y: 48px;
             width: 100%;
-            height: 100%;
-            clicked => { AppState.toggle-theme(!Theme.dark); }
+            height: 1px;
+            background: Theme.border;
         }
     }
 

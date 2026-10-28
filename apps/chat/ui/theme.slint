@@ -1,6 +1,16 @@
 
+import { ThemeMode } from "./components/app_state.slint";
+
 export global Theme {
+    /// The effective colour scheme in use. This is what every `Theme.*`
+    /// brush below is computed from, so flipping it re-tints the whole tree.
+    /// Driven by `mode` + the OS signal (`system-dark`), never set directly.
     in-out property <bool> dark: false;
+    /// The user-chosen appearance preference (source of truth).
+    in-out property <ThemeMode> mode: ThemeMode.System;
+    /// Live OS appearance signal; meaningful only when `mode == system`.
+    /// Updated by the Rust-side detector on every UI tick.
+    in property <bool> system-dark: false;
 
     // Primary text. `fg` is default body text, `fg-muted` is secondary,
     // `fg-strong` is emphasized titles/labels.
