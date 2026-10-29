@@ -69,6 +69,9 @@ apps/platform/android/build/
 # Desktop packaging output from scripts/build_{osx,linux,windows}.sh|ps1
 /build/
 
+# X mini-program build artifacts (built via scripts/build_x.sh)
+/x-t/
+
 # Derived data / build products
 target/ios-derived/
 

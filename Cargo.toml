@@ -71,3 +71,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1"
 qrcode = "0.14"
 chrono = "0.4"
+wasmer = "7.2.1"

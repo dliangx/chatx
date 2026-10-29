@@ -1,0 +1,12 @@
+[package]
+name = "wasmhost"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+description = "ChatX mini-program (X) host runtime: WASM sandbox + import ABI + instance lifecycle"
+
+[dependencies]
+wasmer = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
