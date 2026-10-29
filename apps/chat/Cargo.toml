@@ -19,6 +19,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 base64 = { workspace = true }
 screen = { path = "../../crates/screen" }
 bridge = { path = "../../crates/bridge" }
+wasmhost = { path = "../../crates/wasmhost" }
 audio = { path = "../../crates/audio" }
 media = { path = "../../crates/media" }
 cpal = "0.16"

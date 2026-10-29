@@ -1,0 +1,125 @@
+import { AppState } from "components/app_state.slint";
+import { Theme } from "./theme.slint";
+import { Glyph, Icon } from "components/icon.slint";
+
+// Backing state for the mini-app (wasm plugin) overlay. The Rust side
+// (apps/chat/src/xhost.rs) fills `frame` from `PluginInstance::take_frame()`
+// on every 16 ms `pump-mini-app` tick and flips `failed`/`status` when the
+// instance dies before first paint.
+export global AppHost {
+    in property <image> frame;
+    in property <bool> running: false;
+    in property <bool> failed: false;
+    in property <string> status: "";
+    // arg0: 1 = touch-down, 3 = touch-up (appsdk EV_* codes); arg1/arg2: canvas px
+    callback touch(int, int, int);
+    // Close = destroy the plugin instance + hide the overlay.
+    callback close();
+    // Minimize = hide the overlay only; the instance keeps running and the
+    // "open sandbox app" entry brings it back (no restart).
+    callback minimize();
+}
+
+// Full-screen mini-app page: one live wasm plugin (P0: x.hello) rendered as
+// a committed-frame image, with title/status top-left and minimize/close
+// controls top-right.
+export component MiniAppOverlay inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: #101218;
+    clip: true;
+
+    // Plugin canvas: the plugin draws RGBA8 into its own linear memory and
+    // commits via `x_frame_commit`; this image shows the last committed frame.
+    Image {
+        width: 100%;
+        height: 100%;
+        source: AppHost.frame;
+        image-fit: contain;
+    }
+
+    // status, top-left (over the dark canvas).
+
+    Text {
+        x: 16px;
+        y: 36px;
+        width: parent.width - 32px;
+        height: 18px;
+        text: AppHost.failed ? AppHost.status
+            : AppHost.running ? AppHost.status
+            : @tr("starting…");
+        font-size: 11px;
+        color: AppHost.failed ? #e5484d : #8b95a3;
+    }
+
+    // Frame pump: pull the latest committed frame into the global while this
+    // overlay is alive. Stopped automatically when it is closed/minimized
+    // (component destroyed, or `running`/`failed` flip).
+    Timer {
+        interval: 16ms;
+        running: AppHost.running && !AppHost.failed;
+        triggered => {
+            AppState.pump-mini-app();
+        }
+    }
+
+    // P0: press/release go to the sandbox input queue as EV_TOUCH_* (1/3).
+    // Declared before the buttons so the buttons get the clicks above it.
+    ta := TouchArea {
+        width: 100%;
+        height: 100%;
+        changed pressed => {
+            if AppHost.running {
+                AppHost.touch(ta.pressed ? 1 : 3, ta.mouse-x / 1px, ta.mouse-y / 1px);
+            }
+        }
+    }
+
+    // Minimize (top-right, left of close): hide the overlay, keep the instance.
+    Rectangle {
+        x: parent.width - 92px;
+        y: 10px;
+        width: 34px;
+        height: 34px;
+        border-radius: 17px;
+        background: rgba(255, 255, 255, 0.12);
+
+        Icon {
+            x: 8px;
+            y: 8px;
+            size: 18px;
+            glyph: Glyph.minimize;
+            tint: #eef0f8;
+        }
+
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { AppHost.minimize(); }
+        }
+    }
+
+    // Close (top-right corner): destroy the instance + hide the overlay.
+    Rectangle {
+        x: parent.width - 48px;
+        y: 10px;
+        width: 34px;
+        height: 34px;
+        border-radius: 17px;
+        background: rgba(255, 255, 255, 0.12);
+
+        Icon {
+            x: 8px;
+            y: 8px;
+            size: 18px;
+            glyph: Glyph.close;
+            tint: #eef0f8;
+        }
+
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { AppHost.close(); }
+        }
+    }
+}

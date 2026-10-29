@@ -44,6 +44,9 @@ export enum GlobalOverlayType {
     QrCode,
     AddMenu,
     Error,
+    // X mini-app (wasm sandbox plugin) — full-screen overlay with its own
+    // close/minimize controls (see ui/x.slint).
+    MiniApp,
 }
 
 export struct SubPageEntry {
@@ -242,6 +245,13 @@ export global AppState {
     callback pick-group-member(int);
     callback unpick-group-member(int);
     callback create-group();
+
+    // ── X mini-apps (wasm sandbox, see crates/wasmhost + x/) ────────────────
+    // Open the first plugin (x.hello) on the current tab. The page shows a
+    // status line until the first frame lands; `pump-mini-app` is driven by
+    // the AppHostView timer while the page is visible.
+    callback open-mini-app();
+    callback pump-mini-app();
 
     // ── Chat settings (group chat) ─────────────────────────────────────────
     in-out property <int> current-chat-key: -1;

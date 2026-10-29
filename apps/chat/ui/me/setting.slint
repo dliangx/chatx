@@ -143,8 +143,47 @@ export component SettingView inherits Rectangle {
         }
     }
 
-    SettingItem {
+    // X mini-app sandbox entry (P0: x.hello smoke plugin). Runs the wasm
+    // instance from crates/wasmhost; the page itself lives in ui/x.slint.
+    Rectangle {
         y: 145px;
+        width: 100%;
+        height: 48px;
+        background: transparent;
+
+        Icon {
+            x: 16px;
+            y: 12px;
+            size: 24px;
+            glyph: Glyph.app;
+            tint: Theme.fg;
+        }
+        Text {
+            x: 48px;
+            y: 0px;
+            width: parent.width - 72px;
+            height: parent.height;
+            vertical-alignment: center;
+            text: @tr("Open sandbox app (x.hello)");
+            font-size: 14px;
+            color: Theme.fg;
+        }
+        Icon {
+            x: parent.width - 32px;
+            y: 12px;
+            size: 24px;
+            glyph: Glyph.right;
+            tint: Theme.fg-muted;
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { AppState.open-mini-app(); }
+        }
+    }
+
+    SettingItem {
+        y: 193px;
         width: 100%;
         id: 1;
         icon: Glyph.close-circle;

@@ -22,6 +22,8 @@ use image::{
     ChatMsg, RENDERER, RenderedMsg, ensure_renderer, load_avatar_path_capped, load_image_cached,
     make_avatar, make_preview_image, qr_image, render_msg, to_message_data,
 };
+pub mod xhost;
+
 use process::{group_conn_enter, start_group_conn_sweeper, touch_chat_activity};
 use time::{fmt_profile_date, fmt_time, set_lang as set_time_lang, time_label};
 
@@ -630,11 +632,62 @@ pub fn run_app() {
         });
     }
 
+    // ── X mini-apps (wasm sandbox; plugins under x/, host in crates/wasmhost) ──
     {
         let w = weak.clone();
-        state.on_clear(move || {
-            if let Some(ui) = w.upgrade() {
-                clear_sub_history(&ui.global::<AppState>());
+        let w2 = weak.clone();
+        state.on_open_mini_app(move || {
+            let Some(ui) = w.upgrade() else { return };
+            if ui.get_logged_in() {
+                open_mini_app_page(&ui);
+            }
+        });
+        state.on_pump_mini_app(move || {
+            let Some(ui) = w2.upgrade() else { return };
+            let Some(inst) = xhost::current() else {
+                ui.global::<AppHost>().set_running(false);
+                return;
+            };
+            let ah = ui.global::<AppHost>();
+            if inst.settled() {
+                // Last chance to pick up a frame committed right before exit.
+                if let Some(f) = inst.take_frame() {
+                    ah.set_frame(xhost::frame_image(&f));
+                }
+                if !ah.get_failed() {
+                    ah.set_failed(true);
+                    ah.set_status(xhost::error_status(&inst));
+                }
+                return;
+            }
+            if let Some(f) = inst.take_frame() {
+                ah.set_frame(xhost::frame_image(&f));
+                if ah.get_status().as_str() == "starting…" {
+                    ah.set_status(SharedString::from("x.hello · running"));
+                }
+            }
+        });
+        ui.global::<AppHost>().on_touch(move |kind, x, y| {
+            xhost::push_touch(kind, x, y);
+        });
+        let wc = weak.clone();
+        ui.global::<AppHost>().on_close(move || {
+            // Full teardown: destroy the plugin instance, then hide the overlay.
+            let had_instance = xhost::current().is_some();
+            xhost::close();
+            if had_instance {
+                tracing::info!("[x] x.hello: closed from overlay");
+            }
+            if let Some(ui) = wc.upgrade() {
+                clear_global_overlay(&ui);
+            }
+        });
+        let wm = weak.clone();
+        ui.global::<AppHost>().on_minimize(move || {
+            // Hide the overlay only — the instance keeps running; the
+            // "open sandbox app" entry re-shows it without a restart.
+            if let Some(ui) = wm.upgrade() {
+                clear_global_overlay(&ui);
             }
         });
     }
@@ -1619,6 +1672,23 @@ pub fn run_app() {
         });
     }
 
+    // P0 debug hook: CHATX_OPEN_X=hello opens the x.hello mini-app on launch
+    // (verifies in-app rendering without clicking Me → Settings → "open
+    // sandbox app"). Ignored when not logged in (auth screen blocks the UI).
+    if let Ok(app_id) = std::env::var("CHATX_OPEN_X") {
+        let w = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = w.upgrade() {
+                if !ui.get_logged_in() {
+                    tracing::info!("[x] CHATX_OPEN_X: skipping — not logged in");
+                    return;
+                }
+                open_mini_app_page(&ui);
+                tracing::info!("[x] auto-opened {app_id} (CHATX_OPEN_X)");
+            }
+        });
+    }
+
     ui.run().expect("window run failed");
 }
 
@@ -1647,6 +1717,50 @@ fn install_bridge_sinks() {
     bridge::set_camera_consumer(Box::new(move |bytes, w, h, fmt| {
         call_dispatcher::on_camera_frame(bytes, w, h, fmt);
     }));
+}
+
+/// Open the x.hello mini-app as a full-screen global overlay (P0 sandbox
+/// entry). Canvas = the chat window's logical size; the overlay renders the
+/// committed frame full-screen. Re-opening after a minimize is a no-op for
+/// the instance and just re-shows the overlay.
+fn open_mini_app_page(ui: &MainWindow) {
+    let state = ui.global::<AppState>();
+    let sf = ui.window().scale_factor().max(1.0);
+    let phys = ui.window().size();
+    let cw = ((phys.width as f32) / sf).max(240.0).round() as u32;
+    let ch = ((phys.height as f32) / sf).max(240.0).round() as u32;
+    let dpr_x10 = (sf * 10.0).round() as u32;
+    let ah = ui.global::<AppHost>();
+    let err = match xhost::open_hello(cw, ch, dpr_x10) {
+        Ok(()) => {
+            ah.set_failed(false);
+            ah.set_running(true);
+            None
+        }
+        Err(msg) => {
+            ah.set_failed(true);
+            Some(msg)
+        }
+    };
+    match err {
+        None => {
+            ah.set_frame(slint::Image::default());
+            ah.set_status(SharedString::from("starting…"));
+        }
+        Some(msg) => ah.set_status(SharedString::from(msg)),
+    }
+    let mut nav = state.get_nav_state();
+    nav.global_overlay = GlobalOverlayType::MiniApp;
+    state.set_nav_state(nav);
+}
+
+/// Hide the global overlay (set to None). Used by the mini-app close/
+/// minimize controls.
+fn clear_global_overlay(ui: &MainWindow) {
+    let st = ui.global::<AppState>();
+    let mut nav = st.get_nav_state();
+    nav.global_overlay = GlobalOverlayType::None;
+    st.set_nav_state(nav);
 }
 
 fn push_sub_history(app: &AppState, entry: SubPageEntry) {
@@ -5503,7 +5617,12 @@ fn next_search_seq() -> u64 {
 /// stale filtered rows never survive into the next context.
 fn reset_local_search(weak: &slint::Weak<MainWindow>) {
     if SEARCH_RESET_IN_PROGRESS
-        .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
         .is_err()
     {
         return;
@@ -5555,10 +5674,7 @@ fn filter_chats_for_query(q: &str) -> Vec<data::ChatRow> {
     snapshot
         .chats
         .iter()
-        .filter(|r| {
-            r.title.to_lowercase().contains(&ql)
-                || r.preview.to_lowercase().contains(&ql)
-        })
+        .filter(|r| r.title.to_lowercase().contains(&ql) || r.preview.to_lowercase().contains(&ql))
         .cloned()
         .collect()
 }
@@ -5588,10 +5704,7 @@ fn filter_discover_for_query(q: &str) -> Vec<data::DiscoverRow> {
     snapshot
         .discover
         .iter()
-        .filter(|r| {
-            r.title.to_lowercase().contains(&ql)
-                || r.author.to_lowercase().contains(&ql)
-        })
+        .filter(|r| r.title.to_lowercase().contains(&ql) || r.author.to_lowercase().contains(&ql))
         .cloned()
         .collect()
 }
@@ -5721,12 +5834,9 @@ fn search_chat(weak: slint::Weak<MainWindow>, q: String) {
                     // in-memory list yet (an older DM that was never opened
                     // only exists in SQLite), so the hit stays clickable back
                     // to its conversation.
-                    let _ =
-                        data::refresh_chat_row(pool.as_ref().unwrap(), &me, &mut g, &h.chat_id).await;
-                    g.chats
-                        .iter()
-                        .find(|r| r.chat_id == h.chat_id)
-                        .cloned()
+                    let _ = data::refresh_chat_row(pool.as_ref().unwrap(), &me, &mut g, &h.chat_id)
+                        .await;
+                    g.chats.iter().find(|r| r.chat_id == h.chat_id).cloned()
                 };
                 let Some(row) = row else { continue };
                 let snippet = data::snippet_around(&h.text, &q, 24);
@@ -5743,10 +5853,7 @@ fn search_chat(weak: slint::Weak<MainWindow>, q: String) {
             }
         }
         // Discard if a newer search started while this was in flight.
-        if SEARCH_SEQ
-            .load(std::sync::atomic::Ordering::SeqCst)
-            != seq
-        {
+        if SEARCH_SEQ.load(std::sync::atomic::Ordering::SeqCst) != seq {
             return;
         }
         if let Some(ui) = weak.upgrade() {

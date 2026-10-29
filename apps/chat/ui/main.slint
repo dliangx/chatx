@@ -5,6 +5,8 @@ import { MeView } from "me/me.slint";
 import { BottomNavBar } from "components/bottom_nav.slint";
 import { LeftNavBar } from "components/left_nav.slint";
 import { SubPageView } from "./subpage.slint";
+import { AppHost, MiniAppOverlay } from "./x.slint";
+export { AppHost } from "./x.slint";
 import { AuthView } from "components/auth.slint";
 import { Theme } from "./theme.slint";
 export { Theme } from "./theme.slint";
@@ -239,6 +241,7 @@ export component MainWindow inherits Window {
     if AppState.nav-state.global-overlay == GlobalOverlayType.QrCode: QrCodeView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu: AddMenuView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.Error: ErrorView { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.MiniApp: MiniAppOverlay { }
 
     // Pending-device banner: this device must be approved before sending.
     if root.logged-in && !AppState.device-approved && pop-state:
