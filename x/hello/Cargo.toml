@@ -1,0 +1,18 @@
+[package]
+name = "hello"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+description = "x.hello — P0 smoke-test mini-program (bouncing box + bitmap text)"
+
+[lib]
+# `cdylib` → `hello.wasm`. Not an `rlib`: plugins link wasm32 host imports
+# that can never link on a native host, so the crate must never be pulled
+# into a host test binary either.
+crate-type = ["cdylib"]
+test = false
+bench = false
+
+[dependencies]
+appsdk = { path = "../appsdk" }

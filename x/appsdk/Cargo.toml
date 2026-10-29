@@ -1,0 +1,14 @@
+[package]
+name = "appsdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+description = "ChatX mini-program (X) SDK: host-import bindings + canvas/text drawing primitives"
+
+[lib]
+# The SDK references host wasm imports; host-target test binaries can't link.
+test = false
+bench = false
+
+[dependencies]
