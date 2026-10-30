@@ -7,14 +7,20 @@
 //! * [`Ctx::commit`] — hand a frame to the host (`x_frame_commit`);
 //! * [`poll_input`] — drain host-pushed input events (`x_input_poll`);
 //! * [`log`] / [`now_ms`] — diagnostics + host clock;
-//! * [`draw`] — 5×7 bitmap text (P0); P1 adds `fontdue`-backed CJK text.
+//! * [`draw`] — 5×7 bitmap text (P0);
+//! * [`file`] — read the host-supplied document (P1, all file-viewer plugins);
+//! * [`text`] — `fontdue`-backed single-line text, CJK-capable (P1, feature
+//!   `text`; off for plugins that don't need it).
 //!
 //! The plugin must still export the three lifecycle entry points
 //! `init(width, height, dpr_x10)` / `tick(dt_ms)` / `destroy()` from its own
 //! crate (see `x/hello`).
-
+ 
 pub mod ctx;
 pub mod draw;
+pub mod file;
+#[cfg(feature = "text")]
+pub mod text;
 
 pub use ctx::{Ctx, rgba};
 
@@ -28,7 +34,14 @@ unsafe extern "C" {
     pub fn x_now_ms() -> i64;
     pub fn x_frame_commit(ptr: u32, width: u32, height: u32, stride: u32) -> u32;
     pub fn x_input_poll(kind_out: u32, x_out: u32, y_out: u32, code_out: u32) -> i32;
+    pub fn x_view_state(page: i32, page_count: u32, mode: u32) -> u32;
 }
+
+/// View-mode codes shared with the host (`wasmhost::VIEW_MODE_*`) and the
+/// command channel. Kept as plain numbers here so this crate carries no
+/// `wasmhost` dependency; the values must stay in lockstep with the host.
+pub const VIEW_MODE_WIDTH: u32 = 1;
+pub const VIEW_MODE_HEIGHT: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Input events (host → plugin)
@@ -40,6 +53,10 @@ pub const EV_TOUCH_MOVE: i32 = 2;
 pub const EV_TOUCH_UP: i32 = 3;
 pub const EV_KEY_DOWN: i32 = 4;
 pub const EV_KEY_UP: i32 = 5;
+/// Wheel / trackpad scroll. `y` = vertical delta in canvas px (negative =
+/// user scrolled down, toward later content), `x` = horizontal delta,
+/// `code` unused. Mirrored as `wasmhost::EV_SCROLL`.
+pub const EV_SCROLL: i32 = 6;
 pub const EV_RESIZE: i32 = 16;
 
 #[derive(Debug, Clone, Copy)]
@@ -82,6 +99,19 @@ pub fn log(line: &str) {
 /// Host monotonic clock, ms.
 pub fn now_ms() -> i64 {
     unsafe { x_now_ms() }
+}
+
+/// Report the viewer's current state to the host so the app UI can mirror it
+/// in its own toolbar.
+///
+/// * `page` — 1-based index of the currently visible page.
+/// * `page_count` — total pages in the document.
+/// * `mode` — one of the [`VIEW_MODE_*`] codes (width/height fit).
+///
+/// Idempotent to call whenever the state changes (init, page flip, mode
+/// switch). No-op on a host that does not implement the import.
+pub fn report_view(page: i32, page_count: u32, mode: u32) {
+    unsafe { let _ = x_view_state(page, page_count, mode); }
 }
 
 // ---------------------------------------------------------------------------

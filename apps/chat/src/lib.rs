@@ -39,8 +39,20 @@ pub(crate) static CLIENT: std::sync::Mutex<Option<Arc<Client<Directory>>>> =
 static POOL: std::sync::Mutex<Option<Arc<sqlx::SqlitePool>>> = std::sync::Mutex::new(None);
 static BACKEND: std::sync::Mutex<Option<ArcBackend>> = std::sync::Mutex::new(None);
 
+/// The app's **single shared** tokio runtime, living for the whole process
+/// no matter which thread creates it.
+///
+/// This was formerly a `thread_local` per-thread runtime. That was the
+/// cause of the "Could not save that file / task N was cancelled" chat-file
+/// bug: the file picker's worker thread created its own fresh runtime, the
+/// thread exited moments later, dropping the runtime — and tokio cancels
+/// not-yet-started tasks (including the pending `spawn_blocking` local
+/// store) when a runtime is dropped. A process-global `OnceLock` runtime
+/// can never be dropped mid-flight.
+static RUNTIME: std::sync::OnceLock<Arc<tokio::runtime::Runtime>> =
+    std::sync::OnceLock::new();
+
 thread_local! {
-    static RUNTIME: RefCell<Option<Arc<tokio::runtime::Runtime>>> = RefCell::new(None);
     static PUMP_STARTED: std::cell::Cell<bool> = std::cell::Cell::new(false);
     static CAMERA: RefCell<Option<Camera>> = RefCell::new(None);
     static SCREEN: RefCell<Option<Screen>> = RefCell::new(None);
@@ -231,21 +243,30 @@ static PICKING_CHAT_IMAGE: std::sync::atomic::AtomicBool =
 /// image send, so the shared picker sink can route the selection back to it.
 static CHAT_IMAGE_PICK_KEY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
+/// When set, the system file picker is serving a chat file send (pdf / docx /
+/// xlsx / pptx) rather than any other flow.
+static PICKING_CHAT_FILE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The chat key armed for a chat file send, so the shared picker sink can
+/// route the selection back to it.
+static CHAT_FILE_PICK_KEY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
 static POST_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 static POST_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn runtime() -> Arc<tokio::runtime::Runtime> {
-    RUNTIME.with(|slot| {
-        if slot.borrow().is_none() {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime init failed");
-            *slot.borrow_mut() = Some(Arc::new(rt));
-        }
-        slot.borrow().as_ref().expect("runtime init").clone()
-    })
+    RUNTIME
+        .get_or_init(|| {
+            Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime init failed"),
+            )
+        })
+        .clone()
 }
 
 /// Build a `UserProfile` snapshot of the current user from locally-known
@@ -649,6 +670,14 @@ pub fn run_app() {
                 return;
             };
             let ah = ui.global::<AppHost>();
+            // Mirror the plugin's freshest view-state (page / count / mode) into
+            // the toolbar. The pump reads it non-destructively, so this is cheap
+            // and always stays in sync with what the plugin is showing.
+            if let Some(vs) = inst.view_state() {
+                ah.set_page(vs.page);
+                ah.set_page_count(vs.page_count as i32);
+                ah.set_mode(vs.mode as i32);
+            }
             if inst.settled() {
                 // Last chance to pick up a frame committed right before exit.
                 if let Some(f) = inst.take_frame() {
@@ -669,6 +698,18 @@ pub fn run_app() {
         });
         ui.global::<AppHost>().on_touch(move |kind, x, y| {
             xhost::push_touch(kind, x, y);
+        });
+        // Wheel / trackpad scroll (the app UI's `scroll-event`): the plugin
+        // scrolls its page strip by the delta — same "natural" direction as
+        // its drag scrolling.
+        ui.global::<AppHost>().on_scroll(move |dy| {
+            xhost::push_scroll(dy);
+        });
+        // Toolbar mode toggle: the plugin owns the layout, so the UI just tells
+        // it which mode to render (1 = width, 2 = height); the plugin's next
+        // `report_view` round-trips the new mode back for highlight state.
+        ui.global::<AppHost>().on_set_mode(move |mode| {
+            xhost::push_mode(mode);
         });
         let wc = weak.clone();
         ui.global::<AppHost>().on_close(move || {
@@ -1510,8 +1551,22 @@ pub fn run_app() {
 
     {
         let weak = weak.clone();
+        ui.global::<ChatSession>().on_sent_file(move |key| {
+            pick_chat_file(weak.clone(), key);
+        });
+    }
+
+    {
+        let weak = weak.clone();
         ui.global::<ChatSession>().on_open_image(move |idx| {
             open_chat_image_from_index(weak.clone(), idx);
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        ui.global::<ChatSession>().on_open_file(move |idx| {
+            open_chat_file_from_index(weak.clone(), idx);
         });
     }
 
@@ -1567,6 +1622,19 @@ pub fn run_app() {
                 }
             } else {
                 on_moment_photos_selected(paths);
+            }
+        });
+    }
+
+    // ── install the document-file picker sink (chat file sends) ───────────
+    {
+        camera::filepick::set_file_sink(move |path: Option<String>| {
+            if PICKING_CHAT_FILE.load(std::sync::atomic::Ordering::SeqCst) {
+                PICKING_CHAT_FILE.store(false, std::sync::atomic::Ordering::SeqCst);
+                let key = CHAT_FILE_PICK_KEY.load(std::sync::atomic::Ordering::SeqCst);
+                if let Some(w) = call::weak_window() {
+                    on_chat_file_picked(w, key, path);
+                }
             }
         });
     }
@@ -2224,6 +2292,16 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                         .await;
                         continue;
                     }
+                    if let chatx_core::swarm::ChatEvent::File { peer, name, data } = &evt {
+                        handle_inbound_file(
+                            weak.clone(),
+                            &peer.to_base58(),
+                            name.clone(),
+                            data.clone(),
+                        )
+                        .await;
+                        continue;
+                    }
                     let touched = client.process_event(evt).await;
                     if let Some(touched) = touched {
                         refresh_inbound_chat(weak.clone(), touched).await;
@@ -2299,6 +2377,44 @@ async fn handle_inbound_image(weak: slint::Weak<MainWindow>, peer_base58: &str, 
         }
         Err(e) => {
             tracing::warn!("[chat-image] inbound write failed: {e}");
+        }
+    }
+}
+
+/// Handle an inbound document file (pdf / docx / xlsx / pptx): write the bytes
+/// to the local `files/` dir under the sender's basename, persist a `Kind::File`
+/// row for the DM with the sender, and refresh the current chat if visible.
+async fn handle_inbound_file(
+    weak: slint::Weak<MainWindow>,
+    peer_base58: &str,
+    name: String,
+    data: Vec<u8>,
+) {
+    tracing::debug!(
+        "[chat-file] INBOUND from={peer_base58} name={name} bytes={}",
+        data.len()
+    );
+    let Some(client) = CLIENT.lock().unwrap().clone() else {
+        tracing::warn!("[chat-file] inbound: no client yet, dropping");
+        return;
+    };
+    let me = client.peer_base58();
+    let chat_id = dm_chat_id(&me, peer_base58);
+    match image::store_file_bytes(&name, &data).await {
+        Ok(path) => {
+            let path_str = path.to_string_lossy().into_owned();
+            tracing::debug!(
+                "[chat-file] inbound persisted {} ({} bytes)",
+                path.display(),
+                data.len()
+            );
+            client
+                .persist_file(&chat_id, peer_base58, &name, &path_str)
+                .await;
+            refresh_inbound_chat(weak, chat_id).await;
+        }
+        Err(e) => {
+            tracing::warn!("[chat-file] inbound write failed: {e}");
         }
     }
 }
@@ -2787,6 +2903,274 @@ fn open_chat_image_from_index(weak: slint::Weak<MainWindow>, idx: i32) {
     };
     let path = row.image_path.as_str().to_string();
     open_image_viewer(std::vec![path], 0);
+}
+
+/// Pickable file extensions for chat file sends (documents + pdf).
+fn chat_file_allowed_exts() -> &'static [&'static str] {
+    &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"]
+}
+
+/// Inbound ceiling for a single document on the wire (`FILE_REQ_MAX` on the
+/// receiver side). Keep the sender just under it so the CBOR framing fits.
+const CHAT_FILE_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Open the system file picker armed to send one document to chat `key`.
+fn pick_chat_file(weak: slint::Weak<MainWindow>, key: i32) {
+    if !require_approved(weak.clone()) {
+        return;
+    }
+    PICKING_CHAT_FILE.store(true, std::sync::atomic::Ordering::SeqCst);
+    CHAT_FILE_PICK_KEY.store(key, std::sync::atomic::Ordering::SeqCst);
+    if let Err(e) = camera::filepick::pick_file() {
+        tracing::warn!("[chat-file] pick failed: {e}");
+        PICKING_CHAT_FILE.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<ChatSession>()
+                .set_send_status(SharedString::from(format!("File picker: {e}")));
+        }
+    }
+}
+
+/// A document was chosen for chat `key`: send the bytes over P2P, record a
+/// file row with the sender's basename, and refresh the chat.
+fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<String>) {
+    let Some(src) = path else {
+        tracing::debug!("[chat-file] no file picked (cancelled)");
+        return;
+    };
+    if key < 0 {
+        tracing::warn!("[chat-file] no chat bound, discarding");
+        return;
+    }
+    let name = std::path::Path::new(&src)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    let ext = std::path::Path::new(&src)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if !chat_file_allowed_exts().contains(&ext.as_str()) {
+        set_chat_status(
+            weak,
+            format!("Only document files (pdf / docx / xlsx / pptx) can be shared in chat, not “{ext:?}”."),
+        );
+        return;
+    }
+    let client = CLIENT.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
+    let (Some(client), Some(backend)) = (client, backend) else {
+        return;
+    };
+    let chat_id = {
+        let g = backend.blocking_read();
+        g.chat_id_for(key).map(|s| s.to_string())
+    };
+    let Some(chat_id) = chat_id else {
+        tracing::debug!("[chat-file] no chat_id for key={key}, aborting");
+        return;
+    };
+    let is_group = chat_id.starts_with("grp-");
+    if let Some(ui) = weak.upgrade() {
+        ui.global::<ChatSession>()
+            .set_send_status(SharedString::from("Sending file…"));
+    }
+    let me = client.peer_base58();
+    let my_peers: Vec<String> = {
+        let row_peer: String = backend
+            .blocking_read()
+            .chats
+            .iter()
+            .find(|r| r.key == key)
+            .map(|r| r.peer_id.clone())
+            .unwrap_or_default();
+        let mut v: Vec<String> = Vec::new();
+        if !row_peer.is_empty() && row_peer != me {
+            v.push(row_peer);
+        }
+        if chat_id.contains('|') {
+            for part in chat_id.split('|') {
+                if !part.is_empty() && part != me && !v.iter().any(|x| x == part) {
+                    v.push(part.to_string());
+                }
+            }
+        }
+        v
+    };
+    let meta = match std::fs::metadata(&src) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("[chat-file] stat failed: {e}");
+            set_chat_send_error(weak.clone(), "Could not read that file.");
+            return;
+        }
+    };
+    if meta.len() > CHAT_FILE_MAX_BYTES {
+        set_chat_status(
+            weak,
+            format!(
+                "That file is {:.1} MB — chat files are limited to {} MB.",
+                meta.len() as f64 / 1048576.0,
+                CHAT_FILE_MAX_BYTES / (1024 * 1024)
+            ),
+        );
+        return;
+    }
+    let bytes = match std::fs::read(&src) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("[chat-file] read failed: {e}");
+            set_chat_send_error(weak.clone(), "Could not read that file.");
+            return;
+        }
+    };
+    let rt = runtime();
+    let weak2 = weak.clone();
+    let c = client.clone();
+    let weak3 = weak.clone();
+    rt.spawn(async move {
+        if is_group {
+            match c
+                .send_group_media(
+                    &chat_id,
+                    &chatx_core::group::GroupMsgKind::File { name: name.clone() },
+                    bytes,
+                )
+                .await
+            {
+                Ok(()) => {
+                    tracing::debug!("[chat-file] group sent -> {chat_id}");
+                    touch_chat_activity(&chat_id);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak3.upgrade() {
+                            cs_set_send_status(&ui.global::<ChatSession>(), String::new());
+                        }
+                    });
+                    load_chat_messages(weak2, key);
+                }
+                Err(e) => {
+                    tracing::warn!("[chat-file] group send FAILED: {e}");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak3.upgrade() {
+                            cs_set_send_status(
+                                &ui.global::<ChatSession>(),
+                                format!("Send failed: {e}"),
+                            );
+                        }
+                    });
+                }
+            }
+            return;
+        }
+        // Store the file locally first (same name-based path), so when the
+        // chat reloads its rows the on-disk document is already present.
+        let local_path = match image::store_file_bytes(&name, &bytes).await {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => {
+                tracing::warn!("[chat-file] store failed: {e}");
+                set_chat_send_error(weak3.clone(), "Could not save that file.");
+                return;
+            }
+        };
+        let mut last_err = if my_peers.is_empty() {
+            "Cannot determine peer".to_string()
+        } else {
+            String::new()
+        };
+        let mut sent = false;
+        'outer: for cand in &my_peers {
+            if cand == &me {
+                continue;
+            }
+            match c.send_file_cmd(cand, name.clone(), bytes.clone()).await {
+                Ok(_) => {
+                    c.persist_file(&chat_id, &me, &name, &local_path).await;
+                    sent = true;
+                    tracing::debug!("[chat-file] sent -> {cand}");
+                    break 'outer;
+                }
+                Err(e) => {
+                    tracing::warn!("[chat-file] peer={cand} failed: {e}");
+                    last_err = e.to_string();
+                }
+            }
+        }
+        if sent {
+            touch_chat_activity(&chat_id);
+        }
+        let msg = if sent {
+            String::new()
+        } else if last_err.trim().is_empty() {
+            "Peer is offline".to_string()
+        } else {
+            last_err
+        };
+        set_chat_status(weak3, msg.clone());
+        if sent {
+            load_chat_messages(weak2, key);
+        }
+    });
+}
+
+/// Tap a chat file message. PDFs open in the in-app viewer (x.pdfview); other
+/// document types still surface a status hint until their P2/ppt plugins land.
+fn open_chat_file_from_index(weak: slint::Weak<MainWindow>, idx: i32) {
+    let idx = idx as usize;
+    let Some(ui) = weak.upgrade() else { return };
+    let cs = ui.global::<ChatSession>();
+    use slint::Model as _;
+    let msgs = cs.get_messages();
+    let Some(row) = msgs.row_data(idx) else {
+        tracing::debug!("[chat-file] index {idx} out of range");
+        return;
+    };
+    if row.file_path.is_empty() {
+        tracing::debug!("[chat-file] row {idx} has no file path");
+        return;
+    }
+    let file_path = row.file_path.clone();
+    let ext = std::path::Path::new(&file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "pdf" => {
+            // Canvas = window's logical size; the plugin multiplies by dpr
+            let sf = ui.window().scale_factor().max(1.0);
+            let phys = ui.window().size();
+            let cw = ((phys.width as f32) / sf).max(240.0).round() as u32;
+            let ch = ((phys.height as f32) / sf).max(240.0).round() as u32;
+            let dpr_x10 = (sf * 10.0).round() as u32;
+            let ah = ui.global::<AppHost>();
+            let result = xhost::open_pdf_file(cw, ch, dpr_x10, std::path::Path::new(&file_path));
+            match result {
+                Ok(()) => {
+                    ah.set_failed(false);
+                    ah.set_running(true);
+                    ah.set_frame(slint::Image::default());
+                    ah.set_status(SharedString::from("starting…"));
+                    let mut nav = ui.global::<AppState>().get_nav_state();
+                    nav.global_overlay = GlobalOverlayType::MiniApp;
+                    ui.global::<AppState>().set_nav_state(nav);
+                }
+                Err(msg) => {
+                    ah.set_failed(true);
+                    ah.set_status(SharedString::from(msg));
+                    let mut nav = ui.global::<AppState>().get_nav_state();
+                    nav.global_overlay = GlobalOverlayType::MiniApp;
+                    ui.global::<AppState>().set_nav_state(nav);
+                }
+            }
+        }
+        _ => {
+            cs.set_send_status(SharedString::from(format!(
+                "No in-app viewer for .{ext} yet — please open it with a supporting app."
+            )));
+        }
+    }
 }
 
 /// Present the photos at `paths` in the shared full-screen image viewer at
@@ -3574,6 +3958,12 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         chatx_core::store::Kind::Image { path } => Some(path.clone()),
                         _ => None,
                     };
+                    let file = match &m.kind {
+                        chatx_core::store::Kind::File { path, name } => {
+                            Some((path.clone(), name.clone()))
+                        }
+                        _ => None,
+                    };
                     let preview = image_preview.get(&i).cloned();
                     let preview_dims = image_dims.get(&i).copied();
                     let msg = ChatMsg {
@@ -3584,6 +3974,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         avatar: Some(avatar),
                         voice,
                         image,
+                        file,
                         preview_dims,
                         image_preview: preview,
                     };
@@ -3619,7 +4010,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             let heights: Vec<f32> = rendered
                 .iter()
                 .map(|m| {
-                    if m.voice.is_some() {
+                    if m.voice.is_some() || m.file.is_some() {
                         VOICE_H
                     } else {
                         m.height as f32 / scale

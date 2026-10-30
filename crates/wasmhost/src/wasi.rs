@@ -99,6 +99,8 @@ fn h_clock_res_get(env: FunctionEnvMut<HsEnv>, args: &[Value]) -> std::result::R
 
 fn h_clock_time_get(env: FunctionEnvMut<HsEnv>, args: &[Value]) -> std::result::Result<Vec<Value>, wasmer::RuntimeError> {
     let id = args[0].unwrap_i32() as u32;
+    let _precision = args[1].unwrap_i64(); // wasip1: inline i64 timestamp precision
+    let out_ptr = args[2].unwrap_i32() as u32 as u64;
     let Some((_, view)) = memview(&env) else {
         return errno(63);
     };
@@ -108,8 +110,7 @@ fn h_clock_time_get(env: FunctionEnvMut<HsEnv>, args: &[Value]) -> std::result::
             .map_or(0, |d| d.as_nanos() as u64),
         _ => monotonic_ns(),
     };
-    let _ = view.write(args[1].unwrap_i32() as u32 as u64, &ns.to_le_bytes());
-    let _ = view.write(args[2].unwrap_i32() as u32 as u64, &0u32.to_le_bytes());
+    let _ = view.write(out_ptr, &ns.to_le_bytes());
     errno(0)
 }
 
@@ -166,6 +167,13 @@ fn enosys() -> std::result::Result<Vec<Value>, wasmer::RuntimeError> {
     errno(52) // ENOSYS
 }
 
+fn enoent() -> std::result::Result<Vec<Value>, wasmer::RuntimeError> {
+    errno(44) // ENOENT — no file: the sandbox has no pre-opened host paths,
+    // so file-stat / prestat / open all answer "not found". Callers that
+    // probe the system font directory take the fallback path and use their
+    // bundled face.
+}
+
 /// The whole `wasi_snapshot_preview1` namespace for one instance.
 pub fn wasi_namespace(store: &mut wasmer::Store, env: &FunctionEnv<HsEnv>) -> wasmer::Exports {
     wasmer::import_namespace! {
@@ -175,14 +183,68 @@ pub fn wasi_namespace(store: &mut wasmer::Store, env: &FunctionEnv<HsEnv>) -> wa
             "environ_get" => Function::new_with_env(store, env, ty(2), h_environ_get),
             "environ_sizes_get" => Function::new_with_env(store, env, ty(2), h_environ_sizes_get),
             "clock_res_get" => Function::new_with_env(store, env, ty(2), h_clock_res_get),
-            "clock_time_get" => Function::new_with_env(store, env, ty(3), h_clock_time_get),
+            "clock_time_get" => Function::new_with_env(
+                store,
+                env,
+                FunctionType::new(vec![Type::I32, Type::I64, Type::I32], vec![Type::I32]),
+                h_clock_time_get,
+            ),
             "fd_close" => Function::new_with_env(store, env, ty(1), h_fd_close),
             "fd_fdstat_get" => Function::new_with_env(store, env, ty(2), h_fd_fdstat_get),
+            "fd_read" => Function::new_with_env(store, env, ty(4), |_, _| enosys()),
+            // No host files are pre-opened: stat/prestat/open all ENOENT.
+            "fd_filestat_get" => Function::new_with_env(
+                store,
+                env,
+                ty(2),
+                |_, _| enoent(),
+            ),
+            "fd_prestat_get" => Function::new_with_env(store, env, ty(2), |_, _| enoent()),
+            "fd_prestat_dir_name" => Function::new_with_env(
+                store,
+                env,
+                ty(3),
+                |_, _| enoent(),
+            ),
             "fd_seek" => Function::new_with_env(
                 store,
                 env,
                 FunctionType::new(vec![Type::I32, Type::I64, Type::I32, Type::I32], vec![Type::I32]),
                 |_, _| enosys(),
+            ),
+            // `path_open(13 params)` — open relative to a pre-opened dir; the
+            // sandbox pre-opens nothing, so every path is "not found".
+            "path_open" => Function::new_with_env(
+                store,
+                env,
+                FunctionType::new(
+                    vec![
+                        Type::I32,
+                        Type::I32,
+                        Type::I32,
+                        Type::I32,
+                        Type::I32,
+                        Type::I64,
+                        Type::I64,
+                        Type::I32,
+                        Type::I32,
+                    ],
+                    vec![Type::I32],
+                ),
+                |_, _| enoent(),
+            ),
+            // `path_filestat_get(fd, fsflags, pathlen, path, out)` — 5×i32,
+            // pulled in by `fastrand` (via `phf`) when the plugin is built.
+            // We never actually resolve a path — the sandbox pre-opens nothing —
+            // so ENOENT is the correct, benign response.
+            "path_filestat_get" => Function::new_with_env(
+                store,
+                env,
+                FunctionType::new(
+                    vec![Type::I32, Type::I32, Type::I32, Type::I32, Type::I32],
+                    vec![Type::I32],
+                ),
+                |_, _| enoent(),
             ),
             "fd_write" => Function::new_with_env(store, env, ty(4), h_fd_write),
             "fd_writev" => Function::new_with_env(store, env, ty(4), h_fd_write),

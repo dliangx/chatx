@@ -11,4 +11,12 @@ description = "ChatX mini-program (X) SDK: host-import bindings + canvas/text dr
 test = false
 bench = false
 
+[features]
+# `text` — fontdue-backed single-line text (P1). Off by default so that
+# plugins that only need the 5×7 bitmap font (hello) don't pull the
+# rasterizer in.
+text = ["dep:fontdue"]
+
 [dependencies]
+# Optional; only compiled in when a plugin enables `appsdk/text`.
+fontdue = { version = "0.9", optional = true }

@@ -2,17 +2,18 @@ use crate::message::now_ms;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
-/// A stored chat message — text, a voice clip, or a photo.
+/// A stored chat message — text, a voice clip, a photo, or a document file.
 #[derive(Debug, Clone)]
 pub struct StoredMsg {
     pub id: i64,
     pub chat_id: String,
     pub sender: String,
-    /// For text rows: the body. For media rows: unused / empty.
+    /// For text rows: the body. For media rows: unused / empty (a
+    /// [`Kind::File`] row keeps the filename there instead, see `row_to_kind`).
     pub text: String,
     pub sealed: bool,
     pub t: u64,
-    /// `Text` for plain rows; `Voice`/`Image` carry the media file path.
+    /// `Text` for plain rows; `Voice`/`Image`/`File` carry the media file path.
     pub kind: Kind,
 }
 
@@ -25,6 +26,9 @@ pub enum Kind {
     /// `path` = disk path to a photo (original + compressed preview are the
     /// same compressed JPEG on disk; the UI decides how large to show it).
     Image { path: String },
+    /// `path` = disk path to a document file (pdf / docx / xlsx / pptx),
+    /// `name` = the sender's basename shown on the file bubble.
+    File { path: String, name: String },
 }
 
 impl StoredMsg {
@@ -138,7 +142,15 @@ impl Store {
                     Some(*duration_ms),
                 ),
                 Kind::Image { path } => (sqlite::MediaKind::Image, Some(path.clone()), None),
+                Kind::File { path, .. } => (sqlite::MediaKind::File, Some(path.clone()), None),
                 Kind::Text => (sqlite::MediaKind::None, None, None),
+            };
+            // File rows carry the sender's basename in the `text` column —
+            // the `media_*` columns have no dedicated name slot for File, and
+            // `row_to_kind` reads it back from there.
+            let row_text = match &msg.kind {
+                Kind::File { name, .. } => name.clone(),
+                _ => msg.text.clone(),
             };
             let _ = sqlite::messages::insert_row(
                 db,
@@ -146,7 +158,7 @@ impl Store {
                     id: 0,
                     chat_id: msg.chat_id,
                     sender: msg.sender,
-                    text: msg.text,
+                    text: row_text,
                     sealed: msg.sealed,
                     t: msg.t,
                     mine,
@@ -244,6 +256,23 @@ fn row_to_kind(m: &sqlite::MsgRow) -> Kind {
         },
         sqlite::MediaKind::Image => match &m.media_path {
             Some(p) if !p.is_empty() => Kind::Image { path: p.clone() },
+            _ => Kind::Text,
+        },
+        sqlite::MediaKind::File => match &m.media_path {
+            Some(p) if !p.is_empty() => Kind::File {
+                path: p.clone(),
+                // Stored in the `text` column by `push` (no dedicated name slot
+                // for File in `media_*`); `display_name` falls back to the file
+                // suffix if it is empty.
+                name: if m.text.is_empty() {
+                    std::path::Path::new(p)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                } else {
+                    m.text.clone()
+                },
+            },
             _ => Kind::Text,
         },
         sqlite::MediaKind::None => Kind::Text,

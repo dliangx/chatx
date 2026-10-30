@@ -206,6 +206,10 @@ pub enum GroupMsgKind {
         duration_ms: u64,
     },
     Image,
+    /// A document message (pdf / docx / xlsx / pptx). `name` is the sender's
+    /// basename (signed into the tag, like `voice:{rate}:{ch}:{dur}`) so the
+    /// receiver persists and displays a meaningful filename.
+    File { name: String },
 }
 
 impl GroupMsgKind {
@@ -219,6 +223,7 @@ impl GroupMsgKind {
                 duration_ms,
             } => format!("voice:{rate}:{ch}:{duration_ms}"),
             GroupMsgKind::Image => "image".to_string(),
+            GroupMsgKind::File { name } => format!("file:{name}"),
         }
     }
 }

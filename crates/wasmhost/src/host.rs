@@ -9,7 +9,7 @@ use wasmer::{
     RuntimeError, Store, TypedFunction,
 };
 
-use crate::sandbox::{Frame, InputEvent, Sandbox};
+use crate::sandbox::{Frame, InputEvent, Sandbox, ViewState};
 use crate::wasi;
 use crate::Error;
 
@@ -84,6 +84,10 @@ impl WasmRunner {
                 "x_now_ms" => Function::new_typed_with_env(&mut store, &env, x_now_ms),
                 "x_frame_commit" => Function::new_typed_with_env(&mut store, &env, x_frame_commit),
                 "x_input_poll" => Function::new_typed_with_env(&mut store, &env, x_input_poll),
+                "x_view_state" => Function::new_typed_with_env(&mut store, &env, x_view_state),
+                "x_file_size" => Function::new_typed_with_env(&mut store, &env, x_file_size),
+                "x_file_read" => Function::new_typed_with_env(&mut store, &env, x_file_read),
+                "x_file_name" => Function::new_typed_with_env(&mut store, &env, x_file_name),
             },
             "wasi_snapshot_preview1" => wasi_ns,
         };
@@ -224,6 +228,74 @@ fn x_input_poll(env: FunctionEnvMut<HsEnv>, kind_p: u32, x_p: u32, y_p: u32, cod
     }
 }
 
+/// `x_view_state(page, page_count, mode) -> 0` — a viewer plugin reports its
+/// active page, page count, and view mode; the host parks it in the sandbox so
+/// the app UI's pump can mirror it into the toolbar (icons/counter).
+fn x_view_state(env: FunctionEnvMut<HsEnv>, page: i32, page_count: u32, mode: u32) -> u32 {
+    env.data()
+        .sbx
+        .store_view_state(ViewState { page, page_count, mode });
+    0
+}
+
+/// `x_file_size() -> i64` — size of the host-supplied document; 0 = none.
+fn x_file_size(env: FunctionEnvMut<HsEnv>) -> i64 {
+    env.data()
+        .sbx
+        .file_bytes
+        .as_ref()
+        .map_or(0, |b| b.len() as i64)
+}
+
+/// `x_file_read(off, buf_ptr, buf_len) -> i32` — copy up to `buf_len` bytes
+/// of the document at byte offset `off` into plugin linear memory. Returns
+/// the number of bytes written; -1 on any error (no file, bad offset, OOB
+/// memory).
+fn x_file_read(env: FunctionEnvMut<HsEnv>, off: u64, ptr: u32, len: u32) -> i32 {
+    let Some(bytes) = env.data().sbx.file_bytes.as_ref() else {
+        return -1;
+    };
+    let Some(end) = off
+        .checked_add(len as u64)
+        .filter(|end| *end <= bytes.len() as u64)
+    else {
+        return -1;
+    };
+    let data = &bytes[off as usize..end as usize];
+    let Some((_, view)) = memview(&env) else {
+        return -1;
+    };
+    if view.write(ptr as u64, data).is_err() {
+        return -1;
+    }
+    data.len() as i32
+}
+
+/// `x_file_name(buf_ptr, cap) -> i32` — UTF-8 document basename into plugin
+/// linear memory (at most `cap` bytes, never splitting a char at the cap).
+/// Returns the bytes written; -1 when the instance has no document name.
+fn x_file_name(env: FunctionEnvMut<HsEnv>, ptr: u32, cap: u32) -> i32 {
+    let Some(name) = env.data().sbx.file_name.as_deref() else {
+        return -1;
+    };
+    let bytes = name.as_bytes();
+    // Don't split a UTF-8 char at the cap: step back to a boundary.
+    let capped = &bytes[..(cap as usize).min(bytes.len())];
+    let mut end = capped.len();
+    if let Ok(s) = std::str::from_utf8(capped) {
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+    }
+    let Some((_, view)) = memview(&env) else {
+        return -1;
+    };
+    if view.write(ptr as u64, &bytes[..end]).is_err() {
+        return -1;
+    }
+    end as i32
+}
+
 // ---------------------------------------------------------------------------
 // Instance lifecycle — one dedicated thread per instance
 // ---------------------------------------------------------------------------
@@ -237,6 +309,11 @@ pub struct PluginInstance {
     pub(crate) settled_error: Mutex<Option<String>>,
 }
 
+/// Hard ceiling for a host-supplied document (P1): 64 MiB matches the
+/// inbound file-message cap on the chat wire (`swarm::FILE_REQ_MAX`) and the
+/// SDK-side read budget.
+pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Start one plugin instance.
 ///
 /// `init(width, height, dpr_x10)` runs on the plugin thread before the first
@@ -249,7 +326,42 @@ pub fn open(
     height: u32,
     dpr_x10: u32,
 ) -> Result<Arc<PluginInstance>, Error> {
-    let sandbox = Sandbox::with_tracing_log(app_id);
+    open_with_file(app_id, wasm_bytes, width, height, dpr_x10, None, None)
+}
+
+/// Like [`open`], but with one host-supplied document handed to the plugin
+/// (read back through `x_file_size` / `x_file_read` / `x_file_name`).
+///
+/// `file_name` is the basename shown to the plugin (e.g. `报告.pdf`);
+/// `file_bytes` the content. Pass `None`/`None` for apps that open without
+/// a file — equivalent to [`open`].
+pub fn open_with_file(
+    app_id: &str,
+    wasm_bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+    dpr_x10: u32,
+    file_name: Option<String>,
+    file_bytes: Option<Vec<u8>>,
+) -> Result<Arc<PluginInstance>, Error> {
+    if let Some(bytes) = &file_bytes {
+        if (bytes.len() as u64) > MAX_FILE_BYTES {
+            return Err(Error::other(format!(
+                "document too large: {} bytes (cap {})",
+                bytes.len(),
+                MAX_FILE_BYTES
+            )));
+        }
+    }
+    let sandbox = match (file_name, file_bytes) {
+        (name, Some(bytes)) => Sandbox::with_file(
+            app_id,
+            Sandbox::tracing_log_sink(app_id),
+            name,
+            Some(bytes),
+        ),
+        _ => Sandbox::with_tracing_log(app_id),
+    };
     let inst = Arc::new(PluginInstance {
         sandbox: sandbox.clone(),
         stop: Arc::new(AtomicBool::new(false)),
@@ -333,6 +445,12 @@ impl PluginInstance {
     /// Take the latest committed frame (if any).
     pub fn take_frame(&self) -> Option<Frame> {
         self.sandbox.take_frame()
+    }
+
+    /// Latest view-state the plugin reported (active page / count / mode), if
+    /// any. Non-destructive — the UI may read it every pump.
+    pub fn view_state(&self) -> Option<ViewState> {
+        self.sandbox.view_state()
     }
 
     /// Ask the plugin to shut down (at the next tick boundary → `destroy`)

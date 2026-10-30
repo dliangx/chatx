@@ -1,6 +1,7 @@
 use crate::identity::DeviceIdentity;
 use crate::message::{
-    AudioPayload, ChatRequest, ChatResponse, ImageAck, ImageRequest, VoiceAck, VoiceRequest,
+    AudioPayload, ChatRequest, ChatResponse, FileAck, FileRequest, ImageAck, ImageRequest,
+    VoiceAck, VoiceRequest,
 };
 use crate::moment::{PostRequest, PostResponse};
 use anyhow::Result;
@@ -31,6 +32,10 @@ pub const VOICE_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/voice/1")
 /// Binary (CBOR) photo-message transport — raw image bytes as a byte-string.
 pub const IMAGE_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/image/1");
 
+/// Binary (CBOR) document-file transport — raw file bytes (pdf/docx/xlsx/pptx)
+/// + sender basename as a byte-string.
+pub const FILE_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/file/1");
+
 /// Hard ceiling for a single inbound (or outbound) voice request. ~64 MiB
 /// covers the 5-minute capture cap (`MAX_FRAMES`, ~4.9 MB raw) with wide
 /// margin while still bounding the receiver's read buffer.
@@ -39,6 +44,10 @@ const VOICE_REQ_MAX: u64 = 64 * 1024 * 1024;
 /// Ceiling for a single inbound photo request (photos are capped server-side
 /// before sending, but keep a generous margin for large originals).
 const IMAGE_REQ_MAX: u64 = 64 * 1024 * 1024;
+
+/// Ceiling for a single inbound document-file request (app-side caps picked
+/// files well below this; mirrors the wasm sandbox's `MAX_FILE_BYTES`).
+const FILE_REQ_MAX: u64 = 64 * 1024 * 1024;
 
 pub fn group_topic_name(group_id: &str) -> String {
     format!("/chatx/group/{}", group_id)
@@ -76,6 +85,8 @@ pub struct Net {
     pub voice: Blob<VoiceRequest, VoiceAck>,
     /// Binary (CBOR) photo-message channel — carries raw image bytes.
     pub image: Blob<ImageRequest, ImageAck>,
+    /// Binary (CBOR) document-file channel — carries raw file bytes + name.
+    pub file: Blob<FileRequest, FileAck>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +119,15 @@ pub enum ChatEvent {
     /// [`crate::Client::persist_image`] to record it into the chat store.
     Image {
         peer: PeerId,
+        data: Vec<u8>,
+    },
+
+    /// Persistent document file (pdf/docx/xlsx/pptx) received from a peer.
+    /// `name` is the sender's basename; the application layer writes `data`
+    /// to disk and records the row via [`crate::Client::persist_file`].
+    File {
+        peer: PeerId,
+        name: String,
         data: Vec<u8>,
     },
 
@@ -202,6 +222,16 @@ pub enum Cmd {
     SendImage {
         peer: PeerId,
         from: String,
+        data: Vec<u8>,
+        ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+    },
+    /// Send a document file (pdf/docx/xlsx/pptx). `name` is the sender's
+    /// basename (persisted/shown on the receiver side); the network carries
+    /// the raw file bytes. Same peer-ack lifecycle as [`Cmd::SendImage`].
+    SendFile {
+        peer: PeerId,
+        from: String,
+        name: String,
         data: Vec<u8>,
         ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
     },
@@ -367,6 +397,13 @@ pub async fn boot(
             .set_response_size_maximum(10 * 1024 * 1024);
         Blob::with_codec(codec, [(IMAGE_PROTOCOL, ProtocolSupport::Full)], RrConfig::default())
     };
+    // Binary (CBOR) document-file channel — raw file bytes + name.
+    let file: Blob<FileRequest, FileAck> = {
+        let codec = cbor::codec::Codec::<FileRequest, FileAck>::default()
+            .set_request_size_maximum(FILE_REQ_MAX)
+            .set_response_size_maximum(10 * 1024 * 1024);
+        Blob::with_codec(codec, [(FILE_PROTOCOL, ProtocolSupport::Full)], RrConfig::default())
+    };
     let group: libp2p::gossipsub::Behaviour = libp2p::gossipsub::Behaviour::new(
         libp2p::gossipsub::MessageAuthenticity::Signed(device.keypair()),
         gossip_cfg,
@@ -395,6 +432,7 @@ pub async fn boot(
             blob,
             voice,
             image,
+            file,
             group,
             ping,
         })?
@@ -631,6 +669,33 @@ async fn swarm_loop(
                     );
                     let req = ImageRequest { id, from, data };
                     let _rid = swarm.behaviour_mut().image.send_request(&peer, req);
+                }
+                Some(Cmd::SendFile {
+                    peer,
+                    from,
+                    name,
+                    data,
+                    ack_tx,
+                }) => {
+                    let id: u64 = rand::random();
+                    if let Some(tx) = ack_tx {
+                        pending_acks
+                            .lock()
+                            .unwrap()
+                            .insert(id, (peer, tx));
+                    }
+                    tracing::debug!(
+                        "[swarm] FILE OUTBOUND peer={peer} id={} {} bytes name={name}",
+                        id,
+                        data.len()
+                    );
+                    let req = FileRequest {
+                        id,
+                        from,
+                        name,
+                        data,
+                    };
+                    let _rid = swarm.behaviour_mut().file.send_request(&peer, req);
                 }
                 Some(Cmd::GroupKeyDirect {
                     peer,
@@ -982,6 +1047,53 @@ async fn swarm_loop(
                                 if let Some((_p, tx)) = m.remove(&id) {
                                     let _ = tx.send(Err(anyhow::anyhow!(
                                         "send image to {peer} failed: {error:?}"
+                                    )));
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                    // Binary (CBOR) document-file channel (pdf/docx/xlsx/pptx).
+                    //  * Inbound request: we received a file; notify the app.
+                    //  * Inbound response: we are the sender; resolve the waiter.
+                    NetEvent::File(f) => match f {
+                        RrEvent::Message { peer, message, .. } => match message {
+                            RrMessage::Request { request, channel, .. } => {
+                                tracing::debug!(
+                                    "[swarm] FILE INBOUND from peer={peer} id={} {} bytes name={}",
+                                    request.id,
+                                    request.data.len(),
+                                    request.name
+                                );
+                                let ack = FileAck { id: request.id };
+                                let _ = swarm.behaviour_mut().file.send_response(channel, ack);
+                                let _ = ev.send(ChatEvent::File {
+                                    peer,
+                                    name: request.name,
+                                    data: request.data,
+                                });
+                            }
+                            RrMessage::Response { response, .. } => {
+                                tracing::debug!("[swarm] FILE ACKED id={}", response.id);
+                                if let Some((_peer, tx)) =
+                                    pending_acks.lock().unwrap().remove(&response.id)
+                                {
+                                    let _ = tx.send(Ok(()));
+                                }
+                            }
+                        },
+                        RrEvent::OutboundFailure { peer, error, .. } => {
+                            tracing::warn!("[swarm] FILE OUTBOUND FAILED peer={peer} err={error:?}");
+                            let mut m = pending_acks.lock().unwrap();
+                            let ids: Vec<u64> = m
+                                .iter()
+                                .filter(|(_, (p, _))| *p == peer)
+                                .map(|(id, _)| *id)
+                                .collect();
+                            for id in ids {
+                                if let Some((_p, tx)) = m.remove(&id) {
+                                    let _ = tx.send(Err(anyhow::anyhow!(
+                                        "send file to {peer} failed: {error:?}"
                                     )));
                                 }
                             }

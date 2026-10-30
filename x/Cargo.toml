@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["appsdk", "hello"]
+members = ["appsdk", "hello", "pdfview"]
 
 [workspace.package]
 version = "0.1.0"

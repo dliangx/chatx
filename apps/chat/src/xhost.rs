@@ -10,24 +10,38 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use slint::SharedString;
 
-use wasmhost::{InputEvent, PluginInstance};
+use wasmhost::{InputEvent, PluginInstance, EV_KEY_DOWN};
 
 static INST: LazyLock<Mutex<Option<Arc<PluginInstance>>>> =
     LazyLock::new(|| Mutex::new(None));
+
+/// The live plugin's canvas scale factor (device px per logical px), set at
+/// open time. The overlay forwards *logical* px from Slint, but the plugin's
+/// canvas — and every gesture threshold keyed to it (edge bands, the HUD
+/// hit-rect) — is in *device* px (`init` multiplies by dpr). Without this, a
+/// right-edge tap on a 2× display lands in canvas *centre* and is ignored,
+/// while a left-edge tap (still inside the band) works: the observed
+/// "tap-left ok, tap-right dead" split.
+static DPR: LazyLock<Mutex<f32>> = LazyLock::new(|| Mutex::new(1.0));
+
+fn set_dpr(dpr_x10: u32) {
+    let d = if dpr_x10 == 0 { 1.0 } else { dpr_x10 as f32 / 10.0 };
+    *DPR.lock().unwrap() = d.max(1.0);
+}
 
 /// The one live mini-app instance, if any.
 pub fn current() -> Option<Arc<PluginInstance>> {
     INST.lock().unwrap().clone()
 }
 
-/// Locate the built `x.hello` artifact (`scripts/build_x.sh` output).
+/// Locate a built X-mini-app artifact by app id
+/// (`x-t/<app_id>/0.1.0/app.wasm`, `scripts/build_x.sh` output).
 ///
 /// Dev layout: the chat exe lives at `<root>/apps/chat` while the artifact
-/// sits at `<root>/x-t/x.hello/0.1.0/app.wasm`, so we probe the cwd first
-/// (running from the repo root) and fall back to paths resolved from the
-/// executable location.
-fn find_hello_wasm() -> Result<PathBuf, String> {
-    let rel = PathBuf::from("x-t/x.hello/0.1.0/app.wasm");
+/// sits at `<root>/x-t/…`, so we probe the cwd first (running from the repo
+/// root) and fall back to paths resolved from the executable location.
+fn find_app_wasm(app_id: &str) -> Result<PathBuf, String> {
+    let rel = PathBuf::from(format!("x-t/{app_id}/0.1.0/app.wasm"));
     let mut cands: Vec<PathBuf> = Vec::new();
     cands.push(std::env::current_dir().ok().map(|d| d.join(&rel)).unwrap_or_default());
     if let Ok(exe) = std::env::current_exe() {
@@ -46,10 +60,10 @@ fn find_hello_wasm() -> Result<PathBuf, String> {
             return Ok(c);
         }
     }
-    Err(
-        "x-t/x.hello/0.1.0/app.wasm not found — run scripts/build_x.sh from the repo root"
-            .into(),
-    )
+    Err(format!(
+        "{} not found — run scripts/build_x.sh from the repo root",
+        rel.display()
+    ))
 }
 
 /// Start the x.hello plugin at the given canvas size (canvas px + dpr × 10).
@@ -59,18 +73,85 @@ pub fn open_hello(width: u32, height: u32, dpr_x10: u32) -> Result<(), String> {
         // Re-opened before the old one was released; keep the live one.
         return Ok(());
     }
-    let path = find_hello_wasm()?;
+    let path = find_app_wasm("x.hello")?;
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     let inst = wasmhost::open("x.hello", bytes, width, height, dpr_x10)
         .map_err(|e| e.to_string())?;
+    set_dpr(dpr_x10);
     *INST.lock().unwrap() = Some(inst);
     Ok(())
 }
 
-/// Push a touch event (kind per `appsdk::EV_*`, coords in canvas px).
+/// Start x.pdfview with the document at `file_path`. The host reads the file
+/// bytes here (the sandbox has **no** pre-opens) and passes them to the
+/// plugin through the `x_file_*` imports.
+///
+/// No-op if an instance is already live.
+pub fn open_pdf_file(
+    width: u32,
+    height: u32,
+    dpr_x10: u32,
+    file_path: &std::path::Path,
+) -> Result<(), String> {
+    if current().is_some() {
+        return Ok(());
+    }
+    let app_path = find_app_wasm("x.pdfview")?;
+    let wasm = std::fs::read(&app_path).map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(file_path).map_err(|e| format!("read {}: {e}", file_path.display()))?;
+    let name = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("document.pdf")
+        .to_string();
+    let inst = wasmhost::open_with_file(
+        "x.pdfview",
+        wasm,
+        width,
+        height,
+        dpr_x10,
+        Some(name),
+        Some(bytes),
+    )
+    .map_err(|e| e.to_string())?;
+    set_dpr(dpr_x10);
+    *INST.lock().unwrap() = Some(inst);
+    Ok(())
+}
+
+/// Push a touch event (kind per `appsdk::EV_*`). The overlay hands us
+/// *logical* px; the plugin's gesture space is *device* px, so scale by the
+/// canvas dpr before forwarding (see `DPR`).
 pub fn push_touch(kind: i32, x: i32, y: i32) {
     if let Some(inst) = current() {
-        inst.push_input(InputEvent::new(kind, x, y, 0));
+        let s = *DPR.lock().unwrap();
+        inst.push_input(InputEvent::new(kind, (x as f32 * s).round() as i32, (y as f32 * s).round() as i32, 0));
+    }
+}
+
+/// Push a wheel / trackpad scroll delta (logical px, Slint `scroll-event`
+/// convention: negative = the user scrolled down, toward later content).
+/// Scaled to canvas device px and forwarded as an `EV_SCROLL` event whose
+/// `y` field carries the vertical delta.
+pub fn push_scroll(dy: f32) {
+    if let Some(inst) = current() {
+        let s = *DPR.lock().unwrap();
+        inst.push_input(InputEvent::new(
+            wasmhost::EV_SCROLL,
+            0,
+            (dy * s).round() as i32,
+            0,
+        ));
+    }
+}
+
+/// Tell the live plugin which view mode to render in: `1` = width-fit
+/// (宽度适配), `2` = height-fit (高度适配) — the `wasmhost::VIEW_MODE_*`
+/// codes. Routed over the plugin's input channel as a key event
+/// (`EV_KEY_DOWN` + mode code), which the plugin honours on its next tick.
+pub fn push_mode(mode: i32) {
+    if let Some(inst) = current() {
+        inst.push_input(InputEvent::new(EV_KEY_DOWN, 0, 0, mode));
     }
 }
 

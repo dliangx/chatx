@@ -79,6 +79,29 @@ impl Ctx {
         }
     }
 
+    /// Blend one source-over pixel (straight alpha) at `x`,`y`.
+    ///
+    /// Same straight-alpha formula the host chat compositor uses
+    /// (`crates/render` `canvas::blend_px`): `out = src + dst·(1−sa)`.
+    /// (Only `text.rs` calls it — allow dead-code when `text` is off.)
+    #[allow(dead_code)]
+    pub(crate) fn blend_px(&mut self, x: isize, y: isize, src: [u8; 4]) {
+        if x < 0 || y < 0 || (x as u32) >= self.width || (y as u32) >= self.height {
+            return;
+        }
+        let sa = src[3] as u32;
+        if sa == 0 {
+            return;
+        }
+        let i = ((y * self.width as isize + x) * 4) as usize;
+        let da = self.buf[i + 3] as u32;
+        let out_a = sa + da * (255 - sa) / 255;
+        self.buf[i] = (src[0] as u32 + self.buf[i] as u32 * (255 - sa) / 255) as u8;
+        self.buf[i + 1] = (src[1] as u32 + self.buf[i + 1] as u32 * (255 - sa) / 255) as u8;
+        self.buf[i + 2] = (src[2] as u32 + self.buf[i + 2] as u32 * (255 - sa) / 255) as u8;
+        self.buf[i + 3] = out_a as u8;
+    }
+
     /// Draw text with the 5×7 bitmap font (see [`crate::draw`]).
     ///
     /// `scale` is the pixel size of one font dot (2 → 10×14 px glyphs).
@@ -94,6 +117,37 @@ impl Ctx {
             x = draw::draw_char(&mut pen, ch, x);
         }
         x
+    }
+
+    /// Blit an RGBA8 (straight alpha) bitmap into the canvas at `(dst_x,
+    /// dst_y)`, clipping rows/columns that fall outside the canvas.
+    ///
+    /// Straight **replace** (not blend) — document plugins blit opaque page
+    /// rasters onto the background; `rgba` should be `w * h * 4` bytes,
+    /// row-major, stride `w * 4`.
+    pub fn blit(&mut self, dst_x: i32, dst_y: i32, w: u32, h: u32, rgba: &[u8]) {
+        let w = w as isize;
+        let h = h as isize;
+        if w <= 0 || h <= 0 || rgba.len() < (w * h * 4) as usize {
+            return;
+        }
+        for row in 0..h {
+            let cy = dst_y as isize + row;
+            if cy < 0 || cy >= self.height as isize {
+                continue;
+            }
+            let srow = (row * w * 4) as usize;
+            let drow = (cy * self.width as isize * 4) as usize;
+            for col in 0..w {
+                let cx = dst_x as isize + col;
+                if cx < 0 || cx >= self.width as isize {
+                    continue;
+                }
+                let si = srow + (col * 4) as usize;
+                let di = drow + (cx * 4) as usize;
+                self.buf[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+            }
+        }
     }
 
     /// Hand the current buffer to the host as a new frame.

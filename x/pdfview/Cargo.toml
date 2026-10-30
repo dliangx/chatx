@@ -1,0 +1,23 @@
+[package]
+name = "pdfview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+description = "x.pdfview — PDF viewer mini-program (pdf-rs: pdf-render + pdf-interpret)"
+
+[lib]
+# `cdylib` → `pdfview.wasm`. Plugins link wasm32 host imports that can never
+# link on a native host, so the crate must never be pulled into a host test
+# binary either.
+crate-type = ["cdylib"]
+test = false
+bench = false
+
+[dependencies]
+appsdk = { path = "../appsdk" }
+# pdf-rs (pdfluent): pure-Rust interpreter + vello_cpu rasterizer. Fonts come
+# from the document (pdf-interpret extracts embedded/subset fonts); the
+# `embed-fonts` feature supplies base-14 substitutes as a fallback.
+pdf-interpret = { version = "0.6.1", features = ["embed-fonts"] }
+pdf-render = "1.2.0"

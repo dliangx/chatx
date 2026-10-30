@@ -122,6 +122,23 @@ pub struct ImageAck {
     pub id: u64,
 }
 
+/// A document file (pdf / docx / xlsx / pptx) sent over the binary CBOR
+/// `file` channel. Same shape as a photo, plus the sender's **basename**
+/// (`name`) so the receiver can persist it under a meaningful file name and
+/// show it on the file bubble. `data` is the raw file content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileRequest {
+    pub id: u64,
+    pub from: String,
+    pub name: String,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAck {
+    pub id: u64,
+}
+
 pub fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

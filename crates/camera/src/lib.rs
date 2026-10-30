@@ -35,6 +35,7 @@ pub type CaptureResult = Result<String, String>;
 pub mod album;
 #[allow(dead_code)]
 mod capture_grab;
+pub mod filepick;
 pub mod posts;
 
 #[cfg(any(

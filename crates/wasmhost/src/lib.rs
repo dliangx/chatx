@@ -21,8 +21,8 @@ mod host;
 pub(crate) mod wasi;
 pub mod sandbox;
 
-pub use host::{monotonic_ms, open, PluginInstance};
-pub use sandbox::{Frame, InputEvent, Sandbox};
+pub use host::{monotonic_ms, open, open_with_file, MAX_FILE_BYTES, PluginInstance};
+pub use sandbox::{Frame, InputEvent, Sandbox, ViewState};
 
 pub const EV_NONE: i32 = sandbox::EV_NONE;
 pub const EV_TOUCH_DOWN: i32 = sandbox::EV_TOUCH_DOWN;
@@ -30,7 +30,10 @@ pub const EV_TOUCH_MOVE: i32 = sandbox::EV_TOUCH_MOVE;
 pub const EV_TOUCH_UP: i32 = sandbox::EV_TOUCH_UP;
 pub const EV_KEY_DOWN: i32 = sandbox::EV_KEY_DOWN;
 pub const EV_KEY_UP: i32 = sandbox::EV_KEY_UP;
+pub const EV_SCROLL: i32 = sandbox::EV_SCROLL;
 pub const EV_RESIZE: i32 = sandbox::EV_RESIZE;
+pub const VIEW_MODE_WIDTH: i32 = sandbox::VIEW_MODE_WIDTH;
+pub const VIEW_MODE_HEIGHT: i32 = sandbox::VIEW_MODE_HEIGHT;
 
 /// Errors surfaced by the host runtime.
 #[derive(Debug, thiserror::Error)]

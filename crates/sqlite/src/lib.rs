@@ -28,6 +28,7 @@ pub enum MediaKind {
     None,
     Voice,
     Image,
+    File,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

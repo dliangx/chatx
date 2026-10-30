@@ -2,19 +2,21 @@
 
 Run "mini-programs" inside the main app inside a WASM sandbox: document viewers (PDF / Excel / Word / PPT), map & location, and games. A mini-program **is not running by default** — its instance is loaded on demand (e.g. when the user opens an attachment in a chat) and torn down on close.
 
-> Status (2026-10): plan final; `x/x-m` is an empty skeleton, plugin directories and `crates/wasmhost` not yet started. Target platforms: **desktop + Android (wasmer backend) and iOS (WAMR backend)** — see §1. Related: [../README.md](../README.md) Roadmap.
+> Status (2026-10): **P0 + P1 shipped (desktop)** — `crates/wasmhost` (wasmer backend + `x` imports + WASI subset), `x/appsdk`, and the `x/hello` smoke plugin all landed; `hello` is verified end-to-end both headless (`cargo run -p wasmhost --example run_hello`) and in the chat UI full-screen overlay. **P1**: the `appsdk` `text` (fontdue) + `file` (`x_file_*`) modules, the host-document channel (`open_with_file` + `x_file_*` imports, 64 MiB cap); plus full chat-side document messaging — pdf/docx/xlsx/pptx send & receive over a new CBOR `file` channel, Slint-native file rows (icon + filename). **The `x/pdfview` viewer has been reworked back out (it was built on pdf_oxide) and is to be redone on `pdf-rs`** — rendering via `pdf-render`/`pdf-interpret` (vello_cpu, pure Rust), with **two view modes only: 宽度适配 (width-fit) and 高度适配 (height-fit)**. P2–P6 below remain plan, and `x/x-m` is just an empty crate skeleton. Target platforms: **desktop + Android (wasmer backend) and iOS (WAMR backend)** — see §1. Related: [../README.md](../README.md) Roadmap.
 
 ## Directory layout
 
 | Path | Role |
 |---|---|
 | `x/` | **Mini-program sources** (standalone cargo workspace, not merged into the main workspace) |
-| `x/appsdk` | Plugin SDK: Rust bindings for the host imports (canvas / input / fs / net / geo …) + text rasterisation primitives |
-| `x/pdfview` `x/sheetview` `x/docview` `x/pptview` `x/map` | The five built-in mini-programs |
+| `x/appsdk` | Plugin SDK: Rust bindings for the host imports + text primitives. **Shipped (P0+P1):** externs + `Ctx` + 5×7 bitmap font (**P0**) + `text.rs` fontdue HUD text + `file.rs` host-document read (`x_file_*`) (**P1**); canvas/net/geo/dialog modules stay P3+ |
+| `x/hello` | **P0 smoke plugin** (shipped): bouncing box + tick counter; validates the full ABI end-to-end |
+| `x/pdfview` | **PDF viewer — to be redone (reworked back out).** The pdf_oxide build was reverted; it will be rebuilt on `pdf-rs` (`pdf-render`/`pdf-interpret`, vello_cpu pure-Rust rasterizer) with **two view modes only: 宽度适配 (width-fit) + 高度适配 (height-fit)**. Not currently built |
+| `x/sheetview` `x/docview` `x/pptview` `x/map` | Remaining built-in mini-programs (plan, P2–P3; directories not yet created) |
 | `x/x-m` | **Mini-program management server** (crate `x-manager`: listing, upload, signature verification, distribution) |
 | `x-t/` | **Build artifacts** (gitignored): `<app_id>/<ver>/{manifest.json, app.wasm, assets/}` (+ optional per-platform AOT artifacts) |
-| main repo `crates/wasmhost` | Host-side WASM runtime: `WasmRuntime` trait + **wasmer** backend (desktop/Android) + **WAMR** backend (iOS) + sandboxed import implementation |
-| main repo `apps/chat/src/apphost.rs`, `ui/apphost.slint` | Host UI integration (AppRegistry, mini-program container page) |
+| main repo `crates/wasmhost` | Host-side WASM runtime: **wasmer backend shipped (P0)** + `x_*` host functions + hand-implemented WASI preview1 subset; `WasmRuntime` trait split + **WAMR backend (iOS)** stay P6 |
+| main repo `apps/chat/src/xhost.rs`, `ui/x.slint` | Host UI integration (shipped): full-screen `MiniAppOverlay` global overlay — close + minimize top-right, 16 ms frame pump |
 
 ## 1. Runtime choice: wasmer + WAMR, one ABI
 
@@ -31,7 +33,7 @@ pub trait WasmRuntime {
 }
 ```
 
-Host code (AppRegistry, app threads, frame shipping, sandbox) is backend-agnostic and selects the implementation at startup: `wasmer` for `target_os != "ios"`, `wamr` for iOS.
+Host code (app threads, frame shipping, sandbox) is backend-agnostic and will select the implementation at startup: `wasmer` for `target_os != "ios"`, `wamr` for iOS. *(Current state: the wasmer backend is the only one and lives inline in `host.rs`; the trait + WAMR shim land in P6.)*
 
 ### 1.1 WAMR backend specifics (iOS)
 
@@ -50,55 +52,104 @@ Track the `wasmer` crate releases: if/when the `wamr` or `wasmi` interpreter bac
 
 ```
 crates/wasmhost/src/
-├── lib.rs            # WasmRuntime trait + public API + backend selection
-├── backend_wasmer.rs # wasmer (Cranelift) backend — desktop + Android
-├── backend_wamr.rs   # WAMR C-FFI backend — iOS
-├── imports.rs        # canvas / input / fs / net / geo / dialog host functions (runtime-agnostic)
-├── policy.rs         # manifest parsing, permissions & memory limits, signature check (ed25519)
-└── app.rs            # AppInstance lifecycle + plugin thread
+├── lib.rs              # ✓ public API (`open` / `open_with_file` + `PluginInstance`) + `Error`
+├── host.rs             # ✓ wasmer backend (Cranelift): plugin thread + ~60 fps tick loop + `x_*` host functions (incl. P1 `x_file_*` document channel) — desktop (Android = P5)
+├── wasi.rs             # ✓ hand-implemented WASI preview1 subset (args/environ/clock/fd_write/clocks/random/proc_exit/…; file stat/open/prestat → ENOENT; unimplemented → errno 52)
+├── sandbox.rs          # ✓ backend-neutral `Sandbox` / `Frame` / `InputEvent` types (+ P1 host-supplied document slot)
+└── examples/run_hello.rs
+                      # ✓ headless smoke: hello (P0)
 ```
 
-`imports.rs` defines each host function once, as a plain entry `(context*, args…) -> i32` signature. `backend_wasmer.rs` binds those entries into wasmer import objects; `backend_wamr.rs` binds the same entries into WAMR native-function registration. One implementation of the sandbox, two thin shims.
+Planned (not split out yet):
+
+```
+├── backend_wamr.rs     # WAMR C-FFI backend — iOS (P6)
+├── policy.rs           # manifest parsing, permissions & memory limits, signature check (ed25519) — P4
+└── (a `WasmRuntime` trait extracted to split the two backends — §1)
+```
+
+Host functions are defined once in `host.rs` as plain `(context*, args…) -> result` handlers; the planned `backend_wamr.rs` will bind the same logic into WAMR native-function registration. One implementation of the sandbox, two thin shims.
 
 Key implementation points:
 
 1. **Threads**: wasmer's `Instance` is not `Sync` → **one dedicated thread per running plugin**, each with its own `Store`; a shared `Engine::new(Cranelift)` (`Clone`) avoids repeated JIT compilation. On iOS the per-plugin WAMR `wasm_runtime` is confined to its thread the same way.
-2. **Lazy loading**: the runtimes themselves are statically linked (wasmer's footprint is acceptable on desktop/Android; WAMR is a few hundred KB on iOS); a *plugin instance* is loaded + instantiated only in `AppRegistry::open()`, and destroyed on close — "not running by default" holds at the instance level.
-3. **No WASI directory pre-opens on either backend** — all I/O goes through the `x_`-namespaced host functions.
-4. Canvas handback: the plugin draws into its wasm linear memory and calls `canvas.commit(ptr, len)`; the host reads the RGBA8 out (`memory.view(&store)` on wasmer, `wasm_runtime_addr_app_func`/memory read on WAMR) and ships the frame to the UI.
-5. Limits: manifest-declared `max_memory` (wasm memory limit, enforced by each backend's config); a startup watchdog aborts an instance whose `init` exceeds the budget.
+2. **Lazy loading**: the runtimes themselves are statically linked (wasmer's footprint is acceptable on desktop/Android; WAMR is a few hundred KB on iOS); a *plugin instance* is loaded + instantiated only in `wasmhost::open()`, and destroyed on close — "not running by default" holds at the instance level.
+3. **No WASI file access on either backend** — a minimal preview1 subset only (no pre-opens, no sockets); all app I/O goes through the `x_`-namespaced host functions.
+4. Canvas handback: the plugin draws into its wasm linear memory and calls `x_frame_commit(ptr, width, height, stride)`; the host reads the RGBA8 out of linear memory (via the `memory` export on wasmer; analogous memory read on WAMR) and ships the frame to the UI. (The planned `canvas.commit` API in §2 maps onto this import.)
+5. Limits (P4): manifest-declared `max_memory` (wasm memory limit, enforced by each backend's config); a startup watchdog aborts an instance whose `init` exceeds the budget. *Not yet enforced — the P0 manifest carries `max_memory`, but enforcement lands with `policy.rs`.*
 
 ### L2 `x/appsdk` (plugin side)
 
 ```
 x/appsdk/src/
-├── lib.rs      # export entry: init / tick / destroy dispatch
+├── lib.rs      # ✓ host-import externs (`x_*`) + `with_ctx` + `poll_input` + `log`/`now_ms`; plugins export `init`/`tick`/`destroy` from their own crate
+├── ctx.rs      # ✓ `Ctx` — RGBA8 frame buffer in plugin linear memory + `Ctx::commit` → `x_frame_commit`; P1: `blit` (page rasters) + `blend_px` (text)
+├── draw.rs     # ✓ P0: 5×7 bitmap font
+├── text.rs     # ✓ P1: fontdue-backed single-line text with per-char CJK fallback (feature `text`, off by default)
+└── file.rs     # ✓ P1: `read_all()` / `name()` over the `x_file_*` host imports (64 MiB chunked read)
+```
+
+Planned modules (P3+, not yet split out):
+
+```
 ├── canvas.rs   # resize / begin / commit(ptr,len) / dirty
 ├── input.rs    # poll() -> Event {Touch, Key, Resize, ...}
-├── fs.rs       # read_all / list (host-supplied file + plugin private dir)
 ├── net.rs      # fetch(url, method, body) -> Resp (host proxies, domain allowlist)
 ├── geo.rs      # locate() -> {lat, lon, acc}
 ├── dialog.rs   # confirm / toast / pick_file(exts)
-├── text.rs     # text rasterisation: fontdue + rustybuzz + unicode-linebreak (same versions as the host)
-└── draw.rs     # rect / circle / line, image decode & blit (image crate)
+└── storage.rs  # per-plugin KV in the per-app data dir (iOS sandbox / `~/.config/chatx/plugins/<id>/`)
 ```
 
-**`text.rs` is the shared foundation for every document plugin**: the host's chat bubble compositor already runs on `fontdue + rustybuzz + unicode-linebreak`; reusing the same versions on the plugin side keeps CJK/latine layout behaviour consistent with the host UI. All five plugins render their text through it.
+**`text.rs` (shipped in P1) is the text foundation for every document plugin**: a `fontdue` (0.9) single-line rasterizer with ordered per-character fallback — the same font crate the host chat bubble compositor runs, so glyph metrics match the host UI.
 
 ### L3 Host UI integration (main repo)
 
 ```
 apps/chat/
-├── src/apphost.rs     # AppRegistry (manifest index + instance pool) / open_file / open_app / close_app
-├── ui/apphost.slint   # AppHostState global + container page (header with close button + Image canvas + status bar)
-└── ui/components/app_state.slint  # add MiniApp to SubPageType
+├── src/xhost.rs                  # ✓ entry points: `open_hello` / `close` / `push_touch` + `Frame` → `slint::Image` conversion
+├── ui/x.slint                    # ✓ `AppHost` global + full-screen `MiniAppOverlay` (title + status + Image canvas + touch area; close & minimize top-right)
+└── ui/components/app_state.slint # ✓ `GlobalOverlayType.MiniApp` — a full-screen **global overlay**, not a subpage
 ```
 
-- Frame shipping: plugin thread emits `FrameReady` → `invoke_from_event_loop` → `AppHostState.set_frame(Image::from_rgba8(...))` (same `runtime().spawn + invoke_from_event_loop` pattern already used by the host).
-- Teardown: hooked into the existing `on_pop_sub → release_popped_page()` — destroy = drop the runtime instance (wasmer `Store` / WAMR `wasm_runtime`) + join the thread; all wasm memory is released.
-- Built-in distribution: bundled into the app package on mobile; copied to `~/.config/chatx/plugins/` on first desktop start; third-party plugins are downloaded via `x-m`, land in the same directory, and are signature-checked before use.
+- **Entry (P0)**: the settings row or `CHATX_OPEN_X=hello` → `xhost::open_hello` → `wasmhost::open(...)` → the global overlay is shown.
+- Frame shipping: **pull-based** — a 16 ms `Timer` on the overlay drives `pump-mini-app()` → `take_frame()` → `AppHost.set_frame(Image)`; no `FrameReady` queue, no `invoke_from_event_loop` for frames. (P0 loads the artifact straight from the build layout `x-t/<app_id>/<ver>/app.wasm`.)
+- **Close** (top-right) = `destroy()` + drop the instance (wasmer `Store` / later WAMR `wasm_runtime`) + join the thread; all wasm memory is released.
+- **Minimize** (top-right) = clear the overlay only — the instance keeps running on its thread; re-opening re-shows the existing instance without re-`init`.
+- Built-in distribution (plan, P4): bundled into the app package on mobile; copied to `~/.config/chatx/plugins/` on first desktop start; third-party plugins are downloaded via `x-m`, land in the same directory, and are signature-checked before use.
 
-### Plugin ABI (host namespaces at a glance)
+### Plugin ABI
+
+**Shipped in P0 (verified in `hello`):**
+
+Exports — every plugin must export these from its own crate:
+
+| Function | Signature | Notes |
+|---|---|---|
+| `init` | `(width: u32, height: u32, dpr_x10: u32) -> u32` | canvas pixels + device-pixel-ratio ×10; runs on the plugin thread before the first tick; return 0 = ok |
+| `tick` | `(dt_ms: i64) -> u32` | ~60 fps cadence (16 ms target, 4 ms sleep slices); return 0 = ok |
+| `destroy` | `() -> u32` | return 0 = ok; plugin thread exits afterwards |
+
+Imports, namespace `x`:
+
+| Function | Signature | Notes |
+|---|---|---|
+| `x_log` | `(ptr: u32, len: u32) -> u32` | log line in plugin linear memory → chatx.log |
+| `x_now_ms` | `() -> i64` | host monotonic clock, ms |
+| `x_frame_commit` | `(ptr: u32, width: u32, height: u32, stride: u32) -> u32` | RGBA8 frame in plugin linear memory (row-major); host copies it out to the UI |
+| `x_input_poll` | `(kind_out, x_out, y_out, code_out: u32) -> i32` | plugin drains one queued event per call; kinds: `1` touch-down, `2` touch-move, `3` touch-up, `4/5` key-down/up, `16` resize |
+| `x_file_size` | `() -> i64` | **P1.** size in bytes of the host-supplied document; `0` = no document for this instance |
+| `x_file_read` | `(off: u64, ptr: u32, len: u32) -> i32` | **P1.** copy ≤ `len` bytes at offset `off` into plugin memory; bytes written, -1 on error |
+| `x_file_name` | `(ptr: u32, cap: u32) -> i32` | **P1.** UTF-8 document basename into plugin memory (≤ `cap`, no char split); -1 when unset |
+
+The document itself arrives through `wasmhost::open_with_file(app_id, bytes, w, h, dpr, name, file)` (P1); the host keeps one file per instance, caps it at **64 MiB** (`MAX_FILE_BYTES`), and the `file.read` manifest permission marks its use.
+
+> Fonts: the original `x_font_*` renderer-font channel (host served real faces to the pdf_oxide build) was **reverted along with pdfview**. Fonts instead come from the PDF file itself — `pdf-interpret` (pdf-rs) extracts whatever fonts the document embeds, with its `embed-fonts` feature supplying the 14 base-14 substitutes as a fallback — so no host→sandbox font channel is needed. Re-add a channel only if a CJK font-fallback case proves it out.
+
+Imports, namespace `wasi_snapshot_preview1` (hand-implemented in `wasi.rs`, minimal subset):
+
+`args_get` `args_sizes_get` `environ_get` `environ_sizes_get` `clock_res_get` `clock_time_get` `fd_close` `fd_fdstat_get` `fd_seek` `fd_write` (`fd_writev`) `proc_exit` `proc_raise` `random_get` `sched_yield` — plus the file-probe surface some renderers link: `fd_filestat_get` `fd_prestat_get` `fd_prestat_dir_name` `path_open`, all answering **ENOENT** (no host files are pre-opened). Unimplemented calls fail with errno 52 (ENOSYS).
+
+**Planned extensions** — the module-level `appsdk` surface for P1–P4 (maps onto the `x_*` imports above, e.g. `canvas.commit` = `x_frame_commit`; `text.rs` rasterisation added in P1):
 
 | Namespace | Functions | Notes |
 |---|---|---|
@@ -123,11 +174,13 @@ Manifest shape:
 }
 ```
 
+*P0 manifest (what `build_x.sh` writes to `x-t/x.hello/0.1.0/manifest.json`) already ships the first fields: `id`, `name`, `version`, `extensions`, `permissions`, `max_memory`, `sha256` — no `icon`/`sig` yet; the signature chain lands with P4 (`x/x-m` + `policy.rs`).*
+
 ## 3. The five built-in plugins
 
 | Plugin | Parsing / drawing deps (pure Rust, wasm-buildable) | Page logic |
 |---|---|---|
-| `x/pdfview` | `pdf_oxide` (pure-Rust renderer) | decode each page to a cached bitmap → canvas paging; wheel / pinch zoom |
+| `x/pdfview` | `pdf-rs` — `pdf` (parser) + `pdf-interpret` + `pdf-render` (vello_cpu pure-Rust rasterizer; **to be redone, not built**) | decode each page to a cached bitmap → canvas; **宽度适配 (width-fit)** + **高度适配 (height-fit)** modes only, tap edges or swipe to page; zoom later |
 | `x/sheetview` | `calamine` (xlsx read) | cell grid + header (draw.rs lines + text.rs text); select-and-copy export |
 | `x/docview` | `opendoc` (docx paragraphs / tables / images) | block-level flowing layout (same layout params as the host); decoded images blitted |
 | `x/pptview` | `pptx` crate (slide / shape / image tree) | per slide: background image + positioned text boxes + images; swipe to page |
@@ -136,6 +189,8 @@ Manifest shape:
 **Scope line**: only **PDF + OOXML (docx / xlsx / pptx)**. The legacy binary `.doc/.ppt/.xls` formats have no reliable pure-Rust parser, so the manifests do not declare those extensions; when unmatched, the host shows "please open with a supporting app". Games (canvas + input + `tick` driven) can be added later as additional directories on the same appsdk surface — not in the first batch.
 
 ## 4. `x/x-m` management server
+
+*(P4 — today `x/x-m/` holds only an empty crate skeleton.)*
 
 Reuses the `signaling/` stack (axum + sqlx-sqlite + tokio + tracing):
 
@@ -157,39 +212,55 @@ Signature chain: the main repo's existing `ed25519-dalek` + `sha2`; verification
 ## 5. Build pipeline (`x` → `x-t`)
 
 ```bash
-scripts/build_x.sh
-  cd x && cargo build --release --target wasm32-wasip1 -p pdfview ...   # one artifact for all platforms
-  wasm-opt -O3 → x-t/<id>/<ver>/app.wasm
-  copy assets + generate manifest.json (sha256) + ed25519 signature
-  tar → release package (for x-m upload / mobile bundling)
+scripts/build_x.sh   # ✓ shipped (P0 builds `x/hello` → x-t/x.hello/0.1.0/)
+  rustup target add wasm32-wasip1
+  cd x && cargo build --release --target wasm32-wasip1 -p <pkg>        # one artifact for all platforms
+  copy assets/ → x-t/<id>/<ver>/assets/   (if the package ships them)
+  manifest.json: id, name, version, extensions, permissions, max_memory, sha256(app.wasm)
 
-# iOS AOT (opt-in, only if interpreter throughput is insufficient for a given plugin):
+# planned:
+#   P1–P3: add the five document plugins to the built_app list
+#   P4:    + ed25519 signature (wasmhost/policy.rs) + tar release package (for x-m upload / mobile bundling)
+#   optional: wasm-opt -O3 over app.wasm
+
+# iOS AOT (P6, opt-in, only if interpreter throughput is insufficient for a given plugin):
   wamrc --target arm64 -o x-t/<id>/<ver>/app.aot app.wasm
 ```
 
-Host-side WAMR for iOS is built once in `crates/wasmhost/build.rs` (CMake, `WAMR_BUILD_JIT=0`, `arm64-apple-ios` static library).
+Host-side WAMR for iOS *(P6)* is built once in `crates/wasmhost/build.rs` (CMake, `WAMR_BUILD_JIT=0`, `arm64-apple-ios` static library).
 
 ## 6. End-to-end paths (proof of the closed loop)
 
-**Opening a PDF from a chat:**
+**P0 smoke (`x.hello`) — shipped, verified:**
+
+```
+settings row (setting.slint)  — or  CHATX_OPEN_X=hello on launch
+  → xhost::open_hello → wasmhost::open(app_id, bytes, w, h, dpr_x10)  ──spawn──► plugin thread:
+       shared Engine (Cranelift) → Module → instantiate (imports: x_* + WASI subset)
+       → init(w, h, dpr_x10)
+  overlay 16 ms Timer → pump-mini-app() → take_frame() → AppHost.set_frame(Image)     # pull
+  touch: MiniAppOverlay TouchArea → xhost::push_touch(kind, x, y) → drained by the plugin's next x_input_poll
+  minimize → clear the global overlay (the instance keeps running); re-opening re-shows the same instance
+  close → destroy() + join the thread + drop the Store                                   # all wasm memory released
+```
+
+**Opening a PDF from a chat (plan, P1):**
 
 ```
 bubble tap (chat.slint) → AppState::on_open_attachment(path)
-  → apphost::open_file → Registry resolves extension to x.pdfview
-  → AppRegistry::open(id, payload) ──spawn──► plugin thread:
-       WasmRuntime::load(x-t/pdfview/app.wasm)      # backend: wasmer (desktop/Android) or WAMR (iOS)
-       → instantiate(imports: canvas/fs/input/net…)
-       → init(w, h)
-  loop: tick()  [plugin: poll input → pdf_oxide decode → text/draw → canvas.commit]
-       → memory_read → FrameReady
-  → invoke_from_event_loop → AppHostState.frame
-  close: pop_sub → release_popped_page → Registry.close → drop Store / wasm_runtime
+  → xhost::open_file → resolve extension to x.pdfview
+  → wasmhost::open(id) ──spawn──► plugin thread:
+       wasmer Module → instantiate(imports: x_* + WASI subset)   # P6: WAMR on iOS
+       → init(w, h, dpr_x10)
+  loop: tick()  [plugin: poll input → pdf-rs decode → text/draw → canvas.commit]
+   → frame available; pulled each 16 ms tick: take_frame → AppHost.set_frame
+  close: overlay close button → destroy() + drop Store / wasm_runtime
 ```
 
-**Map location:**
+**Map location (plan, P3):**
 
 ```
-x/map calls geo.locate() → imports.rs checks policy → host asks permission
+x/map calls geo.locate() → host import checks policy → host asks permission
   (iOS CLLocation / Android Fused / desktop IP geolocation, via the net allowlist)
 → plugin computes tiles → net.fetch("https://tile.openstreetmap.org/…")
 → host proxies (allowlist + tile disk cache) → plugin decodes → canvas.commit
@@ -197,10 +268,10 @@ x/map calls geo.locate() → imports.rs checks policy → host asks permission
 
 ## 7. Security model
 
-- **Isolation**: wasm linear memory is inherently isolated; only WASI std is opened (on both backends); no directory pre-opens — all I/O goes through the `x_` host functions gated by the manifest's `permissions`.
+- **Isolation**: wasm linear memory is inherently isolated; what is opened is a minimal, hand-implemented WASI preview1 subset (args/environ/clock/`fd_write`/`fd_seek`/`proc_exit`/`random_get`/`sched_yield` — **no pre-opens, no sockets**; plus the file-probe surface plugins link — `path_open`/stat/prestat — all answering ENOENT to force bundled-font fallbacks), not the full `wasi` crate; unimplemented calls fail with errno 52 (ENOSYS). All app I/O today goes through the `x_*` host functions — including the one host-supplied document (`x_file_*`, 64 MiB cap, `file.read` manifest permission); the wider `x` namespaces of §2 will be gated by the manifest's `permissions` when they land (P4).
 - **Network**: the plugin has no sockets; `net.fetch` is host-proxied with a domain allowlist (e.g. `tile.openstreetmap.org`) and a first-use consent prompt.
-- **Limits**: manifest-declared `max_memory` (enforced per backend); a startup watchdog for `init`.
-- **Distribution**: sha256 + ed25519 signature, public key embedded in the client; only verified plugins may run.
+- **Limits** (P4): the manifest already declares `max_memory`, but enforcement (wasm memory limit per backend + a startup watchdog for `init`) lands with `policy.rs`.
+- **Distribution**: sha256 of `app.wasm` is already part of the manifest (`build_x.sh`); the ed25519 signature + public key embedded in the client is P4 — until then only built-in/`hello`-class artifacts are shipped.
 - **Compliance (iOS)**: no runtime JIT anywhere — WAMR is a bytecode interpreter; the optional AOT path is build-time machine code bundled as an ordinary static library.
 - **Known gap**: no mature fuel mechanism against CPU spinners on either backend; shipping only signed, trusted / built-in plugins is acceptable at first, with a timeout watchdog to follow.
 
@@ -208,19 +279,19 @@ x/map calls geo.locate() → imports.rs checks policy → host asks permission
 
 | Phase | Contents | Estimate |
 |---|---|---|
-| **P0** | `crates/wasmhost` (`WasmRuntime` trait + **wasmer backend** + limits) + `x/appsdk` + a `hello` smoke plugin end-to-end (desktop) | 2 days |
-| **P1** | `text.rs` layout foundation + `x/pdfview` + chat attachment entry + `MiniApp` subpage | 3–4 days |
+| **P0** ✅ shipped | `crates/wasmhost` (**wasmer backend** + `x_*` imports + WASI subset, `policy.rs` limits deferred to P4) + `x/appsdk` + `x/hello` smoke plugin end-to-end on desktop; verified headless and in the full-screen chat overlay | — |
+| **P1** | `text.rs` foundation + `x_file_*` host-document channel + chat-side document messaging send/receive + file bubbles (open flow from chat). **The `x/pdfview` viewer itself was reworked back out (pdf_oxide) and is scheduled to be redone on `pdf-rs` (宽度适配 / 高度适配) as the next step** | **shipped (viewer pending pdf-rs)** |
 | **P2** | `x/sheetview` / `x/docview` / `x/pptview` (on the shared primitives) | 3–4 days |
 | **P3** | `x/map` (allowlisted net + location source incl. iOS CLLocation + tile cache) | 3 days |
 | **P4** | `x/x-m` server + signature/distribution chain + "Discover / Mini-programs" list page | 2–3 days |
 | **P5** | Android device regression + memory / frame-rate tuning | 2 days |
-| **P6** | **iOS**: build WAMR static lib with the Apple toolchain, `backend_wamr.rs` FFI, `hello` + `x/pdfview` on device, regression; per-plugin `wamrc` AOT if interpreter throughput falls short | 3 days |
+| **P6** | **iOS**: build WAMR static lib with the Apple toolchain, `backend_wamr.rs` FFI, `hello` (+ `x/pdfview` once it lands on pdf-rs) on device, regression; per-plugin `wamrc` AOT if interpreter throughput falls short | 3 days |
 
 ## 9. Risks
 
 1. **`backend_wamr.rs` glue is ours to own**: WAMR's native-function registration, WASI preview1 configuration and the CMake cross-build on the Apple toolchain are the new-territory part of P6. Mitigation: it is one ~1k-LOC file behind the trait; wasmer's own tree shows WAMR builds for iOS are a solved problem.
 2. **Interpreter performance on iOS**: WAMR ≈ 0.3–0.6× native; one-shot document decoding is fine, game-like plugins target 30 fps. Fallback: per-plugin `wamrc` AOT (build-time, Apple-compliant).
-3. **`pdf_oxide` render quality**: complex CJK / Type3 fonts may have defects → validate with real Chinese PDFs early in P1.
+3. **`pdf-rs` render quality**: CJK coverage (the embedded base-14 set won't cover it — rely on the document's embedded/subset fonts via `pdf-interpret`) and complex Type3 fonts → validate with real Chinese PDFs early. Also confirm `pdf-render` (vello_cpu) is wasm32-wasip1 compatible before committing to it.
 4. **Pure-Rust OOXML parsing**: `calamine` / `opendoc` / `pptx` compatibility with complex templates needs per-sample regression.
-5. **wasmer major-version API churn**: pin a minor version; `backend_wasmer.rs` is the single wrapper boundary to contain it.
+5. **wasmer major-version API churn**: the root `Cargo.toml` pins `wasmer = "7.2.1"` (lockfile currently on 7.5.0); `host.rs` is the single API boundary to contain it.
 6. **Two-runtimes maintenance**: bounded by construction — plugins/UI/server/ABI are runtime-agnostic; if wasmer's stable crate ships a `wamr`/`wasmi` backend with full fidelity, `backend_wamr.rs` can be deleted (§1.2).
