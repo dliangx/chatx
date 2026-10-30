@@ -4,13 +4,12 @@ import { Glyph, Icon } from "components/icon.slint";
 
 // Backing state for the mini-app (wasm plugin) overlay. The Rust side
 // (apps/chat/src/xhost.rs) fills `frame` from `PluginInstance::take_frame()`
-// on every 16 ms `pump-mini-app` tick and flips `failed`/`status` when the
-// instance dies before first paint.
+// on every 16 ms `pump-mini-app` tick and flips `failed` when the instance
+// dies before first paint.
 export global AppHost {
     in property <image> frame;
     in property <bool> running: false;
     in property <bool> failed: false;
-    in property <string> status: "";
     // View-state the pdfview plugin reports through `x_view_state`; the pump
     // mirrors it here so the top-bar (mode icons + page counter) always
     // reflects the plugin's active page / count / mode.
@@ -36,11 +35,106 @@ export global AppHost {
     // Minimize = hide the overlay only; the instance keeps running and the
     // "open sandbox app" entry brings it back (no restart).
     callback minimize();
+    // Minimized (docked): the overlay is hidden but the instance is still
+    // running — main.slint then shows the floating dock pill (MiniAppDock)
+    // in the corner. A click on it restores the overlay; press-and-drag
+    // repositions it.
+    in property <bool> minimized: false;
+    // Dock pill position in logical px (set by MiniAppDock while dragging).
+    // Persisted on the global instead of the dock component so the
+    // user-placed position survives minimize → restore → minimize cycles
+    // (the dock component is destroyed while the overlay is shown).
+    in-out property <length> dock-x: 0px;
+    in-out property <length> dock-y: 0px;
+    // False until the user dragged the pill once: while false the dock sits
+    // at its default top-right corner.
+    in-out property <bool> dock-set: false;
+    // Dock pill clicked (a tap, not a drag): re-show the mini-app overlay.
+    callback restore();
 }
 
-// Full-screen mini-app page: one live wasm plugin (P0: x.hello) rendered as
-// a committed-frame image, with title/status top-left and minimize/close
-// controls top-right.
+// ── Minimized mini-app dock pill ──────────────────────────────────────────
+// Shown by main.slint while a mini-app is minimized: a floating 44×44 pill,
+// at the top-right corner by default. A short click (press + release within
+// ~6 px) calls AppHost.restore() to bring the overlay back; press-and-drag
+// repositions the pill anywhere inside the window (clamped to its edges).
+// The placed position is stored on AppHost so it is remembered across
+// restore cycles. `win-w`/`win-h` are the current window size, passed in by
+// main.slint (`.slint` has no `window()` accessor).
+export component MiniAppDock inherits Rectangle {
+    in property <length> win-w: 0px;
+    in property <length> win-h: 0px;
+    width: 44px;
+    height: 44px;
+    // Default slot: top-right corner with a 12 px margin. The x/y bindings
+    // clamp the stored position to the window, which also keeps a
+    // user-placed pill on-screen if the window later shrinks.
+    x: AppHost.dock-set
+        ? min(max(AppHost.dock-x, 0px), max(win-w - self.width, 0px))
+        : min(max(win-w - self.width - 12px, 0px), max(win-w - self.width, 0px));
+    y: AppHost.dock-set
+        ? min(max(AppHost.dock-y, 0px), max(win-h - self.height, 0px))
+        : 16px;
+    border-radius: 22px;
+    border-width: 1px;
+    border-color: rgba(255, 255, 255, 0.45);
+    background: rgba(16, 18, 24, 0.6);
+
+    Icon {
+        x: 11px;
+        y: 11px;
+        size: 22px;
+        glyph: Glyph.app;
+        tint: #ffffff;
+    }
+
+    ta := TouchArea {
+        width: 100%;
+        height: 100%;
+        // Position of the *pill* when the press started (so the release
+        // handler can tell a click from a drag) and the grab offset in
+        // pill coordinates (so the drag follows the pointer without
+        // jumping).
+        in-out property <length> start-x: 0px;
+        in-out property <length> start-y: 0px;
+        in-out property <length> grab-dx: 0px;
+        in-out property <length> grab-dy: 0px;
+
+        changed pressed => {
+            if ta.pressed {
+                ta.start-x = parent.x;
+                ta.start-y = parent.y;
+                ta.grab-dx = ta.mouse-x - parent.x;
+                ta.grab-dy = ta.mouse-y - parent.y;
+                return;
+            }
+            if abs(parent.x - ta.start-x) < 6px
+                && abs(parent.y - ta.start-y) < 6px {
+                // A tap → restore the overlay.
+                AppHost.restore();
+            } else {
+                // A drag → persist the final position (the pill's x/y are
+                // clamped bindings, so this is always on-screen).
+                AppHost.dock-x = parent.x;
+                AppHost.dock-y = parent.y;
+                AppHost.dock-set = true;
+            }
+        }
+        moved => {
+            if !ta.pressed {
+                return;
+            }
+            // Raw pointer position; the pill's x/y bindings clamp to the
+            // window on the fly while the drag is in progress.
+            AppHost.dock-x = ta.mouse-x - ta.grab-dx;
+            AppHost.dock-y = ta.mouse-y - ta.grab-dy;
+            AppHost.dock-set = true;
+        }
+    }
+}
+
+// Full-screen mini-app page: one live wasm plugin rendered as a
+// committed-frame image, with minimize/close controls top-right.
 export component MiniAppOverlay inherits Rectangle {
     width: 100%;
     height: 100%;
@@ -54,20 +148,6 @@ export component MiniAppOverlay inherits Rectangle {
         height: 100%;
         source: AppHost.frame;
         image-fit: contain;
-    }
-
-    // status, top-left (over the dark canvas).
-
-    Text {
-        x: 16px;
-        y: 36px;
-        width: parent.width - 32px;
-        height: 18px;
-        text: AppHost.failed ? AppHost.status
-            : AppHost.running ? AppHost.status
-            : @tr("starting…");
-        font-size: 11px;
-        color: AppHost.failed ? #e5484d : #8b95a3;
     }
 
     // Frame pump: pull the latest committed frame into the global while this
@@ -134,17 +214,8 @@ export component MiniAppOverlay inherits Rectangle {
             x: 8px;
             y: 8px;
             size: 18px;
-            glyph: Glyph.fit-height;
+            glyph: AppHost.mode == 2 ? Glyph.fit-height : Glyph.fit-width;
             tint: #ffffff;
-            visible: AppHost.mode == 2;
-        }
-        Icon {
-            x: 8px;
-            y: 8px;
-            size: 18px;
-            glyph: Glyph.fit-width;
-            tint: #ffffff;
-            visible: AppHost.mode != 2;
         }
 
         TouchArea {

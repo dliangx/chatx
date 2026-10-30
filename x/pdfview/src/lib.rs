@@ -23,6 +23,11 @@
 //!                          `VIEW_MODE_*` code, which this plugin honours
 //!   * tap left half      = previous page
 //!   * tap right half     = next page
+//!   * `EV_RESIZE`        = host window drag-resize — `x`/`y` are the new
+//!                          canvas size in **device px** (host-scaled, like
+//!                          touches); the work canvas is resized and the
+//!                          visible pages re-rendered so the frame follows
+//!                          the window aspect (no `contain` letterbox)
 //!
 //! The **toolbar** (the two mode icons + the `n/m` page counter) is owned by
 //! the app UI, not by this plugin. The plugin renders pages across the whole
@@ -37,8 +42,8 @@
 use std::cell::RefCell;
 
 use appsdk::{
-    poll_input, report_view, rgba, with_ctx, EV_KEY_DOWN, EV_SCROLL, EV_TOUCH_DOWN, EV_TOUCH_MOVE,
-    EV_TOUCH_UP, VIEW_MODE_HEIGHT, VIEW_MODE_WIDTH,
+    begin, poll_input, report_view, rgba, with_ctx, EV_KEY_DOWN, EV_RESIZE, EV_SCROLL,
+    EV_TOUCH_DOWN, EV_TOUCH_MOVE, EV_TOUCH_UP, VIEW_MODE_HEIGHT, VIEW_MODE_WIDTH,
 };
 use pdf_interpret::InterpreterSettings;
 use pdf_render::pdf_syntax::Pdf;
@@ -99,6 +104,10 @@ struct App {
     /// The `(page, page_count, mode)` triple last pushed to the host; lets
     /// [`Self::report_if_changed`] skip redundant reports on unchanged frames.
     reported: Option<(u32, u32, u32)>,
+
+    /// Signature of the last committed frame (see [`Self::frame_sig`]); lets
+    /// `compose` skip the repaint + whole-buffer commit while nothing changed.
+    last_sig: Option<(i64, i8, u32, u32)>,
 }
 
 const CACHE_MAX: usize = 8;
@@ -170,6 +179,7 @@ pub extern "C" fn init(width: u32, height: u32, dpr_x10: u32) -> i32 {
         interp: InterpreterSettings::default(),
         cache: Vec::new(),
         reported: None,
+        last_sig: None,
     };
     APP.with(|a| *a.borrow_mut() = Some(app));
     compose();
@@ -178,6 +188,9 @@ pub extern "C" fn init(width: u32, height: u32, dpr_x10: u32) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tick(_dt_ms: i64) -> i32 {
+    // Drain queued input (touch / scroll / mode / resize). `compose` below
+    // re-renders only when the visible state actually changed, so an idle
+    // overlay costs one input poll + one signature compare per tick.
     APP.with(|a| {
         if let Some(app) = a.borrow_mut().as_mut() {
             app.handle_input();
@@ -196,9 +209,22 @@ pub extern "C" fn destroy() -> i32 {
 /// Paint + commit the current frame from the thread-local app, and push the
 /// refreshed view-state (page / count / mode) to the host so the app UI's
 /// toolbar stays in sync.
+///
+/// **Idle-skip**: a commit means the host reads the *entire* RGBA buffer out
+/// of wasm linear memory and the app rebuilds its `Image` texture from it —
+/// ~1 MiB of copy per 390×800-logical canvas, 60× per second when done
+/// unconditionally, with the plugin thread burning CPU even while the overlay
+/// is minimized. Since this viewer is event-driven (no animation), the
+/// composed frame is a pure function of the signature below: when nothing
+/// changed, skip the repaint + commit entirely.
 fn compose() {
     APP.with(|a| {
         if let Some(app) = a.borrow_mut().as_mut() {
+            let sig = app.frame_sig();
+            if app.last_sig == Some(sig) {
+                return; // visible state unchanged → no repaint, no commit
+            }
+            app.last_sig = Some(sig);
             app.paint_frame();
             app.report_if_changed();
         }
@@ -364,6 +390,22 @@ impl App {
         while self.cache.len() > CACHE_MAX {
             self.cache.remove(0);
         }
+    }
+
+    /// Signature of everything that changes the committed pixels: scroll
+    /// position, view mode, and canvas size. Page rasters are immutable and
+    /// cached, so with these fixed the composed frame is bit-identical and
+    /// `compose` can skip the repaint + commit.
+    fn frame_sig(&self) -> (i64, i8, u32, u32) {
+        (
+            self.offset,
+            match self.mode {
+                Mode::Width => 0,
+                Mode::Height => 1,
+            },
+            self.canvas_w,
+            self.canvas_h,
+        )
     }
 
     /// Compose + commit the current frame: background, visible page(s), HUD.
@@ -535,6 +577,25 @@ impl App {
                     }
                     let dy = ev.y as i64;
                     self.offset = (self.offset - dy).clamp(0, self.max_offset());
+                }
+                // Host window drag-resize (the UI pump forwards `EV_RESIZE`):
+                // `x`/`y` = the new canvas size in **device px** (the host
+                // already scaled logical → device, same as touch). Resize the
+                // work canvas (reallocate the frame buffer), drop the rasters
+                // (sized for the old canvas), keep the reader at the same
+                // position, then re-render (the frame signature changes, so
+                // the next `compose` paints + commits fresh).
+                EV_RESIZE => {
+                    let w = ev.x.max(1) as u32;
+                    let h = ev.y.max(1) as u32;
+                    if w != self.canvas_w || h != self.canvas_h {
+                        self.canvas_w = w;
+                        self.canvas_h = h;
+                        begin(w, h, self.dpr);
+                        self.cache.clear();
+                        self.offset = self.offset.clamp(0, self.max_offset());
+                        self.reported = None;
+                    }
                 }
                 // The app UI's toolbar sends a mode-switch command through the
                 // input channel as a key event whose `code` is a `VIEW_MODE_*`.

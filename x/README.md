@@ -107,7 +107,7 @@ Planned modules (P3+, not yet split out):
 ```
 apps/chat/
 ├── src/xhost.rs                  # ✓ entry points: `open_hello` / `close` / `push_touch` + `Frame` → `slint::Image` conversion
-├── ui/x.slint                    # ✓ `AppHost` global + full-screen `MiniAppOverlay` (title + status + Image canvas + touch area; close & minimize top-right)
+├── ui/x.slint                    # ✓ `AppHost` global + full-screen `MiniAppOverlay` (Image canvas + touch area + toolbar; close & minimize top-right)
 └── ui/components/app_state.slint # ✓ `GlobalOverlayType.MiniApp` — a full-screen **global overlay**, not a subpage
 ```
 

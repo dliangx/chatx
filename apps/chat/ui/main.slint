@@ -5,7 +5,7 @@ import { MeView } from "me/me.slint";
 import { BottomNavBar } from "components/bottom_nav.slint";
 import { LeftNavBar } from "components/left_nav.slint";
 import { SubPageView } from "./subpage.slint";
-import { AppHost, MiniAppOverlay } from "./x.slint";
+import { AppHost, MiniAppDock, MiniAppOverlay } from "./x.slint";
 export { AppHost } from "./x.slint";
 import { AuthView } from "components/auth.slint";
 import { Theme } from "./theme.slint";
@@ -242,6 +242,12 @@ export component MainWindow inherits Window {
     if AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu: AddMenuView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.Error: ErrorView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.MiniApp: MiniAppOverlay { }
+    // Minimized mini-app dock pill (top-right): only visible while the
+    // mini-app is docked — instance alive, overlay hidden. Tap to restore,
+    // press-and-drag to move (see MiniAppDock in ui/x.slint).
+    if AppHost.minimized
+        && AppState.nav-state.global-overlay == GlobalOverlayType.None:
+        MiniAppDock { win-w: root.width; win-h: root.height; }
 
     // Pending-device banner: this device must be approved before sending.
     if root.logged-in && !AppState.device-approved && pop-state:

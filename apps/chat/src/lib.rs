@@ -663,39 +663,60 @@ pub fn run_app() {
                 open_mini_app_page(&ui);
             }
         });
-        state.on_pump_mini_app(move || {
-            let Some(ui) = w2.upgrade() else { return };
-            let Some(inst) = xhost::current() else {
-                ui.global::<AppHost>().set_running(false);
-                return;
-            };
-            let ah = ui.global::<AppHost>();
-            // Mirror the plugin's freshest view-state (page / count / mode) into
-            // the toolbar. The pump reads it non-destructively, so this is cheap
-            // and always stays in sync with what the plugin is showing.
-            if let Some(vs) = inst.view_state() {
-                ah.set_page(vs.page);
-                ah.set_page_count(vs.page_count as i32);
-                ah.set_mode(vs.mode as i32);
-            }
-            if inst.settled() {
-                // Last chance to pick up a frame committed right before exit.
+        {
+            // Track the last window size forwarded to the live plugin so a
+            // drag-resize only pushes one EV_RESIZE per actual size change.
+            let last_size = std::cell::Cell::new((0u32, 0u32));
+            state.on_pump_mini_app(move || {
+                let Some(ui) = w2.upgrade() else { return };
+                let Some(inst) = xhost::current() else {
+                    ui.global::<AppHost>().set_running(false);
+                    return;
+                };
+                let ah = ui.global::<AppHost>();
+                if inst.settled() {
+                    // Last chance to pick up a frame committed right before exit.
+                    if let Some(f) = inst.take_frame() {
+                        ah.set_frame(xhost::frame_image(&f));
+                    }
+                    if !ah.get_failed() {
+                        ah.set_failed(true);
+                    }
+                    return;
+                }
+                // Forward window resizes to the plugin canvas: it re-creates
+                // its work area at the new size and re-renders, so the
+                // committed frame follows the window aspect instead of the
+                // `contain`-scaled letterbox (the black edge bands).
+                let sf = ui.window().scale_factor().max(1.0);
+                let phys = ui.window().size();
+                let cw = ((phys.width as f32) / sf).max(240.0).round() as u32;
+                let ch = ((phys.height as f32) / sf).max(240.0).round() as u32;
+                if last_size.get() != (cw, ch) {
+                    last_size.set((cw, ch));
+                    xhost::push_resize(cw, ch);
+                }
+                // Mirror the plugin's freshest view-state (page / count / mode)
+                // into the toolbar. The pump reads it non-destructively, so
+                // this is cheap and always stays in sync with what the plugin
+                // is showing. Setters are equality-guarded so an unchanged
+                // value never invalidates the widget tree on idle ticks.
+                if let Some(vs) = inst.view_state() {
+                    if ah.get_page() != vs.page {
+                        ah.set_page(vs.page);
+                    }
+                    if ah.get_page_count() != vs.page_count as i32 {
+                        ah.set_page_count(vs.page_count as i32);
+                    }
+                    if ah.get_mode() != vs.mode as i32 {
+                        ah.set_mode(vs.mode as i32);
+                    }
+                }
                 if let Some(f) = inst.take_frame() {
                     ah.set_frame(xhost::frame_image(&f));
                 }
-                if !ah.get_failed() {
-                    ah.set_failed(true);
-                    ah.set_status(xhost::error_status(&inst));
-                }
-                return;
-            }
-            if let Some(f) = inst.take_frame() {
-                ah.set_frame(xhost::frame_image(&f));
-                if ah.get_status().as_str() == "starting…" {
-                    ah.set_status(SharedString::from("x.hello · running"));
-                }
-            }
-        });
+            });
+        }
         ui.global::<AppHost>().on_touch(move |kind, x, y| {
             xhost::push_touch(kind, x, y);
         });
@@ -720,16 +741,46 @@ pub fn run_app() {
                 tracing::info!("[x] x.hello: closed from overlay");
             }
             if let Some(ui) = wc.upgrade() {
+                ui.global::<AppHost>().set_minimized(false);
                 clear_global_overlay(&ui);
             }
         });
         let wm = weak.clone();
         ui.global::<AppHost>().on_minimize(move || {
             // Hide the overlay only — the instance keeps running; the
-            // "open sandbox app" entry re-shows it without a restart.
-            if let Some(ui) = wm.upgrade() {
-                clear_global_overlay(&ui);
+            // floating dock pill (MiniAppDock, top-right) then stays behind
+            // and its tap re-shows the overlay without a restart.
+            let Some(ui) = wm.upgrade() else { return };
+            ui.global::<AppHost>().set_minimized(true);
+            clear_global_overlay(&ui);
+        });
+        let wr = weak.clone();
+        ui.global::<AppHost>().on_restore(move || {
+            let Some(ui) = wr.upgrade() else { return };
+            let ah = ui.global::<AppHost>();
+            match xhost::current() {
+                // Instance gone or already settled (a plugin can exit of its
+                // own while docked): don't resurrect a dead overlay — tear
+                // down like a close and hide the dock.
+                None => {
+                    ah.set_minimized(false);
+                    xhost::close();
+                    tracing::warn!("[x] restore: no live instance — cleaned up dock");
+                    return;
+                }
+                Some(inst) if inst.settled() => {
+                    ah.set_minimized(false);
+                    xhost::close();
+                    tracing::warn!("[x] restore: instance settled — cleaned up dock");
+                    return;
+                }
+                Some(_) => {}
             }
+            ah.set_minimized(false);
+            let mut nav = ui.global::<AppState>().get_nav_state();
+            nav.global_overlay = GlobalOverlayType::MiniApp;
+            ui.global::<AppState>().set_nav_state(nav);
+            tracing::info!("[x] restored mini-app from dock");
         });
     }
 
@@ -1799,6 +1850,9 @@ fn open_mini_app_page(ui: &MainWindow) {
     let ch = ((phys.height as f32) / sf).max(240.0).round() as u32;
     let dpr_x10 = (sf * 10.0).round() as u32;
     let ah = ui.global::<AppHost>();
+    // Re-opening a docked mini-app re-shows the overlay (the instance is
+    // kept), so leave the docked state behind.
+    ah.set_minimized(false);
     let err = match xhost::open_hello(cw, ch, dpr_x10) {
         Ok(()) => {
             ah.set_failed(false);
@@ -1806,16 +1860,13 @@ fn open_mini_app_page(ui: &MainWindow) {
             None
         }
         Err(msg) => {
+            tracing::warn!("[x] x.hello open failed: {msg}");
             ah.set_failed(true);
             Some(msg)
         }
     };
-    match err {
-        None => {
-            ah.set_frame(slint::Image::default());
-            ah.set_status(SharedString::from("starting…"));
-        }
-        Some(msg) => ah.set_status(SharedString::from(msg)),
+    if err.is_none() {
+        ah.set_frame(slint::Image::default());
     }
     let mut nav = state.get_nav_state();
     nav.global_overlay = GlobalOverlayType::MiniApp;
@@ -3145,20 +3196,22 @@ fn open_chat_file_from_index(weak: slint::Weak<MainWindow>, idx: i32) {
             let ch = ((phys.height as f32) / sf).max(240.0).round() as u32;
             let dpr_x10 = (sf * 10.0).round() as u32;
             let ah = ui.global::<AppHost>();
+            // Re-opening a docked mini-app re-shows the overlay (the
+            // instance is kept), so leave the docked state behind.
+            ah.set_minimized(false);
             let result = xhost::open_pdf_file(cw, ch, dpr_x10, std::path::Path::new(&file_path));
             match result {
                 Ok(()) => {
                     ah.set_failed(false);
                     ah.set_running(true);
                     ah.set_frame(slint::Image::default());
-                    ah.set_status(SharedString::from("starting…"));
                     let mut nav = ui.global::<AppState>().get_nav_state();
                     nav.global_overlay = GlobalOverlayType::MiniApp;
                     ui.global::<AppState>().set_nav_state(nav);
                 }
                 Err(msg) => {
+                    tracing::warn!("[chat-file] open PDF failed: {msg}");
                     ah.set_failed(true);
-                    ah.set_status(SharedString::from(msg));
                     let mut nav = ui.global::<AppState>().get_nav_state();
                     nav.global_overlay = GlobalOverlayType::MiniApp;
                     ui.global::<AppState>().set_nav_state(nav);

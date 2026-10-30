@@ -1,6 +1,6 @@
 //! X mini-app (wasm sandbox) bridge for the chat UI.
 //!
-//! Owns at most one live `wasmhost::PluginInstance` at a time (P0: x.hello).
+//! Owns at most one live `wasmhost::PluginInstance` at a time.
 //! The page side (`ui/x.slint`) polls `pump-mini-app` on a 16 ms timer;
 //! each pump pulls the latest committed frame out of the sandbox and sets it
 //! onto the `AppHost` global. Popping the page drives `close()`.
@@ -8,9 +8,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use slint::SharedString;
-
-use wasmhost::{InputEvent, PluginInstance, EV_KEY_DOWN};
+use wasmhost::{InputEvent, PluginInstance, EV_KEY_DOWN, EV_RESIZE};
 
 static INST: LazyLock<Mutex<Option<Arc<PluginInstance>>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -155,6 +153,20 @@ pub fn push_mode(mode: i32) {
     }
 }
 
+/// Tell the live plugin its canvas changed (window drag-resize): forwards an
+/// `EV_RESIZE` whose `x`/`y` are the new **logical** canvas size scaled to
+/// device px (the same convention as `push_touch`; the plugin resizes its
+/// work canvas and re-renders, so the committed frame follows the window
+/// aspect instead of letterboxing).
+pub fn push_resize(logical_width: u32, logical_height: u32) {
+    if let Some(inst) = current() {
+        let s = *DPR.lock().unwrap();
+        let w = ((logical_width as f32) * s).round() as i32;
+        let h = ((logical_height as f32) * s).round() as i32;
+        inst.push_input(InputEvent::new(EV_RESIZE, w, h, 0));
+    }
+}
+
 /// Shut the plugin down (idempotent) and drop the handle.
 pub fn close() {
     if let Some(inst) = INST.lock().unwrap().take() {
@@ -173,12 +185,4 @@ pub fn frame_image(f: &wasmhost::Frame) -> slint::Image {
     let l = (n * 4).min(f.rgba.len()).min(dst.len());
     dst[..l].copy_from_slice(&f.rgba[..l]);
     slint::Image::from_rgba8(buf)
-}
-
-/// Refresh status line / error state after a settle (called from the pump).
-pub fn error_status(inst: &PluginInstance) -> SharedString {
-    match inst.settled_error() {
-        Some(msg) => SharedString::from(msg),
-        None => SharedString::from("plugin exited"),
-    }
 }

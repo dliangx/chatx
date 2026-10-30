@@ -81,8 +81,38 @@ pub extern "C" fn tick(dt_ms: i64) -> i32 {
     if let Some((bx, by, size, ticks)) = snap {
         draw_frame(bx, by, size, ticks, w, h);
     }
-    // Drain (and ignore) pushed input events so the host queue stays bounded.
-    while appsdk::poll_input().is_some() {}
+    // Drain pushed input (the host forwards window drag-resizes as
+    // `EV_RESIZE`): resize the canvas buffer to the new window size and
+    // re-draw, so the demo fills the window like pdfview does and never
+    // letterboxes.
+    let mut resized = false;
+    while let Some(ev) = appsdk::poll_input() {
+        if ev.kind == appsdk::EV_RESIZE {
+            let w = ev.x.max(1) as u32;
+            let h = ev.y.max(1) as u32;
+            let cur = canvas_wh();
+            if w as f32 != cur.0 || h as f32 != cur.1 {
+                let dpr = with_ctx(|ctx| ctx.dpr).unwrap_or(1.0);
+                appsdk::begin(w, h, dpr);
+                resized = true;
+            }
+        }
+    }
+    if resized {
+        let (w, h) = canvas_wh();
+        let size = (w.min(h) * 0.09).max(32.0);
+        let snap = APP.with(|a| {
+            let mut guard = a.borrow_mut();
+            let app = guard.as_mut()?;
+            // Keep the box inside the (possibly smaller) new canvas.
+            app.box_x = app.box_x.clamp(8.0, (w - size - 8.0).max(8.0));
+            app.box_y = app.box_y.clamp(90.0, (h - size - 56.0).max(90.0));
+            Some((app.box_x, app.box_y, size, app.ticks))
+        });
+        if let Some((bx, by, size, ticks)) = snap {
+            draw_frame(bx, by, size, ticks, w, h);
+        }
+    }
     0
 }
 

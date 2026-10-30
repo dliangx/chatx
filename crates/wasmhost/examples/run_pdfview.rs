@@ -106,6 +106,26 @@ fn main() {
     }
     eprintln!("ok: top rows are light content, no reserved plugin toolbar: {top_rows:?}");
 
+    // Idle check (CPU regression): with an empty input queue and a static
+    // document, the plugin commits a frame **only when the visible state
+    // changed** — so a settled idle stretch must produce *no* new frames.
+    // The old render-every-tick behaviour returned the ~11 MB frame 60 times
+    // per second regardless, which is exactly the "high CPU at rest" bug.
+    let idle_deadline = Instant::now() + Duration::from_millis(400);
+    let mut idle_commit = false;
+    while Instant::now() < idle_deadline {
+        if inst.take_frame().is_some() {
+            idle_commit = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if idle_commit {
+        eprintln!("FAIL: plugin committed a frame while idle (no input since the first frame)");
+        std::process::exit(1);
+    }
+    eprintln!("ok: 400 ms idle → zero committed frames (commit-on-change; idle CPU ≈ 0)");
+
     // --- exercise the interaction paths (all coordinates in device px) ---
     // The plugin canvas is {width}×{height} logical × dpr3 → 1170×2400 device.
     let cw = width * 3;
@@ -122,7 +142,7 @@ fn main() {
     expect_view(&inst, wasmhost::VIEW_MODE_WIDTH, Some(1), "first frame → width-fit, page 1");
     // 2) Content-area taps page-flip horizontally: right half → next page,
     //    left half → previous page.
-    click(&inst, ((cw * 3) / 4) as i32, (chh / 2) as i32);
+    click(&inst, (3 * cw / 4) as i32, (chh / 2) as i32);
     step_frame(&inst, "tap right half → next page");
     expect_view(&inst, wasmhost::VIEW_MODE_WIDTH, Some(2), "page down → page 2");
     click(&inst, (cw / 4) as i32, (chh / 2) as i32);
@@ -132,10 +152,14 @@ fn main() {
     inst.push_input(set_height);
     let height_fit = step_frame(&inst, "EV_KEY_DOWN(height) → height-fit");
     expect_view(&inst, wasmhost::VIEW_MODE_HEIGHT, Some(1), "height-fit view-state");
-    // 4) Drag + release in Height mode → settle on the nearest full page.
-    drag(&inst, (cw / 2) as i32, (chh / 4) as i32, ((chh * 3) / 4) as i32);
+    // 4) Drag + release in Height mode: finger up scroll-past half a page,
+    //    release settles on the nearest full page (offset ≈ half a page →
+    //    rounds to page 2, "整页吸顶"). Dragging the *other* way from page 1
+    //    can't move the content (already at the top) and the plugin rightly
+    //    commits nothing — commit-on-change, the idle-CPU fix.
+    drag(&inst, (cw / 2) as i32, ((chh * 3) / 4) as i32, (chh / 4) as i32);
     step_frame(&inst, "height-fit drag + release → snap");
-    expect_view(&inst, wasmhost::VIEW_MODE_HEIGHT, None, "snapped page still height-fit");
+    expect_view(&inst, wasmhost::VIEW_MODE_HEIGHT, Some(2), "snapped page still height-fit");
     // 5) Back to Width-fit (the UI's Fit-Width pill) and drag-scroll inside it.
     inst.push_input(set_width);
     step_frame(&inst, "EV_KEY_DOWN(width) → width-fit");
@@ -150,9 +174,35 @@ fn main() {
     inst.push_input(wasmhost::InputEvent::new(wasmhost::EV_SCROLL, 0, -(chh as i32 / 2), 0));
     step_frame(&inst, "EV_SCROLL(dy=-half canvas) → wheel down");
     expect_view(&inst, wasmhost::VIEW_MODE_WIDTH, Some(2), "wheel down → page 2");
-    inst.push_input(wasmhost::InputEvent::new(wasmhost::EV_SCROLL, 0, chh as i32 / 2, 0));
-    step_frame(&inst, "EV_SCROLL(dy=+half canvas) → wheel up");
+    // 7) Back to page 1 with a wheel up-scroll: a 3/4-canvas delta always
+    //    clamps the offset to the top, so the assertion doesn't depend on the
+    //    fixture's page aspect ratio (a half-canvas delta could land exactly
+    //    on a page boundary, which reports the page *below* it by design).
+    inst.push_input(wasmhost::InputEvent::new(wasmhost::EV_SCROLL, 0, (3 * chh) as i32 / 4, 0));
+    step_frame(&inst, "EV_SCROLL(dy=+¾ canvas) → wheel up");
     expect_view(&inst, wasmhost::VIEW_MODE_WIDTH, Some(1), "wheel up → page 1");
+
+    // 8) Window drag-resize (the chat UI's pump forwards `EV_RESIZE`): the
+    //    plugin re-creates its work canvas at the new size and re-renders;
+    //    the committed frame must *follow the new size* (a stale-size frame
+    //    letterboxes into the black edge bands the user reported).
+    let (rw, rh) = (900u32, 1200u32); // arbitrary new size, device px
+    inst.push_input(wasmhost::InputEvent::new(wasmhost::EV_RESIZE, rw as i32, rh as i32, 0));
+    let resized = step_frame(&inst, "EV_RESIZE → canvas re-render");
+    assert_eq!(
+        (resized.width, resized.height),
+        (rw, rh),
+        "committed frame must follow the new canvas size"
+    );
+    expect_view(&inst, wasmhost::VIEW_MODE_WIDTH, Some(1), "still page 1 after resize");
+    // Restore the original canvas; the frame follows it back (no stale size).
+    inst.push_input(wasmhost::InputEvent::new(wasmhost::EV_RESIZE, cw as i32, chh as i32, 0));
+    let restored = step_frame(&inst, "EV_RESIZE → back to original canvas");
+    assert_eq!(
+        (restored.width, restored.height),
+        (cw, chh),
+        "committed frame must follow the restored canvas size"
+    );
 
     // Save as P6 PPM (RGB, alpha dropped) for direct visual inspection.
     let out = repo_root().join(format!("x_pdfview_smoke_{}x{}.ppm", f.width, f.height));

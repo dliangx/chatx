@@ -51,7 +51,8 @@ pub const EV_KEY_UP: i32 = 5;
 /// positive = scrolled back up — the same sign convention Slint's own
 /// `scroll-event` / ScrollView / TabWidget use. Mirrored in `appsdk`.
 pub const EV_SCROLL: i32 = 6;
-pub const EV_RESIZE: i32 = 16; // `x`/`y` = new width/height in canvas px
+pub const EV_RESIZE: i32 = 16; // `x`/`y` = new canvas size in device px (host
+                               // scales window-logical → device, same as touch)
 
 /// View-mode codes shared by the host (command → plugin via `EV_KEY_DOWN.code`,
 /// and out of the plugin via `ViewState.mode`). The plugin (in the `x/`
