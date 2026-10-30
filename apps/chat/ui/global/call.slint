@@ -487,8 +487,6 @@ export component CallView inherits Rectangle {
         color: #ff8080;
     }
 
-
-
     // ── MINIMIZED WIDGET (draggable, floating over the main UI) ─────
     // A compact card: video thumbnail (left) + peer name (top-right) and
     // MAXIMIZE / END stacked vertically (bottom-right). Drag the card body
@@ -499,7 +497,8 @@ export component CallView inherits Rectangle {
         width: 172px;
         height: 112px;
         border-radius: 16px;
-        background: #2a3340;
+        border-color: rgba(255, 255, 255, 0.45);
+        background: rgba(16, 18, 24, 0.6);
         clip: true;
         z: 5;
         visible: CallState.minimized;
@@ -569,7 +568,8 @@ export component CallView inherits Rectangle {
             width: 30px;
             height: 30px;
             border-radius: 15px;
-            background: #3a4452;
+            border-color: rgba(255, 255, 255, 0.45);
+            background: rgba(16, 18, 24, 0.6);
             Icon {
                 x: 6px;
                 y: 6px;
