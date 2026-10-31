@@ -160,15 +160,12 @@ mod stub {
     pub fn cancel() {}
 }
 
-/// Install the callback that receives the file-picker selection:
-/// `Some(path)` on pick, `None` when the user cancelled / nothing was picked.
+/// Install the callback that receives the file-picker selection: `Some(path)` on pick, `None` when the user cancelled / nothing was picked.
 pub fn set_file_sink<F: Fn(Option<String>) + Send + 'static>(sink: F) {
     backend::set_file_sink(sink)
 }
 
-/// Open the system file picker for a single file. Returns `Err` only if the
-/// picker could not be presented — the user's selection is delivered
-/// asynchronously to the installed sink.
+/// Open the system file picker for a single file; `Err` only if it could not be presented — the selection is delivered asynchronously to the installed sink.
 pub fn pick_file() -> Result<(), String> {
     backend::pick_file()
 }

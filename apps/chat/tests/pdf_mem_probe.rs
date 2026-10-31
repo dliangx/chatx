@@ -10,8 +10,7 @@ fn rss_mb() -> u64 {
     s.trim().parse::<u64>().unwrap_or(u64::MAX) / 1024
 }
 
-/// Build an N-page PDF (612×792 pages, a couple of text lines each) with a
-/// valid xref table — the same shape as the user's ~300 kB text document.
+/// Build an N-page PDF (612×792 pages, a few text lines each) with a valid xref table.
 fn make_pdf(path: &std::path::Path, pages: u32) {
     let kids: Vec<String> = (0..pages).map(|i| format!("{} 0 R", 4 + i * 2)).collect();
     let pages_obj = format!("/Kids [{}] /Count {}", kids.join(" "), pages);
@@ -56,8 +55,7 @@ fn make_pdf(path: &std::path::Path, pages: u32) {
     std::fs::write(path, out).expect("write test pdf");
 }
 
-/// Mirror `lib.rs` pump: tick; on a commit, the new canvas frame *replaces*
-/// the previous one (exactly what `PdfHost.frame` holds in the app).
+/// Mirror `lib.rs`'s pump: on a commit, the new canvas frame replaces the previous one (as on `PdfHost.frame`).
 fn pump_tick(frame: &mut Option<slint::Image>) {
     if let Some(t) = chatx::pdfrs::tick() {
         if let chatx::pdfrs::Tick::Commit(c) = t {
@@ -76,17 +74,14 @@ fn cycle(path: &str, w: u32, h: u32, frame: &mut Option<slint::Image>) -> (u64, 
         pump_tick(frame);
         peak = peak.max(rss_mb());
     }
-    // What the app's on_close does, in the same order: teardown the viewer,
-    // drop the committed frame.
+    // Mirror on_close: teardown the viewer, then drop the committed frame.
     *frame = None;
     chatx::pdfrs::close();
     std::thread::sleep(std::time::Duration::from_millis(400));
     (peak, rss_mb())
 }
 
-/// Full lifecycle at the standard test canvas (1600×1000 logical @ dpr 2 →
-/// ~25 MB committed frames, ~50 MB page rasters), twice, to prove no
-/// per-cycle accumulation.
+/// Full lifecycle at 1600×1000 @ dpr 2, run twice — cycle 2 must not accumulate over cycle 1.
 #[test]
 fn pdf_memory_lifecycle() {
     if std::env::var_os("CHATX_MEM_PROBE").is_none() {
@@ -113,17 +108,14 @@ fn pdf_memory_lifecycle() {
         after2.saturating_sub(after1)
     );
 
-    // No per-cycle stacking: identical cycle 2 must not retain more than
-    // cycle 1 did (a true leak would grow RSS each cycle).
+    // No per-cycle stacking: an identical cycle 2 must not retain more RSS (a leak would grow each cycle).
     assert!(
         after2.saturating_sub(after1) < 150,
         "cycle 2 retained another {after2} MB over cycle 1's {after1} MB — accumulating leak"
     );
 }
 
-/// Same lifecycle at a real full-screen Retina window (16″-class MBP:
-/// 1720×1100 logical @ dpr 2 → ~30 MB frames, ~58 MB page rasters) — closest
-/// probe to the user's "maximize + close" scenario.
+/// Same lifecycle at a full-screen Retina window (1720×1100 @ dpr 2) — closest to "maximize + close".
 #[test]
 fn pdf_memory_lifecycle_fullscreen() {
     if std::env::var_os("CHATX_MEM_PROBE").is_none() {
@@ -143,18 +135,14 @@ fn pdf_memory_lifecycle_fullscreen() {
         "fullscreen rss: baseline={baseline} MB | scroll-peak={peak} MB | after-close={after} MB",
     );
 
-    // The whole live working set (render cache + one committed frame + one
-    // texture) must stay bounded well under the old 3-image design (~640 MB
-    // here; ~1.7 GB at this size with the unbounded page caches).
+    // The whole working set (render cache + one committed frame) stays well under the old 3-image design (~640 MB).
     assert!(
         peak.saturating_sub(baseline) < 600,
         "scroll peak grew {peak} MB over the {baseline} MB baseline at full-screen size"
     );
 }
 
-/// DECISIVE: is the retained RAM truly referenced (leak) or freed-but-reusable?
-/// Re-build an identical working set after close: a true leak makes it grow,
-/// reusable freed RAM keeps RSS flat.
+/// Decisive: is retained RAM a true leak or freed-but-reusable — an identical cycle 2 must not grow RSS.
 #[test]
 fn pdf_memory_reuse_after_close() {
     if std::env::var_os("CHATX_MEM_PROBE").is_none() {

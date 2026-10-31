@@ -1426,11 +1426,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         anyhow::bail!("failed to deliver to {peer_base58}: {last_err}");
     }
 
-    /// Send a document file (pdf/docx/xlsx/pptx) to `peer_base58` over the DM
-    /// channel and wait for the peer's ack. `name` is the sender's basename
-    /// (shown on the receiver's file bubble); the caller writes `data` to a
-    /// local path first and calls [`Self::persist_file`] after a successful
-    /// ack (mirroring `send_image_cmd` + `persist_image`).
+    /// Send a document file (pdf/docx/xlsx/pptx) to `peer_base58` over the DM channel and wait for the peer's ack; the caller writes `data` locally first and calls [`Self::persist_file`] after ack (mirrors `send_image_cmd` + `persist_image`).
     pub async fn send_file_cmd(
         &self,
         peer_base58: &str,
@@ -1937,9 +1933,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             group::GroupMsgKind::File { name } => {
                 let dir = home.join("files");
                 std::fs::create_dir_all(&dir)?;
-                // Sanitize the sender's basename (path separators / control
-                // chars / Windows-invalid chars) but keep the extension —
-                // viewers detect the format by suffix.
+                // Sanitize the sender's basename (path separators / control / Windows-invalid chars) but keep the extension — viewers detect the format by suffix.
                 let base = name.rsplit(['/', '\\', '\0']).next().unwrap_or(name).trim();
                 let (stem_raw, ext) = match base.rfind('.') {
                     Some(i) if i > 0 => (&base[..i], base[i..].to_string()),

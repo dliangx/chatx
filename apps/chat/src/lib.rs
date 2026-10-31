@@ -697,9 +697,7 @@ pub fn run_app() {
     {
         let w_open = weak.clone();
         state.on_open_pdf(move || {
-            // Install the picker sink for this request, then present it. The
-            // sink fires on a background thread, so hop onto the UI loop to
-            // open the viewer (which reads the window size / scale factor).
+            // Install the per-request picker sink, then present it; the sink fires on a background thread, so hop to the UI loop to open the viewer (reads window size/sf).
             let weak_outer = w_open.clone();
             camera::filepick::set_file_sink(move |sel: Option<String>| {
                 let Some(path) = sel else {
@@ -724,15 +722,13 @@ pub fn run_app() {
 
         {
             let w_pump = weak.clone();
-            // Track the window size last forwarded to the viewer, so a drag-resize
-            // pushes one `resize` per actual change (not every 16 ms tick).
+            // Track the last window size forwarded, so a drag-resize pushes one resize per real change (not per 16ms tick).
             let last_size = std::cell::Cell::new((0u32, 0u32));
             state.on_pump_pdf(move || {
                 let Some(ui) = w_pump.upgrade() else {
                     return;
                 };
-                // Forward a real window drag-resize (device px); the viewer
-                // invalidates its rasters and re-commits a frame next tick.
+                // Forward a real window drag-resize (device px); the viewer re-invalidates its rasters and re-commits next tick.
                 let phys = ui.window().size();
                 let dw = (phys.width as f32).max(240.0).round() as u32;
                 let dh = (phys.height as f32).max(240.0).round() as u32;
@@ -747,8 +743,7 @@ pub fn run_app() {
                 match t {
                     pdfrs::Tick::Unchanged => {}
                     pdfrs::Tick::Commit(c) => {
-                        // One committed canvas frame replaces the previous one;
-                        // the old image (and its GPU texture) is released with it.
+                        // One committed frame replaces the previous one; the old image (and its GPU texture) is released with it.
                         ph.set_frame(c.img);
                         ph.set_page(c.page);
                         ph.set_page_count(c.page_count);
@@ -779,8 +774,7 @@ pub fn run_app() {
         });
         let close_weak = weak.clone();
         ui.global::<PdfHost>().on_close(move || {
-            // Full teardown: destroy the viewer (releases its parsed doc +
-            // render cache), then drop the committed frame the UI holds.
+            // Full teardown: destroy the viewer (parsed doc + render cache), then drop the committed frame the UI holds.
             let had = pdfrs::is_open();
             pdfrs::close();
             if had {
@@ -802,19 +796,14 @@ pub fn run_app() {
         });
         let min_weak = weak.clone();
         ui.global::<PdfHost>().on_minimize(move || {
-            // Hide the overlay only — the viewer stays live; the dock pill
-            // (top-right) stays behind and tapping it re-shows the overlay
-            // without a restart.
+            // Hide the overlay only — the viewer stays live; tapping the dock pill re-shows it without a restart.
             let Some(ui) = min_weak.upgrade() else { return };
             ui.global::<PdfHost>().set_minimized(true);
             clear_global_overlay(&ui);
         });
         let restore_weak = weak.clone();
         ui.global::<PdfHost>().on_restore(move || {
-            // Re-show the overlay. If the instance is somehow gone (shouldn't
-            // happen — only our close tears it down, which also hides the
-            // dock), fall back to cleaning the dock up instead of reviving a
-            // dead viewer.
+            // Re-show the overlay; if the instance is somehow gone (only our close tears it down, which also hides the dock), clean up the dock instead of reviving a dead viewer.
             let Some(ui) = restore_weak.upgrade() else {
                 return;
             };
@@ -1844,9 +1833,7 @@ pub fn run_app() {
         });
     }
 
-    // Debug hook: CHATX_OPEN_PDF=/path/to/doc.pdf opens the native PDF viewer
-    // on launch (verifies in-app rendering without the file picker). Ignored
-    // when not logged in or the path does not exist.
+    // Debug hook: CHATX_OPEN_PDF=/path opens the native PDF viewer on launch (ignored when not logged in or the path does not exist).
     if let Ok(pdf_path) = std::env::var("CHATX_OPEN_PDF") {
         if !std::path::Path::new(&pdf_path).exists() {
             tracing::warn!("[pdf] CHATX_OPEN_PDF: path missing: {pdf_path}");
@@ -1932,11 +1919,7 @@ fn open_mini_app_page(ui: &MainWindow) {
 
 /// Hide the global overlay (set to None). Used by the mini-app close/
 /// minimize controls.
-/// Open the native PDF viewer (crates/pdf, no wasm) as a full-screen global
-/// overlay on the document at `path`. Canvas = the chat window's logical size;
-/// the frame is rendered at its device resolution (× scale factor) so page
-/// pixels land 1:1 on physical pixels. Re-opening after a minimize is a no-op
-/// for the instance and just re-shows the overlay.
+/// Open the native PDF viewer (crates/pdf, no wasm) as a full-screen overlay on `path`: canvas = window logical size, frame rendered at device px (1:1); re-opening after a minimize just re-shows the overlay.
 fn open_pdf_page(ui: &MainWindow, path: &str) {
     let sf = ui.window().scale_factor().max(1.0);
     let phys = ui.window().size();
@@ -1967,9 +1950,7 @@ fn open_pdf_page(ui: &MainWindow, path: &str) {
     ui.global::<AppState>().set_nav_state(nav);
 }
 
-/// Current window device-pixel-ratio as `dpr × 10` (for scaling logical →
-/// device px in the PDF input handlers); falls back to 1.0 when the window is
-/// gone.
+/// Current window dpr as `dpr × 10` (for scaling logical → device px in the PDF input handlers); falls back to 1.0 when the window is gone.
 fn current_dpr_x10(weak: &slint::Weak<MainWindow>) -> u32 {
     weak.upgrade()
         .map(|ui| (ui.window().scale_factor().max(1.0) * 10.0).round() as u32)
@@ -2533,9 +2514,7 @@ async fn handle_inbound_image(weak: slint::Weak<MainWindow>, peer_base58: &str, 
     }
 }
 
-/// Handle an inbound document file (pdf / docx / xlsx / pptx): write the bytes
-/// to the local `files/` dir under the sender's basename, persist a `Kind::File`
-/// row for the DM with the sender, and refresh the current chat if visible.
+/// Handle an inbound document file (pdf/docx/xlsx/pptx): write the bytes to `files/` under the sender's basename, persist a `Kind::File` DM row, refresh the chat if visible.
 async fn handle_inbound_file(
     weak: slint::Weak<MainWindow>,
     peer_base58: &str,
@@ -3047,12 +3026,10 @@ fn chat_file_allowed_exts() -> &'static [&'static str] {
     &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"]
 }
 
-/// Inbound ceiling for a single document on the wire (`FILE_REQ_MAX` on the
-/// receiver side; 64 MiB). Keep the sender just under it so the CBOR framing fits.
+/// Inbound ceiling for one document on the wire (`FILE_REQ_MAX` = 64 MiB); keep the send just under it so the CBOR framing fits.
 const CHAT_FILE_MAX_BYTES: u64 = 50 * 1024 * 1024;
 
-/// Open the system file picker armed to send one document to chat `key`.
-/// Mirrors `pick_chat_image` — install this flow's sink right before presenting.
+/// Open the file picker armed to send one document to chat `key` (like `pick_chat_image`: sink installed right before presenting).
 fn pick_chat_file(weak: slint::Weak<MainWindow>, key: i32) {
     if !require_approved(weak.clone()) {
         return;
@@ -3063,10 +3040,7 @@ fn pick_chat_file(weak: slint::Weak<MainWindow>, key: i32) {
             tracing::debug!("[chat-file] no file picked (cancelled)");
             return;
         };
-        // The sink fires on a background thread, so hop onto the UI loop.
-        // Clone into a fresh local (owned by the inner closure) to avoid a
-        // second move of `weak_outer` — it is already captured by the outer
-        // `move` closure above.
+        // The sink fires on a background thread → hop to the UI loop; a fresh local clone avoids re-moving `weak_outer` (already captured by the outer closure).
         let weak = weak_outer.clone();
         let _ = slint::invoke_from_event_loop(move || {
             on_chat_file_picked(weak, key, Some(path));
@@ -3081,8 +3055,7 @@ fn pick_chat_file(weak: slint::Weak<MainWindow>, key: i32) {
     }
 }
 
-/// A document was chosen for chat `key`: send the bytes over P2P, record a
-/// file row with the sender's basename, and refresh the chat.
+/// A document was chosen for chat `key`: send the bytes over P2P, record a file row with the sender's basename, refresh the chat.
 fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<String>) {
     let Some(src) = path else {
         tracing::debug!("[chat-file] no file picked (cancelled)");
@@ -3215,8 +3188,7 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
             }
             return;
         }
-        // Store the file locally first (same name-based path), so when the
-        // chat reloads its rows the on-disk document is already present.
+        // Store the file locally first (same name-based path), so reloaded chat rows already find it on disk.
         let local_path = match image::store_file_bytes(&name, &bytes).await {
             Ok(p) => p.to_string_lossy().into_owned(),
             Err(e) => {
@@ -3265,9 +3237,7 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
     });
 }
 
-/// Tap a chat file message. PDFs open in the native in-app viewer (crates/pdf,
-/// no wasm); other document types still surface a status hint until a viewer
-/// for them lands.
+/// Tap a chat file message: PDFs open in the native in-app viewer (crates/pdf, no wasm); other types surface a status hint for now.
 fn open_chat_file_from_index(weak: slint::Weak<MainWindow>, idx: i32) {
     let idx = idx as usize;
     let Some(ui) = weak.upgrade() else { return };

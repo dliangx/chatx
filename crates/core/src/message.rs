@@ -96,7 +96,8 @@ pub struct ImageAck {
     pub id: u64,
 }
 
-/// A document file (pdf / docx / xlsx / pptx) sent over the binary CBOR
+/// A document file (pdf/docx/xlsx/pptx) sent over the binary CBOR file channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRequest {
     pub id: u64,
     pub from: String,

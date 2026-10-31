@@ -1,10 +1,6 @@
-//! Native P1 smoke: open a real PDF with `pdf::Viewer`, render, and drive the
-//! same interaction sequence the wasm `run_pdfview` smoke exercised (page
-//! taps, mode switch, snap, scroll, resize) — this time with **no wasm**.
+//! Native smoke test: open a real PDF with `pdf::Viewer`, render, and drive the same interaction sequence the wasm version exercised (taps, mode switch, scroll, resize) — **no wasm** this time.
 //!
-//!   cargo run -p pdf --example render_pdf [path/to/doc.pdf]
-//!
-//! Defaults to the first PDF in `~/.chatx/files/`.
+//!   cargo run -p pdf --example render_pdf [path/to/doc.pdf]   (defaults to the first PDF in `~/.chatx/files/`)
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -65,22 +61,22 @@ fn run(pdf_path: PathBuf) {
 
     let multi = v.page_count() > 1;
 
-    // 1) Content-area taps page-flip horizontally: right → next, left → prev.
+    // 1) Width-fit: taps are ignored — the continuous strip only scrolls (drag/wheel).
     {
         let cw = frame.width as i32;
         v.touch_down(cw * 3 / 4, 400);
         v.touch_up(cw * 3 / 4, 400);
-        let _ = step(&v);
-        if multi {
-            expect_page(&v, 2, "tap right → next page");
-        }
         v.touch_down(cw / 4, 400);
         v.touch_up(cw / 4, 400);
-        let _ = step(&v);
-        expect_page(&v, 1, "tap left → previous page");
+        assert!(
+            matches!(v.step(), Step::Unchanged),
+            "width mode must ignore taps"
+        );
+        expect_page(&v, 1, "width-fit taps ignored");
+        eprintln!("ok: width-fit taps ignored (continuous scroll only)");
     }
 
-    // 2) Height-fit: page 1 fills the whole canvas.
+    // 2) Height-fit: page 1 fills the whole canvas; taps flip pages (right → next, left → prev).
     v.set_mode(Mode::Height);
     let height_fit = step(&v);
     assert_eq!(
@@ -90,6 +86,17 @@ fn run(pdf_path: PathBuf) {
     );
     assert_eq!(v.view_state().mode, pdf::VIEW_MODE_HEIGHT);
     eprintln!("ok: height-fit view-state; page {}", v.view_state().page);
+    if multi {
+        let cw = (width * 3) as i32;
+        v.touch_down(cw * 3 / 4, 400);
+        v.touch_up(cw * 3 / 4, 400);
+        let _ = step(&v);
+        expect_page(&v, 2, "height-fit tap right → next page");
+        v.touch_down(cw / 4, 400);
+        v.touch_up(cw / 4, 400);
+        let _ = step(&v);
+        expect_page(&v, 1, "height-fit tap left → previous page");
+    }
 
     // 3) Height mode: drag down past half a page, release → snap to nearest.
     if multi {
@@ -133,8 +140,7 @@ fn step(v: &Viewer) -> pdf::Frame {
         match v.step() {
             Step::Frame(f) => return f,
             Step::Unchanged => {
-                // A change was expected but none came; give a grace period then
-                // fail so a regression is loud rather than silent.
+                // Expected a change but none came; grace period, then fail — a regression must be loud, not silent.
                 if Instant::now() >= deadline {
                     eprintln!("FAIL: expected a frame change that never arrived");
                     std::process::exit(1);

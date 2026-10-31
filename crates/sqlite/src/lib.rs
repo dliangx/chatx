@@ -28,8 +28,7 @@ pub enum MediaKind {
     None,
     Voice,
     Image,
-    /// A document file (pdf / docx / xlsx / pptx). The on-disk path is stored in
-    /// `msg.media_path`; the sender's basename rides in the `text` column.
+    /// A document file (pdf/docx/xlsx/pptx); the on-disk path lives in `msg.media_path`, the sender's basename rides in the `text` column.
     File,
 }
 

@@ -11,9 +11,7 @@ pub fn is_open() -> bool {
     VIEWER.lock().unwrap().is_some()
 }
 
-/// Open the PDF at `path`, sized for a `width`×`height` logical canvas at a
-/// device-pixel-ratio of `dpr`. Re-opening before the old one is closed keeps
-/// the live instance (an overlay re-enter is a no-op for the instance).
+/// Open the PDF at `path` for a `width`×`height` logical canvas at dpr `dpr`; a re-open while the instance is alive is a no-op.
 pub fn open_pdf(path: &str, width: u32, height: u32, dpr: f32) -> Result<(), String> {
     if is_open() {
         return Ok(());
@@ -49,8 +47,7 @@ pub fn scroll(dy: f32, dpr_x10: u32) {
     }
 }
 
-/// Switch the rendered view mode (`code`: [`pdf::VIEW_MODE_WIDTH`] /
-/// [`pdf::VIEW_MODE_HEIGHT`]).
+/// Switch the view mode being rendered (`code`: `pdf::VIEW_MODE_WIDTH` / `pdf::VIEW_MODE_HEIGHT`).
 pub fn set_mode(code: i32) {
     if let Some(m) = Mode::from_code(code) {
         if let Some(v) = VIEWER.lock().unwrap().as_ref() {
@@ -66,18 +63,14 @@ pub fn resize(w: u32, h: u32) {
     }
 }
 
-/// Shut the viewer down (idempotent) and drop the instance — its parsed
-/// document and the byte-budgeted render cache go with it. The UI releases its
-/// one committed frame image separately (`PdfrsHost.frame → default`).
+/// Shut the viewer down (idempotent) and drop the instance (parsed document + byte-budgeted cache along with it); the UI releases its held frame image separately.
 pub fn close() {
     VIEWER.lock().unwrap().take();
 }
 
 // ── pump → the committed canvas frame ───────────────────────────────────────
 
-/// One committed frame plus the view-state that belongs to it (the toolbar's
-/// page counter / mode). The image is the **full canvas at device px** — the
-/// app shows it scaled to the window (1:1 physical pixels).
+/// A single committed frame + its view state (page counter / mode for the toolbar); the image is the **full canvas in device px** (the app shows it scaled to the window).
 pub struct Commit {
     pub img: slint::Image,
     pub page: i32,
@@ -94,14 +87,11 @@ pub enum Tick {
     Unchanged,
     /// A new committed frame to show.
     Commit(Commit),
-    /// A fatal viewer state (e.g. the document has no renderable pages):
-    /// show the solid panel and surface the message.
+    /// Fatal viewer state (e.g. document has no renderable pages): show a solid panel and surface the message.
     Fatal { img: slint::Image, message: String },
 }
 
-/// Drive one step: drain input, pre-warm + render the visible neighborhood and
-/// compose the frame — only when the visible state actually changed.
-/// `None` when no viewer is live.
+/// Advance one step: drain input, pre-warm + render the visible neighborhood, and compose the frame — only if the visible state actually changed; `None` when no viewer is alive.
 pub fn tick() -> Option<Tick> {
     let guard = VIEWER.lock().unwrap();
     let v = guard.as_ref()?;
@@ -126,9 +116,7 @@ pub fn tick() -> Option<Tick> {
     }
 }
 
-/// Convert the composed canvas frame into a Slint `image` property value
-/// (one copy out of the viewer's frame buffer into Slint's shared pixel
-/// buffer; the viewer's `Frame` is then dropped).
+/// Turn a composed canvas frame into a Slint `image` value (one copy into Slint's shared pixel buffer).
 pub fn frame_image(f: &Frame) -> slint::Image {
     if f.width == 0 || f.height == 0 || f.rgba.is_empty() {
         return slint::Image::default();

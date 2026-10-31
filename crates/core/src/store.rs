@@ -25,8 +25,7 @@ pub enum Kind {
     /// `path` = disk path to a photo (original + compressed preview are the
     /// same compressed JPEG on disk; the UI decides how large to show it).
     Image { path: String },
-    /// `path` = disk path to a document file (pdf / docx / xlsx / pptx),
-    /// `name` = the sender's basename shown on the file bubble.
+    /// `path` = disk path to a document file (pdf/docx/xlsx/pptx); `name` = the sender's basename shown on the file bubble.
     File { path: String, name: String },
 }
 
@@ -144,9 +143,7 @@ impl Store {
                 Kind::File { path, .. } => (sqlite::MediaKind::File, Some(path.clone()), None),
                 Kind::Text => (sqlite::MediaKind::None, None, None),
             };
-            // File rows carry the sender's basename in the `text` column — the
-            // `media_*` columns have no dedicated name slot for File, and
-            // `row_to_kind` reads it back from there.
+            // File rows carry the sender's basename in the `text` column (no dedicated name slot in `media_*`) — `row_to_kind` reads it back from there.
             let row_text = match &msg.kind {
                 Kind::File { name, .. } => name.clone(),
                 _ => msg.text.clone(),
@@ -260,8 +257,7 @@ fn row_to_kind(m: &sqlite::MsgRow) -> Kind {
         sqlite::MediaKind::File => match &m.media_path {
             Some(p) if !p.is_empty() => Kind::File {
                 path: p.clone(),
-                // Stored in the `text` column by `push` (no dedicated name slot
-                // for File in `media_*`); fall back to the file suffix.
+                // Stored in the `text` column by `push` (no dedicated name slot for File in `media_*`); fall back to the file suffix.
                 name: if m.text.is_empty() {
                     std::path::Path::new(p)
                         .file_name()

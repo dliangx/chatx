@@ -93,8 +93,9 @@ export component PdfViewer inherits Rectangle {
         }
     }
 
-    // Gesture surface (declared before the buttons so they sit on top): drag → continuous page strip,
-    // tap → page-flip (left = prev, right = next); wheel / trackpad via `scroll-event`.
+    // Gesture surface (declared before the buttons so they sit on top): drag → continuous page strip
+    // (both modes); tap → page-flip (left = prev, right = next) in Height mode only — Width mode ignores taps;
+    // wheel / trackpad scroll via `scroll-event`.
     ta := TouchArea {
         width: 100%;
         height: 100%;

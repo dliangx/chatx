@@ -224,9 +224,7 @@ pub fn derive_chat_image_bytes(src: &str) -> std::io::Result<Vec<u8>> {
     std::fs::read(src)
 }
 
-/// Write an inbound / outgoing document file to the app's local `files/` dir
-/// and return its path. The sender's basename is preserved (sanitized) so the
-/// file bubble and the PDF viewer show a meaningful name.
+/// Write an inbound / outgoing document file to the local `files/` dir (sender's basename preserved, sanitized) and return its path.
 pub async fn store_file_bytes(
     name: &str,
     bytes: &[u8],
@@ -236,8 +234,7 @@ pub async fn store_file_bytes(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    // Sanitize the sender-supplied basename (path separators / control chars)
-    // while keeping the extension (viewers detect the format by suffix).
+    // Sanitize the sender-supplied basename (path separators / control chars) while keeping the extension (viewers detect the format by suffix).
     let base = name
         .rsplit(['/', '\\', '\0'])
         .next()
@@ -424,9 +421,7 @@ pub struct RenderedMsg {
     /// Present when this is a photo bubble: the disk path. When set, the pixel
     /// buffer is a 1x1 dummy and Slint draws the image (bubble + viewer).
     pub image: Option<String>,
-    /// Present when this is a document-file bubble: (disk path, sender
-    /// basename). When set, the pixel buffer is a 1x1 dummy and Slint draws
-    /// the file row (icon + name).
+    /// Present when this is a document-file bubble: (disk path, sender basename); the pixel buffer is a 1x1 dummy and Slint draws the file row.
     pub file: Option<(String, String)>,
     /// The SMALL cached preview path (≤300px JPEG) for this photo. Used by
     /// `to_message_data` to fill `image_img` (the bubble draws the thumb — a
@@ -452,9 +447,7 @@ pub struct ChatMsg {
     /// A photo replaces the text body with an image bubble. The `path` is the
     /// local disk copy (original, possibly downscaled); tapping opens the viewer.
     pub image: Option<String>,
-    /// A document file (pdf / docx / xlsx / pptx) replaces the text body with
-    /// a file row. `(path, name)` = disk path + the sender's basename shown on
-    /// the bubble; tapping a PDF opens the in-app viewer.
+    /// A document file (pdf/docx/xlsx/pptx) replaces the text body with a file row: (disk path, sender basename); tapping a PDF opens the in-app viewer.
     pub file: Option<(String, String)>,
     /// Display-box dimensions derived from the small cached preview's aspect
     /// (identical ratio to the original, but never reads the big original file).
@@ -472,9 +465,7 @@ pub fn render_msg(
     available_w: u32,
     scale: f32,
 ) -> RenderedMsg {
-    // File rows are drawn by Slint (document icon + filename), so the
-    // rasterised buffer is a 1x1 dummy; the caller controls the displayed
-    // size (see `to_message_data`).
+    // File rows are drawn by Slint (icon + filename), so the rasterised buffer is a 1x1 dummy; the caller controls the displayed size.
     if let Some((path, name)) = &msg.file {
         return RenderedMsg {
             rgba: vec![255u8, 255, 255, 255],
@@ -576,17 +567,14 @@ pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageDa
     let (w, h) = if is_voice {
         (72.0, 54.0)
     } else if is_file {
-        // File row: avatar (36) + icon (24) + elided filename, 54px tall like
-        // the voice row (Slint truncates long names with an ellipsis).
+        // File row: avatar + icon + elided filename, 54px tall like the voice row (Slint truncates long names).
         (150.0, 54.0)
     } else {
         (m.width as f64 / scale as f64, m.height as f64 / scale as f64)
     };
     crate::MessageData {
         bubble: {
-            // Image / file rows carry a 1x1 dummy raster (Slint draws
-            // `image_img` / the file row instead, sized by `width`/`height`),
-            // so keep the buffer 1x1 to match the 4-byte `rgba`.
+            // Image / file rows carry a 1x1 dummy raster (Slint draws them, sized by `width`/`height`), so keep the buffer 1x1 = the 4-byte `rgba`.
             let bw = if is_image || is_file { 1 } else { m.width.max(1) };
             let bh = if is_image || is_file { 1 } else { m.height.max(1) };
             let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(bw, bh);

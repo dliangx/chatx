@@ -32,8 +32,7 @@ pub const VOICE_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/voice/1")
 /// Binary (CBOR) photo-message transport — raw image bytes as a byte-string.
 pub const IMAGE_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/image/1");
 
-/// Binary (CBOR) document-file transport — raw file bytes (pdf/docx/xlsx/pptx)
-/// + sender basename as a byte-string.
+/// Binary (CBOR) document-file transport — raw file bytes (pdf/docx/xlsx/pptx) + sender basename as a byte-string.
 pub const FILE_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/file/1");
 
 /// Hard ceiling for a single inbound (or outbound) voice request. ~64 MiB
@@ -45,8 +44,7 @@ const VOICE_REQ_MAX: u64 = 64 * 1024 * 1024;
 /// before sending, but keep a generous margin for large originals).
 const IMAGE_REQ_MAX: u64 = 64 * 1024 * 1024;
 
-/// Ceiling for a single inbound document-file request (app-side caps picked
-/// files well below this; mirrors the wasm sandbox's `MAX_FILE_BYTES`).
+/// Ceiling for one inbound document-file request (app-side caps picked files well below this; mirrors the wasm sandbox's `MAX_FILE_BYTES`).
 const FILE_REQ_MAX: u64 = 64 * 1024 * 1024;
 
 pub fn group_topic_name(group_id: &str) -> String {
@@ -122,9 +120,7 @@ pub enum ChatEvent {
         data: Vec<u8>,
     },
 
-    /// Persistent document file (pdf/docx/xlsx/pptx) received from a peer.
-    /// `name` is the sender's basename; the application layer writes `data`
-    /// to disk and records the row via [`crate::Client::persist_file`].
+    /// Persistent document file (pdf/docx/xlsx/pptx) received from a peer; `name` = sender's basename — the app writes `data` to disk and records the row via [`crate::Client::persist_file`].
     File {
         peer: PeerId,
         name: String,
@@ -225,9 +221,7 @@ pub enum Cmd {
         data: Vec<u8>,
         ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
     },
-    /// Send a document file (pdf/docx/xlsx/pptx). `name` is the sender's
-    /// basename (persisted/shown on the receiver side); the network carries
-    /// the raw file bytes. Same peer-ack lifecycle as [`Cmd::SendImage`].
+    /// Send a document file (pdf/docx/xlsx/pptx); `name` = sender's basename (persisted/shown at the receiver); same peer-ack lifecycle as [`Cmd::SendImage`].
     SendFile {
         peer: PeerId,
         from: String,
@@ -1053,9 +1047,7 @@ async fn swarm_loop(
                         }
                         _ => {}
                     },
-                    // Binary (CBOR) document-file channel (pdf/docx/xlsx/pptx).
-                    //  * Inbound request: we received a file; notify the app.
-                    //  * Inbound response: we are the sender; resolve the waiter.
+                    // Binary (CBOR) document-file channel (pdf/docx/xlsx/pptx): inbound request = file received (notify the app); inbound response = we are the sender (resolve the waiter).
                     NetEvent::File(f) => match f {
                         RrEvent::Message { peer, message, .. } => match message {
                             RrMessage::Request { request, channel, .. } => {

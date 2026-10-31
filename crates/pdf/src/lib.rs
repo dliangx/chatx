@@ -1,44 +1,10 @@
-//! `pdf` — native PDF viewer core (no wasm).
+//! `pdf` — native PDF viewer core (no wasm): an event-driven `Viewer` owning the parsed document + view state + render cache.
 //!
-//! A self-contained, event-driven [`Viewer`] that owns a parsed document and
-//! a small state machine (view mode, scroll offset, render cache) and paints
-//! the current frame to an opaque RGBA8 buffer on demand. This is a native
-//! port of the `x.pdfview` wasm plugin's control / rendering logic: the same
-//! two view modes, the same gesture model, the same "render only the visible
-//! pages and commit on change" cadence — but driven directly by the app over
-//! method calls instead of a wasm input/commit channel.
+//! Two modes, both a continuous vertical strip: Width (page fits canvas width) / Height (page fits canvas height), separated from neighbours by a canvas-gray gutter; a release parks exactly where it is — never a page-covering snap.
 //!
-//! **Two view modes only** (both are continuous vertical strips — a page never
-//! slides in to cover the previous one):
-//!   * [`Mode::Width`]  (宽度适配) — each page scaled to fill the canvas width;
-//!     a vertical strip you scrub through.
-//!   * [`Mode::Height`] (高度适配) — each page scaled to fill the canvas height;
-//!     a continuous strip where the current page and its neighbour stay visible
-//!     together and move as one; a release parks exactly where it was.
+//! Gesture coords are all **device px** (the caller scales logical→device): vertical drag / wheel = scroll (`dy` positive = up = toward earlier content, Slint `delta-y` sign), tap left/right half = prev/next page in **Height** mode only (Width mode is the continuous strip, its taps are ignored); plus `set_mode`, `resize`.
 //!
-//! Adjacent pages are separated by a canvas-**gray gutter** (a fraction of a
-//! page in Height mode, 24 device px in Width mode) so page boundaries stay
-//! easy to tell apart while the strip scrolls.
-//!
-//! **Gesture model** (every coordinate is **device px**; the caller scales
-//! logical px to device px before forwarding it):
-//!   * vertical drag = scroll (both modes); a release parks exactly where it is — no page-covering snap
-//!   * wheel / trackpad = scroll by a vertical delta in device px
-//!   * mode command = switch the view mode ([`Viewer::set_mode`])
-//!   * tap left half = previous page; tap right half = next page
-//!   * [`Viewer::resize`] = window drag-resize; the canvas re-renders so the frame follows the new aspect
-//!
-//! Rendering: the parsed page is rasterised with `pdf-render` (pure-Rust
-//! `vello_cpu`) over `pdf-interpret`. Each page is baked over opaque white so
-//! the committed buffer is fully opaque, then blitted 1:1 onto the canvas.
-//!
-//! **Sharpness:** the caller hands a *logical* canvas size plus the dpr; we
-//! build the canvas at **device** resolution (`size × dpr`), render every page
-//! at that device resolution, and blit 1:1 — one canvas pixel lands on one
-//! physical pixel (no upscaling blur).
-//!
-//! All methods take `&self` (interior mutability) and are `Send + Sync`, so
-//! the app can hold a single live viewer and pump it from its UI thread.
+//! Rendering: pages rasterised via `pdf-render`/`pdf-interpret`, alpha baked over white (fully opaque), canvas = logical size × dpr, blitted 1:1; commit-on-change — `step` does nothing when the frame signature (offset, mode, canvas size) is unchanged.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -90,8 +56,7 @@ pub enum Error {
     NoPages,
 }
 
-/// An opaque RGBA8 frame at the current canvas size. `rgba` is exactly
-/// `width * height * 4` bytes, top-left origin, alpha already baked to opaque.
+/// Opaque RGBA8 frame: `rgba` is exactly `width * height * 4` bytes, top-left origin, alpha already baked opaque.
 #[derive(Debug, Clone)]
 pub struct Frame {
     pub width: u32,
@@ -99,8 +64,7 @@ pub struct Frame {
     pub rgba: Vec<u8>,
 }
 
-/// The active view-state, reported to the app so the top-bar (mode icons +
-/// page counter `n/m`) mirrors the viewer.
+/// The active view state, reported to the app's top bar (mode icons + `n/m` counter).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewState {
     /// Active page, 1-based.
@@ -136,9 +100,7 @@ enum Ev {
     TouchDown(i32, i32),
     TouchMove(i32, i32),
     TouchUp(i32, i32),
-    /// Vertical scroll delta in device px. Positive = the user scrolled *up*
-    /// (toward earlier content), matching Slint's `delta-y` sign; negative =
-    /// down (toward later content).
+    /// Vertical scroll delta in device px; positive = up (toward earlier content), negative = down — matches Slint's `delta-y` sign.
     Scroll(i32),
     /// New canvas size in device px.
     Resize(u32, u32),
@@ -176,41 +138,31 @@ struct Inner {
     /// Interpreter settings (embed-fonts default), shared across pages.
     interp: InterpreterSettings,
 
-    /// Render cache (bounded by bytes, oldest evicted first; see
-    /// [`CACHE_MAX_BYTES`] / [`CACHE_MIN_PAGES`]).
+    /// Render cache, bounded by bytes (CACHE_MAX_BYTES, floor CACHE_MIN_PAGES; oldest evicted first).
     cache: Vec<Rast>,
 
     /// Total bytes held in `cache` (tracked so eviction is a sum, not a count).
     cache_bytes: usize,
 
-    /// Signature of the last committed frame (see [`Inner::frame_sig`]); lets
-    /// `step` skip the repaint while nothing changed.
+    /// Last committed frame signature (see `frame_sig`); lets `step` skip the repaint while unchanged.
     last_sig: Option<(i64, i8, u32, u32)>,
 }
 
-/// A native PDF viewer: parsed document + view-state + render cache.
-///
-/// Create with [`Self::open`] (or [`Self::open_bytes`)]), forward the app's
-/// gestures via the input methods, then call [`Self::step`] on a pump to pull
-/// the next [`Frame`].
+/// Native PDF viewer: parsed document + view state + render cache; create via `open`/`open_bytes`, forward gestures, call `step` per pump for the next `Frame`.
 pub struct Viewer {
     inner: Mutex<Inner>,
 }
 
 impl Viewer {
-    // ------------------------------------------------------------------
-    // Open
-    // ------------------------------------------------------------------
+    // -------------------- Open --------------------
 
-    /// Open the PDF at `path`, sized for a `width`×`height` **logical** canvas
-    /// at a device-pixel-ratio of `dpr`.
+    /// Open the PDF at `path` for a `width`×`height` **logical** canvas at dpr `dpr`.
     pub fn open(path: &Path, width: u32, height: u32, dpr: f32) -> Result<Self, Error> {
         let bytes = std::fs::read(path).map_err(|e| Error::Read(e.to_string()))?;
         Self::open_bytes(bytes, width, height, dpr)
     }
 
-    /// Open a PDF from in-memory bytes, sized for a `width`×`height`
-    /// **logical** canvas at a device-pixel-ratio of `dpr`.
+    /// Open a PDF from in-memory bytes for a `width`×`height` **logical** canvas at dpr `dpr`.
     pub fn open_bytes(bytes: Vec<u8>, width: u32, height: u32, dpr: f32) -> Result<Self, Error> {
         let dpr = dpr.max(1.0);
         // Logical canvas × dpr → the device-resolution work canvas we commit.
@@ -248,9 +200,7 @@ impl Viewer {
         })
     }
 
-    // ------------------------------------------------------------------
-    // Input (device px; drained on the next step)
-    // ------------------------------------------------------------------
+    // -------------------- Input (device px; drained on the next step) --------------------
 
     /// A press began at `(x, y)`.
     pub fn touch_down(&self, x: i32, y: i32) {
@@ -262,14 +212,12 @@ impl Viewer {
         self.inner().input.push_back(Ev::TouchMove(x, y));
     }
 
-    /// A press ended at `(x, y)`: a tap page-flips; a drag releases and parks
-    /// exactly where it is (both modes — never a next-page-covering snap).
+    /// A press ended at `(x, y)`: a tap page-flips (Height mode only — Width mode ignores taps); a released drag parks exactly where it is (no page-covering snap).
     pub fn touch_up(&self, x: i32, y: i32) {
         self.inner().input.push_back(Ev::TouchUp(x, y));
     }
 
-    /// A wheel / trackpad scroll with vertical delta `dy` in device px
-    /// (positive = up, toward earlier content — matching Slint's `delta-y`).
+    /// A wheel/trackpad scroll, vertical delta `dy` in device px (positive = up, Slint `delta-y` sign).
     pub fn scroll(&self, dy: i32) {
         self.inner().input.push_back(Ev::Scroll(dy));
     }
@@ -284,9 +232,7 @@ impl Viewer {
         self.inner().input.push_back(Ev::Resize(w.max(1), h.max(1)));
     }
 
-    // ------------------------------------------------------------------
-    // Queries the app reads between pumps
-    // ------------------------------------------------------------------
+    // -------------------- Queries the app reads between pumps --------------------
 
     /// The active `(page, page_count, mode)` triple.
     pub fn view_state(&self) -> ViewState {
@@ -303,14 +249,12 @@ impl Viewer {
         self.inner().page_count as i32
     }
 
-    /// Bytes currently held by the render cache (diagnostics; bounded at
-    /// [`CACHE_MAX_BYTES`], floored at [`CACHE_MIN_PAGES`] pages).
+    /// Bytes held by the render cache (bounded at CACHE_MAX_BYTES, floor at CACHE_MIN_PAGES pages).
     pub fn cache_bytes(&self) -> usize {
         self.inner().cache_bytes
     }
 
-    /// Scroll offset in **device px**: the top edge of the viewport within the
-    /// vertical content strip.
+    /// Scroll offset in **device px**: top edge of the viewport within the content strip.
     pub fn offset(&self) -> i64 {
         self.inner().offset
     }
@@ -321,14 +265,12 @@ impl Viewer {
         (g.canvas_w, g.canvas_h)
     }
 
-    /// Index of the page whose cell contains content-y `y` (**device px**).
-    /// Clamped to the last page past the bottom of the strip.
+    /// Page whose cell contains content-y `y` (**device px**), clamped to the last page.
     pub fn index_at(&self, y: i64) -> usize {
         self.inner().index_at(y.max(0))
     }
 
-    /// Top edge of page `idx` within the strip (**device px**). `i64::MAX` for
-    /// an out-of-range index so `min`-based clamping at the caller just works.
+    /// Top edge of page `idx` within the strip (**device px**); `i64::MAX` if out of range.
     pub fn page_top(&self, idx: usize) -> i64 {
         let g = self.inner();
         if idx >= g.page_count {
@@ -348,10 +290,7 @@ impl Viewer {
         }
     }
 
-    /// Ensure page `idx` has a rendered raster in the cache (no-op if present,
-    /// and a cheap lookup when it is). This is the **pre-warm / on-demand
-    /// render** the app calls per tick so a page is already a texture before it
-    /// scrolls fully into view.
+    /// Ensure page `idx` has a rendered raster in the cache — the **pre-warm / on-demand render** the app calls per tick (no-op if already cached).
     pub fn ensure_page(&self, idx: usize) {
         let mut g = self.inner();
         if idx < g.page_count {
@@ -359,13 +298,7 @@ impl Viewer {
         }
     }
 
-    /// Ensure page `idx` is cached, then run `f` with its raster — size in
-    /// device px and a slice over the opaque RGBA8 bytes. `f` runs while the
-    /// viewer lock is held, so the slice is valid for its whole duration. This
-    /// is the zero-clone companion to [`Self::page_rgba`]: callers that can
-    /// copy the pixels themselves in one step skip the temporary full-page
-    /// copy (matters at hundreds of MB per full-screen Retina page).
-    /// `None` for an out-of-range page (or one that failed to render).
+    /// Ensure page `idx` is cached, then run `f` with its raster (w, h **device px** + opaque RGBA8 slice) — the zero-clone companion to `page_rgba` (`f` runs while the viewer lock is held).
     pub fn with_raster<F, R>(&self, idx: usize, f: F) -> Option<R>
     where
         F: FnOnce(u32, u32, &[u8]) -> R,
@@ -379,9 +312,7 @@ impl Viewer {
         Some(f(r.w, r.h, &r.px))
     }
 
-    /// Return page `idx`'s opaque RGBA raster at the current mode's size
-    /// (**device px**), rendering it first if it was not yet cached. `None` for
-    /// an out-of-range index.
+    /// Page `idx`'s opaque RGBA raster at the current mode's size (**device px**), rendered on demand; `None` if out of range.
     pub fn page_rgba(&self, idx: usize) -> Option<Frame> {
         self.with_raster(
             idx,
@@ -393,16 +324,9 @@ impl Viewer {
         )
     }
 
-    // ------------------------------------------------------------------
-    // Pump
-    // ------------------------------------------------------------------
+    // -------------------- Pump --------------------
 
-    /// Drain queued input (scroll / tap / mode / resize) **without rendering**.
-    /// Returns `true` if the committed layout (scroll position / mode / canvas)
-    /// changed, so the app knows it must re-commit; `false` when idle.
-    ///
-    /// This is the lightweight counterpart to [`Self::step`]: the app composites
-    /// cached per-page rasters itself, so it only needs the state update here.
+    /// Drain queued input **without rendering**; `true` if the committed layout (scroll / mode / canvas) changed, `false` when idle.
     pub fn pump(&self) -> bool {
         let mut g = self.inner();
         if g.input.is_empty() {
@@ -413,14 +337,7 @@ impl Viewer {
         g.frame_sig() != before
     }
 
-    /// Drive one step of the viewer: drain queued input, and if the visible
-    /// state changed, render the visible pages and compose the current frame.
-    ///
-    /// A commit means the caller rebuilds its image texture from the *entire*
-    /// RGBA buffer, so it is deliberately skipped while the visible state is
-    /// unchanged: the composed frame is a pure function of the signature
-    /// below, and this viewer is event-driven (no animation), so an idle pump
-    /// costs one input poll + one signature compare — near-zero idle work.
+    /// One pump: drain input; if the visible state changed, render the visible pages and compose the frame (commit-on-change: idle cost = poll + signature compare).
     pub fn step(&self) -> Step {
         let mut g = self.inner();
         g.drain_input();
@@ -434,8 +351,7 @@ impl Viewer {
         Step::Frame(g.compose())
     }
 
-    /// Lock helper; the guard is always dropped back to `Inner` on poison
-    /// (we own the only handle, so re-entrancy is not a concern).
+    /// Lock helper; recovers on poison (we own the only handle).
     fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner
             .lock()
@@ -443,16 +359,10 @@ impl Viewer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Layout (all lengths in device px)
-// ---------------------------------------------------------------------------
+// -------------------- Layout (all lengths in device px) --------------------
 
 impl Inner {
-    /// Stride of one page on the content strip (device px): the page's own
-    /// raster height ([`Self::page_target`] `.1`) **plus** the canvas-gray
-    /// gutter that separates it from the next page. Layout positions and the
-    /// blitted raster are derived from the same single source of truth, so
-    /// they can never desync into a seam or an overlap.
+    /// Stride of one page on the strip (device px) = its raster height **plus** the canvas-gray gutter; layout and blit derive from this, so they can't desync.
     fn cell_height(&self, i: usize) -> i64 {
         self.page_target(i).1 as i64 + self.strip_gap()
     }
@@ -462,9 +372,7 @@ impl Inner {
         self.cell_top(idx) + self.page_target(idx).1 as i64
     }
 
-    /// Top edge (device px) of page `idx` in the current mode (a gutter of
-    /// [`Self::strip_gap`] follows every page except the last one, which the
-    /// strip's total height — sum of the strides minus one gap — accounts for).
+    /// Top edge (device px) of page `idx`; a `strip_gap` gutter follows every page except the last.
     fn cell_top(&self, idx: usize) -> i64 {
         let limit = idx.min(self.page_count - 1);
         let mut acc = 0_i64;
@@ -474,10 +382,7 @@ impl Inner {
         acc
     }
 
-    /// The canvas-gray gutter between two adjacent pages (device px). In
-    /// Height mode it scales with the page so a gutter stays the same
-    /// *fraction* of a page on every screen — one page still fills the
-    /// viewport, gutter and all.
+    /// Canvas-gray gutter between adjacent pages (device px); in Height mode it scales with the page.
     fn strip_gap(&self) -> i64 {
         match self.mode {
             Mode::Width => GUTTER_DEV_PX,
@@ -496,8 +401,7 @@ impl Inner {
         (self.cell_bottom(self.page_count - 1) - self.view_h()).max(0)
     }
 
-    /// Index of the page whose stride contains content-y `y` (device px);
-    /// the gutter right after a page belongs to that page's stride.
+    /// Page whose stride contains content-y `y` (device px); the gutter after a page belongs to that page.
     fn index_at(&self, y: i64) -> usize {
         let mut acc = 0_i64;
         for i in 0..self.page_count {
@@ -517,8 +421,7 @@ impl Inner {
             Mode::Width => {
                 (self.canvas_w, (ph * (self.canvas_w as f32 / pw)).max(1.0) as u32)
             }
-            // One page (plus its trailing gutter) fills the canvas, so the
-            // page itself is scaled to the leftover height.
+            // One page + trailing gutter fills the canvas ⇒ page itself scales to the leftover height.
             Mode::Height => {
                 let vh = self.view_h().max(1) as f32;
                 let gap = self.strip_gap() as f32;
@@ -528,20 +431,16 @@ impl Inner {
         }
     }
 
-    /// The page-strip region: the **whole canvas**. The app UI floats its
-    /// toolbar (mode icons + counter) over the top of the committed frame.
+    /// The page-strip region = the **whole canvas** (the app floats its toolbar over the top).
     fn view_h(&self) -> i64 {
         (self.canvas_h as i64).max(1)
     }
 }
 
-// ---------------------------------------------------------------------------
-// State updates (gesture / scroll / mode / resize)
-// ---------------------------------------------------------------------------
+// -------------------- State updates (gesture / scroll / mode / resize) --------------------
 
 impl Inner {
-    /// Drain the queued input events, updating the model. Pure bookkeeping; no
-    /// rendering happens here (that is `step` / `ensure_visible`'s job).
+    /// Drain the queued input events, updating the model — pure bookkeeping, no rendering (that is `step`'s job).
     fn drain_input(&mut self) {
         while let Some(ev) = self.input.pop_front() {
             match ev {
@@ -565,9 +464,7 @@ impl Inner {
                         self.offset = (self.offset - dy as i64).clamp(0, self.max_offset());
                     }
                 }
-                // Both modes: a release parks exactly where the finger let go —
-                // the current page and its neighbour stay connected, nothing
-                // slides in to cover the other.
+                // A release parks exactly where the finger let go (neighbour stays connected, nothing slides in to cover it).
                 Ev::TouchUp(x, _y) => {
                     let was_down = self.down;
                     let moved = self.moved;
@@ -580,9 +477,7 @@ impl Inner {
                     if dy == 0 {
                         continue;
                     }
-                    // Slint convention: a negative delta-y means the user scrolled
-                    // toward later content — the identical "natural scroll" math
-                    // as touch move above (`offset -= dy`).
+                    // Slint: negative delta-y = toward later content; same natural-scroll math as touch (`offset -= dy`).
                     self.offset = (self.offset - dy as i64).clamp(0, self.max_offset());
                 }
                 Ev::Resize(w, h) => {
@@ -600,8 +495,7 @@ impl Inner {
         }
     }
 
-    /// Switch to view mode `m` (the app UI's Fit-Width / Fit-Height icon).
-    /// Keeps the reader on the same logical page across the switch.
+    /// Switch to view mode `m`; keeps the reader on the same logical page.
     fn set_mode(&mut self, m: Mode) {
         if m == self.mode {
             return;
@@ -612,10 +506,10 @@ impl Inner {
         self.offset = self.cell_top(keep).clamp(0, self.max_offset());
     }
 
-    /// A tap in the content area page-flips horizontally: left half → previous
-    /// page, right half → next page.
+    /// A tap page-flips horizontally: left half → previous, right half → next — **Height mode only**;
+    /// Width mode is the continuous strip (drag/wheel scroll) and ignores taps entirely.
     fn on_tap(&mut self, x: i32) {
-        if self.page_count == 0 {
+        if self.mode != Mode::Height || self.page_count == 0 {
             return;
         }
         let mid = (self.canvas_w as i64) / 2;
@@ -629,13 +523,10 @@ impl Inner {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Rendering (render-on-demand, baked opaque RGBA8)
-// ---------------------------------------------------------------------------
+// -------------------- Rendering (render-on-demand, baked opaque RGBA8) --------------------
 
 impl Inner {
-    /// Ensure the cache holds a raster for the pages intersecting the current
-    /// viewport; render any that are still missing.
+    /// Ensure the cache has rasters for the pages overlapping the current viewport; render the missing ones.
     fn ensure_visible(&mut self) {
         if self.page_count == 0 {
             return;
@@ -684,18 +575,14 @@ impl Inner {
             px,
         });
         self.cache_bytes += self.cache.last().expect("just pushed").px.len();
-        // Byte-budget eviction (oldest first), floored below CACHE_MIN_PAGES so
-        // the live viewport + pre-warmed neighbors always stay cached.
+        // Byte-budget eviction (oldest first), floored at CACHE_MIN_PAGES so the live viewport + neighbors stay cached.
         while self.cache_bytes > CACHE_MAX_BYTES && self.cache.len() > CACHE_MIN_PAGES {
             let old = self.cache.remove(0);
             self.cache_bytes -= old.px.len();
         }
     }
 
-    /// Signature of everything that changes the committed pixels: scroll
-    /// position, view mode, and canvas size. Page rasters are immutable and
-    /// cached, so with these fixed the composed frame is bit-identical and
-    /// `step` can skip the repaint.
+    /// Signature of everything that changes the committed pixels (offset, mode, canvas size); unchanged ⇒ `step` skips the repaint.
     fn frame_sig(&self) -> (i64, i8, u32, u32) {
         (
             self.offset,
@@ -735,10 +622,7 @@ impl Inner {
                 Mode::Height => (self.canvas_w as i64 - r.w as i64) / 2, // can be < 0 (centre-crop)
                 Mode::Width => 0,
             };
-            // SIGNED placement on the content strip: a page whose top has
-            // scrolled above the viewport keeps flowing out of the top
-            // (overhang clipped off the source) and is NEVER snapped back to
-            // the canvas top while the next page slides in over it.
+            // SIGNED placement on the strip: a page scrolled above the viewport keeps flowing out the top (overhang clipped off the source), never snapped back to the canvas top.
             blit(&mut px, dw, dh, x, cell_top - top, r.w, r.h, &r.px);
         }
 
@@ -750,8 +634,7 @@ impl Inner {
     }
 }
 
-/// Render PDF page `index` to an opaque RGBA8 raster at the given device-px
-/// size, baking alpha over white so the committed buffer is fully opaque.
+/// Render PDF page `index` to an opaque RGBA8 raster at a device-px size, alpha baked over white (fully opaque).
 fn render_page_rgba(
     doc: &Pdf,
     interp: &InterpreterSettings,
@@ -781,9 +664,7 @@ fn render_page_rgba(
     let ph = pixmap.height() as usize;
     let src = pixmap.data_as_u8_slice();
     let n = (pw * ph * 4).min(src.len());
-    // `src` is *premultiplied* RGBA8. Bake over opaque white:
-    //   out = premul_rgb + 255·(1 − a/255) = premul_rgb + (255 − a)
-    //   out_a = a + (255 − a) = 255
+    // `src` is *premultiplied* RGBA8; bake over opaque white: out = premul_rgb + (255 − a), out_a = 255.
     let mut px = vec![0u8; n];
     for k in (0..n).step_by(4) {
         let over = (255 - src[k + 3] as i32).max(0);
@@ -808,35 +689,22 @@ fn page_dimensions(doc: &Pdf) -> (Vec<u32>, Vec<u32>) {
     (pw, ph)
 }
 
-/// Soft byte budget for the render cache. Eviction keeps the cache at or
-/// under this even for full-screen Retina pages (hundreds of MB each), so the
-/// working set stays flat instead of scaling with page count × page size.
+/// Soft byte budget for the render cache (stays flat even for full-screen Retina pages).
 const CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
-/// Minimum number of pages the render cache always keeps (eviction stops here
-/// even when over budget) — the on-screen page(s) plus the pre-warmed
-/// neighbors, so a back-and-forth scroll never re-renders from the document.
+/// Minimum pages the cache always keeps (eviction stops here even over budget) — on-screen page + pre-warmed neighbors.
 const CACHE_MIN_PAGES: usize = 3;
 /// Touch movement (px) before a press becomes a drag rather than a tap.
 const TAP_THRESH: i32 = 8;
-/// Canvas-gray gutter between two adjacent pages, in Width mode (device px)
-/// — Height mode scales it with the page (see [`Inner::strip_gap`]).
+/// Canvas-gray gutter between adjacent pages in Width mode (device px) — Height mode scales it with the page (see `strip_gap`).
 const GUTTER_DEV_PX: i64 = 24;
 /// The page gutter / canvas background (opaque light).
 const BG_R: u8 = 240;
 const BG_G: u8 = 242;
 const BG_B: u8 = 246;
 
-/// Copy an opaque RGBA8 raster `src` (size `sw`×`sh`) into the destination
-/// buffer `dst` (size `dw`×`dh`) so its top-left lands at **signed** `(dx, dy)`,
-/// clipping both ends against the destination: any part hanging off the
-/// top/left (`dx`/`dy < 0`) is cut off **from the source** — the page keeps
-/// its position on the flowing content strip (it must never be re-anchored
-/// onto the canvas top while the neighbour page slides in over it); the part
-/// past the bottom/right edge is dropped. Row-wise `memcpy` (a page row is a
-/// contiguous run of pixels) at full-screen Retina sizes. The source rasters
-/// are baked fully opaque (alpha 255) by `render_page_rgba`, so the row
-/// bytes can be copied verbatim.
-#[allow(clippy::too_many_arguments)] // nine flat raster params; a struct would obscure the call sites
+/// Copy an opaque RGBA8 raster `src` (size `sw`×`sh`) into `dst` (size `dw`×`dh`) with top-left at **signed** `(dx, dy)`,
+/// clipping both ends: overhang past top/left is cut **from the source** (never re-anchored to the canvas top), past bottom/right is dropped.
+#[allow(clippy::too_many_arguments)]
 fn blit(
     dst: &mut [u8],
     dw: usize,
@@ -874,9 +742,7 @@ fn blit(
 mod tests {
     use super::*;
 
-    /// Assemble a minimal valid PDF from flat object bodies (object `i+1` =
-    /// `objs[i]`), with a correctly-computed xref table, so a real raster path
-    /// is exercised end-to-end natively (not just on wasm).
+    /// Assemble a minimal valid PDF from flat object bodies (`i+1` = `objs[i]`) with a correct xref, exercising the real raster path end-to-end.
     fn build_pdf(objs: Vec<String>) -> Vec<u8> {
         let mut out = String::from("%PDF-1.4\n");
         let mut offsets: Vec<usize> = Vec::new();
@@ -964,25 +830,49 @@ mod tests {
     }
 
     #[test]
-    fn switches_mode_and_tap_pages() {
-        let v = Viewer::open_bytes(test_pdf(), 390, 800, 1.0).expect("should parse");
+    fn tap_pages_only_in_height_mode() {
+        let v = Viewer::open_bytes(test_pdf_n(2), 390, 800, 1.0).expect("should parse");
+        assert!(matches!(v.step(), Step::Frame(_)));
+
+        // Width-fit: taps are ignored (the continuous strip scrolls via drag/wheel) — right half, then left.
+        v.touch_down(300, 10); // right half
+        v.touch_up(300, 10);
+        v.touch_down(10, 10); // left half
+        v.touch_up(10, 10);
+        assert!(
+            matches!(v.step(), Step::Unchanged),
+            "width mode must ignore taps"
+        );
+        assert_eq!(v.view_state().page, 1);
 
         // Switch to height-fit: the canvas re-renders (signature changes).
         v.set_mode(Mode::Height);
         assert!(matches!(v.step(), Step::Frame(_)));
         assert_eq!(v.view_state().mode, VIEW_MODE_HEIGHT);
 
-        // Back to width-fit — still a repaint, still page 1 (can't page past N=1).
-        v.set_mode(Mode::Width);
-        v.touch_down(10, 10);
-        v.touch_up(10, 10); // tap left half → previous (clamped at page 1)
-        assert!(matches!(v.step(), Step::Unchanged | Step::Frame(_)));
+        // Height-fit: tap right half → next, tap left half → back to previous.
+        v.touch_down(300, 400);
+        v.touch_up(300, 400);
+        assert!(matches!(v.step(), Step::Frame(_)));
+        assert_eq!(v.view_state().page, 2);
+        v.touch_down(10, 400);
+        v.touch_up(10, 400);
+        assert!(matches!(v.step(), Step::Frame(_)));
         assert_eq!(v.view_state().page, 1);
     }
 
-    /// Height mode is a continuous strip: a released drag parks **exactly**
-    /// where the finger let go — the current page and its neighbour stay
-    /// connected and visible together, nothing jumps in to cover the other.
+    #[test]
+    fn switches_mode_repaint() {
+        let v = Viewer::open_bytes(test_pdf(), 390, 800, 1.0).expect("should parse");
+        v.set_mode(Mode::Height);
+        assert!(matches!(v.step(), Step::Frame(_)));
+        assert_eq!(v.view_state().mode, VIEW_MODE_HEIGHT);
+        v.set_mode(Mode::Width);
+        let _ = v.step();
+        assert_eq!(v.view_state().mode, VIEW_MODE_WIDTH);
+    }
+
+    /// Height mode: a released drag parks **exactly** where the finger let go (current page + neighbour stay visible together).
     #[test]
     fn height_mode_parks_where_released() {
         // 390×800 logical @ dpr 1 → each page cell is 800px tall here.
@@ -999,8 +889,7 @@ mod tests {
         assert_eq!(v.offset(), 400);
         v.touch_up(195, 0);
 
-        // Parked: exactly 400 — not snapped back to 0, not pushed on to 800.
-        // (Both pages are still composited from the offset's position.)
+        // Parked at exactly 400 — not snapped back to 0, not pushed on to 800 (both pages still composed from that offset).
         assert!(matches!(v.step(), Step::Unchanged | Step::Frame(_)));
         assert_eq!(v.offset(), 400);
 
@@ -1010,22 +899,14 @@ mod tests {
         assert_eq!(v.offset(), 500);
     }
 
-    /// Regression for "下一页盖住前一页 / 当前页吸附在顶部": the whole content
-    /// strip must move as one. Here each 612×792 page's "Hi" line sits
-    /// ~76–93px below the cell top (PDF y=700 means 700pt up from the
-    /// *bottom*); Height mode on a 700×800 canvas makes cells exactly 800px
-    /// tall. As the offset grows, the first dark line must follow it 1:1 —
-    /// page 1's line flows off the top (93→…) while page 2's (893→…) flows
-    /// in from the bottom. A page pinned at the top would keep its line at
-    /// ~93 forever while page 2 slid over it; every check below fails on
-    /// that defect.
+    /// Regression "next page covers the previous one / current page sticks to the top": the whole content strip must move as one.
+    /// Each "Hi" line sits ~76–93px below the cell top (PDF y=700 is measured up from the page bottom), and Height mode on 700×800 makes cells exactly 800px tall: as the offset grows, the topmost dark line must follow it 1:1, never pinned at the top.
     #[test]
     fn scroll_moves_the_whole_strip() {
         let v = Viewer::open_bytes(test_pdf_n(2), 700, 800, 1.0).expect("should parse");
         v.set_mode(Mode::Height);
 
-        /// The top-most dark text row in the next committed frame
-        /// (each commit follows a visible state change — offset / mode).
+        /// The top-most dark text row in the next committed frame (each commit tracks a visible state change).
         let line_at = |v: &Viewer| -> usize {
             let f = match v.step() {
                 Step::Frame(f) => f,
@@ -1046,9 +927,7 @@ mod tests {
         let y0 = line_at(&v);
         assert!((30..170).contains(&y0), "page-1 line at offset 0: {y0}");
 
-        // 200px steps → offset 200/400/600: page-1's line (93) has flowed
-        // off the top, so these land on page-2's line 893−off = 693/493/293.
-        // A top-pinned page would report ~93 at *every* offset.
+        // 200px steps → offsets 200/400/600: page-1's line (93) has flowed off the top, so this lands on page-2's line 893−off = 693/493/293; a page pinned to the top would always report ~93.
         for (off, want) in [(200i64, 693i64), (400, 493), (600, 293)] {
             v.scroll(-200);
             let y = line_at(&v) as i64; // step() inside drains the scroll
@@ -1059,9 +938,7 @@ mod tests {
             );
         }
 
-        // One full page of scroll (clamped to the strip's end, where the
-        // grey gutter + page-2 leave 776px scrollable): page-2's line now
-        // sits where page-1's used to, page counter says 2.
+        // One full page of scroll (clamped at the end of the strip, 776px scrollable): page-2's line now sits where page-1's had sat, page counter is 2.
         v.scroll(-400);
         let y = line_at(&v);
         assert_eq!(v.offset(), 776); // (2×776 + 24 gutter) − 800 viewport
@@ -1072,9 +949,7 @@ mod tests {
         assert_eq!(v.view_state().page, 2);
     }
 
-    /// The grey gutter: in Width mode a 24px canvas-grey band separates the
-    /// two pages — at the right scroll position those middle rows are the
-    /// background colour, while the paper on either side is white.
+    /// Grey gutter: in Width mode a 24px band of canvas-grey separates two pages — middle rows are the background color, paper on either side is white.
     #[test]
     fn gutter_between_pages_is_canvas_gray() {
         let v = Viewer::open_bytes(test_pdf_n(2), 390, 800, 1.0).expect("should parse");
@@ -1083,9 +958,7 @@ mod tests {
             (f.rgba[i], f.rgba[i + 1], f.rgba[i + 2])
         };
 
-        // Park the strip at offset 150 (2×504 pages + 24 gutter − 800 view
-        // clamps the strip at 232) → the page1|page2 gutter spans rows
-        // 504−150 .. 528−150 = 354 .. 378.
+        // Park the strip at offset 150 (2×504 pages + 24 gutter − 800 view → clamped to 232); the gutter row is 504−150 .. 528−150 = 354 .. 378.
         v.touch_down(195, 500);
         v.touch_move(195, 350);
         v.touch_up(195, 350);
@@ -1105,8 +978,7 @@ mod tests {
         assert!(white_like(px_at(&f, 40, 430)), "page-2 paper below the gutter");
     }
 
-    /// Width mode: a released drag parks exactly where it is too (unchanged
-    /// free-strip behaviour).
+    /// Width mode: a released drag parks exactly where it is too (free-strip behaviour).
     #[test]
     fn width_mode_parks_where_released() {
         let v = Viewer::open_bytes(test_pdf_n(2), 390, 800, 1.0).expect("should parse");
