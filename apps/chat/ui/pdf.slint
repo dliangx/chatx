@@ -65,12 +65,12 @@ export component PdfDock inherits Rectangle {
 export component PdfViewer inherits Rectangle {
     width: 100%;
     height: 100%;
-    background: #101218;
+    background: PdfHost.minimized ? #00000000 : #101218;
     clip: true;
 
     // Committed frame scaled to fill the window; rendered at the window's exact device px, so `fill` is 1:1 (no upscaling).
     Rectangle {
-        visible: PdfHost.page-count > 0 && !PdfHost.failed;
+        visible: PdfHost.page-count > 0 && !PdfHost.failed && !PdfHost.minimized;
         x: 0;
         y: 0;
         width: 100%;
@@ -93,10 +93,8 @@ export component PdfViewer inherits Rectangle {
         }
     }
 
-    // Gesture surface (declared before the buttons so they sit on top): drag → continuous page strip
-    // (both modes); tap → page-flip (left = prev, right = next) in Height mode only — Width mode ignores taps;
-    // wheel / trackpad scroll via `scroll-event`.
     ta := TouchArea {
+        visible: !PdfHost.minimized;
         width: 100%;
         height: 100%;
         changed pressed => {
@@ -134,7 +132,7 @@ export component PdfViewer inherits Rectangle {
 
     // View-mode toggle (top-centre).
     Rectangle {
-        visible: PdfHost.page-count > 0;
+        visible: PdfHost.page-count > 0 && !PdfHost.minimized;
         x: (parent.width - 34px) / 2;
         y: 10px;
         width: 34px;
@@ -161,7 +159,7 @@ export component PdfViewer inherits Rectangle {
 
     // Page counter "n/m", on the same row, right of the mode pill.
     Text {
-        visible: PdfHost.page-count > 0;
+        visible: PdfHost.page-count > 0 && !PdfHost.minimized;
         x: (parent.width + 34px) / 2 + 12px;
         y: 10px;
         width: 64px;
@@ -172,8 +170,9 @@ export component PdfViewer inherits Rectangle {
         color: rgba(255, 255, 255, 0.85);
     }
 
-    // Minimize (top-right, left of close): hide the overlay, keep the instance.
+    // Minimize (top-right, left of close): hide the page, keep the viewer mounted.
     Rectangle {
+        visible: !PdfHost.minimized;
         x: parent.width - 92px;
         y: 10px;
         width: 34px;
@@ -200,6 +199,7 @@ export component PdfViewer inherits Rectangle {
 
     // Close (top-right corner): destroy the viewer + hide the overlay.
     Rectangle {
+        visible: !PdfHost.minimized;
         x: parent.width - 48px;
         y: 10px;
         width: 34px;
@@ -222,5 +222,10 @@ export component PdfViewer inherits Rectangle {
             height: 100%;
             clicked => { PdfHost.close(); }
         }
+    }
+
+    PdfDock {
+        x: parent.width - 44px;
+        y: 10px;
     }
 }

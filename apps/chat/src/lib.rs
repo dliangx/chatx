@@ -180,6 +180,7 @@ fn apply_theme_mode(ui: &MainWindow, mode: ThemeMode) {
         } else {
             render::theme::Theme::default()
         };
+        ensure_renderer();
         if let Some(r) = RENDERER.get() {
             r.lock().unwrap().set_theme(palette);
         }
@@ -796,10 +797,8 @@ pub fn run_app() {
         });
         let min_weak = weak.clone();
         ui.global::<PdfHost>().on_minimize(move || {
-            // Hide the overlay only — the viewer stays live; tapping the dock pill re-shows it without a restart.
             let Some(ui) = min_weak.upgrade() else { return };
             ui.global::<PdfHost>().set_minimized(true);
-            clear_global_overlay(&ui);
         });
         let restore_weak = weak.clone();
         ui.global::<PdfHost>().on_restore(move || {

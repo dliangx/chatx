@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use pdf_interpret::InterpreterSettings;
 use pdf_render::pdf_syntax::Pdf;
-use pdf_render::{render as render_page, RenderSettings};
+use pdf_render::{RenderSettings, render as render_page};
 
 /// Fit each page to the canvas width (vertical strip).
 pub const VIEW_MODE_WIDTH: i32 = 1;
@@ -314,14 +314,11 @@ impl Viewer {
 
     /// Page `idx`'s opaque RGBA raster at the current mode's size (**device px**), rendered on demand; `None` if out of range.
     pub fn page_rgba(&self, idx: usize) -> Option<Frame> {
-        self.with_raster(
-            idx,
-            |w, h, rgba| Frame {
-                width: w,
-                height: h,
-                rgba: rgba.to_vec(),
-            },
-        )
+        self.with_raster(idx, |w, h, rgba| Frame {
+            width: w,
+            height: h,
+            rgba: rgba.to_vec(),
+        })
     }
 
     // -------------------- Pump --------------------
@@ -353,9 +350,7 @@ impl Viewer {
 
     /// Lock helper; recovers on poison (we own the only handle).
     fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -418,9 +413,10 @@ impl Inner {
         let pw = self.page_w[idx].max(1) as f32;
         let ph = self.page_h[idx].max(1) as f32;
         match self.mode {
-            Mode::Width => {
-                (self.canvas_w, (ph * (self.canvas_w as f32 / pw)).max(1.0) as u32)
-            }
+            Mode::Width => (
+                self.canvas_w,
+                (ph * (self.canvas_w as f32 / pw)).max(1.0) as u32,
+            ),
             // One page + trailing gutter fills the canvas ⇒ page itself scales to the leftover height.
             Mode::Height => {
                 let vh = self.view_h().max(1) as f32;
@@ -705,16 +701,7 @@ const BG_B: u8 = 246;
 /// Copy an opaque RGBA8 raster `src` (size `sw`×`sh`) into `dst` (size `dw`×`dh`) with top-left at **signed** `(dx, dy)`,
 /// clipping both ends: overhang past top/left is cut **from the source** (never re-anchored to the canvas top), past bottom/right is dropped.
 #[allow(clippy::too_many_arguments)]
-fn blit(
-    dst: &mut [u8],
-    dw: usize,
-    dh: usize,
-    dx: i64,
-    dy: i64,
-    sw: u32,
-    sh: u32,
-    src: &[u8],
-) {
+fn blit(dst: &mut [u8], dw: usize, dh: usize, dx: i64, dy: i64, sw: u32, sh: u32, src: &[u8]) {
     // Destination sub-rectangle: (dx,dy)..(dx+sw,dy+sh) ∩ (0,0)..(dw,dh).
     let x0 = dx.max(0) as usize;
     let y0 = dy.max(0) as usize;
@@ -793,9 +780,7 @@ mod tests {
                    << /Font << /F1 {font_idx} 0 R >> >> /Contents {contents_idx} 0 R >>"
             ));
         }
-        objs.push(
-            "<< /Length 29 >>\nstream\nBT /F1 24 Tf 72 700 Td (Hi) Tj ET\nendstream".into(),
-        );
+        objs.push("<< /Length 29 >>\nstream\nBT /F1 24 Tf 72 700 Td (Hi) Tj ET\nendstream".into());
         objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into());
         build_pdf(objs)
     }
@@ -811,11 +796,12 @@ mod tests {
                 assert_eq!((f.width, f.height), (780, 1600));
                 assert_eq!(f.rgba.len(), (780 * 1600 * 4) as usize);
                 // Fully opaque everywhere.
-                assert!(f
-                    .rgba
-                    .iter()
-                    .enumerate()
-                    .all(|(i, c)| i % 4 != 3 || *c == 255));
+                assert!(
+                    f.rgba
+                        .iter()
+                        .enumerate()
+                        .all(|(i, c)| i % 4 != 3 || *c == 255)
+                );
             }
             other => panic!("expected a rendered frame, got {other:?}"),
         }
@@ -906,7 +892,6 @@ mod tests {
         let v = Viewer::open_bytes(test_pdf_n(2), 700, 800, 1.0).expect("should parse");
         v.set_mode(Mode::Height);
 
-        /// The top-most dark text row in the next committed frame (each commit tracks a visible state change).
         let line_at = |v: &Viewer| -> usize {
             let f = match v.step() {
                 Step::Frame(f) => f,
@@ -974,8 +959,14 @@ mod tests {
             "gutter row must be canvas gray, got ({gr}, {gg}, {gb})"
         );
         let white_like = |c: (u8, u8, u8)| c.0 >= 250 && c.1 >= 250 && c.2 >= 250;
-        assert!(white_like(px_at(&f, 40, 300)), "page-1 paper above the gutter");
-        assert!(white_like(px_at(&f, 40, 430)), "page-2 paper below the gutter");
+        assert!(
+            white_like(px_at(&f, 40, 300)),
+            "page-1 paper above the gutter"
+        );
+        assert!(
+            white_like(px_at(&f, 40, 430)),
+            "page-2 paper below the gutter"
+        );
     }
 
     /// Width mode: a released drag parks exactly where it is too (free-strip behaviour).

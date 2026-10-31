@@ -7,7 +7,7 @@ import { LeftNavBar } from "components/left_nav.slint";
 import { SubPageView } from "./subpage.slint";
 import { AppHost, MiniAppOverlay } from "./x.slint";
 export { AppHost } from "./x.slint";
-import { PdfHost, PdfViewer, PdfDock } from "./pdf.slint";
+import { PdfHost, PdfViewer } from "./pdf.slint";
 export { PdfHost } from "./pdf.slint";
 import { AuthView } from "components/auth.slint";
 import { Theme } from "./theme.slint";
@@ -78,7 +78,7 @@ export component MainWindow inherits Window {
         height: root.height - root.safe-area-insets.bottom - root.safe-area-insets.top;
 
         if root.logged-in && AppState.is-mobile:
-    Rectangle {
+        Rectangle {
             x: 0px;
             y: 0px;
             width: 100%;
@@ -86,7 +86,7 @@ export component MainWindow inherits Window {
             clip: true;
 
             if AppState.nav-state.active-tab >= 0:
-        VerticalLayout {
+            VerticalLayout {
                 width: 100%;
                 height: 100%;
                 spacing: 0px;
@@ -130,14 +130,14 @@ export component MainWindow inherits Window {
                 }
             }
             BottomNavBar {
-                y: root.height - 58px;
+                y: parent.height - 58px;
                 height: 58px;
                 active-tab: AppState.nav-state.active-tab;
                 tab-clicked(i) => { root.select_tab(i); }
             }
 
             if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 1:
-        SubPageView {
+            SubPageView {
                 width: 100%;
                 height: 100%;
                 animate-in: false;
@@ -230,7 +230,7 @@ export component MainWindow inherits Window {
                     height: 100%;
 
                     if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 0:
-            SubPageView {
+                    SubPageView {
                         width: 100%;
                         height: 100%;
                         page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
@@ -241,27 +241,8 @@ export component MainWindow inherits Window {
                 }
             }
         }
-        if AppState.nav-state.global-overlay == GlobalOverlayType.ImageViewer: ImageViewer { }
-        if AppState.nav-state.global-overlay == GlobalOverlayType.QrScanner: ScanView { }
-        if AppState.nav-state.global-overlay == GlobalOverlayType.Camera: CameraView { }
-        if AppState.nav-state.global-overlay == GlobalOverlayType.AudioCall
-            || AppState.nav-state.global-overlay == GlobalOverlayType.VideoCall
-            || AppState.nav-state.global-overlay == GlobalOverlayType.ScreenShare: CallView { }
-        if AppState.nav-state.global-overlay == GlobalOverlayType.QrCode: QrCodeView { }
-        if AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu: AddMenuView { }
-        if AppState.nav-state.global-overlay == GlobalOverlayType.Error: ErrorView { }
-        if AppState.nav-state.global-overlay == GlobalOverlayType.MiniApp: MiniAppOverlay { }
-        if AppState.nav-state.global-overlay == GlobalOverlayType.Pdf: PdfViewer { }
-
-        // Minimized PDF dock pill (top-right): tap to re-show the viewer; `visible` is owned by the dock,
-    // so it hides whenever the overlay is up and never covers the close.
-    PdfDock {
-            x: parent.width - 44px;
-            y: 10px;
-        }
-
         if root.logged-in && !AppState.device-approved && pop-state:
-    Rectangle {
+        Rectangle {
             x: 0px;
             y: 0px;
             width: 100%;
@@ -310,4 +291,16 @@ export component MainWindow inherits Window {
             }
         }
     }
+
+    if AppState.nav-state.global-overlay == GlobalOverlayType.ImageViewer: ImageViewer { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.QrScanner: ScanView { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.Camera: CameraView { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.AudioCall
+        || AppState.nav-state.global-overlay == GlobalOverlayType.VideoCall
+        || AppState.nav-state.global-overlay == GlobalOverlayType.ScreenShare: CallView { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.QrCode: QrCodeView { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu: AddMenuView { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.Error: ErrorView { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.MiniApp: MiniAppOverlay { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.Pdf: PdfViewer { }
 }
