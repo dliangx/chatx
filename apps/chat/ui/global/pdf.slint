@@ -1,6 +1,6 @@
-import { AppState } from "components/app_state.slint";
-import { Theme } from "./theme.slint";
-import { Glyph, Icon } from "components/icon.slint";
+import { AppState } from "../components/app_state.slint";
+import { Theme } from "../theme.slint";
+import { Glyph, Icon } from "../components/icon.slint";
 
 export global PdfHost {
     in property <bool> running: false;
@@ -225,7 +225,7 @@ export component PdfViewer inherits Rectangle {
     }
 
     PdfDock {
-        x: parent.width - 44px;
+        x: parent.width - 90px;
         y: 10px;
     }
 }
