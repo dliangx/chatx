@@ -1,4 +1,3 @@
-
 use serde::{Deserialize, Serialize};
 
 const _PROTOCOL: &str = "/chatx/text/1";
@@ -10,26 +9,11 @@ pub enum MsgKind {
     Dm,
     GroupKey,
     GroupMsg,
-    /// Realtime audio frame (s16le PCM, base64-transported inside the JSON
-    /// envelope). Not persisted to the chat store — routed straight to the
-    /// speaker-playback sink on the far end.
     Audio,
-    /// WebRTC signaling frame (SDP offer/answer + ICE trickle) carried as an
-    /// opaque JSON string. Not persisted.
     Webrtc,
-    /// Persistent voice *message* — a recorded mic clip transmitted as s16le
-    /// PCM (base64), stored locally on both sides and rendered as a bubble
-    /// with a duration.
     Voice,
 }
 
-/// One realtime-audio frame carried inside a [`ChatRequest::audio`].
-///
-/// - `rate` — sample rate in Hz of `data`
-/// - `ch`   — channel count (1 or 2)
-/// - `data` — base64(s16le PCM); `decoded.len() == samples * 2 * ch`
-///
-/// Carried as base64 so it survives the request/response JSON transport.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioPayload {
     pub rate: u32,
@@ -79,12 +63,6 @@ pub struct ChatResponse {
     pub e2e: String,
 }
 
-/// Voice-message request/response pair, carried on the binary CBOR channel
-/// (`VOICE_PROTOCOL`). Unlike the JSON channel, `data` is a raw `Vec<u8>` —
-/// `cbor4ii` serialises it as a byte-string with no base64 expansion, so a
-/// 4.9 MB clip stays ~4.9 MB on the wire (JSON + string would have been
-/// ~6.5 MB). The `request_size_maximum` is set on the codec at construction
-/// time in `swarm.rs` to a value comfortably above any clip we produce.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceRequest {
     pub id: u64,
@@ -105,11 +83,7 @@ pub struct VoiceAck {
 }
 
 /// A photo message carried on the binary CBOR `image` channel. `data` is the
-/// raw image bytes (JPEG/PNG) — `cbor4ii` serializes `Vec<u8>` as a compact
-/// byte-string, so the wire size equals the image size. The sender writes the
-/// same bytes to its own local disk *before* sending and records them by
-/// path; the receiver writes the received bytes to disk and records them by
-/// path (so both sides keep a self-contained local copy).
+/// raw image bytes (JPEG/PNG)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageRequest {
     pub id: u64,
@@ -119,6 +93,19 @@ pub struct ImageRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageAck {
+    pub id: u64,
+}
+
+/// A document file (pdf / docx / xlsx / pptx) sent over the binary CBOR
+pub struct FileRequest {
+    pub id: u64,
+    pub from: String,
+    pub name: String,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAck {
     pub id: u64,
 }
 

@@ -20,6 +20,7 @@ base64 = { workspace = true }
 screen = { path = "../../crates/screen" }
 bridge = { path = "../../crates/bridge" }
 wasmhost = { path = "../../crates/wasmhost" }
+pdf = { path = "../../crates/pdf" }
 audio = { path = "../../crates/audio" }
 media = { path = "../../crates/media" }
 cpal = "0.16"

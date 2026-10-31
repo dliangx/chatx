@@ -44,9 +44,8 @@ export enum GlobalOverlayType {
     QrCode,
     AddMenu,
     Error,
-    // X mini-app (wasm sandbox plugin) — full-screen overlay with its own
-    // close/minimize controls (see ui/x.slint).
     MiniApp,
+    Pdf,
 }
 
 export struct SubPageEntry {
@@ -252,6 +251,11 @@ export global AppState {
     // the AppHostView timer while the page is visible.
     callback open-mini-app();
     callback pump-mini-app();
+
+    // ── Native PDF viewer (crates/pdf, no wasm) ─────────────────────────────
+    // open-pdf → file picker (desktop) then the viewer overlay; pump-pdf is driven by the PdfViewer timer.
+    callback open-pdf();
+    callback pump-pdf();
 
     // ── Chat settings (group chat) ─────────────────────────────────────────
     in-out property <int> current-chat-key: -1;

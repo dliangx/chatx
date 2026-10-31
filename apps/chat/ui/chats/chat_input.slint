@@ -10,6 +10,8 @@ export component ChatInputView inherits Rectangle {
     /// The photo icon was tapped — Rust opens the system photo picker for
     /// `chat-id`, then sends the chosen photo to the peer.
     callback sent-image(int);
+    /// The file icon was tapped — Rust opens the file picker for `chat-id`, then sends the chosen document.
+    callback sent-file(int);
 
     background: Theme.bg;
 
@@ -49,7 +51,7 @@ export component ChatInputView inherits Rectangle {
     out property <length> in-pad: 10px;
     out property <length> in-pad-x: 14px;
     out property <length> tail-w: 82px;
-    out property <length> head-w: 56px;
+    out property <length> head-w: 84px;
     out property <length> btn-w: 68px;
     out property <length> btn-h: 32px;
     out property <length> box-w: root.width - 2 * root.pad;
@@ -74,7 +76,7 @@ export component ChatInputView inherits Rectangle {
         border-color: Theme.border;
         clip: true;
 
-        // Left icon row: voice-toggle then photo (pick + send), bottom-left.
+        // Left icon row (bottom-left): voice-toggle, photo, then file — each pick + send.
         Rectangle {
             x: 0px;
             y: parent.height - root.btn-h - (root.in-pad / 2);
@@ -120,6 +122,24 @@ export component ChatInputView inherits Rectangle {
                 height: root.btn-h;
                 clicked => {
                     root.sent-image(root.chat-id);
+                }
+            }
+
+            Icon {
+                x: 59px;
+                y: (root.btn-h - 22px) / 2;
+                size: 22px;
+                glyph: Glyph.file;
+                tint: Theme.fg-muted;
+            }
+
+            TouchArea {
+                x: 56px;
+                y: 0px;
+                width: 28px;
+                height: root.btn-h;
+                clicked => {
+                    root.sent-file(root.chat-id);
                 }
             }
         }

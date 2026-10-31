@@ -163,6 +163,7 @@ pub async fn insert_row(pool: &Pool, m: &MsgRow) -> anyhow::Result<()> {
             m.media_duration_ms.map(|d| d as i64),
         ),
         (MediaKind::Image, Some(p)) if !p.is_empty() => (MSG_TYPE_IMAGE, Some(p.to_string()), None),
+        (MediaKind::File, Some(p)) if !p.is_empty() => (MSG_TYPE_FILE, Some(p.to_string()), None),
         _ => (MSG_TYPE_TEXT, None, None),
     };
     insert(
@@ -244,6 +245,7 @@ async fn load_rows(
             |(id, sender, text, sealed, t, msg_type, media_path, media_duration)| {
                 let (kind, path, dur) = match msg_type {
                     MSG_TYPE_IMAGE => (MediaKind::Image, media_path, None),
+                    MSG_TYPE_FILE => (MediaKind::File, media_path, None),
                     MSG_TYPE_VOICE => (
                         MediaKind::Voice,
                         media_path,

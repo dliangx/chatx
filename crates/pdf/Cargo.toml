@@ -1,0 +1,16 @@
+[package]
+name = "pdf"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Native PDF rendering + viewer control (pdf-rs: pdf-render + pdf-interpret). No wasm."
+
+[dependencies]
+thiserror = { workspace = true }
+# pdf-rs (pdfluent): pure-Rust interpreter + vello_cpu rasterizer. Fonts come
+# from the document (pdf-interpret extracts embedded/subset fonts); the
+# `embed-fonts` feature supplies the 14 base-14 substitutes as a fallback, so
+# no host font channel is needed. Parsing is via the `Pdf` re-export that
+# `pdf-render` gets from `pdf-syntax`.
+pdf-interpret = { version = "0.6.1", features = ["embed-fonts"] }
+pdf-render = "1.2.0"

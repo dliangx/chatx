@@ -182,8 +182,46 @@ export component SettingView inherits Rectangle {
         }
     }
 
-    SettingItem {
+    // Native PDF viewer entry (crates/pdf): file picker → full-screen viewer.
+    Rectangle {
         y: 193px;
+        width: 100%;
+        height: 48px;
+        background: transparent;
+
+        Icon {
+            x: 16px;
+            y: 12px;
+            size: 24px;
+            glyph: Glyph.fill;
+            tint: Theme.fg;
+        }
+        Text {
+            x: 48px;
+            y: 0px;
+            width: parent.width - 72px;
+            height: parent.height;
+            vertical-alignment: center;
+            text: @tr("Open PDF viewer");
+            font-size: 14px;
+            color: Theme.fg;
+        }
+        Icon {
+            x: parent.width - 32px;
+            y: 12px;
+            size: 24px;
+            glyph: Glyph.right;
+            tint: Theme.fg-muted;
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { AppState.open-pdf(); }
+        }
+    }
+
+    SettingItem {
+        y: 241px;
         width: 100%;
         id: 1;
         icon: Glyph.close-circle;

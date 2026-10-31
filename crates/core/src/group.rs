@@ -206,6 +206,9 @@ pub enum GroupMsgKind {
         duration_ms: u64,
     },
     Image,
+    File {
+        name: String,
+    },
 }
 
 impl GroupMsgKind {
@@ -219,6 +222,7 @@ impl GroupMsgKind {
                 duration_ms,
             } => format!("voice:{rate}:{ch}:{duration_ms}"),
             GroupMsgKind::Image => "image".to_string(),
+            GroupMsgKind::File { name } => format!("file:{name}"),
         }
     }
 }
@@ -355,14 +359,7 @@ pub fn seal_message(
     sender_peer: &str,
     text: &str,
 ) -> GmResult<SealedGroupMsg> {
-    seal_message_typed(
-        group,
-        sender,
-        sender_peer,
-        &GroupMsgKind::Text,
-        text,
-        None,
-    )
+    seal_message_typed(group, sender, sender_peer, &GroupMsgKind::Text, text, None)
 }
 
 pub fn seal_message_typed(
@@ -425,9 +422,14 @@ pub fn open_message(my_secret: &[u8; 32], env: &SealedGroupMsg) -> GmResult<Grou
     if payload.from != env.from {
         return Err(AcctError::BadSignature("group msg from mismatch".into()));
     }
-    let data = payload.data_b64.as_deref().and_then(|b| crate::account::from_b64(b));
+    let data = payload
+        .data_b64
+        .as_deref()
+        .and_then(|b| crate::account::from_b64(b));
     if !matches!(payload.kind, GroupMsgKind::Text) && data.is_none() {
-        return Err(AcctError::Crypto("group media message lacks payload".into()));
+        return Err(AcctError::Crypto(
+            "group media message lacks payload".into(),
+        ));
     }
     Ok(GroupPlain {
         kind: payload.kind,
@@ -495,11 +497,26 @@ mod tests {
         assert!(open_message(&[9u8; 32], &sealed_img).is_err());
 
         // Voice round-trips with rate/ch/duration + PCM bytes intact.
-        let pcm: Vec<u8> = (0u32..4096).map(|i| (i % 32_000) as u16).flat_map(|x| x.to_le_bytes()).collect();
-        let vkind = GroupMsgKind::Voice { rate: 48_000, ch: 2, duration_ms: 425 };
-        let sealed_voice = seal_message_typed(&group, &bob, bob_p, &vkind, "", Some(pcm.as_slice())).unwrap();
+        let pcm: Vec<u8> = (0u32..4096)
+            .map(|i| (i % 32_000) as u16)
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+        let vkind = GroupMsgKind::Voice {
+            rate: 48_000,
+            ch: 2,
+            duration_ms: 425,
+        };
+        let sealed_voice =
+            seal_message_typed(&group, &bob, bob_p, &vkind, "", Some(pcm.as_slice())).unwrap();
         let pv = open_message(&s0, &sealed_voice).unwrap();
-        assert!(matches!(pv.kind, GroupMsgKind::Voice { rate: 48_000, ch: 2, .. }));
+        assert!(matches!(
+            pv.kind,
+            GroupMsgKind::Voice {
+                rate: 48_000,
+                ch: 2,
+                ..
+            }
+        ));
         assert_eq!(pv.data, Some(pcm.clone()));
 
         // A media envelope forged with the wrong sender must be rejected

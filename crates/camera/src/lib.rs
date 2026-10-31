@@ -1,31 +1,3 @@
-//! Camera capture + native QR-code recognition.
-//!
-//! One public [`Camera`] type with the same surface on every target —
-//! `new`, `set_sink`, `set_frame_sink`, `is_running`, `start`, `stop` — so
-//! the app drives it identically no matter where it runs.
-//!
-//! - **macOS / iOS**: AVFoundation (`AVCaptureMetadataOutput`) + Apple's
-//!   built-in QR decoder, driven by a Swift shim (`shim/shim.swift`)
-//!   compiled by `build.rs` and linked into the final binary. See
-//!   `appleshim.rs`. iOS additionally exposes [`authorization_status`] to
-//!   query the camera grant state without prompting (see `ios.rs`).
-//! - **Windows / Linux**: [`nokhwa`](https://docs.rs/nokhwa) opens the camera
-//!   and streams frames; each frame is greyscaled and handed to `rxing` for
-//!   QR decode. See `desktop.rs`.
-//! - **Android**: the Java shell captures via Camera1 and delivers frames
-//!   through the `bridge` JNI consumer; we decode them with `rxing`. See
-//!   `android.rs`.
-//!
-//! Anything else (e.g. wasm) gets a no-op [`Camera`] whose `start()` reports
-//! "unsupported" (`fallback.rs`).
-//!
-//! Every target also exposes `set_capture_sink` + `capture`, used by the
-//! "share a moment" photo flow: `capture` grabs a still and delivers the
-//! saved on-disk path (or an error) to the sink installed earlier.
-//!
-//! All targets also expose the photo-album picker (`set_photos_sink` +
-//! `pick_photos` + `cancel`) for the moment page — see `album.rs`.
-
 #![allow(deprecated, non_snake_case, unsafe_op_in_unsafe_fn)]
 
 /// Outcome of a still-photo [`Camera::capture`]: either the saved file path or
@@ -35,6 +7,7 @@ pub type CaptureResult = Result<String, String>;
 pub mod album;
 #[allow(dead_code)]
 mod capture_grab;
+pub mod filepick;
 pub mod posts;
 
 #[cfg(any(
@@ -56,7 +29,7 @@ pub use apple_core::Camera;
 #[path = "ios.rs"]
 mod apple_ios;
 #[cfg(target_os = "ios")]
-pub use apple_ios::{authorization_status, CameraAuth};
+pub use apple_ios::{CameraAuth, authorization_status};
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod desktop;

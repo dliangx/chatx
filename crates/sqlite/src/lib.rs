@@ -28,6 +28,9 @@ pub enum MediaKind {
     None,
     Voice,
     Image,
+    /// A document file (pdf / docx / xlsx / pptx). The on-disk path is stored in
+    /// `msg.media_path`; the sender's basename rides in the `text` column.
+    File,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

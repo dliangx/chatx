@@ -224,6 +224,48 @@ pub fn derive_chat_image_bytes(src: &str) -> std::io::Result<Vec<u8>> {
     std::fs::read(src)
 }
 
+/// Write an inbound / outgoing document file to the app's local `files/` dir
+/// and return its path. The sender's basename is preserved (sanitized) so the
+/// file bubble and the PDF viewer show a meaningful name.
+pub async fn store_file_bytes(
+    name: &str,
+    bytes: &[u8],
+) -> std::io::Result<std::path::PathBuf> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    // Sanitize the sender-supplied basename (path separators / control chars)
+    // while keeping the extension (viewers detect the format by suffix).
+    let base = name
+        .rsplit(['/', '\\', '\0'])
+        .next()
+        .unwrap_or(name)
+        .trim();
+    let (stem_raw, ext) = match base.rfind('.') {
+        Some(i) if i > 0 => (&base[..i], base[i..].to_string()),
+        _ => (base, String::new()),
+    };
+    let stem: String = stem_raw
+        .chars()
+        .filter(|c| {
+            !c.is_control() && !matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
+        .collect();
+    let stem = if stem.trim().is_empty() { "file".to_string() } else { stem };
+    let dir = chatx_core::identity::DeviceIdentity::home_dir().join("files");
+    let path = dir.join(format!("{ts}__{stem}{ext}"));
+    let owned = bytes.to_vec();
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, &owned)?;
+        Ok::<_, std::io::Error>(path)
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
 /// Decode the photo at `path` (any format the `image` crate supports — PNG,
 /// JPEG, WebP, …) into a full-resolution `SlintImage`. Slint's built-in
 /// `load_from_path` only handles PNG/JPEG, so we decode through the `image`
@@ -382,6 +424,10 @@ pub struct RenderedMsg {
     /// Present when this is a photo bubble: the disk path. When set, the pixel
     /// buffer is a 1x1 dummy and Slint draws the image (bubble + viewer).
     pub image: Option<String>,
+    /// Present when this is a document-file bubble: (disk path, sender
+    /// basename). When set, the pixel buffer is a 1x1 dummy and Slint draws
+    /// the file row (icon + name).
+    pub file: Option<(String, String)>,
     /// The SMALL cached preview path (≤300px JPEG) for this photo. Used by
     /// `to_message_data` to fill `image_img` (the bubble draws the thumb — a
     /// memory-cached hit — and NEVER the big original). Tapping opens the
@@ -406,6 +452,10 @@ pub struct ChatMsg {
     /// A photo replaces the text body with an image bubble. The `path` is the
     /// local disk copy (original, possibly downscaled); tapping opens the viewer.
     pub image: Option<String>,
+    /// A document file (pdf / docx / xlsx / pptx) replaces the text body with
+    /// a file row. `(path, name)` = disk path + the sender's basename shown on
+    /// the bubble; tapping a PDF opens the in-app viewer.
+    pub file: Option<(String, String)>,
     /// Display-box dimensions derived from the small cached preview's aspect
     /// (identical ratio to the original, but never reads the big original file).
     /// `None` → `render_msg` falls back to measuring the original.
@@ -422,6 +472,24 @@ pub fn render_msg(
     available_w: u32,
     scale: f32,
 ) -> RenderedMsg {
+    // File rows are drawn by Slint (document icon + filename), so the
+    // rasterised buffer is a 1x1 dummy; the caller controls the displayed
+    // size (see `to_message_data`).
+    if let Some((path, name)) = &msg.file {
+        return RenderedMsg {
+            rgba: vec![255u8, 255, 255, 255],
+            width: 1,
+            height: 1,
+            is_self: msg.side == Side::SelfSide,
+            text: String::new(),
+            voice: None,
+            image: None,
+            file: Some((path.clone(), name.clone())),
+            preview: None,
+            avatar: msg.avatar.clone(),
+            time: msg.time.clone(),
+        };
+    }
     // Voice bubbles are drawn by Slint (icon + duration + play state), so the
     // rasterised image is a 1x1 dummy; the caller picks the displayed size in
     // `voice_dim` / `to_message_data_voice`.
@@ -434,6 +502,7 @@ pub fn render_msg(
             text: format!("{dur}ms"),
             voice: Some((path.clone(), *dur)),
             image: None,
+            file: None,
             preview: None,
             avatar: msg.avatar.clone(),
             time: msg.time.clone(),
@@ -466,6 +535,7 @@ pub fn render_msg(
             text: String::new(),
             voice: None,
             image: Some(path.clone()),
+            file: None,
             preview: msg.image_preview.clone(),
             avatar: msg.avatar.clone(),
             time: msg.time.clone(),
@@ -489,6 +559,7 @@ pub fn render_msg(
             text: msg.text.clone(),
             voice: None,
             image: None,
+            file: None,
             preview: None,
             avatar: None,
             time: msg.time.clone(),
@@ -501,18 +572,23 @@ pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageDa
     // (see `render_msg`), same handling as text rows.
     let is_voice = m.voice.is_some();
     let is_image = m.image.is_some();
+    let is_file = m.file.is_some();
     let (w, h) = if is_voice {
         (72.0, 54.0)
+    } else if is_file {
+        // File row: avatar (36) + icon (24) + elided filename, 54px tall like
+        // the voice row (Slint truncates long names with an ellipsis).
+        (150.0, 54.0)
     } else {
         (m.width as f64 / scale as f64, m.height as f64 / scale as f64)
     };
     crate::MessageData {
         bubble: {
-            // Image rows carry a 1x1 dummy raster (Slint draws `image_img`
-            // instead, sized by `width`/`height`), so keep the buffer 1x1 to
-            // match the 4-byte `rgba`.
-            let bw = if is_image { 1 } else { m.width.max(1) };
-            let bh = if is_image { 1 } else { m.height.max(1) };
+            // Image / file rows carry a 1x1 dummy raster (Slint draws
+            // `image_img` / the file row instead, sized by `width`/`height`),
+            // so keep the buffer 1x1 to match the 4-byte `rgba`.
+            let bw = if is_image || is_file { 1 } else { m.width.max(1) };
+            let bh = if is_image || is_file { 1 } else { m.height.max(1) };
             let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(bw, bh);
             buf.make_mut_bytes().copy_from_slice(&m.rgba);
             SlintImage::from_rgba8(buf)
@@ -532,6 +608,16 @@ pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageDa
             .voice
             .map(|(_, d)| format_duration_ms(d))
             .map(SharedString::from)
+            .unwrap_or_default(),
+        file_path: m
+            .file
+            .as_ref()
+            .map(|(p, _)| SharedString::from(p.clone()))
+            .unwrap_or_default(),
+        file_name: m
+            .file
+            .as_ref()
+            .map(|(_, n)| SharedString::from(n.clone()))
             .unwrap_or_default(),
         image_path: m
             .image

@@ -7,6 +7,8 @@ import { LeftNavBar } from "components/left_nav.slint";
 import { SubPageView } from "./subpage.slint";
 import { AppHost, MiniAppOverlay } from "./x.slint";
 export { AppHost } from "./x.slint";
+import { PdfHost, PdfViewer, PdfDock } from "./pdf.slint";
+export { PdfHost } from "./pdf.slint";
 import { AuthView } from "components/auth.slint";
 import { Theme } from "./theme.slint";
 export { Theme } from "./theme.slint";
@@ -242,8 +244,14 @@ export component MainWindow inherits Window {
     if AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu: AddMenuView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.Error: ErrorView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.MiniApp: MiniAppOverlay { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.Pdf: PdfViewer { }
 
-    // Pending-device banner: this device must be approved before sending.
+    // Minimized PDF dock pill (top-right): tap to re-show the viewer; `visible` is owned by the dock,
+    // so it hides whenever the overlay is up and never covers the close.
+    PdfDock {
+        x: parent.width - 44px;
+        y: 10px;
+    }
     if root.logged-in && !AppState.device-approved && pop-state:
     Rectangle {
         x: 0px;

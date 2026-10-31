@@ -1,8 +1,8 @@
 pub mod account;
-pub mod logging;
 pub mod friendq;
 pub mod group;
 pub mod identity;
+pub mod logging;
 pub mod message;
 pub mod moment;
 pub mod signal;
@@ -1352,10 +1352,21 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .await;
     }
 
-    /// Send a photo to `peer_base58` over the DM channel and wait for the
-    /// peer's ack. The image bytes are NOT persisted by core — the caller
-    /// writes them to a local path first and calls [`Self::persist_image`]
-    /// after a successful ack (mirroring voice).
+    pub async fn persist_file(&self, chat_id: &str, sender: &str, name: &str, local_path: &str) {
+        self.store
+            .push(
+                chat_id,
+                sender,
+                "",
+                false,
+                store::Kind::File {
+                    path: local_path.to_string(),
+                    name: name.to_string(),
+                },
+            )
+            .await;
+    }
+
     pub async fn send_image_cmd(&self, peer_base58: &str, data: Vec<u8>) -> anyhow::Result<()> {
         tracing::debug!("[image] send_image peer={peer_base58} bytes={}", data.len());
         let rec = self
@@ -1399,6 +1410,76 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(Ok(()))) => {
                     tracing::debug!("[image] acked via {addr}");
+                    return Ok(());
+                }
+                Ok(Ok(Err(e))) => {
+                    last_err = format!("send to {addr} failed: {e}");
+                }
+                Ok(Err(_)) => {
+                    last_err = "peer connection dropped before ack".to_string();
+                }
+                Err(_) => {
+                    last_err = format!("no ack from {addr} within {timeout:?}");
+                }
+            }
+        }
+        anyhow::bail!("failed to deliver to {peer_base58}: {last_err}");
+    }
+
+    /// Send a document file (pdf/docx/xlsx/pptx) to `peer_base58` over the DM
+    /// channel and wait for the peer's ack. `name` is the sender's basename
+    /// (shown on the receiver's file bubble); the caller writes `data` to a
+    /// local path first and calls [`Self::persist_file`] after a successful
+    /// ack (mirroring `send_image_cmd` + `persist_image`).
+    pub async fn send_file_cmd(
+        &self,
+        peer_base58: &str,
+        name: String,
+        data: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        tracing::debug!("[file] send_file peer={peer_base58} bytes={}", data.len());
+        let rec = self
+            .dir
+            .resolve_device(peer_base58)
+            .map_err(|e| anyhow::anyhow!("device {peer_base58} not found: {e}"))?;
+        if rec.endpoints.is_empty() {
+            anyhow::bail!("device {peer_base58} is offline (no endpoints)");
+        }
+        let peer: PeerId = peer_base58
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
+        let from = self.peer_base58();
+        let timeout = std::time::Duration::from_secs(15);
+        let mut last_err = String::new();
+        for endpoint in &rec.endpoints {
+            let Ok(addr) = endpoint.parse::<Multiaddr>() else {
+                continue;
+            };
+            if let Some(reason) = unroutable_reason(&addr) {
+                last_err = format!("{addr} unroutable ({reason})");
+                continue;
+            }
+            if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
+                peer: peer.clone(),
+                addr: addr.clone(),
+            }) {
+                last_err = format!("cmd channel closed: {e}");
+                continue;
+            }
+            let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+            if let Err(e) = self.running.cmd_tx.send(Cmd::SendFile {
+                peer: peer.clone(),
+                from: from.clone(),
+                name: name.clone(),
+                data: data.clone(),
+                ack_tx: Some(tx),
+            }) {
+                last_err = format!("cmd channel closed: {e}");
+                continue;
+            }
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(Ok(()))) => {
+                    tracing::debug!("[file] acked via {addr}");
                     return Ok(());
                 }
                 Ok(Ok(Err(e))) => {
@@ -1844,15 +1925,38 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     "png"
                 } else if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 {
                     "jpg"
-                } else if data
-                    .starts_with(b"RIFF")
-                    && data.get(8..12) == Some(b"WEBP")
-                {
+                } else if data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WEBP") {
                     "webp"
                 } else {
                     "jpg"
                 };
                 let path = dir.join(format!("img-{ts}.{ext}"));
+                std::fs::write(&path, data)?;
+                Ok(path)
+            }
+            group::GroupMsgKind::File { name } => {
+                let dir = home.join("files");
+                std::fs::create_dir_all(&dir)?;
+                // Sanitize the sender's basename (path separators / control
+                // chars / Windows-invalid chars) but keep the extension —
+                // viewers detect the format by suffix.
+                let base = name.rsplit(['/', '\\', '\0']).next().unwrap_or(name).trim();
+                let (stem_raw, ext) = match base.rfind('.') {
+                    Some(i) if i > 0 => (&base[..i], base[i..].to_string()),
+                    _ => (base, String::new()),
+                };
+                let stem: String = stem_raw
+                    .chars()
+                    .filter(|c| {
+                        !c.is_control() && !matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|')
+                    })
+                    .collect();
+                let stem = if stem.trim().is_empty() {
+                    "file".to_string()
+                } else {
+                    stem
+                };
+                let path = dir.join(format!("f-{ts}__{stem}{ext}"));
                 std::fs::write(&path, data)?;
                 Ok(path)
             }
@@ -1871,10 +1975,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             return Ok(None);
         };
         match &plain.kind {
-            group::GroupMsgKind::Voice {
-                duration_ms,
-                ..
-            } => {
+            group::GroupMsgKind::Voice { duration_ms, .. } => {
                 let path = self.write_group_media(&plain.kind, data)?;
                 Ok(Some(store::Kind::Voice {
                     path: path.to_string_lossy().into_owned(),
@@ -1885,6 +1986,13 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 let path = self.write_group_media(&plain.kind, data)?;
                 Ok(Some(store::Kind::Image {
                     path: path.to_string_lossy().into_owned(),
+                }))
+            }
+            group::GroupMsgKind::File { name } => {
+                let path = self.write_group_media(&plain.kind, data)?;
+                Ok(Some(store::Kind::File {
+                    path: path.to_string_lossy().into_owned(),
+                    name: name.clone(),
                 }))
             }
             group::GroupMsgKind::Text => Ok(None),
@@ -1913,7 +2021,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         // Text rows keep the sealed envelope in `text` so the chat window can
         // decrypt a plaintext preview.
         let (text_field, sealed) = match &kind {
-            store::Kind::Voice { .. } | store::Kind::Image { .. } => (String::new(), false),
+            store::Kind::Voice { .. } | store::Kind::Image { .. } | store::Kind::File { .. } => {
+                (String::new(), false)
+            }
             store::Kind::Text => {
                 let wire = serde_json::to_string(env)?;
                 (crate::account::b64(wire.as_bytes()), true)

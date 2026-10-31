@@ -22,6 +22,7 @@ use image::{
     ChatMsg, RENDERER, RenderedMsg, ensure_renderer, load_avatar_path_capped, load_image_cached,
     make_avatar, make_preview_image, qr_image, render_msg, to_message_data,
 };
+pub mod pdfrs;
 pub mod xhost;
 
 use process::{group_conn_enter, start_group_conn_sweeper, touch_chat_activity};
@@ -689,6 +690,146 @@ pub fn run_app() {
             if let Some(ui) = wm.upgrade() {
                 clear_global_overlay(&ui);
             }
+        });
+    }
+
+    // ── Native PDF viewer (crates/pdf, no wasm) — overlay + controls ────────
+    {
+        let w_open = weak.clone();
+        state.on_open_pdf(move || {
+            // Install the picker sink for this request, then present it. The
+            // sink fires on a background thread, so hop onto the UI loop to
+            // open the viewer (which reads the window size / scale factor).
+            let weak_outer = w_open.clone();
+            camera::filepick::set_file_sink(move |sel: Option<String>| {
+                let Some(path) = sel else {
+                    return;
+                };
+                if !path.to_lowercase().ends_with(".pdf") {
+                    tracing::warn!("[pdf] ignoring non-PDF selection: {path}");
+                    return;
+                }
+                let weak = weak_outer.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    if ui.get_logged_in() {
+                        open_pdf_page(&ui, &path);
+                    }
+                });
+            });
+            if let Err(e) = camera::filepick::pick_file() {
+                tracing::warn!("[pdf] file picker failed to present: {e}");
+            }
+        });
+
+        {
+            let w_pump = weak.clone();
+            // Track the window size last forwarded to the viewer, so a drag-resize
+            // pushes one `resize` per actual change (not every 16 ms tick).
+            let last_size = std::cell::Cell::new((0u32, 0u32));
+            state.on_pump_pdf(move || {
+                let Some(ui) = w_pump.upgrade() else {
+                    return;
+                };
+                // Forward a real window drag-resize (device px); the viewer
+                // invalidates its rasters and re-commits a frame next tick.
+                let phys = ui.window().size();
+                let dw = (phys.width as f32).max(240.0).round() as u32;
+                let dh = (phys.height as f32).max(240.0).round() as u32;
+                if last_size.get() != (dw, dh) {
+                    last_size.set((dw, dh));
+                    pdfrs::resize(dw, dh);
+                }
+                let Some(t) = pdfrs::tick() else {
+                    return; // nothing live → keep what is shown
+                };
+                let ph = ui.global::<PdfHost>();
+                match t {
+                    pdfrs::Tick::Unchanged => {}
+                    pdfrs::Tick::Commit(c) => {
+                        // One committed canvas frame replaces the previous one;
+                        // the old image (and its GPU texture) is released with it.
+                        ph.set_frame(c.img);
+                        ph.set_page(c.page);
+                        ph.set_page_count(c.page_count);
+                        ph.set_mode(c.mode);
+                    }
+                    pdfrs::Tick::Fatal { img, message } => {
+                        ph.set_frame(img);
+                        ph.set_failed(true);
+                        ph.set_running(false);
+                        ph.set_status(SharedString::from(message));
+                    }
+                }
+            });
+        }
+
+        let touch_weak = weak.clone();
+        ui.global::<PdfHost>().on_touch(move |kind, x, y| {
+            let dpr_x10 = current_dpr_x10(&touch_weak);
+            pdfrs::touch(kind, x, y, dpr_x10);
+        });
+        let scroll_weak = weak.clone();
+        ui.global::<PdfHost>().on_scroll(move |dy| {
+            let dpr_x10 = current_dpr_x10(&scroll_weak);
+            pdfrs::scroll(dy, dpr_x10);
+        });
+        ui.global::<PdfHost>().on_set_mode(move |m| {
+            pdfrs::set_mode(m);
+        });
+        let close_weak = weak.clone();
+        ui.global::<PdfHost>().on_close(move || {
+            // Full teardown: destroy the viewer (releases its parsed doc +
+            // render cache), then drop the committed frame the UI holds.
+            let had = pdfrs::is_open();
+            pdfrs::close();
+            if had {
+                tracing::info!("[pdf] closed from overlay");
+            }
+            if let Some(ui) = close_weak.upgrade() {
+                let ph = ui.global::<PdfHost>();
+                ph.set_minimized(false);
+                ph.set_running(false);
+                ph.set_failed(false);
+                ph.set_status(SharedString::from(""));
+                ph.set_page(0);
+                ph.set_page_count(0);
+                ph.set_mode(1);
+                // Release the committed frame texture the global still references.
+                ph.set_frame(slint::Image::default());
+                clear_global_overlay(&ui);
+            }
+        });
+        let min_weak = weak.clone();
+        ui.global::<PdfHost>().on_minimize(move || {
+            // Hide the overlay only — the viewer stays live; the dock pill
+            // (top-right) stays behind and tapping it re-shows the overlay
+            // without a restart.
+            let Some(ui) = min_weak.upgrade() else { return };
+            ui.global::<PdfHost>().set_minimized(true);
+            clear_global_overlay(&ui);
+        });
+        let restore_weak = weak.clone();
+        ui.global::<PdfHost>().on_restore(move || {
+            // Re-show the overlay. If the instance is somehow gone (shouldn't
+            // happen — only our close tears it down, which also hides the
+            // dock), fall back to cleaning the dock up instead of reviving a
+            // dead viewer.
+            let Some(ui) = restore_weak.upgrade() else {
+                return;
+            };
+            let ph = ui.global::<PdfHost>();
+            if !pdfrs::is_open() {
+                ph.set_minimized(false);
+                clear_global_overlay(&ui);
+                tracing::warn!("[pdf] restore: no live viewer — cleaned up dock");
+                return;
+            }
+            ph.set_minimized(false);
+            let mut nav = ui.global::<AppState>().get_nav_state();
+            nav.global_overlay = GlobalOverlayType::Pdf;
+            ui.global::<AppState>().set_nav_state(nav);
+            tracing::info!("[pdf] restored from dock");
         });
     }
 
@@ -1517,6 +1658,20 @@ pub fn run_app() {
 
     {
         let weak = weak.clone();
+        ui.global::<ChatSession>().on_sent_file(move |key| {
+            pick_chat_file(weak.clone(), key);
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        ui.global::<ChatSession>().on_open_file(move |idx| {
+            open_chat_file_from_index(weak.clone(), idx);
+        });
+    }
+
+    {
+        let weak = weak.clone();
         ui.global::<PostDetailState>().on_request_load(move |key| {
             // Release the previous post's full-resolution images before we go
             // off to load the new one; holding both at once doubles the bitmap
@@ -1689,6 +1844,27 @@ pub fn run_app() {
         });
     }
 
+    // Debug hook: CHATX_OPEN_PDF=/path/to/doc.pdf opens the native PDF viewer
+    // on launch (verifies in-app rendering without the file picker). Ignored
+    // when not logged in or the path does not exist.
+    if let Ok(pdf_path) = std::env::var("CHATX_OPEN_PDF") {
+        if !std::path::Path::new(&pdf_path).exists() {
+            tracing::warn!("[pdf] CHATX_OPEN_PDF: path missing: {pdf_path}");
+        } else {
+            let w = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    if !ui.get_logged_in() {
+                        tracing::info!("[pdf] CHATX_OPEN_PDF: skipping — not logged in");
+                        return;
+                    }
+                    open_pdf_page(&ui, &pdf_path);
+                    tracing::info!("[pdf] auto-opened {pdf_path} (CHATX_OPEN_PDF)");
+                }
+            });
+        }
+    }
+
     ui.run().expect("window run failed");
 }
 
@@ -1756,6 +1932,50 @@ fn open_mini_app_page(ui: &MainWindow) {
 
 /// Hide the global overlay (set to None). Used by the mini-app close/
 /// minimize controls.
+/// Open the native PDF viewer (crates/pdf, no wasm) as a full-screen global
+/// overlay on the document at `path`. Canvas = the chat window's logical size;
+/// the frame is rendered at its device resolution (× scale factor) so page
+/// pixels land 1:1 on physical pixels. Re-opening after a minimize is a no-op
+/// for the instance and just re-shows the overlay.
+fn open_pdf_page(ui: &MainWindow, path: &str) {
+    let sf = ui.window().scale_factor().max(1.0);
+    let phys = ui.window().size();
+    let cw = ((phys.width as f32) / sf).max(240.0).round() as u32;
+    let ch = ((phys.height as f32) / sf).max(240.0).round() as u32;
+    let ph = ui.global::<PdfHost>();
+    // Showing a (re-)opened overlay dismisses any leftover dock pill.
+    ph.set_minimized(false);
+    match pdfrs::open_pdf(path, cw, ch, sf) {
+        Ok(()) => {
+            ph.set_failed(false);
+            ph.set_running(true);
+            ph.set_status(SharedString::from("opening…"));
+            ph.set_page(0);
+            ph.set_page_count(0);
+            ph.set_mode(1);
+            // Start with no frame; the first pump commit paints it.
+            ph.set_frame(slint::Image::default());
+        }
+        Err(msg) => {
+            ph.set_failed(true);
+            ph.set_running(false);
+            ph.set_status(SharedString::from(msg));
+        }
+    }
+    let mut nav = ui.global::<AppState>().get_nav_state();
+    nav.global_overlay = GlobalOverlayType::Pdf;
+    ui.global::<AppState>().set_nav_state(nav);
+}
+
+/// Current window device-pixel-ratio as `dpr × 10` (for scaling logical →
+/// device px in the PDF input handlers); falls back to 1.0 when the window is
+/// gone.
+fn current_dpr_x10(weak: &slint::Weak<MainWindow>) -> u32 {
+    weak.upgrade()
+        .map(|ui| (ui.window().scale_factor().max(1.0) * 10.0).round() as u32)
+        .unwrap_or(10)
+}
+
 fn clear_global_overlay(ui: &MainWindow) {
     let st = ui.global::<AppState>();
     let mut nav = st.get_nav_state();
@@ -2224,6 +2444,16 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                         .await;
                         continue;
                     }
+                    if let chatx_core::swarm::ChatEvent::File { peer, name, data } = &evt {
+                        handle_inbound_file(
+                            weak.clone(),
+                            &peer.to_base58(),
+                            name.clone(),
+                            data.clone(),
+                        )
+                        .await;
+                        continue;
+                    }
                     let touched = client.process_event(evt).await;
                     if let Some(touched) = touched {
                         refresh_inbound_chat(weak.clone(), touched).await;
@@ -2299,6 +2529,44 @@ async fn handle_inbound_image(weak: slint::Weak<MainWindow>, peer_base58: &str, 
         }
         Err(e) => {
             tracing::warn!("[chat-image] inbound write failed: {e}");
+        }
+    }
+}
+
+/// Handle an inbound document file (pdf / docx / xlsx / pptx): write the bytes
+/// to the local `files/` dir under the sender's basename, persist a `Kind::File`
+/// row for the DM with the sender, and refresh the current chat if visible.
+async fn handle_inbound_file(
+    weak: slint::Weak<MainWindow>,
+    peer_base58: &str,
+    name: String,
+    data: Vec<u8>,
+) {
+    tracing::debug!(
+        "[chat-file] INBOUND from={peer_base58} name={name} bytes={}",
+        data.len()
+    );
+    let Some(client) = CLIENT.lock().unwrap().clone() else {
+        tracing::warn!("[chat-file] inbound: no client yet, dropping");
+        return;
+    };
+    let me = client.peer_base58();
+    let chat_id = dm_chat_id(&me, peer_base58);
+    match image::store_file_bytes(&name, &data).await {
+        Ok(path) => {
+            let path_str = path.to_string_lossy().into_owned();
+            tracing::debug!(
+                "[chat-file] inbound persisted {} ({} bytes)",
+                path.display(),
+                data.len()
+            );
+            client
+                .persist_file(&chat_id, peer_base58, &name, &path_str)
+                .await;
+            refresh_inbound_chat(weak, chat_id).await;
+        }
+        Err(e) => {
+            tracing::warn!("[chat-file] inbound write failed: {e}");
         }
     }
 }
@@ -2772,6 +3040,267 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
             load_chat_messages(weak2, key);
         }
     });
+}
+
+/// Pickable file extensions for chat file sends (documents + pdf).
+fn chat_file_allowed_exts() -> &'static [&'static str] {
+    &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"]
+}
+
+/// Inbound ceiling for a single document on the wire (`FILE_REQ_MAX` on the
+/// receiver side; 64 MiB). Keep the sender just under it so the CBOR framing fits.
+const CHAT_FILE_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Open the system file picker armed to send one document to chat `key`.
+/// Mirrors `pick_chat_image` — install this flow's sink right before presenting.
+fn pick_chat_file(weak: slint::Weak<MainWindow>, key: i32) {
+    if !require_approved(weak.clone()) {
+        return;
+    }
+    let weak_outer = weak.clone();
+    camera::filepick::set_file_sink(move |sel: Option<String>| {
+        let Some(path) = sel else {
+            tracing::debug!("[chat-file] no file picked (cancelled)");
+            return;
+        };
+        // The sink fires on a background thread, so hop onto the UI loop.
+        // Clone into a fresh local (owned by the inner closure) to avoid a
+        // second move of `weak_outer` — it is already captured by the outer
+        // `move` closure above.
+        let weak = weak_outer.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            on_chat_file_picked(weak, key, Some(path));
+        });
+    });
+    if let Err(e) = camera::filepick::pick_file() {
+        tracing::warn!("[chat-file] pick failed: {e}");
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<ChatSession>()
+                .set_send_status(SharedString::from(format!("File picker: {e}")));
+        }
+    }
+}
+
+/// A document was chosen for chat `key`: send the bytes over P2P, record a
+/// file row with the sender's basename, and refresh the chat.
+fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<String>) {
+    let Some(src) = path else {
+        tracing::debug!("[chat-file] no file picked (cancelled)");
+        return;
+    };
+    if key < 0 {
+        tracing::warn!("[chat-file] no chat bound, discarding");
+        return;
+    }
+    let name = std::path::Path::new(&src)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    let ext = std::path::Path::new(&src)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if !chat_file_allowed_exts().contains(&ext.as_str()) {
+        set_chat_status(
+            weak,
+            format!(
+                "Only document files (pdf / docx / xlsx / pptx) can be shared in chat, not “{ext:?}”."
+            ),
+        );
+        return;
+    }
+    let client = CLIENT.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
+    let (Some(client), Some(backend)) = (client, backend) else {
+        return;
+    };
+    let chat_id = {
+        let g = backend.blocking_read();
+        g.chat_id_for(key).map(|s| s.to_string())
+    };
+    let Some(chat_id) = chat_id else {
+        tracing::debug!("[chat-file] no chat_id for key={key}, aborting");
+        return;
+    };
+    let is_group = chat_id.starts_with("grp-");
+    if let Some(ui) = weak.upgrade() {
+        ui.global::<ChatSession>()
+            .set_send_status(SharedString::from("Sending file…"));
+    }
+    let me = client.peer_base58();
+    let my_peers: Vec<String> = {
+        let row_peer: String = backend
+            .blocking_read()
+            .chats
+            .iter()
+            .find(|r| r.key == key)
+            .map(|r| r.peer_id.clone())
+            .unwrap_or_default();
+        let mut v: Vec<String> = Vec::new();
+        if !row_peer.is_empty() && row_peer != me {
+            v.push(row_peer);
+        }
+        if chat_id.contains('|') {
+            for part in chat_id.split('|') {
+                if !part.is_empty() && part != me && !v.iter().any(|x| x == part) {
+                    v.push(part.to_string());
+                }
+            }
+        }
+        v
+    };
+    let meta = match std::fs::metadata(&src) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("[chat-file] stat failed: {e}");
+            set_chat_send_error(weak.clone(), "Could not read that file.");
+            return;
+        }
+    };
+    if meta.len() > CHAT_FILE_MAX_BYTES {
+        set_chat_status(
+            weak,
+            format!(
+                "That file is {:.1} MB — chat files are limited to {} MB.",
+                meta.len() as f64 / 1048576.0,
+                CHAT_FILE_MAX_BYTES / (1024 * 1024)
+            ),
+        );
+        return;
+    }
+    let bytes = match std::fs::read(&src) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("[chat-file] read failed: {e}");
+            set_chat_send_error(weak.clone(), "Could not read that file.");
+            return;
+        }
+    };
+    let rt = runtime();
+    let weak2 = weak.clone();
+    let c = client.clone();
+    let weak3 = weak.clone();
+    rt.spawn(async move {
+        if is_group {
+            match c
+                .send_group_media(
+                    &chat_id,
+                    &chatx_core::group::GroupMsgKind::File { name: name.clone() },
+                    bytes,
+                )
+                .await
+            {
+                Ok(()) => {
+                    tracing::debug!("[chat-file] group sent -> {chat_id}");
+                    touch_chat_activity(&chat_id);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak3.upgrade() {
+                            cs_set_send_status(&ui.global::<ChatSession>(), String::new());
+                        }
+                    });
+                    load_chat_messages(weak2, key);
+                }
+                Err(e) => {
+                    tracing::warn!("[chat-file] group send FAILED: {e}");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak3.upgrade() {
+                            cs_set_send_status(
+                                &ui.global::<ChatSession>(),
+                                format!("Send failed: {e}"),
+                            );
+                        }
+                    });
+                }
+            }
+            return;
+        }
+        // Store the file locally first (same name-based path), so when the
+        // chat reloads its rows the on-disk document is already present.
+        let local_path = match image::store_file_bytes(&name, &bytes).await {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => {
+                tracing::warn!("[chat-file] store failed: {e}");
+                set_chat_send_error(weak3.clone(), "Could not save that file.");
+                return;
+            }
+        };
+        let mut last_err = if my_peers.is_empty() {
+            "Cannot determine peer".to_string()
+        } else {
+            String::new()
+        };
+        let mut sent = false;
+        'outer: for cand in &my_peers {
+            if cand == &me {
+                continue;
+            }
+            match c.send_file_cmd(cand, name.clone(), bytes.clone()).await {
+                Ok(_) => {
+                    c.persist_file(&chat_id, &me, &name, &local_path).await;
+                    sent = true;
+                    tracing::debug!("[chat-file] sent -> {cand}");
+                    break 'outer;
+                }
+                Err(e) => {
+                    tracing::warn!("[chat-file] peer={cand} failed: {e}");
+                    last_err = e.to_string();
+                }
+            }
+        }
+        if sent {
+            touch_chat_activity(&chat_id);
+        }
+        let msg = if sent {
+            String::new()
+        } else if last_err.trim().is_empty() {
+            "Peer is offline".to_string()
+        } else {
+            last_err
+        };
+        set_chat_status(weak3, msg.clone());
+        if sent {
+            load_chat_messages(weak2, key);
+        }
+    });
+}
+
+/// Tap a chat file message. PDFs open in the native in-app viewer (crates/pdf,
+/// no wasm); other document types still surface a status hint until a viewer
+/// for them lands.
+fn open_chat_file_from_index(weak: slint::Weak<MainWindow>, idx: i32) {
+    let idx = idx as usize;
+    let Some(ui) = weak.upgrade() else { return };
+    let cs = ui.global::<ChatSession>();
+    use slint::Model as _;
+    let msgs = cs.get_messages();
+    let Some(row) = msgs.row_data(idx) else {
+        tracing::debug!("[chat-file] index {idx} out of range");
+        return;
+    };
+    if row.file_path.is_empty() {
+        tracing::debug!("[chat-file] row {idx} has no file path");
+        return;
+    }
+    let file_path = row.file_path.clone();
+    let ext = std::path::Path::new(&file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "pdf" => {
+            if ui.get_logged_in() {
+                open_pdf_page(&ui, &file_path);
+            }
+        }
+        _ => {
+            cs.set_send_status(SharedString::from(format!(
+                "No in-app viewer for .{ext} yet — please open it with a supporting app."
+            )));
+        }
+    }
 }
 
 /// Open the shared full-screen image viewer on the chat photo at `idx`.
@@ -3574,6 +4103,12 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         chatx_core::store::Kind::Image { path } => Some(path.clone()),
                         _ => None,
                     };
+                    let file = match &m.kind {
+                        chatx_core::store::Kind::File { path, name } => {
+                            Some((path.clone(), name.clone()))
+                        }
+                        _ => None,
+                    };
                     let preview = image_preview.get(&i).cloned();
                     let preview_dims = image_dims.get(&i).copied();
                     let msg = ChatMsg {
@@ -3584,6 +4119,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         avatar: Some(avatar),
                         voice,
                         image,
+                        file,
                         preview_dims,
                         image_preview: preview,
                     };
@@ -3619,7 +4155,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             let heights: Vec<f32> = rendered
                 .iter()
                 .map(|m| {
-                    if m.voice.is_some() {
+                    if m.voice.is_some() || m.file.is_some() {
                         VOICE_H
                     } else {
                         m.height as f32 / scale

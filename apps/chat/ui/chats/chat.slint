@@ -21,6 +21,10 @@ export struct MessageData {
     voice_path: string,
     /// Pre-formatted duration label ("M:SS") for voice rows.
     voice_label: string,
+    /// Empty except for file rows; the local document path (pdf / docx / …) — tapping a PDF opens the in-app viewer.
+    file_path: string,
+    /// The sender's basename for file rows (shown on the file bubble).
+    file_name: string,
     /// Empty for text/voice rows; the local photo path for image rows.
     image_path: string,
     /// The decoded chat photo (set for image rows; the `Image` element shows it,
@@ -54,8 +58,12 @@ export global ChatSession {
     /// User tapped the image icon in the input bar — open the system photo
     /// picker for chat `key`, then send the chosen photo.
     callback sent-image(int);
+    /// File icon tapped — open the file picker for chat `key`, then send the chosen document.
+    callback sent-file(int);
     /// User tapped a photo bubble — open the full-screen viewer on `idx`.
     callback open-image(int);
+    /// File bubble tapped — open the document (PDFs in the native in-app viewer).
+    callback open-file(int);
 }
 
 export component ChatView inherits Rectangle {
@@ -155,6 +163,7 @@ export component ChatView inherits Rectangle {
         chat-id: root.chat-id;
         sent(t) => { ChatSession.message-sent(root.chat-id, t); }
         sent-image(id) => { ChatSession.sent-image(id); }
+        sent-file(id) => { ChatSession.sent-file(id); }
     }
 
     if ChatSession.send-status != "":
@@ -265,14 +274,6 @@ export component ChatView inherits Rectangle {
             height: msg.height;
 
             // ── voice bubble (matching text-bubble proportions) ──────────
-            // Row geometry (logical px, scale=1):
-            //   avatar  = 36×36  (theme.avatar_size; same as text bubbles)
-            //   body    = 36px tall, 72px wide (8 pad + 24 icon + 4 + 34 dur)
-            //   time    = 11px font, 14px tall, directly below the body
-            //   gap     = 8px, edge = 6px  (same as text bubbles)
-            //   row     = avatar/body (36) + 4 gap + time (14) = 54 ≈ text height
-            // Own:   [body 72][gap][avatar 36]  → right edge
-            // Other: [avatar 36][gap][body 72]  → left edge
             if msg.voice_path != "":
             Rectangle {
                 width: 100%;
@@ -353,6 +354,74 @@ export component ChatView inherits Rectangle {
                 }
             }
 
+            // ── file bubble (icon + elided filename, tap to open); same row grammar as voice ──
+            if msg.file_path != "":
+            Rectangle {
+                width: 100%;
+                height: parent.height;
+
+                Image {
+                    width: 36px;
+                    height: 36px;
+                    y: 0px;
+                    x: msg.is_self ? parent.width - 6px - 36px : 6px;
+                    source: msg.avatar;
+                }
+
+                Rectangle {
+                    x: msg.is_self
+                        ? parent.width - 6px - 36px - 8px - 150px
+                        : 6px + 36px + 8px;
+                    y: 0px;
+                    width: 150px;
+                    height: 36px;
+                    border-radius: 12px;
+                    background: msg.is_self ? Theme.brand : Theme.surface;
+                    clip: true;
+
+                    Icon {
+                        x: 5px;
+                        y: 6px;
+                        size: 24px;
+                        glyph: Glyph.file;
+                        tint: msg.is_self ? Theme.fg-on-accent : Theme.fg;
+                    }
+
+                    Text {
+                        x: 35px;
+                        y: 0px;
+                        width: parent.width - 39px;
+                        height: 100%;
+                        text: msg.file_name;
+                        font-size: 12px;
+                        overflow: elide;
+                        color: msg.is_self ? Theme.fg-on-accent : Theme.fg;
+                        horizontal-alignment: left;
+                        vertical-alignment: center;
+                    }
+
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => { ChatSession.open-file(i); }
+                    }
+                }
+
+                Text {
+                    x: msg.is_self
+                        ? parent.width - 6px - 36px - 8px - 150px
+                        : 6px + 36px + 8px;
+                    y: 40px;
+                    width: 150px;
+                    height: 14px;
+                    text: msg.voice_time;
+                    font-size: 11px;
+                    color: Theme.fg-muted;
+                    horizontal-alignment: msg.is_self ? right : left;
+                    vertical-alignment: center;
+                }
+            }
+
             // ── image bubble (only for image rows) ───────────────────────
             if msg.image_path != "":
             Rectangle {
@@ -386,8 +455,8 @@ export component ChatView inherits Rectangle {
                 }
             }
 
-            // ── text bubble (existing path, only for non-voice, non-image rows) ─
-            if msg.voice_path == "" && msg.image_path == "":
+            // ── text bubble (only for non-voice / non-image / non-file rows) ─
+            if msg.voice_path == "" && msg.image_path == "" && msg.file_path == "":
             TouchArea {
                 x: msg.is_self ? parent.width - msg.width - 6px : 6px;
                 y: 0px;
