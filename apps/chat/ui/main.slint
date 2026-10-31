@@ -70,233 +70,242 @@ export component MainWindow inherits Window {
     AuthView {
         uid <=> AppState.user-id;
     }
-    if root.logged-in && AppState.is-mobile:
     Rectangle {
-        x: 0px;
-        y: 0px;
-        width: 100%;
-        height: 100%;
-        clip: true;
+        background: yellow;
+        x: root.safe-area-insets.left;
+        y: root.safe-area-insets.top;
+        width: root.width - root.safe-area-insets.right - root.safe-area-insets.left;
+        height: root.height - root.safe-area-insets.bottom - root.safe-area-insets.top;
 
-        if AppState.nav-state.active-tab >= 0:
-        VerticalLayout {
+        if root.logged-in && AppState.is-mobile:
+    Rectangle {
+            x: 0px;
+            y: 0px;
             width: 100%;
             height: 100%;
-            spacing: 0px;
+            clip: true;
 
-            Rectangle {
+            if AppState.nav-state.active-tab >= 0:
+        VerticalLayout {
                 width: 100%;
-                background: Theme.surface;
-                clip: true;
+                height: 100%;
+                spacing: 0px;
 
-                ChatListView {
-                    visible: AppState.nav-state.active-tab == 0;
+                Rectangle {
                     width: 100%;
-                    height: 100%;
-                    rows: AppState.chats;
-                    status: AppState.data-status;
-                }
+                    background: Theme.surface;
+                    clip: true;
 
-                ContactListView {
-                    visible: AppState.nav-state.active-tab == 1;
-                    width: 100%;
-                    height: 100%;
-                    rows: AppState.contacts;
-                    letters: AppState.contact-letters;
-                    requests: AppState.friend-requests;
-                }
+                    ChatListView {
+                        visible: AppState.nav-state.active-tab == 0;
+                        width: 100%;
+                        height: 100%;
+                        rows: AppState.chats;
+                        status: AppState.data-status;
+                    }
 
-                DiscoverView {
-                    visible: AppState.nav-state.active-tab == 2;
-                    width: 100%;
-                    height: 100%;
-                    cards: AppState.discover;
-                    like-toggled(id) => { AppState.toggle-like(id); }
-                    recommend-toggled(id) => { AppState.toggle-recommend(id); }
-                }
+                    ContactListView {
+                        visible: AppState.nav-state.active-tab == 1;
+                        width: 100%;
+                        height: 100%;
+                        rows: AppState.contacts;
+                        letters: AppState.contact-letters;
+                        requests: AppState.friend-requests;
+                    }
 
-                MeView {
-                    visible: AppState.nav-state.active-tab == 3;
-                    width: 100%;
-                    height: 100%;
+                    DiscoverView {
+                        visible: AppState.nav-state.active-tab == 2;
+                        width: 100%;
+                        height: 100%;
+                        cards: AppState.discover;
+                        like-toggled(id) => { AppState.toggle-like(id); }
+                        recommend-toggled(id) => { AppState.toggle-recommend(id); }
+                    }
+
+                    MeView {
+                        visible: AppState.nav-state.active-tab == 3;
+                        width: 100%;
+                        height: 100%;
+                    }
                 }
             }
-        }
-        BottomNavBar {
-            y: root.height - 58px;
-            height: 58px;
-            active-tab: AppState.nav-state.active-tab;
-            tab-clicked(i) => { root.select_tab(i); }
-        }
-
-        if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 1:
-        SubPageView {
-            width: 100%;
-            height: 100%;
-            animate-in: false;
-            page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
-                    AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top - 1].page;
-            payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
-                    AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top - 1].payload;
-            z: 1;
-        }
-
-        if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 0:
-            SubPageView {
-            width: 100%;
-            height: 100%;
-            z: 2;
-            page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
-                    AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top].page;
-            payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
-                    AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top].payload;
-        }
-    }
-
-    if root.logged-in && !AppState.is-mobile:
-        Rectangle {
-        x: 0px;
-        y: 0px;
-        width: 100%;
-        height: 100%;
-        clip: true;
-        HorizontalLayout {
-            width: 100%;
-            height: 100%;
-            spacing: 0px;
-            LeftNavBar {
-                width: 58px;
-                height: 100%;
+            BottomNavBar {
+                y: root.height - 58px;
+                height: 58px;
                 active-tab: AppState.nav-state.active-tab;
                 tab-clicked(i) => { root.select_tab(i); }
             }
 
-            Rectangle {
-                width: 280px;
+            if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 1:
+        SubPageView {
+                width: 100%;
                 height: 100%;
-                background: Theme.surface-2;
-                clip: true;
-
-                ChatListView {
-                    visible: AppState.nav-state.active-tab == 0;
-                    width: 100%;
-                    height: 100%;
-                    rows: AppState.chats;
-                    status: AppState.data-status;
-                }
-
-                ContactListView {
-                    visible: AppState.nav-state.active-tab == 1;
-                    width: 100%;
-                    height: 100%;
-                    rows: AppState.contacts;
-                    letters: AppState.contact-letters;
-                    requests: AppState.friend-requests;
-                }
-
-                DiscoverView {
-                    visible: AppState.nav-state.active-tab == 2;
-                    width: 100%;
-                    height: 100%;
-                    cards: AppState.discover;
-                    like-toggled(id) => { AppState.toggle-like(id); }
-                    recommend-toggled(id) => { AppState.toggle-recommend(id); }
-                }
-
-                MeView {
-                    visible: AppState.nav-state.active-tab == 3;
-                    width: 100%;
-                    height: 100%;
-                }
+                animate-in: false;
+                page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                    AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top - 1].page;
+                payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                    AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top - 1].payload;
+                z: 1;
             }
 
-            Rectangle {
-                width: 1px;
-                height: 100%;
-                background: Theme.border;
-            }
-
-            Rectangle {
-                background: Theme.surface-2;
-                clip: true;
-                width: root.width - 280px - 58px;
-                height: 100%;
-
-                if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 0:
+            if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 0:
             SubPageView {
-                    width: 100%;
-                    height: 100%;
-                    page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                width: 100%;
+                height: 100%;
+                z: 2;
+                page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
                     AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top].page;
-                    payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
                     AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top].payload;
+            }
+        }
+
+        if root.logged-in && !AppState.is-mobile:
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 100%;
+            clip: true;
+            HorizontalLayout {
+                width: 100%;
+                height: 100%;
+                spacing: 0px;
+                LeftNavBar {
+                    width: 58px;
+                    height: 100%;
+                    active-tab: AppState.nav-state.active-tab;
+                    tab-clicked(i) => { root.select_tab(i); }
+                }
+
+                Rectangle {
+                    width: 280px;
+                    height: 100%;
+                    background: Theme.surface-2;
+                    clip: true;
+
+                    ChatListView {
+                        visible: AppState.nav-state.active-tab == 0;
+                        width: 100%;
+                        height: 100%;
+                        rows: AppState.chats;
+                        status: AppState.data-status;
+                    }
+
+                    ContactListView {
+                        visible: AppState.nav-state.active-tab == 1;
+                        width: 100%;
+                        height: 100%;
+                        rows: AppState.contacts;
+                        letters: AppState.contact-letters;
+                        requests: AppState.friend-requests;
+                    }
+
+                    DiscoverView {
+                        visible: AppState.nav-state.active-tab == 2;
+                        width: 100%;
+                        height: 100%;
+                        cards: AppState.discover;
+                        like-toggled(id) => { AppState.toggle-like(id); }
+                        recommend-toggled(id) => { AppState.toggle-recommend(id); }
+                    }
+
+                    MeView {
+                        visible: AppState.nav-state.active-tab == 3;
+                        width: 100%;
+                        height: 100%;
+                    }
+                }
+
+                Rectangle {
+                    width: 1px;
+                    height: 100%;
+                    background: Theme.border;
+                }
+
+                Rectangle {
+                    background: Theme.surface-2;
+                    clip: true;
+                    width: root.width - 280px - 58px;
+                    height: 100%;
+
+                    if AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top >= 0:
+            SubPageView {
+                        width: 100%;
+                        height: 100%;
+                        page: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                    AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top].page;
+                        payload: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-history[
+                    AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top].payload;
+                    }
                 }
             }
         }
-    }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.ImageViewer: ImageViewer { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.QrScanner: ScanView { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.Camera: CameraView { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.AudioCall
-        || AppState.nav-state.global-overlay == GlobalOverlayType.VideoCall
-        || AppState.nav-state.global-overlay == GlobalOverlayType.ScreenShare: CallView { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.QrCode: QrCodeView { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu: AddMenuView { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.Error: ErrorView { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.MiniApp: MiniAppOverlay { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.Pdf: PdfViewer { }
+        if AppState.nav-state.global-overlay == GlobalOverlayType.ImageViewer: ImageViewer { }
+        if AppState.nav-state.global-overlay == GlobalOverlayType.QrScanner: ScanView { }
+        if AppState.nav-state.global-overlay == GlobalOverlayType.Camera: CameraView { }
+        if AppState.nav-state.global-overlay == GlobalOverlayType.AudioCall
+            || AppState.nav-state.global-overlay == GlobalOverlayType.VideoCall
+            || AppState.nav-state.global-overlay == GlobalOverlayType.ScreenShare: CallView { }
+        if AppState.nav-state.global-overlay == GlobalOverlayType.QrCode: QrCodeView { }
+        if AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu: AddMenuView { }
+        if AppState.nav-state.global-overlay == GlobalOverlayType.Error: ErrorView { }
+        if AppState.nav-state.global-overlay == GlobalOverlayType.MiniApp: MiniAppOverlay { }
+        if AppState.nav-state.global-overlay == GlobalOverlayType.Pdf: PdfViewer { }
 
-    // Minimized PDF dock pill (top-right): tap to re-show the viewer; `visible` is owned by the dock,
+        // Minimized PDF dock pill (top-right): tap to re-show the viewer; `visible` is owned by the dock,
     // so it hides whenever the overlay is up and never covers the close.
     PdfDock {
-        x: parent.width - 44px;
-        y: 10px;
-    }
-    if root.logged-in && !AppState.device-approved && pop-state:
-    Rectangle {
-        x: 0px;
-        y: 0px;
-        width: 100%;
-        height: 34px;
-        background: Theme.warning-bg;
-
-        Text {
-            x: 12px;
-            y: 0px;
-            width: parent.width - 60px;
-            height: parent.height;
-            text: @tr("Device pending approval · have an approved device approve it to send/receive");
-            font-size: 12px;
-            color: Theme.warning-fg;
-            vertical-alignment: center;
+            x: parent.width - 44px;
+            y: 10px;
         }
 
-        Rectangle {
-            x: parent.width - 52px;
-            y: 6px;
-            width: 40px;
-            height: 22px;
-            border-radius: 11px;
-            background: Theme.warning-fg;
+        if root.logged-in && !AppState.device-approved && pop-state:
+    Rectangle {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 34px;
+            background: Theme.warning-bg;
 
             Text {
-                x: 0px;
+                x: 12px;
                 y: 0px;
-                width: parent.width;
+                width: parent.width - 60px;
                 height: parent.height;
-                text: @tr("Approve");
-                font-size: 11px;
-                color: white;
-                horizontal-alignment: center;
+                text: @tr("Device pending approval · have an approved device approve it to send/receive");
+                font-size: 12px;
+                color: Theme.warning-fg;
                 vertical-alignment: center;
             }
 
-            TouchArea {
-                width: parent.width;
-                height: parent.height;
-                clicked => {
-                    root.pop-state = false;
-                    AppState.push-sub(SubPageType.MyDevices, 0);
+            Rectangle {
+                x: parent.width - 52px;
+                y: 6px;
+                width: 40px;
+                height: 22px;
+                border-radius: 11px;
+                background: Theme.warning-fg;
+
+                Text {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: parent.height;
+                    text: @tr("Approve");
+                    font-size: 11px;
+                    color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    clicked => {
+                        root.pop-state = false;
+                        AppState.push-sub(SubPageType.MyDevices, 0);
+                    }
                 }
             }
         }
