@@ -3439,9 +3439,9 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
     });
 }
 
-/// Pickable file extensions for chat file sends (documents + pdf).
+/// Pickable file extensions for chat file sends: docx / xlsx / pptx / pdf only.
 fn chat_file_allowed_exts() -> &'static [&'static str] {
-    &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"]
+    &["docx", "xlsx", "pptx", "pdf"]
 }
 
 /// Inbound ceiling for one document on the wire (`FILE_REQ_MAX` = 64 MiB); keep the send just under it so the CBOR framing fits.

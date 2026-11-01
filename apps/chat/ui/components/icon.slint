@@ -17,6 +17,10 @@ export enum Glyph {
     delete,
     edit,
     file,
+    file-excel,
+    file-pdf,
+    file-ppt,
+    file-word,
     fill,
     fit-height,
     fit-width,
@@ -81,6 +85,51 @@ export component Filled inherits Path {
     viewbox-width: 1024;
     viewbox-height: 1024;
     fill: root.tint;
+}
+
+// Multi-colour document icons (Word / Excel / PowerPoint / PDF), one per chat file bubble.
+// Each layer of the source SVG (page body, folded corner, letter mark) keeps its own
+// fill colour — a single `Filled` path only carries one colour, so every layer is a
+// separate `Path` stacked in the same 1024×1024 viewbox.
+component FileWordGlyph inherits Rectangle {
+    in property <length> size: 24px;
+    width: root.size;
+    height: root.size;
+    background: transparent;
+    Filled { size: root.size; tint: #4A8DFF; commands: "M179 64h468.5l223 225.5V935c0 13.807-11.193 25-25 25H179c-13.807 0-25-11.193-25-25V89c0-13.807 11.193-25 25-25z"; }
+    Filled { size: root.size; tint: #E5F0FF; commands: "M647.5 64v200.5c0 13.807 11.193 25 25 25h198L647.5 64z"; }
+    Filled { size: root.size; tint: #FFFFFF; commands: "M693.153 784.6C714.698 808.196 754 792.953 754 761V389h-70v281.758L544.847 518.35c-13.879-15.201-37.815-15.201-51.694 0L354 670.758V389h-70v372c0 31.954 39.302 47.197 60.847 23.6L519 593.857 693.153 784.6z"; }
+}
+
+component FileExcelGlyph inherits Rectangle {
+    in property <length> size: 24px;
+    width: root.size;
+    height: root.size;
+    background: transparent;
+    Filled { size: root.size; tint: #00C090; commands: "M179 64h468.5l223 225.5V935c0 13.807-11.193 25-25 25H179c-13.807 0-25-11.193-25-25V89c0-13.807 11.193-25 25-25z"; }
+    Filled { size: root.size; tint: #68DBBF; commands: "M647.5 64v200.5c0 13.807 11.193 25 25 25h198L647.5 64z"; }
+    Filled { size: root.size; tint: #FFFFFF; commands: "M677.007 388.282L297.22 769.07c-13.65 13.685-13.623 35.846 0.062 49.497 13.685 13.652 35.846 13.624 49.498-0.061l379.786-380.787c13.652-13.685 13.624-35.846-0.061-49.498-13.686-13.65-35.846-13.623-49.498 0.062z"; }
+    Filled { size: root.size; tint: #FFFFFF; commands: "M297.22 436.718l379.787 380.787c13.652 13.685 35.812 13.713 49.498 0.061 13.685-13.651 13.713-35.812 0.061-49.497L346.78 387.282c-13.652-13.685-35.813-13.713-49.498-0.062-13.685 13.652-13.713 35.813-0.062 49.498z"; }
+}
+
+component FilePptGlyph inherits Rectangle {
+    in property <length> size: 24px;
+    width: root.size;
+    height: root.size;
+    background: transparent;
+    Filled { size: root.size; tint: #FF7861; commands: "M179 64h468.5l223 225.5V935c0 13.807-11.193 25-25 25H179c-13.807 0-25-11.193-25-25V89c0-13.807 11.193-25 25-25z"; }
+    Filled { size: root.size; tint: #FFB0A4; commands: "M647.5 64v200.5c0 13.807 11.193 25 25 25h198L647.5 64z"; }
+    Filled { size: root.size; tint: #FFFFFF; commands: "M670.098 478.093C677.884 486.056 682 497.51 682 514.5c0 16.989-4.116 28.444-11.902 36.407-8.313 8.504-22.397 14.822-43.202 18.093H318c-19.33 0-35 15.67-35 35v157c0 19.33 15.67 35 35 35s35-15.67 35-35V639h276.5a35 35 0 0 0 4.95-0.352C709.214 627.968 752 584.203 752 514.5s-42.786-113.468-117.55-124.148a35 35 0 0 0-4.95-0.352H318c-19.33 0-35 15.67-35 35s15.67 35 35 35h308.896c20.805 3.271 34.889 9.589 43.202 18.093z"; }
+}
+
+component FilePdfGlyph inherits Rectangle {
+    in property <length> size: 24px;
+    width: root.size;
+    height: root.size;
+    background: transparent;
+    Filled { size: root.size; tint: #FF4867; commands: "M179 64h468.5l223 225.5V935c0 13.807-11.193 25-25 25H179c-13.807 0-25-11.193-25-25V89c0-13.807 11.193-25 25-25z"; }
+    Filled { size: root.size; tint: #FF97A9; commands: "M647.5 64v200.5c0 13.807 11.193 25 25 25h198L647.5 64z"; }
+    Filled { size: root.size; tint: #FFFFFF; commands: "M691.919 812c-44.4 0-84.22-76.189-105.17-125.732-35.243-14.71-74.092-28.45-111.831-37.331-33.022 21.788-89.214 54.4-132.365 54.4-26.778 0-46.064-13.461-53.14-36.914-5.411-19.29-0.832-32.613 4.995-39.83 11.377-15.543 34.825-23.453 69.929-23.453 28.443 0 64.517 4.996 104.754 14.71 25.945-18.457 52.307-39.829 75.756-62.45-10.406-49.404-21.784-129.479 7.076-166.393 14.29-17.625 36.074-23.454 62.436-15.543 28.86 8.326 39.82 25.951 43.15 39.829 12.21 48.155-43.15 113.103-80.473 151.267 8.325 33.029 19.286 67.862 32.606 99.78 53.556 23.87 117.24 59.536 124.456 98.394 2.913 13.461-1.249 25.951-12.21 36.915-9.435 7.771-19.425 12.351-29.97 12.351zM652 728c9.768 21.74 19.081 32 23.99 32 0.76 0 1.823-0.333 3.341-1.664 1.822-1.996 1.822-3.327 1.518-4.547-1.012-5.713-9.262-15.085-28.849-25.789z m-281.922-88c-15.62 0-19.913 3.774-21.22 5.535-0.373 0.566-1.493 2.264-0.373 6.666 0.933 3.774 3.547 7.799 11.636 7.799 10.143 0 24.829-5.723 41.879-15.975-12.196-2.704-22.962-4.025-31.922-4.025zM523 620.582c9.333 2.6 19.01 5.951 28 9.418-3.264-8.551-5.898-17.449-8.13-26A629.121 629.121 0 0 1 523 620.582zM588.966 433c-3.32 0-5.649 1.229-7.745 3.511-6.173 7.783-6.872 27.386-2.097 52.489 18.111-19.427 27.953-37.275 25.507-46.813-0.35-1.404-1.398-5.676-9.842-8.134-2.33-0.702-4.076-1.053-5.823-1.053z"; }
 }
 
 export component Icon inherits Rectangle {
@@ -218,6 +267,11 @@ export component Icon inherits Rectangle {
         tint: root.tint;
         commands: "M825.9 192H383.7c-1.4-16.5-8.5-31.9-20.4-43.7-13.3-13.3-31-20.7-49.9-20.7H199.3c-38.9 0-70.5 31.6-70.5 70.5v627.3c0 38.9 31.6 70.5 70.5 70.5h626.5c38.9 0 70.5-31.6 70.5-70.5V262.5c0.1-38.9-31.5-70.5-70.4-70.5z m-626.6-0.4h114.1c1.7 0 3.4 0.7 4.6 1.9 1.2 1.2 1.9 2.9 1.9 4.6V256h505.9c3.6 0 6.5 2.9 6.5 6.5V352H192.8V198.1c0-3.6 2.9-6.5 6.5-6.5zM825.9 832H199.3c-3.6 0-6.5-2.9-6.5-6.5V416h639.6v409.5c0 3.6-2.9 6.5-6.5 6.5z";
     }
+
+    if root.glyph == Glyph.file-excel: FileExcelGlyph { size: root.size; }
+    if root.glyph == Glyph.file-pdf: FilePdfGlyph { size: root.size; }
+    if root.glyph == Glyph.file-ppt: FilePptGlyph { size: root.size; }
+    if root.glyph == Glyph.file-word: FileWordGlyph { size: root.size; }
 
     if root.glyph == Glyph.fit-height: Filled {
         size: root.size;

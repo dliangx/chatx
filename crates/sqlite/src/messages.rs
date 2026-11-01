@@ -1,5 +1,5 @@
 use crate::conversations;
-use crate::{new_id, now_ms, MediaKind, MsgRow, Pool};
+use crate::{MediaKind, MsgRow, Pool, new_id, now_ms};
 use sqlx::FromRow;
 
 /// 0=text, 1=image, 2=voice, 3=video, 4=file, 5=system
@@ -139,16 +139,6 @@ pub async fn insert(pool: &Pool, m: &NewMessage) -> anyhow::Result<i64> {
     Ok(id)
 }
 
-/// Legacy shim over [`insert`] preserving the old `MsgRow` fields,
-/// used by `chatx-core` for its outgoing/inbound text messages.
-///
-/// The string `chat_id`/`sender` are mapped:
-/// - `chat_id` onto integer `conversations.id` via `conversations::ensure_dm`.
-/// - `sender` onto `messages.sender_peer_id` (the wire identity, always
-///   preserved). If a `devices` row for that peer exists (i.e. we know their
-///   real user), `messages.sender_user_id` is populated from it; otherwise it
-///   stays NULL. **No user row is ever created here** — historical ghost
-///   `users` rows keyed by `<PeerId>` are gone (see migration 0003).
 pub async fn insert_row(pool: &Pool, m: &MsgRow) -> anyhow::Result<()> {
     let conversation_id = conversations::ensure_dm(pool, &m.chat_id).await?;
     let sender_user_id = crate::devices::ensure_user_by_peer(pool, &m.sender).await?;
@@ -204,11 +194,23 @@ pub async fn load_all(pool: &Pool, chat_id: &str) -> anyhow::Result<Vec<MsgRow>>
 }
 
 /// Legacy shim: paged load for a string chat id.
-pub async fn load_page(pool: &Pool, chat_id: &str, limit: u32, offset: u32) -> anyhow::Result<Vec<MsgRow>> {
+pub async fn load_page(
+    pool: &Pool,
+    chat_id: &str,
+    limit: u32,
+    offset: u32,
+) -> anyhow::Result<Vec<MsgRow>> {
     let Some(conversation_id) = conversations::resolve_id(pool, chat_id).await? else {
         return Ok(Vec::new());
     };
-    load_rows(pool, conversation_id, chat_id, Some(limit as i64), Some(offset as i64)).await
+    load_rows(
+        pool,
+        conversation_id,
+        chat_id,
+        Some(limit as i64),
+        Some(offset as i64),
+    )
+    .await
 }
 
 async fn load_rows(
@@ -220,20 +222,29 @@ async fn load_rows(
 ) -> anyhow::Result<Vec<MsgRow>> {
     let limit = limit.unwrap_or(-1);
     let offset = offset.unwrap_or(0);
-    // Prefer the wire peer id (set on every P2P message); fall back to the
-    // sender user's username for legacy rows that only carried a users.id.
-    let rows: Vec<(i64, String, Option<String>, bool, i64, i64, Option<String>, Option<i64>)> =
-        sqlx::query_as(
-            "SELECT m.id, COALESCE(m.sender_peer_id, u.username, '') AS sender,
-                    CASE WHEN m.msg_type = 0 THEN m.text_content ELSE NULL END AS text,
-                    m.is_encrypted, m.timestamp,
-                    m.msg_type, m.media_path, m.media_duration
-              FROM messages m
-              LEFT JOIN users u ON u.id = m.sender_user_id
-              WHERE m.conversation_id = ?1
-              ORDER BY m.timestamp DESC
-              LIMIT ?2 OFFSET ?3",
-        )
+
+    let sql = format!(
+        "SELECT m.id, COALESCE(m.sender_peer_id, u.username, '') AS sender,
+                CASE WHEN m.msg_type IN ({}, {}) THEN m.text_content ELSE NULL END AS text,
+                m.is_encrypted, m.timestamp,
+                m.msg_type, m.media_path, m.media_duration
+          FROM messages m
+          LEFT JOIN users u ON u.id = m.sender_user_id
+          WHERE m.conversation_id = ?1
+          ORDER BY m.timestamp DESC
+          LIMIT ?2 OFFSET ?3",
+        MSG_TYPE_TEXT, MSG_TYPE_FILE
+    );
+    let rows: Vec<(
+        i64,
+        String,
+        Option<String>,
+        bool,
+        i64,
+        i64,
+        Option<String>,
+        Option<i64>,
+    )> = sqlx::query_as(&sql)
         .bind(conversation_id)
         .bind(limit)
         .bind(offset)
@@ -271,7 +282,12 @@ async fn load_rows(
 }
 
 /// Messages newer than `after_timestamp` (exclusive), ordered ascending.
-pub async fn load_since(pool: &Pool, conversation_id: i64, after_timestamp: i64, limit: u32) -> anyhow::Result<Vec<Message>> {
+pub async fn load_since(
+    pool: &Pool,
+    conversation_id: i64,
+    after_timestamp: i64,
+    limit: u32,
+) -> anyhow::Result<Vec<Message>> {
     let rows = sqlx::query_as::<_, Message>(
         "SELECT * FROM messages
          WHERE conversation_id = ?1 AND timestamp > ?2
@@ -336,8 +352,8 @@ pub async fn clear_unread_for(pool: &Pool, conversation_id: i64) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::open_memory;
     use crate::MsgRow as LegacyRow;
+    use crate::open_memory;
 
     #[tokio::test]
     async fn insert_and_page_ordering() {
@@ -393,21 +409,31 @@ mod tests {
                 sender: "a".into(),
                 text: "hi".into(),
                 sealed: false,
-                    t: now_ms() as u64,
-                    mine: false,
-                    media_path: None,
-                    media_kind: MediaKind::None,
-                    media_duration_ms: None,
-                },
+                t: now_ms() as u64,
+                mine: false,
+                media_path: None,
+                media_kind: MediaKind::None,
+                media_duration_ms: None,
+            },
         )
         .await
         .unwrap();
-        let conv_id = conversations::resolve_id(&pool, "dm").await.unwrap().unwrap();
+        let conv_id = conversations::resolve_id(&pool, "dm")
+            .await
+            .unwrap()
+            .unwrap();
         let conv = conversations::get(&pool, conv_id).await.unwrap().unwrap();
         assert_eq!(conv.unread_count, 1);
         assert_eq!(conv.name.as_deref(), Some("dm"));
         conversations::clear_unread(&pool, conv_id).await.unwrap();
-        assert_eq!(conversations::get(&pool, conv_id).await.unwrap().unwrap().unread_count, 0);
+        assert_eq!(
+            conversations::get(&pool, conv_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .unread_count,
+            0
+        );
     }
 
     #[tokio::test]
@@ -426,7 +452,9 @@ mod tests {
         )
         .await
         .unwrap();
-        insert(&pool, &NewMessage::text(200, 101, "hi group")).await.unwrap();
+        insert(&pool, &NewMessage::text(200, 101, "hi group"))
+            .await
+            .unwrap();
 
         let rows = load_all(&pool, "g").await.unwrap();
         assert_eq!(rows.len(), 1);

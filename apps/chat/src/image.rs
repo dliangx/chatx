@@ -6,10 +6,6 @@ use render::bubble::parse::parse_text;
 use render::bubble::{Bubble, GroupPos, Side};
 use render::canvas::Image;
 
-/// voice record icon + 8 pre-rotated spin frames are now pure Slint paths
-/// (see `apps/chat/ui/components/icon.slint`, `Glyph.record`); no more PNG
-/// decoding here. `Slint::Image` remains below for avatars and other raster paths.
-
 pub(crate) static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> =
     std::sync::OnceLock::new();
 
@@ -53,11 +49,6 @@ pub fn load_image_cached(path: &str) -> SlintImage {
     })
 }
 
-/// Decode `path` and downscale it to a side-capped square of at most `cap`px,
-/// preserving the source aspect ratio (never upscales). The result is a
-/// pixel-buffer `SlintImage` that `Image` elements can sample at a smaller
-/// display size (e.g. a ProfileItem 40x40 avatar) without holding the full
-/// bitmap.
 fn to_pixel_buffer(img: image::DynamicImage, cap: u32) -> SlintImage {
     let w = img.width();
     let h = img.height();
@@ -87,13 +78,6 @@ pub fn load_avatar_path_capped(path: &str, cap: u32) -> SlintImage {
     }
 }
 
-/// Compress the avatar at `path` down to at most `cap`×`cap` (preserving
-/// aspect ratio, never upscaling), re-encode as JPEG, and write it to
-/// `dst_path`. Returns `Ok(())` on success.
-///
-/// The wire profile carries a base64-encoded, compact JPEG of the avatar so
-/// receiving devices can persist a small on-disk copy without shipping the
-/// source image — a 40×40 JPEG is a few KB even for the most detailed face.
 pub fn compress_avatar_to_disk(
     src_path: &str,
     dst_path: &std::path::Path,
@@ -129,19 +113,12 @@ fn decode_capped_jpeg_bytes(src_path: &str, cap: u32) -> std::io::Result<Vec<u8>
     Ok(buf.into_inner())
 }
 
-/// Load an avatar from `path`, cap it to `cap`×`cap`, re-encode as JPEG, and
-/// return a base64 string (for embedding in a FriendQ profile over the P2P
-/// wire). Returns `None` if the file cannot be decoded.
 pub fn avatar_to_base64(path: &str, cap: u32) -> Option<String> {
     use base64::Engine as _;
     let bytes = decode_capped_jpeg_bytes(path, cap).ok()?;
     Some(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
-/// Decode `bytes` (JPEG / PNG / any format the `image` crate supports) and
-/// produce a capped, RGBA8-pixel-buffer `SlintImage` at most `cap`×`cap`.
-/// Empty / undecodable payloads return the default (`empty`) image so the
-/// slot keeps its placeholder.
 pub fn image_from_bytes(bytes: &[u8], cap: u32) -> SlintImage {
     if bytes.is_empty() {
         return SlintImage::default();
@@ -152,11 +129,6 @@ pub fn image_from_bytes(bytes: &[u8], cap: u32) -> SlintImage {
     }
 }
 
-/// As `image_from_bytes`, but also returns the display size in px — the
-/// DOCX image block needs it (this Slint build cannot measure image
-/// sources). Undecodable payloads (unknown / vector formats) come back as
-/// the default image with a 0 × 0 size so the caller falls back to the
-/// alt-text caption.
 pub fn doc_image_from_bytes(bytes: &[u8], cap: u32) -> (SlintImage, u32, u32) {
     let Ok(img) = image::load_from_memory(bytes) else {
         return (SlintImage::default(), 0, 0);
@@ -208,17 +180,6 @@ fn ext_of(bytes: &[u8], src_ext_hint: Option<&str>) -> String {
     "jpg".into()
 }
 
-/// Write raw image bytes into the chat-images dir and return the stored
-/// original path. `src_ext_hint` is the picked/received file's original
-/// extension, kept when it is a format Slint can decode (so HEIC/WebP
-/// originals stay originals).
-///
-/// The original is the single full-resolution copy the peer receives and that
-/// the full-screen viewer opens lazily. A compressed preview is produced in
-/// the **same** blocking task, so when this `Future` resolves both files exist
-/// and are fully written — no detached thread racing the chat's lazy
-/// preview-loads. Must be awaited from a Tokio runtime context (both callers
-/// drive it inside `tokio::spawn` / async fns).
 pub async fn store_image_bytes(
     bytes: &[u8],
     src_ext_hint: Option<&str>,
@@ -242,41 +203,32 @@ pub async fn store_image_bytes(
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
 }
 
-/// The bytes to send for a picked photo: the picker's original file, verbatim.
-/// The chat bubble renders this file small (the "compressed preview"), and the
-/// full-screen viewer opens the same file at full detail (the "original"), so
-/// the peer always has the original image to tap into.
 pub fn derive_chat_image_bytes(src: &str) -> std::io::Result<Vec<u8>> {
     std::fs::read(src)
 }
 
 /// Write an inbound / outgoing document file to the local `files/` dir (sender's basename preserved, sanitized) and return its path.
-pub async fn store_file_bytes(
-    name: &str,
-    bytes: &[u8],
-) -> std::io::Result<std::path::PathBuf> {
+pub async fn store_file_bytes(name: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
     // Sanitize the sender-supplied basename (path separators / control chars) while keeping the extension (viewers detect the format by suffix).
-    let base = name
-        .rsplit(['/', '\\', '\0'])
-        .next()
-        .unwrap_or(name)
-        .trim();
+    let base = name.rsplit(['/', '\\', '\0']).next().unwrap_or(name).trim();
     let (stem_raw, ext) = match base.rfind('.') {
         Some(i) if i > 0 => (&base[..i], base[i..].to_string()),
         _ => (base, String::new()),
     };
     let stem: String = stem_raw
         .chars()
-        .filter(|c| {
-            !c.is_control() && !matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|')
-        })
+        .filter(|c| !c.is_control() && !matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
         .collect();
-    let stem = if stem.trim().is_empty() { "file".to_string() } else { stem };
+    let stem = if stem.trim().is_empty() {
+        "file".to_string()
+    } else {
+        stem
+    };
     let dir = chatx_core::identity::DeviceIdentity::home_dir().join("files");
     let path = dir.join(format!("{ts}__{stem}{ext}"));
     let owned = bytes.to_vec();
@@ -289,10 +241,6 @@ pub async fn store_file_bytes(
     .map_err(std::io::Error::other)?
 }
 
-/// Decode the photo at `path` (any format the `image` crate supports — PNG,
-/// JPEG, WebP, …) into a full-resolution `SlintImage`. Slint's built-in
-/// `load_from_path` only handles PNG/JPEG, so we decode through the `image`
-/// crate here to support WebP and the other formats picked/received photos use.
 pub fn decode_image(path: &str) -> SlintImage {
     match image::open(std::path::Path::new(path)) {
         Ok(img) => {
@@ -322,10 +270,6 @@ pub fn image_dims(path: impl AsRef<std::path::Path>) -> (u32, u32) {
     image::image_dimensions(path).unwrap_or((1, 1))
 }
 
-/// Ensure the compressed preview for `original` exists on disk. The preview is
-/// a JPEG capped to `cap` on the long edge (never upscaled) — a few KB for a
-/// ~330px thumbnail, versus the multi-MB original the full-screen viewer opens
-/// lazily. Returns the preview path on success.
 pub fn ensure_preview(original: &str, cap: u32) -> std::io::Result<std::path::PathBuf> {
     let Some(dst) = preview_path(original) else {
         return Err(std::io::Error::new(
@@ -525,12 +469,6 @@ pub fn render_msg(
             time: msg.time.clone(),
         };
     }
-    // Photo bubbles are drawn by Slint (the `Image` element shows the disk file
-    // and the viewer re-uses the same file), so the pixel buffer is a 1x1 dummy.
-    // For the box aspect ratio we PREFER the small cached preview's dimensions
-    // (`preview_dims`) — same ratio as the original, but never touches the big
-    // original file. We only fall back to reading the original's dimensions when
-    // no preview dimensions are available (e.g. preview not yet generated).
     if let Some(path) = &msg.image {
         let (iw, ih) = match msg.preview_dims {
             Some((w, h)) => (w.max(1), h.max(1)),
@@ -572,21 +510,36 @@ pub fn render_msg(
         rgba: out.to_straight_rgba(),
         width: out.width,
         height: out.height,
-            is_self: msg.side == Side::SelfSide,
-            text: msg.text.clone(),
-            voice: None,
-            image: None,
-            file: None,
-            preview: None,
-            avatar: None,
-            time: msg.time.clone(),
-        }
+        is_self: msg.side == Side::SelfSide,
+        text: msg.text.clone(),
+        voice: None,
+        image: None,
+        file: None,
+        preview: None,
+        avatar: None,
+        time: msg.time.clone(),
     }
+}
+
+/// Format tag for a chat file bubble: 0 Word (.docx) · 1 Excel (.xlsx) ·
+/// 2 PowerPoint (.pptx) · 3 PDF (-1 = unknown, the bubble falls back to the
+/// generic file glyph). Derived from the on-disk path's suffix.
+fn file_kind(path: &str) -> i32 {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "docx" | "doc" => 0,
+        "xlsx" | "xls" => 1,
+        "pptx" | "ppt" => 2,
+        "pdf" => 3,
+        _ => -1,
+    }
+}
 
 pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageData {
-    // Voice bubbles are drawn by Slint; give them a fixed logical size.
-    // Image bubbles already carry logical preview dimensions in `width`/`height`
-    // (see `render_msg`), same handling as text rows.
     let is_voice = m.voice.is_some();
     let is_image = m.image.is_some();
     let is_file = m.file.is_some();
@@ -596,13 +549,24 @@ pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageDa
         // File row: avatar + icon + elided filename, 54px tall like the voice row (Slint truncates long names).
         (150.0, 54.0)
     } else {
-        (m.width as f64 / scale as f64, m.height as f64 / scale as f64)
+        (
+            m.width as f64 / scale as f64,
+            m.height as f64 / scale as f64,
+        )
     };
     crate::MessageData {
         bubble: {
             // Image / file rows carry a 1x1 dummy raster (Slint draws them, sized by `width`/`height`), so keep the buffer 1x1 = the 4-byte `rgba`.
-            let bw = if is_image || is_file { 1 } else { m.width.max(1) };
-            let bh = if is_image || is_file { 1 } else { m.height.max(1) };
+            let bw = if is_image || is_file {
+                1
+            } else {
+                m.width.max(1)
+            };
+            let bh = if is_image || is_file {
+                1
+            } else {
+                m.height.max(1)
+            };
             let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(bw, bh);
             buf.make_mut_bytes().copy_from_slice(&m.rgba);
             SlintImage::from_rgba8(buf)
@@ -633,11 +597,8 @@ pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageDa
             .as_ref()
             .map(|(_, n)| SharedString::from(n.clone()))
             .unwrap_or_default(),
-        image_path: m
-            .image
-            .clone()
-            .map(SharedString::from)
-            .unwrap_or_default(),
+        file_kind: m.file.as_ref().map(|(p, _)| file_kind(p)).unwrap_or(-1),
+        image_path: m.image.clone().map(SharedString::from).unwrap_or_default(),
         // The photo bubble draws the SMALL cached preview (`image_preview`), not
         // the original. `load_image_cached` is a memory hit after the first
         // switch, so re-entering a chat never re-decodes the big full-res file.

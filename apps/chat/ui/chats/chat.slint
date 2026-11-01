@@ -25,6 +25,9 @@ export struct MessageData {
     file_path: string,
     /// The sender's basename for file rows (shown on the file bubble).
     file_name: string,
+    /// File rows only: which document icon to draw — 0 Word (.docx) · 1 Excel (.xlsx)
+    /// · 2 PowerPoint (.pptx) · 3 PDF (anything else / -1 = the generic file glyph).
+    file_kind: int,
     /// Empty for text/voice rows; the local photo path for image rows.
     image_path: string,
     /// The decoded chat photo (set for image rows; the `Image` element shows it,
@@ -355,6 +358,11 @@ export component ChatView inherits Rectangle {
             }
 
             // ── file bubble (icon + elided filename, tap to open); same row grammar as voice ──
+            // The bubble is no longer a fixed 150px: its width tracks the
+            // filename. `filename.preferred-width` is the ideal (un-elided) text
+            // width, so short names give a snug bubble and long names expand up
+            // to the cap before eliding — the name is never truncated by a
+            // hardcoded box.
             if msg.file_path != "":
             Rectangle {
                 width: 100%;
@@ -368,12 +376,16 @@ export component ChatView inherits Rectangle {
                     source: msg.avatar;
                 }
 
-                Rectangle {
-                    x: msg.is_self
-                        ? parent.width - 6px - 36px - 8px - 150px
-                        : 6px + 36px + 8px;
+                bubble := Rectangle {
                     y: 0px;
-                    width: 150px;
+                    // Max bubble width: leave room for the avatar (36) + both
+                    // margins (6) + the icon band, and hard-cap at 260px.
+                    in property <length> cap-w: min(260px, parent.width - 54px);
+                    // 43px of chrome (left pad 5 + icon 24 → text starts at 35, + right pad 8)
+                    // around the text, plus a readable floor so a bare extension still
+                    // looks like a bubble. Elide kicks in if that exceeds the cap.
+                    width: min(max(43px + filename.preferred-width, 78px), cap-w);
+                    x: msg.is_self ? parent.width - 50px - self.width : 50px;
                     height: 36px;
                     border-radius: 12px;
                     background: msg.is_self ? Theme.brand : Theme.surface;
@@ -383,14 +395,20 @@ export component ChatView inherits Rectangle {
                         x: 5px;
                         y: 6px;
                         size: 24px;
-                        glyph: Glyph.file;
+                        // Per-format bubble icon (Word / Excel / PowerPoint / PDF);
+                        // `file_kind == -1` (or an unknown extension) keeps the generic file glyph.
+                        glyph: msg.file_kind == 0 ? Glyph.file-word
+                            : msg.file_kind == 1 ? Glyph.file-excel
+                            : msg.file_kind == 2 ? Glyph.file-ppt
+                            : msg.file_kind == 3 ? Glyph.file-pdf
+                            : Glyph.file;
                         tint: msg.is_self ? Theme.fg-on-accent : Theme.fg;
                     }
 
-                    Text {
+                    filename := Text {
                         x: 35px;
                         y: 0px;
-                        width: parent.width - 39px;
+                        width: parent.width - 43px;
                         height: 100%;
                         text: msg.file_name;
                         font-size: 12px;
@@ -408,11 +426,9 @@ export component ChatView inherits Rectangle {
                 }
 
                 Text {
-                    x: msg.is_self
-                        ? parent.width - 6px - 36px - 8px - 150px
-                        : 6px + 36px + 8px;
+                    x: msg.is_self ? parent.width - 50px - bubble.width : 50px;
                     y: 40px;
-                    width: 150px;
+                    width: bubble.width;
                     height: 14px;
                     text: msg.voice_time;
                     font-size: 11px;
