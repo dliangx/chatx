@@ -1111,7 +1111,7 @@ pub fn run_app() {
             cs.set_messages(slint::ModelRc::new(slint::VecModel::from(
                 Vec::<MessageData>::new(),
             )));
-            cs.set_send_status(SharedString::new());
+            cs.set_send_busy(false);
             ui.set_logged_in(false);
         }
     });
@@ -2997,7 +2997,7 @@ fn send_chat_voice(
     let is_group = chat_id.starts_with("grp-");
     if let Some(ui) = weak.upgrade() {
         ui.global::<ChatSession>()
-            .set_send_status(SharedString::from("Sending voice…"));
+            .set_send_busy(true);
     }
     let row_peer: String = {
         backend
@@ -3041,23 +3041,12 @@ fn send_chat_voice(
                 Ok(()) => {
                     tracing::debug!("[voice] group sent -> {chat_id}");
                     touch_chat_activity(&chat_id);
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak3.upgrade() {
-                            cs_set_send_status(&ui.global::<ChatSession>(), String::new());
-                        }
-                    });
+                    cs_set_send_status(weak3, String::new());
                     load_chat_messages(weak2, key);
                 }
                 Err(e) => {
                     tracing::warn!("[voice] group send FAILED: {e}");
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak3.upgrade() {
-                            cs_set_send_status(
-                                &ui.global::<ChatSession>(),
-                                format!("Send failed: {e}"),
-                            );
-                        }
-                    });
+                    cs_set_send_status(weak3, format!("Send failed: {e}"));
                 }
             }
             return;
@@ -3115,26 +3104,38 @@ fn send_chat_voice(
         } else {
             String::new()
         };
-        let _ = slint::invoke_from_event_loop(move || {
-            if let Some(ui) = weak3.upgrade() {
-                let cs = ui.global::<ChatSession>();
-                cs_set_send_status(&cs, msg.clone());
-            }
-        });
+        cs_set_send_status(weak3, msg);
         if sent {
             load_chat_messages(weak2, key);
         }
     });
 }
 
+/// Show/hide the transient "sending" spinner over the chat input (drives
+/// `ChatSession.send-busy`); hops onto the event loop so it's safe from tasks.
 #[inline]
-fn cs_set_send_status(cs: &ChatSession, msg: String) {
-    let s = if msg.is_empty() {
-        SharedString::new()
-    } else {
-        SharedString::from(format!("Send failed: {msg}"))
-    };
-    cs.set_send_status(s);
+fn chat_set_send_busy(weak: slint::Weak<MainWindow>, busy: bool) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<ChatSession>().set_send_busy(busy);
+        }
+    });
+}
+
+/// Finish a chat send: hide the in-flight spinner, and when the send failed
+/// (`msg` non-empty) raise a transient notice toast (success = empty `msg`).
+/// Already-`Send failed:`-prefixed input is passed through so the prefix isn't doubled.
+#[inline]
+fn cs_set_send_status(weak: slint::Weak<MainWindow>, msg: String) {
+    if !msg.is_empty() {
+        let e = if msg.starts_with("Send failed:") {
+            msg
+        } else {
+            format!("Send failed: {msg}")
+        };
+        show_app_notice(weak.clone(), e, false);
+    }
+    chat_set_send_busy(weak, false);
 }
 
 const MIN_VOICE_MS: u64 = 300;
@@ -3284,10 +3285,7 @@ fn pick_chat_image(weak: slint::Weak<MainWindow>, key: i32) {
     if let Err(e) = camera::album::pick_photos(1) {
         tracing::warn!("[chat-image] pick failed: {e}");
         PICKING_CHAT_IMAGE.store(false, std::sync::atomic::Ordering::SeqCst);
-        if let Some(ui) = weak.upgrade() {
-            ui.global::<ChatSession>()
-                .set_send_status(SharedString::from(format!("Photo picker: {e}")));
-        }
+        show_app_notice(weak, format!("Photo picker: {e}"), false);
     }
 }
 
@@ -3318,7 +3316,7 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
     let is_group = chat_id.starts_with("grp-");
     if let Some(ui) = weak.upgrade() {
         ui.global::<ChatSession>()
-            .set_send_status(SharedString::from("Sending photo…"));
+            .set_send_busy(true);
     }
     let me = client.peer_base58();
     let my_peers: Vec<String> = {
@@ -3367,23 +3365,12 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
                 Ok(()) => {
                     tracing::debug!("[chat-image] group sent -> {chat_id}");
                     touch_chat_activity(&chat_id);
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak3.upgrade() {
-                            cs_set_send_status(&ui.global::<ChatSession>(), String::new());
-                        }
-                    });
+                    cs_set_send_status(weak3, String::new());
                     load_chat_messages(weak2, key);
                 }
                 Err(e) => {
                     tracing::warn!("[chat-image] group send FAILED: {e}");
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak3.upgrade() {
-                            cs_set_send_status(
-                                &ui.global::<ChatSession>(),
-                                format!("Send failed: {e}"),
-                            );
-                        }
-                    });
+                    cs_set_send_status(weak3, format!("Send failed: {e}"));
                 }
             }
             return;
@@ -3466,10 +3453,7 @@ fn pick_chat_file(weak: slint::Weak<MainWindow>, key: i32) {
     });
     if let Err(e) = camera::filepick::pick_file() {
         tracing::warn!("[chat-file] pick failed: {e}");
-        if let Some(ui) = weak.upgrade() {
-            ui.global::<ChatSession>()
-                .set_send_status(SharedString::from(format!("File picker: {e}")));
-        }
+        show_app_notice(weak, format!("File picker: {e}"), false);
     }
 }
 
@@ -3517,7 +3501,7 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
     let is_group = chat_id.starts_with("grp-");
     if let Some(ui) = weak.upgrade() {
         ui.global::<ChatSession>()
-            .set_send_status(SharedString::from("Sending file…"));
+            .set_send_busy(true);
     }
     let me = client.peer_base58();
     let my_peers: Vec<String> = {
@@ -3585,23 +3569,12 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
                 Ok(()) => {
                     tracing::debug!("[chat-file] group sent -> {chat_id}");
                     touch_chat_activity(&chat_id);
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak3.upgrade() {
-                            cs_set_send_status(&ui.global::<ChatSession>(), String::new());
-                        }
-                    });
+                    cs_set_send_status(weak3, String::new());
                     load_chat_messages(weak2, key);
                 }
                 Err(e) => {
                     tracing::warn!("[chat-file] group send FAILED: {e}");
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak3.upgrade() {
-                            cs_set_send_status(
-                                &ui.global::<ChatSession>(),
-                                format!("Send failed: {e}"),
-                            );
-                        }
-                    });
+                    cs_set_send_status(weak3, format!("Send failed: {e}"));
                 }
             }
             return;
@@ -3688,13 +3661,19 @@ fn open_chat_file_from_index(weak: slint::Weak<MainWindow>, idx: i32) {
         open_doc_page(&ui, &file_path);
     } else if matches!(ext.as_str(), "doc" | "xls" | "ppt") {
         // Legacy binary Office: betteroffice only reads OOXML.
-        cs.set_send_status(SharedString::from(format!(
-            ".{ext} is a legacy Office format — save it as .docx / .xlsx / .pptx to view it in the app."
-        )));
+        show_app_notice(
+            ui.as_weak(),
+            format!(
+                ".{ext} is a legacy Office format — save it as .docx / .xlsx / .pptx to view it in the app."
+            ),
+            false,
+        );
     } else {
-        cs.set_send_status(SharedString::from(format!(
-            "No in-app viewer for .{ext} yet — please open it with a supporting app."
-        )));
+        show_app_notice(
+            ui.as_weak(),
+            format!("No in-app viewer for .{ext} yet — please open it with a supporting app."),
+            false,
+        );
     }
 }
 
@@ -3736,16 +3715,7 @@ fn open_image_viewer(paths: Vec<String>, start: i32) {
 /// image, use the original; otherwise downscale+re-encode as JPEG. Returns the
 /// bytes (the same file the bubble + viewer will show).
 fn set_chat_status(weak: slint::Weak<MainWindow>, msg: String) {
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(ui) = weak.upgrade() {
-            let cs = ui.global::<ChatSession>();
-            cs.set_send_status(if msg.is_empty() {
-                SharedString::new()
-            } else {
-                SharedString::from(format!("Send failed: {msg}"))
-            });
-        }
-    });
+    cs_set_send_status(weak, msg);
 }
 
 fn set_chat_send_error(weak: slint::Weak<MainWindow>, msg: &str) {
@@ -4352,14 +4322,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
         let rows = match client.store().load(&chat_id, 200, 0).await {
             Ok(rows) => rows,
             Err(e) => {
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.global::<ChatSession>()
-                            .set_send_status(SharedString::from(format!(
-                                "Failed to load messages: {e}"
-                            )));
-                    }
-                });
+                show_app_notice(ui_weak, format!("Failed to load messages: {e}"), false);
                 return;
             }
         };
@@ -4580,7 +4543,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             cs.set_scroll_token(cs.get_scroll_token() + 1);
             cs.set_content_h(content_h);
             cs.set_messages(slint::ModelRc::new(slint::VecModel::from(messages)));
-            cs.set_send_status(SharedString::new());
+            cs.set_send_busy(false);
         });
     });
 }
@@ -4611,7 +4574,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     if is_group {
         if let Some(ui) = weak.upgrade() {
             ui.global::<ChatSession>()
-                .set_send_status(SharedString::from("Sending…"));
+                .set_send_busy(true);
         }
         let rt = runtime();
         let weak2 = weak.clone();
@@ -4624,7 +4587,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
                             ui.global::<ChatSession>()
-                                .set_send_status(SharedString::new());
+                                .set_send_busy(false);
                         }
                     });
                     CHAT_SCROLL_POS.write().unwrap().insert(key, 0.0);
@@ -4633,12 +4596,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                 Err(e) => {
                     tracing::warn!("[send] group message FAILED: {e}");
                     let msg = e.to_string();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.global::<ChatSession>()
-                                .set_send_status(SharedString::from(format!("Send failed: {msg}")));
-                        }
-                    });
+                    cs_set_send_status(weak, msg);
                 }
             }
         });
@@ -4647,7 +4605,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
 
     if let Some(ui) = weak.upgrade() {
         ui.global::<ChatSession>()
-            .set_send_status(SharedString::from("Sending…"));
+            .set_send_busy(true);
     }
     let row_peer: String = {
         backend
@@ -4713,19 +4671,14 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                 last_err
             };
             tracing::warn!("[send] dm ALL candidates failed: {msg}");
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = weak.upgrade() {
-                    ui.global::<ChatSession>()
-                        .set_send_status(SharedString::from(format!("Send failed: {msg}")));
-                }
-            });
+            cs_set_send_status(weak, format!("Send failed: {msg}"));
             return;
         }
         {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<ChatSession>()
-                        .set_send_status(SharedString::new());
+                        .set_send_busy(false);
                 }
             });
             load_chat_messages(weak2, key);

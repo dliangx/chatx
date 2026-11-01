@@ -1,4 +1,4 @@
-import { Button } from "std-widgets.slint";
+import { Button, Spinner } from "std-widgets.slint";
 import { ChatInputView } from "chat_input.slint";
 import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
@@ -42,7 +42,9 @@ export struct MessageData {
 export global ChatSession {
     in property <bool> connect-status: false;
     in property <[MessageData]> messages: [];
-    in property <string> send-status: "";
+    /// True while a message is being sent: the chat shows a spinner over the input.
+    in property <bool> send-busy: false;
+
     in property <length> scroll-dist: 0px;
     in property <int> scroll-token: 0;
     in property <length> content-h: 0px;
@@ -79,9 +81,6 @@ export component ChatView inherits Rectangle {
     background: Theme.bg;
 
     // ── long-press detection ───────────────────────────────────────────────
-    // `lp-armed` is the row currently held down; `lp-elapsed` accumulates
-    // while armed. Once it passes 1s (and the press isn't cancelled),
-    // `lp-active` flips to that row and the icon menu appears.
     in-out property <int> lp-armed: -1;
     in-out property <duration> lp-elapsed: 0s;
     in-out property <int> lp-active: -1;
@@ -101,13 +100,8 @@ export component ChatView inherits Rectangle {
 
     out property <length> msg-row-h: 56px;
     out property <length> input-h: input-bar.view-h;
-    out property <length> status-h: ChatSession.send-status != "" ? 20px : 0px;
-    out property <length> _bottom: root.status-h + root.input-h;
+    out property <length> _bottom: root.input-h;
 
-    // Single Timer that advances the record icon's rotation angle while a clip
-    // is playing. `rotation-angle` is a basic `Path` property (no effects), so
-    // we just keep adding degrees — no pre-baked frames or reset logic needed.
-    // ~3.4deg per 16ms tick → ~60fps, ~1.05s per full turn.
     Timer {
         interval: 16ms;
         running: ChatSession.playing-idx >= 0;
@@ -117,9 +111,6 @@ export component ChatView inherits Rectangle {
     Header {
         name: @tr("chat");
 
-        // Group chat settings "⚙" — shown only for group chats (left of the call
-        // icon). `current-chat-key` is set by Rust on chat open; -1 means "not
-        // set / DM" so the icon is hidden for 1:1 chats.
         if AppState.current-chat-key >= 0 && AppState.current-chat-is-group:
 
         Icon {
@@ -169,17 +160,15 @@ export component ChatView inherits Rectangle {
         sent-file(id) => { ChatSession.sent-file(id); }
     }
 
-    if ChatSession.send-status != "":
-    Text {
-        x: 0px;
-        y: parent.height - root.input-h - 20px;
-        width: parent.width;
-        height: 20px;
-        text: ChatSession.send-status;
-        color: Theme.fg-muted;
-        font-size: 12px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    // "Sending…" indicator (transient, shown only while a send is in flight) —
+    // replaces the old always-present status text above the input. Failures
+    // surface elsewhere as a transient toast (not pinned here).
+    if ChatSession.send-busy:
+    Spinner {
+        x: (parent.width - 22px) / 2;
+        y: parent.height - root.input-h - 32px;
+        width: 22px;
+        height: 22px;
     }
     in-out property <bool> scrolled: false;
     in-out property <bool> scroll-guard: false;
@@ -204,23 +193,12 @@ export component ChatView inherits Rectangle {
         content-height: ChatSession.content-h;
         interactive: ChatSession.messages.length > 0;
 
-        // User-initiated drag cancels any pending programmatic scroll request
-        // — once they take the wheel, the saved position (kept fresh by the
-        // position-report timer) wins over a stale restore request.
         flicked => {
             if (root.my-token != ChatSession.scroll-token) {
                 root.my-token = ChatSession.scroll-token;
             }
         }
 
-        // Apply the requested scroll position whenever `scroll-token` bumps
-        // from Rust (on entry or after a message is sent). One-shot per token:
-        // we commit `my-token` inside `triggered`, otherwise this timer stays
-        // "running" and re-applies `content-y` every 16ms forever — each
-        // application re-triggers the position-report timer (below, whose ±1px
-        // window is crossed by the sub-pixel drift), which bumps the scroll
-        // token back from Rust, and the two fight each other: the visible
-        // symptom is a stutter view that snaps back to the saved position.
         Timer {
             interval: 16ms;
             running: root.my-token != ChatSession.scroll-token
@@ -254,9 +232,6 @@ export component ChatView inherits Rectangle {
             }
         }
 
-        // Blank-area catcher: when a long-press menu is showing, tapping
-        // anywhere in the chat background (outside the bubble) dismisses it.
-        // Only present while a menu is open so it never blocks flick/scroll.
         if root.lp-active >= 0:
         Rectangle {
             width: 100%;
@@ -357,12 +332,6 @@ export component ChatView inherits Rectangle {
                 }
             }
 
-            // ── file bubble (icon + elided filename, tap to open); same row grammar as voice ──
-            // The bubble is no longer a fixed 150px: its width tracks the
-            // filename. `filename.preferred-width` is the ideal (un-elided) text
-            // width, so short names give a snug bubble and long names expand up
-            // to the cap before eliding — the name is never truncated by a
-            // hardcoded box.
             if msg.file_path != "":
             Rectangle {
                 width: 100%;
@@ -378,12 +347,7 @@ export component ChatView inherits Rectangle {
 
                 bubble := Rectangle {
                     y: 0px;
-                    // Max bubble width: leave room for the avatar (36) + both
-                    // margins (6) + the icon band, and hard-cap at 260px.
                     in property <length> cap-w: min(260px, parent.width - 54px);
-                    // 43px of chrome (left pad 5 + icon 24 → text starts at 35, + right pad 8)
-                    // around the text, plus a readable floor so a bare extension still
-                    // looks like a bubble. Elide kicks in if that exceeds the cap.
                     width: min(max(43px + filename.preferred-width, 78px), cap-w);
                     x: msg.is_self ? parent.width - 50px - self.width : 50px;
                     height: 36px;
@@ -395,8 +359,6 @@ export component ChatView inherits Rectangle {
                         x: 5px;
                         y: 6px;
                         size: 24px;
-                        // Per-format bubble icon (Word / Excel / PowerPoint / PDF);
-                        // `file_kind == -1` (or an unknown extension) keeps the generic file glyph.
                         glyph: msg.file_kind == 0 ? Glyph.file-word
                             : msg.file_kind == 1 ? Glyph.file-excel
                             : msg.file_kind == 2 ? Glyph.file-ppt
