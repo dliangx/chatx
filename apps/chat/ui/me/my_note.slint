@@ -11,7 +11,9 @@ export component MyNoteView inherits Rectangle {
     height: 100%;
     background: Theme.bg;
 
-    out property <length> bottom: AppState.is-mobile ? 58px : 0px;
+    /// Sub-page (tab bar hidden): mobile keeps a comfortable bottom gap,
+    /// desktop full height (no bottom tab bar).
+    out property <length> bottom: AppState.is-mobile ? AppState.bottom-nav : 0px;
     // Horizontal inset from the root edge to the body text's left edge:
     // scroll gutter (12 each side) + card padding (14 each side).
     out property <length> body-w: root.width - 52px;

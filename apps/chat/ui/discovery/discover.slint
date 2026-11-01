@@ -51,7 +51,7 @@ export component DiscoverView inherits Rectangle {
         x: 0px;
         y: 48px;
         width: parent.width;
-        height: parent.height - 48px - (AppState.is-mobile ? 58px : 0px);
+        height: parent.height - 48px - (AppState.is-mobile ? AppState.bottom-nav : 0px);
         content-height: root.viewport-h;
         interactive: true;
 

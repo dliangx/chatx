@@ -174,7 +174,8 @@ export component MyDevicesView inherits Rectangle {
         x: 0px;
         y: 124px;
         width: parent.width;
-        height: parent.height - 124px - (AppState.is-mobile ? 58px : 0px);
+        // Sub-page (tab bar hidden): comfortable bottom gap on mobile.
+        height: parent.height - 124px - (AppState.is-mobile ? AppState.bottom-nav : 0px);
         interactive: true;
         content-height: AppState.my-devices.length * 76px;
 

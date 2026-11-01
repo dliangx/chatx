@@ -63,8 +63,8 @@ export component ChatListView inherits Rectangle {
         y: (root.status == "" || root.searching) ? 48px : 74px;
         width: parent.width;
         height: (root.status == "" || root.searching)
-            ? (parent.height - 48px - (AppState.is-mobile ? 58px : 0px))
-            : (parent.height - 74px - (AppState.is-mobile ? 58px : 0px));
+            ? (parent.height - 48px - (AppState.is-mobile ? AppState.bottom-nav : 0px))
+            : (parent.height - 74px - (AppState.is-mobile ? AppState.bottom-nav : 0px));
         content-height: root.viewport-h;
         interactive: true;
 

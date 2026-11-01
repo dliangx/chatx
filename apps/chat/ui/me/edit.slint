@@ -69,7 +69,9 @@ export component EditProfileView inherits Rectangle {
         x: 0px;
         y: 49px;
         width: 100%;
-        height: parent.height - 49px - 58px;
+        // Sub-page (tab bar hidden): keep a comfortable bottom gap on all
+        // platforms (there's no tab bar behind this page).
+        height: parent.height - 49px - AppState.bottom-nav;
 
         VerticalLayout {
             width: 80%;

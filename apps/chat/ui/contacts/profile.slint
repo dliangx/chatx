@@ -81,7 +81,9 @@ export component ContactProfileView inherits Rectangle {
             x: 0px;
             y: 149px;
             width: parent.width;
-            height: parent.height - 149px - 58px;
+            // Sub-page (tab bar hidden): keep a comfortable bottom gap on all
+            // platforms (there's no tab bar behind this page).
+            height: parent.height - 149px - AppState.bottom-nav;
 
             VerticalLayout {
                 width: 100%;

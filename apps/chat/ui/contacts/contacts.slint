@@ -153,7 +153,7 @@ export component ContactListView inherits Rectangle {
     out property <length> req-block-h: root.requests.length * root.req-h;
     out property <bool> forwarding: AppState.forward-target != "";
     out property <length> fwd-block-h: root.forwarding ? root.fwd-h : 0px;
-    out property <length> bottom: AppState.is-mobile ? 58px : 0px;
+    out property <length> bottom: AppState.is-mobile ? AppState.bottom-nav : 0px;
     out property <bool> searching: AppState.search-q != "";
 
     // Forward banner: shown only when a chat bubble's "forward" action armed it.

@@ -147,7 +147,8 @@ export component AddContactView inherits Rectangle {
         x: 0px;
         y: 132px;
         width: parent.width;
-        height: parent.height - 132px - (AppState.is-mobile ? 58px : 0px);
+        // Sub-page (tab bar hidden): comfortable bottom gap on mobile.
+        height: parent.height - 132px - (AppState.is-mobile ? AppState.bottom-nav : 0px);
         interactive: true;
         content-height: AppState.search-results.length * 132px;
 

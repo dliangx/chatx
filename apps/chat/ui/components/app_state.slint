@@ -155,6 +155,14 @@ export global AppState {
     in-out property <bool> auth-register: false;
     in-out property <bool> auth-uid-locked: false;
     in-out property <bool> is-mobile: true;
+    /// True when running on iOS (vs Android/other). Set once from Rust via
+    /// `cfg!(target_os = "ios")`. Lets the UI pick platform-correct chrome sizes.
+    in property <bool> is-ios: false;
+    /// Standard mobile bottom-tab content band height (icon + caption only —
+    /// the home-indicator / nav-bar inset is added on top by the bar itself):
+    /// 49pt on iOS, 56dp on Android. This is the single source of truth for how
+    /// much room views must leave at the bottom so they clear the tab bar.
+    out property <length> bottom-nav: is-ios ? 49px : 56px;
     in-out property <bool> search-active: false;
     /// Current text in the active tab's search bar (all three boxes bind to
     /// this single shared box; the handler dispatches by active tab).
