@@ -77,7 +77,17 @@ fn main() {
                             block.header_rows
                         )
                     };
-                    println!("{i:3} [{} lv{}] {text}", block.kind.number(), block.level);
+                    let img = if block.image.is_empty() {
+                        String::new()
+                    } else {
+                        let alt = if block.text.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", alt «{}»", block.text)
+                        };
+                        format!("  <{} bytes{}>", block.image.len(), alt)
+                    };
+                    println!("{i:3} [{} lv{}] {text}{img}", block.kind.number(), block.level);
                 }
             }
         }

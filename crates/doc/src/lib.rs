@@ -17,7 +17,10 @@
 //!   the app renders as a formatted document (betteroffice-docx's own PNG
 //!   pipeline is tied to the collaborative editing engine — its reference
 //!   viewer is a 120 KB custom app — which is out of scope for a chat
-//!   preview).
+//!   preview). Inline images are not part of the structured text
+//!   (only their part name + alt text), so their bytes are pulled out of
+//!   the package's `word/media/*` parts and emitted as image blocks in
+//!   document order.
 //!
 //! Legacy Office (`.doc` / `.xls` / `.ppt`) is OOXML-only territory and is
 //! refused with a clear message. No slint, no retained state — the caller
@@ -50,6 +53,7 @@ pub enum Kind {
     Paragraph = 1,
     Bullet = 2,
     Numbered = 3,
+    Image = 4,
     Rule = 5,
     Table = 8,
 }
@@ -62,6 +66,7 @@ impl Kind {
             Kind::Paragraph => 1,
             Kind::Bullet => 2,
             Kind::Numbered => 3,
+            Kind::Image => 4,
             Kind::Rule => 5,
             Kind::Table => 8,
         }
@@ -69,17 +74,19 @@ impl Kind {
 }
 
 /// One visual block of a DOCX document — a heading, paragraph, list item, a
-/// page / section break (rule), or a table (`cells` is the flat table body,
-/// row-major; `header_rows` = how many leading rows render bold + tinted).
-/// Text is **plain** — Slint has no rich-text element, so block-level
-/// formatting (size / weight / indent) carries the emphasis.
+/// page / section break (rule), an inline image, or a table (`cells` is the
+/// flat table body, row-major; `header_rows` = how many leading rows render
+/// bold + tinted). Text is **plain** — Slint has no rich-text element, so
+/// block-level formatting (size / weight / indent) carries the emphasis.
 #[derive(Clone, Debug)]
 pub struct Block {
     pub kind: Kind,
     /// Heading level (1–6) for headings; list nesting depth (0 = top) for list items.
     pub level: i32,
-    /// Display text; empty for tables and rules.
+    /// Display text; empty for tables and rules, alt text for images.
     pub text: String,
+    /// Image bytes for `Kind::Image` (PNG / JPEG / …); empty otherwise.
+    pub image: Vec<u8>,
     /// Table body: one inner array per row, one string per cell. Empty otherwise.
     pub cells: Vec<Vec<String>>,
     /// For `Kind::Table`: leading rows rendered bold + tinted.
@@ -92,6 +99,18 @@ impl Block {
             kind,
             level,
             text,
+            image: Vec::new(),
+            cells: Vec::new(),
+            header_rows: 0,
+        }
+    }
+
+    fn image(alt: String, bytes: Vec<u8>) -> Self {
+        Self {
+            kind: Kind::Image,
+            level: 0,
+            text: alt,
+            image: bytes,
             cells: Vec::new(),
             header_rows: 0,
         }
@@ -102,6 +121,7 @@ impl Block {
             kind: Kind::Table,
             level: 0,
             text: String::new(),
+            image: Vec::new(),
             cells,
             header_rows,
         }
@@ -318,6 +338,8 @@ fn xl_sheet(sheet: &XlSheetM, styles: &XlStylesheet, date_system: XlDateSystem) 
     }
 
     // Column widths (character counts → px); hidden columns collapse to 0.
+    // These are only the *build* placeholders: the final, rendered pass
+    // below re-derives them relative to each column's own font size.
     let col_w: Vec<i32> = (first_col..=last_col)
         .map(|c| {
             if sheet.col_hidden(c) {
@@ -332,8 +354,21 @@ fn xl_sheet(sheet: &XlSheetM, styles: &XlStylesheet, date_system: XlDateSystem) 
             }
         })
         .collect();
-    let total_width = col_w.iter().sum::<i32>().max(1);
+    let mut col_chars: Vec<f64> = Vec::new();
+    for c in first_col..=last_col {
+        if sheet.col_hidden(c) {
+            col_chars.push(0.0);
+        } else {
+            col_chars.push(sheet.col_widths.get(&c).copied().unwrap_or(xr::DEFAULT_COL_WIDTH_CHARS));
+        }
+    }
 
+    // Per-column stats gathered while walking the cells: the largest rendered
+    // font size (px) and the longest text — the final pixel width is relative
+    // to both (see the pass after the rows).
+    let mut col_font: Vec<i32> = vec![0; col_span as usize];
+    let mut col_text: Vec<String> = vec![String::new(); col_span as usize];
+    let mut row_ids: Vec<u32> = Vec::new();
     let mut rows: Vec<XlRow> = Vec::new();
     for r in first_row..=last_row {
         if sheet.row_hidden(r) {
@@ -423,13 +458,59 @@ fn xl_sheet(sheet: &XlSheetM, styles: &XlStylesheet, date_system: XlDateSystem) 
                     };
                 }
             }
+            if !out.text.is_empty() {
+                col_font[i] = col_font[i].max(out.size.max(15));
+                if out.text.len() > col_text[i].len() {
+                    col_text[i] = out.text.clone();
+                }
+            }
             if !out.text.is_empty() || out.fill[3] != 0 {
                 painted = true;
             }
             cells.push(out);
         }
         if painted {
+            row_ids.push(r);
             rows.push(XlRow { h, cells });
+        }
+    }
+
+    // ── Relative column widths ──────────────────────────────────────────
+    // Excel stores a column's width in the character unit of its default
+    // (11 pt) font; this grid renders every cell in its *own* font, so one
+    // character is worth one digit of the rendered font (≈ 0.6 em at the
+    // column's largest size — 15px, the grid's 11pt default, keeps it at
+    // least).  A column is also never narrower than its longest value, so a
+    // long number (84219.49731068664) is not clipped to "84219.49…".
+    let col_w: Vec<i32> = (0..col_chars.len()).map(|i| {
+        if col_chars[i] == 0.0 {
+            return 0; // hidden column.
+        }
+        let em = col_font[i].max(15) as f64;
+        let unit = (col_chars[i] * 0.6 * em).round() as i32;
+        let fit = px_width_of(&col_text[i], col_font[i].max(15)) + 12;
+        unit.max(fit)
+    }).collect();
+    let total_width = col_w.iter().sum::<i32>().max(1);
+
+    // Re-point each cell at its final column width (the build above used the
+    // character-unit placeholders; a merged anchor spans its whole run of
+    // columns, a covered slot collapses to 0).
+    for (rid, row) in row_ids.iter().zip(rows.iter_mut()) {
+        let r_id: u32 = *rid;
+        for (i, cell) in row.cells.iter_mut().enumerate() {
+            let c = first_col + i as u32;
+            cell.w = if covered.contains(&(r_id, c)) {
+                0
+            } else {
+                match anchors.get(&(r_id, c)) {
+                    Some((_, end_c)) => {
+                        let hi = (*end_c).min(last_col) as usize - first_col as usize;
+                        col_w[i..=hi].iter().sum()
+                    }
+                    None => col_w[i],
+                }
+            };
         }
     }
 
@@ -444,6 +525,35 @@ fn hex_rgba(hex: &str, alpha: u8) -> [u8; 4] {
     }
     let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0);
     [byte(0), byte(2), byte(4), alpha]
+}
+
+/// Whether `ch` is full-width (CJK / full-width forms, ≈ 1 em in the UI
+/// font), as opposed to an ASCII glyph (≈ 0.6 em).
+fn wide_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x1100..=0x115F
+            | 0x2E80..=0x9FFF
+            | 0xA000..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0x20000..=0x3FFFD
+    )
+}
+
+/// `text`'s display width in px when rendered at `em` px per em, the widest
+/// of its lines.
+fn px_width_of(text: &str, em: i32) -> i32 {
+    let em = em.max(1) as u32;
+    text.lines()
+        .map(|line| {
+            let units: u32 = line.chars().map(|c| if wide_char(c) { 10 } else { 6 }).sum();
+            units * em / 10
+        })
+        .max()
+        .unwrap_or(0) as i32
 }
 
 /// The betteroffice raster backend refuses a surface that would exceed its
@@ -501,6 +611,44 @@ fn open_pptx(bytes: &[u8], title: String, format: String) -> Result<DocContent, 
 
 // ── DOCX: betteroffice structured export → blocks ─────────────────────
 
+/// Per-image cap: slint decodes every image block into a texture at open
+/// time, so a single 90 MB "hero" would be a bad neighbour in a chat overlay.
+/// Oversize parts stay as their `[image]` caption.
+const DOCX_MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+/// Total expanded media budget (zip-bomb guard, on top of opc's own).
+const DOCX_MEDIA_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `part name → image bytes` for the package's `word/media/*` parts, keyed
+/// both by full path and by file name (the structured export's part targets
+/// may be relative or absolute). Media extraction is best-effort: a broken
+/// part table just means images fall back to captions.
+fn media_map(bytes: &[u8]) -> std::collections::HashMap<String, Vec<u8>> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(parts) = ooxml_opc::unzip_parts_where(bytes, DOCX_MEDIA_TOTAL_BYTES,
+        |name| name.contains("/media/"))
+    else {
+        return map;
+    };
+    for (name, part) in parts {
+        if part.len() > DOCX_MAX_IMAGE_BYTES {
+            continue;
+        }
+        let base = name.rsplit('/').next().unwrap_or(name.as_str());
+        map.entry(name.clone()).or_insert_with(|| part.clone());
+        map.entry(base.to_string()).or_insert(part);
+    }
+    map
+}
+
+/// Resolve one structured-export part target against the media map (target
+/// normalization + file-name fallback).
+fn media_lookup(map: &std::collections::HashMap<String, Vec<u8>>, part: &str) -> Option<Vec<u8>> {
+    let part = part.trim_start_matches('/');
+    map.get(part)
+        .cloned()
+        .or_else(|| part.rsplit('/').next().map(|b| map.get(b).cloned()).flatten())
+}
+
 fn open_docx(bytes: &[u8], title: String, format: String) -> Result<DocContent, String> {
     use betteroffice_docx::{Document, ExportOptions, RevisionView};
 
@@ -508,6 +656,10 @@ fn open_docx(bytes: &[u8], title: String, format: String) -> Result<DocContent, 
     let content = doc
         .export_structured(&ExportOptions::new(RevisionView::Accepted))
         .map_err(|e| e.to_string())?;
+
+    // The structured export names an image's package part but carries none of
+    // its bytes — pull the parts out of the package up front.
+    let media = media_map(bytes);
 
     let mut blocks: Vec<Block> = Vec::new();
     for story in &content.stories {
@@ -517,7 +669,7 @@ fn open_docx(bytes: &[u8], title: String, format: String) -> Result<DocContent, 
             continue;
         }
         for block in &story.blocks {
-            push_block(&block.content, &mut blocks);
+            push_block(&block.content, &mut blocks, &media);
         }
     }
     if blocks.is_empty() {
@@ -528,35 +680,27 @@ fn open_docx(bytes: &[u8], title: String, format: String) -> Result<DocContent, 
 
 /// Walk one structured [`BoBlockKind`] into flat viewer blocks. Nested
 /// content controls recurse; tables are flattened cell-by-cell; unsupported
-/// constructs are dropped rather than failing the whole document.
-fn push_block(content: &BoBlockKind, out: &mut Vec<Block>) {
+/// constructs are dropped rather than failing the whole document. Inline
+/// images become their own blocks in document order (see
+/// `push_inline_blocks`).
+fn push_block(content: &BoBlockKind, out: &mut Vec<Block>, media: &std::collections::HashMap<String, Vec<u8>>) {
     match content {
         BoBlockKind::Heading { paragraph, heading } => {
-            let text = inline_text(&paragraph.inlines);
-            if text.trim().is_empty() {
-                return;
-            }
             let level = ((heading.outline_level as i32) + 1).clamp(1, 6);
-            out.push(Block::text(Kind::Heading, level, text));
+            push_inline_blocks(&paragraph.inlines, Kind::Heading, level, "", out, media);
         }
         BoBlockKind::Paragraph { paragraph } => {
-            let text = inline_text(&paragraph.inlines);
-            if !text.trim().is_empty() {
-                out.push(Block::text(Kind::Paragraph, 0, text));
-            }
+            push_inline_blocks(&paragraph.inlines, Kind::Paragraph, 0, "", out, media);
         }
         BoBlockKind::ListItem { paragraph, list, .. } => {
-            let text = inline_text(&paragraph.inlines);
-            if text.trim().is_empty() {
-                return;
-            }
+            let ordered = list.format != "bullet";
+            let kind = if ordered { Kind::Numbered } else { Kind::Bullet };
             let marker = list
                 .marker
                 .clone()
                 .unwrap_or_default()
                 .trim()
                 .to_string();
-            let ordered = list.format != "bullet";
             let marker = if marker.is_empty() {
                 if ordered {
                     "1.".to_string()
@@ -566,8 +710,14 @@ fn push_block(content: &BoBlockKind, out: &mut Vec<Block>) {
             } else {
                 marker
             };
-            let kind = if ordered { Kind::Numbered } else { Kind::Bullet };
-            out.push(Block::text(kind, list.level.min(8) as i32, format!("{marker} {text}")));
+            push_inline_blocks(
+                &paragraph.inlines,
+                kind,
+                list.level.min(8) as i32,
+                &format!("{marker} "),
+                out,
+                media,
+            );
         }
         BoBlockKind::Table { table } => {
             let mut cells: Vec<Vec<String>> = Vec::new();
@@ -591,7 +741,7 @@ fn push_block(content: &BoBlockKind, out: &mut Vec<Block>) {
         }
         BoBlockKind::ContentControl { blocks, .. } => {
             for block in blocks {
-                push_block(&block.content, out);
+                push_block(&block.content, out, media);
             }
         }
         // Page breaks read as visual rules; section / column furniture does not.
@@ -652,35 +802,99 @@ fn cell_text(blocks: &[BoBlock]) -> String {
 /// One inline's plain text: text runs verbatim, tabs as spaces, line breaks
 /// preserved, images as a bracketed caption; notes / comments / fields are
 /// annotations, not body copy.
-fn inline_text(inlines: &[BoInline]) -> String {
+fn inline_text_of(inline: &BoInline) -> String {
     use BoInlineKind as IK;
 
     let mut out = String::new();
-    for inline in inlines {
-        match &inline.content {
-            IK::Text { text } => out.push_str(text),
-            IK::Tab => out.push(' '),
-            IK::Break { break_type } => {
-                if matches!(break_type, BoBreakType::Line) {
-                    out.push('\n');
-                }
+    match &inline.content {
+        IK::Text { text } => out.push_str(text),
+        IK::Tab => out.push(' '),
+        IK::Break { break_type } => {
+            if matches!(break_type, BoBreakType::Line) {
+                out.push('\n');
             }
-            IK::Image { alt_text, .. } => {
-                let alt = alt_text.as_deref().map(|a| a.trim()).unwrap_or("");
-                if alt.is_empty() {
-                    out.push_str("[image] ");
-                } else {
-                    out.push_str("[image: ");
-                    out.push_str(alt);
-                    out.push_str("] ");
-                }
-            }
-            IK::ContentControl { inlines, .. } => out.push_str(&inline_text(inlines)),
-            IK::NoteReference { .. } | IK::CommentReference { .. } | IK::Field { .. }
-            | IK::Unsupported { .. } => {}
         }
+        IK::Image { alt_text, .. } => {
+            let alt = alt_text.as_deref().map(|a| a.trim()).unwrap_or("");
+            if alt.is_empty() {
+                out.push_str("[image] ");
+            } else {
+                out.push_str(&format!("[image: {alt}] "));
+            }
+        }
+        IK::ContentControl { inlines, .. } => out.push_str(&inline_text(inlines)),
+        IK::NoteReference { .. } | IK::CommentReference { .. } | IK::Field { .. }
+        | IK::Unsupported { .. } => {}
     }
     out
+}
+
+/// One inline sequence's plain text (list items / table cells).
+fn inline_text(inlines: &[BoInline]) -> String {
+    let mut out = String::new();
+    for inline in inlines {
+        out.push_str(&inline_text_of(inline));
+    }
+    out
+}
+
+/// Push the accumulated inline text as one block of `kind` (the list-item
+/// `prefix` — marker + space — goes in front); whitespace-only runs vanish.
+fn flush_inline_text(
+    out: &mut Vec<Block>,
+    kind: Kind,
+    level: i32,
+    prefix: &str,
+    pending: &mut String,
+) {
+    if pending.trim().is_empty() {
+        pending.clear();
+        return;
+    }
+    let text = if prefix.is_empty() {
+        std::mem::take(pending)
+    } else {
+        let t = format!("{prefix}{pending}");
+        pending.clear();
+        t
+    };
+    out.push(Block::text(kind, level, text));
+}
+
+/// An inline sequence → flat blocks in document order. Image inlines whose
+/// bytes the media map can supply become standalone [`Kind::Image`] blocks;
+/// everything else lands in the surrounding text block. Images that do not
+/// resolve (external links, parts that are not in the map) keep their
+/// bracketed caption in the text instead.
+fn push_inline_blocks(
+    inlines: &[BoInline],
+    kind: Kind,
+    level: i32,
+    prefix: &str,
+    out: &mut Vec<Block>,
+    media: &std::collections::HashMap<String, Vec<u8>>,
+) {
+    let mut pending = String::new();
+    for inline in inlines {
+        if let BoInlineKind::Image { part, alt_text, .. } = &inline.content {
+            if let Some(bytes) = part
+                .as_deref()
+                .and_then(|part| media_lookup(media, part))
+                .filter(|bytes| !bytes.is_empty())
+            {
+                flush_inline_text(out, kind, level, prefix, &mut pending);
+                let alt = alt_text
+                    .as_deref()
+                    .map(|a| a.trim())
+                    .unwrap_or("")
+                    .to_string();
+                out.push(Block::image(alt, bytes));
+                continue;
+            }
+        }
+        pending.push_str(&inline_text_of(inline));
+    }
+    flush_inline_text(out, kind, level, prefix, &mut pending);
 }
 
 // betteroffice-docx-edit's structured types (the read model the DOCX facade
@@ -717,6 +931,7 @@ mod tests {
         assert_eq!(Kind::Paragraph.number(), 1);
         assert_eq!(Kind::Bullet.number(), 2);
         assert_eq!(Kind::Numbered.number(), 3);
+        assert_eq!(Kind::Image.number(), 4);
         assert_eq!(Kind::Rule.number(), 5);
         assert_eq!(Kind::Table.number(), 8);
     }
@@ -829,5 +1044,77 @@ mod tests {
         assert_eq!(amount.align, 2);
         assert!(!grid.rows.iter().any(|r| r.cells.iter().any(|c| c.text.contains("hidden"))));
         assert_eq!(grid.rows[1].cells[3].w, 0);
+    }
+
+    /// A DOCX whose body has a paragraph, an inline image, then a paragraph,
+    /// comes back as `[Paragraph, Image, Paragraph]` — the image block
+    /// carrying the part's exact bytes and the alt text, in document order.
+    #[test]
+    fn docx_inline_image_becomes_an_image_block() {
+        // 8×8 red PNG.
+        let png: Vec<u8> = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0xc4, 0x0f, 0xbe, 0x8b, 0x00, 0x00, 0x00, 0x12, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x1f, 0x66, 0x18, 0x19, 0x0a, 0x00, 0xc2,
+            0xd7, 0x7f, 0x81, 0x2f, 0x71, 0xe0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+            0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+
+        let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Default Extension="png" ContentType="image/png"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"#;
+        let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#;
+        let doc_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+</Relationships>"#;
+        let document = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>
+<w:p><w:r><w:t>Before the picture.</w:t></w:r></w:p>
+<w:p><w:r><w:drawing>
+<wp:inline distT="0" distB="0" distL="0" distR="0" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">
+<wp:extent cx="1219200" cy="1219200"/>
+<wp:docPr id="1" name="Picture 1" descr="the alt"/>
+<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+<pic:nvPicPr><pic:cNvPr id="1" name="image1.png" descr="the alt"/><pic:cNvPicPr/></pic:nvPicPr>
+<pic:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>
+<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1219200" cy="1219200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>
+</pic:pic>
+</a:graphicData>
+</a:graphic>
+</wp:inline>
+</w:drawing></w:r></w:p>
+<w:p><w:r><w:t>After the picture.</w:t></w:r></w:p>
+</w:body>
+</w:document>"#;
+
+        let parts = vec![
+            ("[Content_Types].xml".into(), content_types.as_bytes().to_vec()),
+            ("_rels/.rels".into(), root_rels.as_bytes().to_vec()),
+            ("word/_rels/document.xml.rels".into(), doc_rels.as_bytes().to_vec()),
+            ("word/document.xml".into(), document.as_bytes().to_vec()),
+            ("word/media/image1.png".into(), png.clone()),
+        ];
+        let bytes = ooxml_opc::rezip_parts(&parts).expect("rezip the test docx");
+
+        let content = open_docx(&bytes, "images".into(), "DOCX".into()).expect("open the docx");
+        let kinds: Vec<Kind> = content.blocks.iter().map(|b| b.kind).collect();
+        assert_eq!(kinds, vec![Kind::Paragraph, Kind::Image, Kind::Paragraph]);
+
+        let img = &content.blocks[1];
+        assert_eq!(img.image, png);
+        assert_eq!(img.text, "the alt");
+        assert!(img.cells.is_empty());
     }
 }

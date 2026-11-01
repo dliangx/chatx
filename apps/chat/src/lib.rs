@@ -943,6 +943,13 @@ pub fn run_app() {
                             }
                             lines.push(line);
                         }
+                    } else if b.kind == 4 {
+                        // Image: its alt text, or a bare caption when it has none.
+                        lines.push(if b.text.is_empty() {
+                            "[image]".to_string()
+                        } else {
+                            b.text.to_string()
+                        });
                     } else if !b.text.is_empty() {
                         lines.push(b.text.to_string());
                     }
@@ -2292,6 +2299,13 @@ fn open_doc_page(ui: &MainWindow, path: &str) {
                             .collect();
                         let slint_cells: slint::ModelRc<slint::ModelRc<SharedString>> =
                             slint::ModelRc::new(slint::VecModel::from(slint_rows));
+                        // Image block: decode (capped) so the row can size itself;
+                        // undecodable payloads fall back to the alt-text caption.
+                        let (sm_img, iw, ih) = if b.image.is_empty() {
+                            (slint::Image::default(), 0, 0)
+                        } else {
+                            image::doc_image_from_bytes(&b.image, 640)
+                        };
                         DocBlock {
                             kind: b.kind.number(),
                             level: b.level,
@@ -2304,6 +2318,9 @@ fn open_doc_page(ui: &MainWindow, path: &str) {
                                 .max()
                                 .unwrap_or(0) as i32,
                             header_rows: b.header_rows,
+                            image: sm_img,
+                            img_w: iw as i32,
+                            img_h: ih as i32,
                         }
                     })
                     .collect();

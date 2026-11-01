@@ -152,6 +152,32 @@ pub fn image_from_bytes(bytes: &[u8], cap: u32) -> SlintImage {
     }
 }
 
+/// As `image_from_bytes`, but also returns the display size in px — the
+/// DOCX image block needs it (this Slint build cannot measure image
+/// sources). Undecodable payloads (unknown / vector formats) come back as
+/// the default image with a 0 × 0 size so the caller falls back to the
+/// alt-text caption.
+pub fn doc_image_from_bytes(bytes: &[u8], cap: u32) -> (SlintImage, u32, u32) {
+    let Ok(img) = image::load_from_memory(bytes) else {
+        return (SlintImage::default(), 0, 0);
+    };
+    let w = img.width().max(1);
+    let h = img.height().max(1);
+    let longest = w.max(h);
+    let scale = longest.min(cap) as f64 / longest as f64;
+    let nw = (w as f64 * scale).max(1.0) as u32;
+    let nh = (h as f64 * scale).max(1.0) as u32;
+    let resized = if nw != w || nh != h {
+        img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let rgba = resized.to_rgba8();
+    let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(rgba.width(), rgba.height());
+    buf.make_mut_bytes().copy_from_slice(rgba.as_raw());
+    (SlintImage::from_rgba8(buf), nw, nh)
+}
+
 /// Directory where sent / received chat photos live (per-user, not per-chat —
 /// mirrors `record::voice_dir`).
 pub fn image_dir() -> std::path::PathBuf {

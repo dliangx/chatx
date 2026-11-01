@@ -2801,6 +2801,7 @@ name = "doc"
 version = "0.1.0"
 dependencies = [
  "betteroffice-docx",
+ "betteroffice-opc",
  "betteroffice-pptx",
  "betteroffice-xlsx",
  "betteroffice-xlsx-model",

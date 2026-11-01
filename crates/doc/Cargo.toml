@@ -21,3 +21,6 @@ betteroffice-xlsx-model = "0.5"
 betteroffice-xlsx-render = "0.5"
 # PPTX — `raster` is the slide→PNG backend (fonts are caller-supplied).
 betteroffice-pptx = { version = "0.5", features = ["raster"] }
+# OPC container reader: pulls the `word/media/*` image parts out of a DOCX so
+# inline images can be shown instead of dropped.
+betteroffice-opc = "0.5"

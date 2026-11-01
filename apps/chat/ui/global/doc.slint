@@ -4,12 +4,13 @@ import { Theme } from "../theme.slint";
 
 /// One visual block of the extracted document, parsed by the `doc` crate
 /// from betteroffice's structured export; the UI renders it in `DocBlockRow`.
-/// `kind`: 0 heading · 1 paragraph · 2 bullet · 3 numbered · 5 rule · 8 table
+/// `kind`: 0 heading · 1 paragraph · 2 bullet · 3 numbered · 4 image · 5 rule · 8 table
 export struct DocBlock {
     kind: int,
     // Heading level (1–6) or list nesting depth (0 = top level).
     level: int,
-    // Plain text. For tables: unused (cells carry the content).
+    // Plain text. For tables: unused (cells carry the content). For images:
+    // the alt text (or an empty string).
     text: string,
     // Table body for `kind==8`: rows → cells. Empty otherwise.
     cells: [[string]],
@@ -17,6 +18,11 @@ export struct DocBlock {
     cols: int,
     // For `kind==8`: how many leading rows render bold + tinted.
     header-rows: int,
+    // For `kind==4`: the decoded image, plus its display size in px
+    // (0 × 0 = undecodable payload → the alt-text caption shows instead).
+    image: image,
+    img-w: int,
+    img-h: int,
 }
 
 /// One cell of the XLSX sheet grid (text + width + style extracted by the
@@ -183,8 +189,8 @@ export component DocTableRow inherits Rectangle {
 }
 
 /// One row of the document: a text block (heading / paragraph / list item /
-/// rule) or the whole table (equal-height rows). This Slint build has no
-/// rich-text element, so a block's `kind` carries all the emphasis.
+/// rule), an image, or the whole table (equal-height rows). This Slint build
+/// has no rich-text element, so a block's `kind` carries all the emphasis.
 export component DocBlockRow inherits Rectangle {
     in property <int> kind: 1;
     in property <int> level: 0;
@@ -192,16 +198,24 @@ export component DocBlockRow inherits Rectangle {
     in property <[[string]]> cells: [];
     in property <int> cols: 0;
     in property <int> header-rows: 0;
+    in property <image> image;
+    in property <int> img-w: 0;
+    in property <int> img-h: 0;
 
     out property <bool> is-table: kind == 8;
     out property <bool> is-rule: kind == 5;
     out property <bool> is-heading: kind == 0;
+    // An image block whose payload decoded (`0 × 0` = undecodable → caption).
+    out property <bool> image-ok: kind == 4 && img-w > 0;
     out property <int> size-hint: root.is-heading ? (23 - level) : 14;
     out property <int> weight-hint: root.is-heading ? 700 : 400;
     out property <length> pad: 6px;
     out property <length> indent: (kind == 2 || kind == 3) ? (6px + (level * 16px)) : 0px;
     out property <length> body-width: root.width - 2 * root.pad - root.indent;
     out property <length> cell-w: (root.width / (root.cols > 0 ? root.cols : 1)) - 15px;
+    // Fitted image: capped at the body width, height keeps the ratio.
+    out property <length> img-fit-w: min(root.body-width, root.img-w * 1px);
+    out property <length> img-fit-h: (root.img-w > 0) ? (root.img-fit-w * root.img-h / root.img-w) : 0px;
 
     // Measures the body text (or, for a table, the flat text of every cell at
     // one column's width) — Slint does the text layout, so the height is exact.
@@ -217,7 +231,9 @@ export component DocBlockRow inherits Rectangle {
     out property <int> rows-n: (root.cells.length > 0 ? root.cells.length : 1);
     out property <length> rows-h: max(measure.preferred-height, 18px * root.rows-n);
     out property <length> row-h: max(root.rows-h / root.rows-n, 20px);
-    out property <length> content-h: root.is-table
+    out property <length> content-h: root.image-ok
+        ? root.img-fit-h + 2 * root.pad
+        : root.is-table
         ? max(root.rows-h, 20px * root.rows-n)
         : max(measure.preferred-height, 16px) + (root.is-heading ? 2 * root.pad : 0px);
 
@@ -239,9 +255,19 @@ export component DocBlockRow inherits Rectangle {
             h: root.row-h;
         }
     }
-    if !root.is-table:
+    // if !root.is-table
+    // The image, centred, capped at the body width (height keeps its ratio).
+    if root.image-ok: Image {
+        x: (root.width - root.img-fit-w) / 2;
+        y: root.pad;
+        width: root.img-fit-w;
+        height: root.img-fit-h;
+        source: root.image;
+        image-fit: fill;
+    }
+    // Text rows (and the alt caption of an undecodable image).
     Text {
-        visible: !root.is-rule;
+        visible: !root.is-rule && !root.image-ok;
         x: root.pad + root.indent;
         y: root.is-heading ? root.pad : 0px;
         width: root.body-width;
@@ -317,10 +343,10 @@ export component XlRowView inherits Rectangle {
                 vertical-alignment: center;
 
                 states [
-                    center-align when c.align == 1 : {
+                    center-align when c.align == 1: {
                         horizontal-alignment: center;
                     }
-                    right-align when c.align == 2 : {
+                    right-align when c.align == 2: {
                         horizontal-alignment: right;
                     }
                 ]
@@ -526,9 +552,8 @@ export component DocViewer inherits Rectangle {
             height: 22px;
             text: DocHost.in-sheet
                 ? (
-                    DocHost.sheet-name + "  ·  "
-                    + (DocHost.page + 1) + " / " + DocHost.page-count
-                  )
+                DocHost.sheet-name + "  ·  "
+                + (DocHost.page + 1) + " / " + DocHost.page-count)
                 : (DocHost.page + 1) + " / " + DocHost.page-count;
             font-size: 12px;
             // The canvas differs by mode: dark in page view, white in sheet view.
@@ -562,6 +587,9 @@ export component DocViewer inherits Rectangle {
                 cells: b.cells;
                 cols: b.cols;
                 header-rows: b.header-rows;
+                image: b.image;
+                img-w: b.img-w;
+                img-h: b.img-h;
             }
         }
     }
@@ -630,15 +658,15 @@ export component DocViewer inherits Rectangle {
             height: 34px;
             border-radius: 17px;
             border-width: 1px;
-            border-color: Theme.border;
-            background: Theme.surface-2;
+            border-color: rgba(255, 255, 255, 0.45);
+            background: rgba(16, 18, 24, 0.6);
 
             Icon {
                 x: 8px;
                 y: 8px;
                 size: 18px;
                 glyph: DocHost.copied ? Glyph.finish : Glyph.copy;
-                tint: DocHost.copied ? Theme.success : Theme.fg;
+                tint: DocHost.copied ? Theme.success : Theme.fg-on-accent;
             }
 
             TouchArea {
