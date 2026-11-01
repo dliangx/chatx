@@ -511,7 +511,10 @@ export component ChatView inherits Rectangle {
                 x: 0px;
                 width: menu.slot-w;
                 height: 100%;
-                clicked => { root.lp-active = -1; AppState.copy-note(menu.msg.text); }
+                // Read the row's text BEFORE closing the menu: `menu.msg` is bound
+                // to `ChatSession.messages[root.lp-active]`, so setting lp-active
+                // to -1 first would re-resolve it to an out-of-bounds (empty) row.
+                clicked => { let t = menu.msg.text; root.lp-active = -1; AppState.copy-note(t); }
             }
 
             Icon {
@@ -526,7 +529,8 @@ export component ChatView inherits Rectangle {
                 x: menu.slot-w;
                 width: menu.slot-w;
                 height: 100%;
-                clicked => { root.lp-active = -1; AppState.save-note(menu.msg.text); }
+                // Read the row's text BEFORE closing the menu (same reason as copy).
+                clicked => { let t = menu.msg.text; root.lp-active = -1; AppState.save-note(t); }
             }
 
             Icon {
@@ -542,8 +546,10 @@ export component ChatView inherits Rectangle {
                 width: menu.slot-w;
                 height: 100%;
                 clicked => {
+                    // Read the row's text BEFORE closing the menu (same reason as copy).
+                    let t = menu.msg.text;
                     root.lp-active = -1;
-                    AppState.forward-target = menu.msg.text;
+                    AppState.forward-target = t;
                     AppState.nav-state = {
                         active-tab: 1,
                         tabs: AppState.nav-state.tabs,
