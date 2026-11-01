@@ -365,6 +365,13 @@ export component DocViewer inherits Rectangle {
     background: DocHost.minimized ? #00000000 : Theme.bg;
     clip: true;
 
+    blocker := TouchArea {
+        visible: !DocHost.minimized;
+        width: 100%;
+        height: 100%;
+        clicked => {}
+    }
+
     // The body area (below the 48px title bar, above the bottom counter) the
     // page-view image may occupy.
     out property <length> body-w: root.width - 32px;
