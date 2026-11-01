@@ -1,0 +1,18 @@
+[package]
+name = "doc"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Office document viewer core (betteroffice): spreadsheets and slides render to full-quality PNG pages; Word documents export their high-fidelity, formatted content. No slint — the app layer displays the result."
+
+[dependencies]
+# DOCX — the read-only path: high-fidelity structured content export
+# (headings, lists, tables, runs). No `raster` feature: DOCX content needs no
+# text shaping, betteroffice-docx's own native PNG path is designed around the
+# collaborative editing engine (see the upstream native-viewer) and is out of
+# scope for a chat preview.
+betteroffice-docx = "0.5"
+# XLSX — `raster` (the default) builds in the Carlito face and sheet→PNG.
+betteroffice-xlsx = "0.5"
+# PPTX — `raster` is the slide→PNG backend (fonts are caller-supplied).
+betteroffice-pptx = { version = "0.5", features = ["raster"] }

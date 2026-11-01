@@ -1,0 +1,544 @@
+import { ScrollView } from "std-widgets.slint";
+import { Glyph, Icon } from "../components/icon.slint";
+import { Theme } from "../theme.slint";
+
+/// One visual block of the extracted document, parsed by the `doc` crate
+/// from betteroffice's structured export; the UI renders it in `DocBlockRow`.
+/// `kind`: 0 heading · 1 paragraph · 2 bullet · 3 numbered · 5 rule · 8 table
+export struct DocBlock {
+    kind: int,
+    // Heading level (1–6) or list nesting depth (0 = top level).
+    level: int,
+    // Plain text. For tables: unused (cells carry the content).
+    text: string,
+    // Table body for `kind==8`: rows → cells. Empty otherwise.
+    cells: [[string]],
+    // Number of columns for `kind==8` (0 otherwise).
+    cols: int,
+    // For `kind==8`: how many leading rows render bold + tinted.
+    header-rows: int,
+}
+
+export global DocHost {
+    in property <bool> running: false;
+    in property <bool> failed: false;
+    in property <string> status: "";
+    // Document title (file base name) + a small format tag (e.g. "DOCX").
+    in property <string> title: "";
+    in property <string> format: "";
+    // DOCX blocks (block view, rendered in order).
+    in property <[DocBlock]> blocks: [];
+    // XLSX / PPTX pages (page view): the current page's rendered pixels and
+    // its aspect ratio (width / height), plus the deck size.
+    in property <image> frame;
+    in property <int> page: 0;
+    in property <int> page-count: 0;
+    in property <float> page-ratio: 0.0;
+    // Page-view mode when there are pages (blocks stay empty then).
+    out property <bool> in-pages: page-count > 0;
+    // Wheel-scroll throttle (a burst of wheel notches = one page change).
+    in property <bool> wheel-busy: false;
+    // Clipboard feedback, cleared by a timer so the copy button flashes "copied".
+    in property <bool> copied: false;
+    // Set while the page is hidden by a minimize; the loaded content stays alive.
+    in property <bool> minimized: false;
+    // Copy the document text to the clipboard (Rust → system clipboard).
+    callback copy-text();
+    // Ask the Rust side to render and show page `idx` (page-view mode).
+    callback page-at(int);
+    // Close tears the document down + hides the overlay.
+    callback close-doc();
+    // Minimise hides the page but keeps the loaded content (a dock pill restores it).
+    callback minimize-doc();
+    // Dock pill tapped: re-show the page (the loaded content stays).
+    callback restore-doc();
+}
+
+/// Floating pill shown while the viewer is minimized (content stays loaded); tap re-shows the page.
+export component DocDock inherits Rectangle {
+    visible: DocHost.running && DocHost.minimized;
+    width: 34px;
+    height: 34px;
+    background: transparent;
+    z: 10;
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 34px;
+        height: 34px;
+        border-radius: 17px;
+        border-width: 1px;
+        border-color: rgba(255, 255, 255, 0.45);
+        background: rgba(16, 18, 24, 0.8);
+
+        Icon {
+            x: 8px;
+            y: 8px;
+            size: 18px;
+            glyph: Glyph.fullscreen;
+            tint: #ffffff;
+        }
+
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { DocHost.restore-doc(); }
+        }
+    }
+}
+
+/// One table row: equal-width stretch cells, header rows bold + tinted.
+/// Height is fixed by the owner (`h`) so all rows of a table line up.
+export component DocTableRow inherits Rectangle {
+    in property <[string]> line: [];
+    in property <bool> header: false;
+    in property <length> h: 30px;
+
+    width: 100%;
+    height: root.h;
+    clip: true;
+    background: root.header ? Theme.surface-2 : transparent;
+
+    // Bottom separator (this build's `border-width` takes a single value,
+    // so the line is a 1px child rectangle).
+    Rectangle {
+        x: 0px;
+        y: root.h - 1px;
+        width: 100%;
+        height: 1px;
+        background: Theme.separator;
+    }
+
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 0px;
+
+        for cell in line: Rectangle {
+            horizontal-stretch: 1;
+            clip: true;
+
+            // Left cell separator.
+            Rectangle {
+                x: 0px;
+                y: 0px;
+                width: 1px;
+                height: 100%;
+                background: Theme.separator;
+                visible: line.length > 1;
+            }
+
+            Text {
+                x: 8px;
+                y: 5px;
+                width: parent.width - 14px;
+                height: parent.height - 10px;
+                text: cell;
+                font-size: 13px;
+                font-weight: root.header ? 700 : 400;
+                color: root.header ? Theme.fg-strong : Theme.fg;
+                wrap: word-wrap;
+                overflow: clip;
+                vertical-alignment: top;
+            }
+        }
+    }
+}
+
+/// One row of the document: a text block (heading / paragraph / list item /
+/// rule) or the whole table (equal-height rows). This Slint build has no
+/// rich-text element, so a block's `kind` carries all the emphasis.
+export component DocBlockRow inherits Rectangle {
+    in property <int> kind: 1;
+    in property <int> level: 0;
+    in property <string> text: "";
+    in property <[[string]]> cells: [];
+    in property <int> cols: 0;
+    in property <int> header-rows: 0;
+
+    out property <bool> is-table: kind == 8;
+    out property <bool> is-rule: kind == 5;
+    out property <bool> is-heading: kind == 0;
+    out property <int> size-hint: root.is-heading ? (23 - level) : 14;
+    out property <int> weight-hint: root.is-heading ? 700 : 400;
+    out property <length> pad: 6px;
+    out property <length> indent: (kind == 2 || kind == 3) ? (6px + (level * 16px)) : 0px;
+    out property <length> body-width: root.width - 2 * root.pad - root.indent;
+    out property <length> cell-w: (root.width / (root.cols > 0 ? root.cols : 1)) - 15px;
+
+    // Measures the body text (or, for a table, the flat text of every cell at
+    // one column's width) — Slint does the text layout, so the height is exact.
+    measure := Text {
+        width: root.is-table ? root.cell-w : root.body-width;
+        text: root.text;
+        font-size: root.is-table ? 13px : root.size-hint * 1px;
+        font-weight: root.is-table ? 400 : root.weight-hint;
+        wrap: word-wrap;
+        visible: false;
+    }
+
+    out property <int> rows-n: (root.cells.length > 0 ? root.cells.length : 1);
+    out property <length> rows-h: max(measure.preferred-height, 18px * root.rows-n);
+    out property <length> row-h: max(root.rows-h / root.rows-n, 20px);
+    out property <length> content-h: root.is-table
+        ? max(root.rows-h, 20px * root.rows-n)
+        : max(measure.preferred-height, 16px) + (root.is-heading ? 2 * root.pad : 0px);
+
+    width: 100%;
+    height: root.is-rule ? 1px : root.content-h;
+    border-radius: 6px;
+    background: root.is-rule ? Theme.separator
+        : (root.is-heading ? Theme.surface-3 : transparent);
+
+    if root.is-table:
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 0px;
+
+        for r[i] in root.cells: DocTableRow {
+            line: r;
+            header: i < root.header-rows;
+            h: root.row-h;
+        }
+    }
+    if !root.is-table:
+    Text {
+        visible: !root.is-rule;
+        x: root.pad + root.indent;
+        y: root.is-heading ? root.pad : 0px;
+        width: root.body-width;
+        height: root.content-h;
+        text: root.text;
+        font-size: root.size-hint * 1px;
+        font-weight: root.weight-hint;
+        color: root.is-heading ? Theme.fg-strong : Theme.fg;
+        wrap: word-wrap;
+        overflow: clip;
+        vertical-alignment: top;
+    }
+}
+
+/// Full-screen document page: title bar, then either the block view (DOCX) or
+/// the page view (XLSX sheets / PPTX slides, pixel-exact PNGs from betteroffice).
+export component DocViewer inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: DocHost.minimized ? #00000000 : Theme.bg;
+    clip: true;
+
+    // The body area (below the 48px title bar, above the bottom counter) the
+    // page-view image may occupy.
+    out property <length> body-w: root.width - 32px;
+    out property <length> body-h: root.height - 84px;
+
+    // ── Page view (XLSX / PPTX): the rendered page, fitted into the body ──
+    out property <length> fit-h: (DocHost.page-ratio > 0.0)
+        ? min(body-h, body-w / DocHost.page-ratio)
+        : body-h;
+    out property <length> fit-w: root.fit-h * DocHost.page-ratio;
+
+    if !DocHost.minimized && !DocHost.failed && DocHost.in-pages:
+    Rectangle {
+        x: 0;
+        y: 48px;
+        width: 100%;
+        height: parent.height - 48px;
+        background: #0a0c11;
+
+        // Wheel / trackpad: up = previous page, down = next (throttled).
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            scroll-event(event) => {
+                if !DocHost.wheel-busy && event.delta-y != 0 {
+                    if event.delta-y > 0 {
+                        if DocHost.page + 1 < DocHost.page-count {
+                            DocHost.wheel-busy = true;
+                            DocHost.page-at(DocHost.page + 1);
+                        }
+                    } else {
+                        if DocHost.page > 0 {
+                            DocHost.wheel-busy = true;
+                            DocHost.page-at(DocHost.page - 1);
+                        }
+                    }
+                    return accept;
+                }
+                reject
+            }
+        }
+
+        // The rendered page, fitted (no crop, no letterbox distortion).
+        Image {
+            x: (parent.width - root.fit-w) / 2;
+            y: (parent.height - root.fit-h) / 2;
+            width: root.fit-w;
+            height: root.fit-h;
+            source: DocHost.frame;
+            image-fit: fill;
+        }
+
+        // Previous page (left edge).
+        Rectangle {
+            x: 12px;
+            y: (parent.height - 56px) / 2;
+            width: 36px;
+            height: 56px;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: rgba(255, 255, 255, 0.2);
+            background: rgba(24, 27, 35, 0.85);
+            opacity: DocHost.page > 0 ? 1.0 : 0.3;
+
+            Icon {
+                x: 8px;
+                y: 18px;
+                size: 20px;
+                glyph: Glyph.left;
+                tint: #ffffff;
+            }
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => {
+                    if DocHost.page > 0 {
+                        DocHost.page-at(DocHost.page - 1);
+                    }
+                }
+            }
+        }
+
+        // Next page (right edge).
+        Rectangle {
+            x: parent.width - 48px;
+            y: (parent.height - 56px) / 2;
+            width: 36px;
+            height: 56px;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: rgba(255, 255, 255, 0.2);
+            background: rgba(24, 27, 35, 0.85);
+            opacity: DocHost.page + 1 < DocHost.page-count ? 1.0 : 0.3;
+
+            Icon {
+                x: 8px;
+                y: 18px;
+                size: 20px;
+                glyph: Glyph.right;
+                tint: #ffffff;
+            }
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => {
+                    if DocHost.page + 1 < DocHost.page-count {
+                        DocHost.page-at(DocHost.page + 1);
+                    }
+                }
+            }
+        }
+
+        // Page counter.
+        Text {
+            x: 0;
+            y: parent.height - 30px;
+            width: 100%;
+            height: 22px;
+            text: (DocHost.page + 1) + " / " + DocHost.page-count;
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.6);
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    // Throttle wheel pages: re-arm after a beat so one gesture = one page.
+    Timer {
+        interval: 400ms;
+        running: DocHost.wheel-busy;
+        triggered => { DocHost.wheel-busy = false; }
+    }
+
+    // ── Block view (DOCX): a scrolling, formatted stack of blocks ──
+    if !DocHost.minimized && !DocHost.failed && !DocHost.in-pages && DocHost.blocks.length > 0:
+    ScrollView {
+        x: 0;
+        y: 48px;
+        width: 100%;
+        height: parent.height - 48px;
+
+        VerticalLayout {
+            width: 100%;
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 10px;
+            padding-bottom: 28px;
+            spacing: 10px;
+            cross-axis-alignment: stretch;
+
+            for b in DocHost.blocks: DocBlockRow {
+                kind: b.kind;
+                level: b.level;
+                text: b.text;
+                cells: b.cells;
+                cols: b.cols;
+                header-rows: b.header-rows;
+            }
+        }
+    }
+
+    // Empty (nothing rendered in block mode) hint.
+    if !DocHost.minimized && !DocHost.failed && !DocHost.in-pages && DocHost.blocks.length == 0:
+    Text {
+        x: 24px;
+        y: 80px;
+        width: parent.width - 48px;
+        text: @tr("This document has no readable content.");
+        font-size: 13px;
+        color: Theme.fg-muted;
+    }
+
+    // Fatal / failure message, centred (shown once `failed` is set).
+    Text {
+        visible: DocHost.failed;
+        x: 24px;
+        y: 48px;
+        width: parent.width - 48px;
+        text: DocHost.status;
+        font-size: 13px;
+        color: Theme.danger;
+        wrap: word-wrap;
+    }
+
+    // Title bar (file name + format tag + copy / minimize / close).
+    Rectangle {
+        visible: !DocHost.minimized;
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 48px;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.separator;
+
+        Icon {
+            x: 14px;
+            y: 14px;
+            size: 20px;
+            glyph: Glyph.file;
+            tint: Theme.fg-muted;
+        }
+
+        Text {
+            x: 42px;
+            y: 0;
+            width: parent.width - 170px;
+            height: 48px;
+            vertical-alignment: center;
+            text: DocHost.format != "" ? DocHost.format + "  ·  " + DocHost.title : DocHost.title;
+            font-size: 14px;
+            font-weight: 600;
+            color: Theme.fg-strong;
+            overflow: elide;
+        }
+
+        // Page view only: no text to copy, so the button is hidden there.
+        if !DocHost.in-pages:
+        Rectangle {
+            x: parent.width - 128px;
+            y: 8px;
+            width: 34px;
+            height: 34px;
+            border-radius: 17px;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.surface-2;
+
+            Icon {
+                x: 8px;
+                y: 8px;
+                size: 18px;
+                glyph: DocHost.copied ? Glyph.finish : Glyph.copy;
+                tint: DocHost.copied ? Theme.success : Theme.fg;
+            }
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => {
+                    if DocHost.running && !DocHost.failed && DocHost.blocks.length > 0 && !DocHost.copied {
+                        DocHost.copied = true;
+                        DocHost.copy-text();
+                    }
+                }
+            }
+        }
+
+        // Minimize (middle): hide the page, keep the loaded content; a dock pill restores it.
+        Rectangle {
+            x: parent.width - 84px;
+            y: 8px;
+            width: 34px;
+            height: 34px;
+            border-radius: 17px;
+            border-width: 1px;
+            border-color: rgba(255, 255, 255, 0.45);
+            background: rgba(16, 18, 24, 0.6);
+
+            Icon {
+                x: 8px;
+                y: 8px;
+                size: 18px;
+                glyph: Glyph.minimize;
+                tint: #ffffff;
+            }
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { DocHost.minimize-doc(); }
+            }
+        }
+
+        // Close (right): tear the document down + hide the overlay.
+        Rectangle {
+            x: parent.width - 40px;
+            y: 8px;
+            width: 34px;
+            height: 34px;
+            border-radius: 17px;
+            border-width: 1px;
+            border-color: rgba(255, 255, 255, 0.45);
+            background: rgba(16, 18, 24, 0.6);
+
+            Icon {
+                x: 8px;
+                y: 8px;
+                size: 18px;
+                glyph: Glyph.close;
+                tint: #ffffff;
+            }
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { DocHost.close-doc(); }
+            }
+        }
+    }
+
+    // Dismiss the "copied" flash after a beat so the label is transient.
+    Timer {
+        interval: 1400ms;
+        running: DocHost.copied;
+        triggered => { DocHost.copied = false; }
+    }
+
+    DocDock {
+        x: parent.width - 90px;
+        y: 10px;
+    }
+}

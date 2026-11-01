@@ -25,6 +25,8 @@ struct L10n {
     h_ago: &'static str,
     d_ago: &'static str,
     y_ago: &'static str,
+    /// App notice: Office documents render desktop-only.
+    desktop_only: &'static str,
 }
 
 const EN: L10n = L10n {
@@ -33,6 +35,7 @@ const EN: L10n = L10n {
     h_ago: "{} hours ago",
     d_ago: "{} days ago",
     y_ago: "{} years ago",
+    desktop_only: "Documents can only be viewed on desktop",
 };
 const ZH_CN: L10n = L10n {
     just_now: "刚刚",
@@ -40,6 +43,7 @@ const ZH_CN: L10n = L10n {
     h_ago: "{} 小时前",
     d_ago: "{} 天前",
     y_ago: "{} 年前",
+    desktop_only: "文档只支持桌面端查看",
 };
 const DE: L10n = L10n {
     just_now: "gerade eben",
@@ -47,6 +51,7 @@ const DE: L10n = L10n {
     h_ago: "vor {} Std",
     d_ago: "vor {} T",
     y_ago: "vor {} J",
+    desktop_only: "Dokumente können nur auf Desktop-Geräten angezeigt werden",
 };
 const ES: L10n = L10n {
     just_now: "ahora mismo",
@@ -54,6 +59,7 @@ const ES: L10n = L10n {
     h_ago: "hace {} h",
     d_ago: "hace {} d",
     y_ago: "hace {} a",
+    desktop_only: "Los documentos solo se pueden ver en escritorio",
 };
 const FR: L10n = L10n {
     just_now: "à l'instant",
@@ -61,6 +67,7 @@ const FR: L10n = L10n {
     h_ago: "il y a {} h",
     d_ago: "il y a {} j",
     y_ago: "il y a {} a",
+    desktop_only: "Les documents ne peuvent être consultés que sur ordinateur de bureau",
 };
 const JA: L10n = L10n {
     just_now: "たった今",
@@ -68,6 +75,7 @@ const JA: L10n = L10n {
     h_ago: "{} 時間前",
     d_ago: "{} 日前",
     y_ago: "{} 年前",
+    desktop_only: "ドキュメントはデスクトップ版でのみ表示できます",
 };
 const RU: L10n = L10n {
     just_now: "только что",
@@ -75,6 +83,7 @@ const RU: L10n = L10n {
     h_ago: "{} ч назад",
     d_ago: "{} дн назад",
     y_ago: "{} г назад",
+    desktop_only: "Документы можно просматривать только на настольной версии",
 };
 const AR: L10n = L10n {
     just_now: "الآن",
@@ -82,6 +91,7 @@ const AR: L10n = L10n {
     h_ago: "قبل {} ساعة",
     d_ago: "قبل {} يوم",
     y_ago: "قبل {} سنة",
+    desktop_only: "يمكن عرض المستندات على سطح المكتب فقط",
 };
 
 fn table(code: &str) -> &'static L10n {
@@ -156,4 +166,10 @@ pub fn fmt_profile_date(ms: i64) -> String {
         Some(dt) => dt.format("%Y-%m-%d").to_string(),
         None => String::new(),
     }
+}
+
+/// The localized "documents are desktop-only" notice, for the app-layer
+/// notice when a mobile build tries to open an Office document.
+pub fn desktop_only_message() -> String {
+    cur_l10n().desktop_only.to_string()
 }

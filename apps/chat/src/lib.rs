@@ -532,6 +532,8 @@ pub fn run_app() {
     state.set_user_id(SharedString::from(""));
     state.set_is_mobile(cfg!(target_os = "android") || cfg!(target_os = "ios"));
     // state.set_is_mobile(true);
+    // Drives the platform-correct bottom-tab base height (49pt iOS / 56dp Android).
+    state.set_is_ios(cfg!(target_os = "ios"));
     let existing_uid = chatx_core::account::Keystore::load(&keystore_path(&profile()))
         .map(|ks| ks.user_id)
         .ok();
@@ -818,6 +820,131 @@ pub fn run_app() {
             nav.global_overlay = GlobalOverlayType::Pdf;
             ui.global::<AppState>().set_nav_state(nav);
             tracing::info!("[pdf] restored from dock");
+        });
+    }
+
+    // ── Office document viewer (betteroffice: docx/xlsx/pptx) ──────────
+    {
+        let w_open = weak.clone();
+        state.on_open_doc(move || {
+            // Desktop-only renderer: on mobile the entry point just notices
+            // (no file picker), in the app's language.
+            if let Some(ui) = w_open.upgrade()
+                && ui.global::<AppState>().get_is_mobile()
+            {
+                show_app_notice(w_open.clone(), time::desktop_only_message(), false);
+                return;
+            }
+            let weak_outer = w_open.clone();
+            camera::filepick::set_file_sink(move |sel: Option<String>| {
+                let Some(path) = sel else { return };
+                if !doc::is_office_ext(&path) {
+                    tracing::warn!("[doc] ignoring non-Office selection: {path}");
+                    return;
+                }
+                let weak = weak_outer.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    if ui.get_logged_in() {
+                        open_doc_page(&ui, &path);
+                    }
+                });
+            });
+            if let Err(e) = camera::filepick::pick_file() {
+                tracing::warn!("[doc] file picker failed to present: {e}");
+            }
+        });
+
+        let close_weak = weak.clone();
+        ui.global::<DocHost>().on_close_doc(move || {
+            tracing::info!("[doc] closed from overlay");
+            // Drop the page-mode cache first (thread-local, event-loop thread).
+            doc_pages_replace(None);
+            if let Some(ui) = close_weak.upgrade() {
+                let dh = ui.global::<DocHost>();
+                dh.set_minimized(false);
+                dh.set_running(false);
+                dh.set_failed(false);
+                dh.set_copied(false);
+                dh.set_wheel_busy(false);
+                dh.set_status(SharedString::from(""));
+                dh.set_title(SharedString::from(""));
+                dh.set_format(SharedString::from(""));
+                dh.set_frame(slint::Image::default());
+                dh.set_page(0);
+                dh.set_page_count(0);
+                // Release the loaded blocks the global still references.
+                dh.set_blocks(slint::ModelRc::new(slint::VecModel::from(Vec::<DocBlock>::new())));
+                clear_global_overlay(&ui);
+            }
+        });
+        let min_weak = weak.clone();
+        ui.global::<DocHost>().on_minimize_doc(move || {
+            let Some(ui) = min_weak.upgrade() else { return };
+            ui.global::<DocHost>().set_minimized(true);
+        });
+        let restore_weak = weak.clone();
+        ui.global::<DocHost>().on_restore_doc(move || {
+            let Some(ui) = restore_weak.upgrade() else { return };
+            let dh = ui.global::<DocHost>();
+            if !dh.get_running() {
+                dh.set_minimized(false);
+                clear_global_overlay(&ui);
+                tracing::warn!("[doc] restore: nothing loaded — cleaned up dock");
+                return;
+            }
+            dh.set_minimized(false);
+            let mut nav = ui.global::<AppState>().get_nav_state();
+            nav.global_overlay = GlobalOverlayType::Doc;
+            ui.global::<AppState>().set_nav_state(nav);
+        });
+        let copy_weak = weak.clone();
+        ui.global::<DocHost>().on_copy_text(move || {
+            // Copy whatever text is currently loaded at click time.
+            if let Some(ui) = copy_weak.upgrade() {
+                let dh = ui.global::<DocHost>();
+                use slint::Model as _;
+                let blocks = dh.get_blocks();
+                let mut lines: Vec<String> = Vec::new();
+                for i in 0..blocks.row_count() {
+                    let Some(b) = blocks.row_data(i) else { continue };
+                    if b.kind == 8 {
+                        // Table: one line per row, cells tab-separated.
+                        for i in 0..b.cells.row_count() {
+                            let Some(row) = b.cells.row_data(i) else { continue };
+                            let mut line = String::new();
+                            for j in 0..row.row_count() {
+                                let Some(cell) = row.row_data(j) else { continue };
+                                if !line.is_empty() {
+                                    line.push('\t');
+                                }
+                                line.push_str(&cell);
+                            }
+                            lines.push(line);
+                        }
+                    } else if !b.text.is_empty() {
+                        lines.push(b.text.to_string());
+                    }
+                }
+                let text = lines.join("\n");
+                if !text.trim().is_empty() {
+                    copy_note_to_clipboard(text);
+                }
+            }
+        });
+        // Page-view navigation (XLSX sheets / PPTX slides): decode the
+        // requested page from the thread-local cache and hand it to the UI.
+        let page_weak = weak.clone();
+        ui.global::<DocHost>().on_page_at(move |idx: i32| {
+            if let Some(ui) = page_weak.upgrade() {
+                let dh = ui.global::<DocHost>();
+                let Some(page) = doc_page_get(idx) else {
+                    return;
+                };
+                dh.set_frame(image::image_from_bytes(&page.png, 16384));
+                dh.set_page(idx);
+                dh.set_page_ratio(page.width as f32 / (page.height as f32).max(1.0));
+            }
         });
     }
 
@@ -1851,6 +1978,25 @@ pub fn run_app() {
         }
     }
 
+    // Debug hook: CHATX_OPEN_DOC=/path opens the Office-document viewer on launch (ignored when not logged in or the path does not exist).
+    if let Ok(doc_path) = std::env::var("CHATX_OPEN_DOC") {
+        if !std::path::Path::new(&doc_path).exists() {
+            tracing::warn!("[doc] CHATX_OPEN_DOC: path missing: {doc_path}");
+        } else {
+            let w = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    if !ui.get_logged_in() {
+                        tracing::info!("[doc] CHATX_OPEN_DOC: skipping — not logged in");
+                        return;
+                    }
+                    open_doc_page(&ui, &doc_path);
+                    tracing::info!("[doc] auto-opened {doc_path} (CHATX_OPEN_DOC)");
+                }
+            });
+        }
+    }
+
     ui.run().expect("window run failed");
 }
 
@@ -1946,6 +2092,129 @@ fn open_pdf_page(ui: &MainWindow, path: &str) {
     }
     let mut nav = ui.global::<AppState>().get_nav_state();
     nav.global_overlay = GlobalOverlayType::Pdf;
+    ui.global::<AppState>().set_nav_state(nav);
+}
+
+// Rendered Office-document pages (XLSX sheets / PPTX slides) of the open
+// page-mode viewer. `SlintImage` is `!Send`, so the page bytes live in a
+// thread-local that only the event-loop thread ever touches: the page
+// callbacks and `open_doc_page` both run there.
+thread_local! {
+    static DOC_PAGES: std::cell::RefCell<Option<Vec<doc::PngPage>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn doc_pages_replace(pages: Option<Vec<doc::PngPage>>) {
+    DOC_PAGES.with(|c| *c.borrow_mut() = pages);
+}
+
+/// One page by index (`None` when the cache is empty or the index out of range).
+fn doc_page_get(index: i32) -> Option<doc::PngPage> {
+    if index < 0 {
+        return None;
+    }
+    DOC_PAGES.with(|c| c.borrow().as_ref().and_then(|v| v.get(index as usize).cloned()))
+}
+
+/// Open the Office-document viewer (`doc` crate: betteroffice) on `path` —
+/// XLSX / PPTX render to pixel-exact PNG pages, DOCX to a formatted block
+/// view. Mobile builds refuse before the (desktop-only) backend runs and show
+/// the localized notice instead. A re-open after a minimise just re-shows the
+/// (still-loaded) overlay.
+fn open_doc_page(ui: &MainWindow, path: &str) {
+    // Desktop-only renderer: gate here too (the chat-file tap and the
+    // CHATX_OPEN_DOC launch hook funnel straight into this function).
+    if ui.global::<AppState>().get_is_mobile() {
+        show_app_notice(ui.as_weak(), time::desktop_only_message(), false);
+        return;
+    }
+    let dh = ui.global::<DocHost>();
+    // Showing a (re-)opened overlay dismisses any leftover dock pill.
+    dh.set_minimized(false);
+    match doc::open_doc(path) {
+        Ok(content) => {
+            // The doc crate owns all the document logic (blocks / pages);
+            // only the slint-specific pieces — the nested shared model and the
+            // first decoded page — are built here.
+            if content.pages.is_empty() {
+                // DOCX: block view.
+                doc_pages_replace(None);
+                let blocks: Vec<DocBlock> = content
+                    .blocks
+                    .into_iter()
+                    .map(|b| {
+                        // The slint struct field is a nested shared model (a
+                        // model of rows, each row a model of cells) — build it
+                        // in two stages.
+                        let slint_rows: Vec<slint::ModelRc<SharedString>> = b
+                            .cells
+                            .iter()
+                            .map(|row| {
+                                let v: Vec<SharedString> = row
+                                    .iter()
+                                    .map(|c| SharedString::from(c.to_string()))
+                                    .collect();
+                                slint::ModelRc::new(slint::VecModel::from(v))
+                            })
+                            .collect();
+                        let slint_cells: slint::ModelRc<slint::ModelRc<SharedString>> =
+                            slint::ModelRc::new(slint::VecModel::from(slint_rows));
+                        DocBlock {
+                            kind: b.kind.number(),
+                            level: b.level,
+                            text: SharedString::from(b.text),
+                            cells: slint_cells,
+                            cols: b
+                                .cells
+                                .iter()
+                                .map(|r| r.len())
+                                .max()
+                                .unwrap_or(0) as i32,
+                            header_rows: b.header_rows,
+                        }
+                    })
+                    .collect();
+                dh.set_blocks(slint::ModelRc::new(slint::VecModel::from(blocks)));
+                dh.set_frame(slint::Image::default());
+                dh.set_page(0);
+                dh.set_page_count(0);
+            } else {
+                // XLSX / PPTX: page view. Keep the PNG bytes in the
+                // thread-local; decode (cheap, bounded by the render budget)
+                // on navigation.
+                let first = &content.pages[0];
+                dh.set_blocks(slint::ModelRc::new(slint::VecModel::from(
+                    Vec::<DocBlock>::new(),
+                )));
+                dh.set_frame(image::image_from_bytes(&first.png, 16384));
+                dh.set_page(0);
+                dh.set_page_count(content.pages.len() as i32);
+                dh.set_page_ratio(first.width as f32 / (first.height as f32).max(1.0));
+                doc_pages_replace(Some(content.pages));
+            }
+            dh.set_failed(false);
+            dh.set_running(true);
+            dh.set_copied(false);
+            dh.set_wheel_busy(false);
+            dh.set_status(SharedString::from(""));
+            dh.set_title(SharedString::from(content.title));
+            dh.set_format(SharedString::from(content.format));
+        }
+        Err(msg) => {
+            doc_pages_replace(None);
+            dh.set_blocks(slint::ModelRc::new(slint::VecModel::from(Vec::<DocBlock>::new())));
+            dh.set_frame(slint::Image::default());
+            dh.set_page(0);
+            dh.set_page_count(0);
+            dh.set_failed(true);
+            dh.set_running(false);
+            dh.set_copied(false);
+            dh.set_wheel_busy(false);
+            dh.set_status(SharedString::from(msg));
+        }
+    }
+    let mut nav = ui.global::<AppState>().get_nav_state();
+    nav.global_overlay = GlobalOverlayType::Doc;
     ui.global::<AppState>().set_nav_state(nav);
 }
 
@@ -3258,17 +3527,24 @@ fn open_chat_file_from_index(weak: slint::Weak<MainWindow>, idx: i32) {
         .unwrap_or("")
         .to_lowercase();
 
-    match ext.as_str() {
-        "pdf" => {
-            if ui.get_logged_in() {
-                open_pdf_page(&ui, &file_path);
-            }
-        }
-        _ => {
-            cs.set_send_status(SharedString::from(format!(
-                "No in-app viewer for .{ext} yet — please open it with a supporting app."
-            )));
-        }
+    if !ui.get_logged_in() {
+        return;
+    }
+    if ext == "pdf" {
+        open_pdf_page(&ui, &file_path);
+    } else if doc::is_office_ext(&file_path) {
+        // Office documents (Word/Excel/PowerPoint) open in the in-app viewer
+        // (mobile shows the desktop-only notice instead).
+        open_doc_page(&ui, &file_path);
+    } else if matches!(ext.as_str(), "doc" | "xls" | "ppt") {
+        // Legacy binary Office: betteroffice only reads OOXML.
+        cs.set_send_status(SharedString::from(format!(
+            ".{ext} is a legacy Office format — save it as .docx / .xlsx / .pptx to view it in the app."
+        )));
+    } else {
+        cs.set_send_status(SharedString::from(format!(
+            "No in-app viewer for .{ext} yet — please open it with a supporting app."
+        )));
     }
 }
 

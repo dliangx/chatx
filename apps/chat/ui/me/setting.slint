@@ -220,8 +220,46 @@ export component SettingView inherits Rectangle {
         }
     }
 
-    SettingItem {
+    // Office document viewer entry (office-oxide): file picker → full-screen text viewer.
+    Rectangle {
         y: 241px;
+        width: 100%;
+        height: 48px;
+        background: transparent;
+
+        Icon {
+            x: 16px;
+            y: 12px;
+            size: 24px;
+            glyph: Glyph.notes;
+            tint: Theme.fg;
+        }
+        Text {
+            x: 48px;
+            y: 0px;
+            width: parent.width - 72px;
+            height: parent.height;
+            vertical-alignment: center;
+            text: @tr("Open document viewer");
+            font-size: 14px;
+            color: Theme.fg;
+        }
+        Icon {
+            x: parent.width - 32px;
+            y: 12px;
+            size: 24px;
+            glyph: Glyph.right;
+            tint: Theme.fg-muted;
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { AppState.open-doc(); }
+        }
+    }
+
+    SettingItem {
+        y: 289px;
         width: 100%;
         id: 1;
         icon: Glyph.close-circle;

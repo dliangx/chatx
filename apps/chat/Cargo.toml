@@ -21,6 +21,8 @@ screen = { path = "../../crates/screen" }
 bridge = { path = "../../crates/bridge" }
 wasmhost = { path = "../../crates/wasmhost" }
 pdf = { path = "../../crates/pdf" }
+# Office document reading (Word/Excel/PowerPoint) — parse-to-blocks reader crate.
+doc = { path = "../../crates/doc" }
 audio = { path = "../../crates/audio" }
 media = { path = "../../crates/media" }
 cpal = "0.16"

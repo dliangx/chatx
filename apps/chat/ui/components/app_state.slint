@@ -46,6 +46,7 @@ export enum GlobalOverlayType {
     Error,
     MiniApp,
     Pdf,
+    Doc,
 }
 
 export struct SubPageEntry {
@@ -264,6 +265,11 @@ export global AppState {
     // open-pdf → file picker (desktop) then the viewer overlay; pump-pdf is driven by the PdfViewer timer.
     callback open-pdf();
     callback pump-pdf();
+
+    // ── Office document viewer (office-oxide: doc/docx/xls/xlsx/ppt/pptx) ──
+    // open-doc → file picker (desktop) then the document overlay; the text is
+    // extracted once on open (no pump loop).
+    callback open-doc();
 
     // ── Chat settings (group chat) ─────────────────────────────────────────
     in-out property <int> current-chat-key: -1;

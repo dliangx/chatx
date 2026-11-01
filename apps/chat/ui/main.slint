@@ -7,8 +7,10 @@ import { LeftNavBar } from "components/left_nav.slint";
 import { SubPageView } from "./subpage.slint";
 import { AppHost, MiniAppOverlay } from "./x.slint";
 export { AppHost } from "./x.slint";
-import { PdfHost, PdfViewer } from "./pdf.slint";
-export { PdfHost } from "./pdf.slint";
+import { PdfHost, PdfViewer } from "global/pdf.slint";
+export { PdfHost } from "global/pdf.slint";
+import { DocHost, DocViewer } from "global/doc.slint";
+export { DocHost } from "global/doc.slint";
 import { AuthView } from "components/auth.slint";
 import { Theme } from "./theme.slint";
 export { Theme } from "./theme.slint";
@@ -66,15 +68,34 @@ export component MainWindow inherits Window {
         AppState.xp = root.width;
     }
 
+    // The tab bar lives inside the safe content area (above the home-indicator /
+    // nav-bar inset). This strip fills that bottom inset band with the bar's
+    // surface colour so the shelf reads as one continuous bar reaching the
+    // physical edge — the native iOS/Android look. Mobile only; hidden while a
+    // sub-page is open (sub-top < 0 means we're on the root tab where the bar
+    // shows); zero-height (invisible) when there's no bottom inset / on desktop.
+    if root.logged-in && AppState.is-mobile
+        && AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top < 0:
+    Rectangle {
+        x: root.safe-area-insets.left;
+        y: root.height - root.safe-area-insets.bottom;
+        width: root.width - root.safe-area-insets.right - root.safe-area-insets.left;
+        height: root.safe-area-insets.bottom;
+        background: Theme.surface;
+    }
+
     if !root.logged-in:
     AuthView {
         uid <=> AppState.user-id;
     }
     Rectangle {
-        background: yellow;
         x: root.safe-area-insets.left;
         y: root.safe-area-insets.top;
         width: root.width - root.safe-area-insets.right - root.safe-area-insets.left;
+        // Keep the bottom safe-area inset (home indicator / nav bar) OUT of the
+        // content area so full-height pages (chat input, comment box, ...) never
+        // slip under the gesture strip. The tab bar's same-colour strip (above)
+        // covers that inset band so the bar reads as full-height and native.
         height: root.height - root.safe-area-insets.bottom - root.safe-area-insets.top;
 
         if root.logged-in && AppState.is-mobile:
@@ -130,8 +151,8 @@ export component MainWindow inherits Window {
                 }
             }
             BottomNavBar {
-                y: parent.height - 58px;
-                height: 58px;
+                y: parent.height - AppState.bottom-nav;
+                content-height: AppState.bottom-nav;
                 active-tab: AppState.nav-state.active-tab;
                 tab-clicked(i) => { root.select_tab(i); }
             }
@@ -303,4 +324,5 @@ export component MainWindow inherits Window {
     if AppState.nav-state.global-overlay == GlobalOverlayType.Error: ErrorView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.MiniApp: MiniAppOverlay { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.Pdf: PdfViewer { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.Doc: DocViewer { }
 }
