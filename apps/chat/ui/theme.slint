@@ -26,6 +26,14 @@ export global Theme {
     in property <brush> brand: #7d54cd;
     in property <brush> brand-soft: #f1ebfa;
     in property <brush> brand-tint: #d8ccf0;
+    // `brand-soft` / `brand-tint` above are fixed light lavenders (they also
+    // double as light text/icons ON the purple `brand`, so they can't flip).
+    // These two, by contrast, follow the dark flip so they read as a
+    // brand-tinted panel sitting on the page background in either scheme —
+    // the soft fill and its slightly-stronger border (e.g. the contacts
+    // "Forward…" banner, which must not be a near-white box in dark mode).
+    in property <brush> brand-soft-bg:     dark ? #7d54cd33 : #f1ebfa;
+    in property <brush> brand-soft-border: dark ? #7d54cd80 : #d8ccf0;
 
     // Surfaces. `bg` is the app-wide page background, `surface` is cards /
     // input fields / bubbles (non-self), `surface-2` is secondary panels,
