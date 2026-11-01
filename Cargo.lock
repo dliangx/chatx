@@ -2803,6 +2803,8 @@ dependencies = [
  "betteroffice-docx",
  "betteroffice-pptx",
  "betteroffice-xlsx",
+ "betteroffice-xlsx-model",
+ "betteroffice-xlsx-render",
 ]
 
 [[package]]

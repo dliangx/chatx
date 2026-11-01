@@ -1,6 +1,8 @@
 //! Render / extract an Office document through the `doc` crate:
 //!
-//! - XLSX / PPTX → PNG page files next to the input (`<stem>.pages-NNN.png`).
+//! - XLSX → each sheet's grid, summarised (`name  rows × cols`), a few rows
+//!   printed as a text table.
+//! - PPTX → PNG page files next to the input (`<stem>.pages-NNN.png`).
 //! - DOCX → the extracted blocks, printed one per line.
 //!
 //! Usage: `cargo run -q -p doc --example dump -- <file> [out-prefix]`
@@ -19,7 +21,30 @@ fn main() {
             std::process::exit(1);
         }
         Ok(content) => {
-            if !content.pages.is_empty() {
+            if !content.sheets.is_empty() {
+                for (i, sheet) in content.sheets.iter().enumerate() {
+                    let cols = sheet.rows.first().map(|r| r.cells.len()).unwrap_or(0);
+                    let clip = if sheet.truncated { "  [truncated]" } else { "" };
+                    println!(
+                        "sheet {i}: {}  ({} rows × {cols} cols, {} px{clip})",
+                        sheet.name,
+                        sheet.rows.len(),
+                        sheet.total_width,
+                    );
+                    for row in sheet.rows.iter().take(5) {
+                        let line = row
+                            .cells
+                            .iter()
+                            .map(|c| if c.text.is_empty() { "·" } else { c.text.as_str() })
+                            .collect::<Vec<_>>()
+                            .join(" | ");
+                        println!("    {line}");
+                    }
+                    if sheet.rows.len() > 5 {
+                        println!("    …");
+                    }
+                }
+            } else if !content.pages.is_empty() {
                 let stem = Path::new(path)
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())

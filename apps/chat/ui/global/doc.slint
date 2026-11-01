@@ -19,6 +19,31 @@ export struct DocBlock {
     header-rows: int,
 }
 
+/// One cell of the XLSX sheet grid (text + width + style extracted by the
+/// `doc` crate). `w == 0` collapses the cell: a hidden column, or a position
+/// inside a merged span whose anchor (top-left) carries the text.
+export struct XlCell {
+    text: string,
+    // Width in px (0 = collapsed).
+    w: int,
+    // Horizontal alignment: 0 left · 1 center · 2 right.
+    align: int,
+    bold: bool,
+    italic: bool,
+    // Font size in px.
+    size: int,
+    // Cell fill: `[r, g, b]` (0–255); empty = no fill.
+    fill: [int],
+    // Text colour: `[r, g, b]`; empty = the viewer's default ink.
+    tint: [int],
+}
+
+/// One row of the sheet grid: cells in column order plus the shared height (px).
+export struct XlRow {
+    h: int,
+    cells: [XlCell],
+}
+
 export global DocHost {
     in property <bool> running: false;
     in property <bool> failed: false;
@@ -34,8 +59,19 @@ export global DocHost {
     in property <int> page: 0;
     in property <int> page-count: 0;
     in property <float> page-ratio: 0.0;
-    // Page-view mode when there are pages (blocks stay empty then).
-    out property <bool> in-pages: page-count > 0;
+    // Which view is active: 0 block (DOCX) · 1 page (PPTX PNG) · 2 sheet (XLSX grid).
+    in property <int> mode: 0;
+    // XLSX sheet view: the current sheet's grid (rows → cells), its total
+    // width in px (the scrollable content width), and whether the preview
+    // budget trimmed the sheet.
+    in property <[XlRow]> xl-rows: [];
+    in property <int> xl-total-w: 0;
+    in property <bool> xl-truncated: false;
+    // XLSX: the current sheet's name (the pager counter shows it).
+    in property <string> sheet-name: "";
+    // Page view (PNG pages) or sheet view (cell grids) — both show the pager.
+    out property <bool> in-pages: mode == 1;
+    out property <bool> in-sheet: mode == 2;
     // Wheel-scroll throttle (a burst of wheel notches = one page change).
     in property <bool> wheel-busy: false;
     // Clipboard feedback, cleared by a timer so the copy button flashes "copied".
@@ -220,8 +256,83 @@ export component DocBlockRow inherits Rectangle {
     }
 }
 
-/// Full-screen document page: title bar, then either the block view (DOCX) or
-/// the page view (XLSX sheets / PPTX slides, pixel-exact PNGs from betteroffice).
+/// One row of the sheet grid: fixed-width cells in a line. Collapsed cells
+/// (`w == 0`) render zero-wide (merged onto their anchor, or a hidden column).
+export component XlRowView inherits Rectangle {
+    in property <[XlCell]> cells: [];
+    in property <int> h: 24;
+
+    width: 100%;
+    height: root.h * 1px;
+    background: #ffffff;
+    clip: true;
+
+    // Bottom row separator (single-value `border-width` build → 1px child).
+    Rectangle {
+        x: 0px;
+        y: root.h * 1px - 1px;
+        width: 100%;
+        height: 1px;
+        background: #e5e7eb;
+    }
+
+    HorizontalLayout {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: 100%;
+        spacing: 0px;
+
+        for c in cells: Rectangle {
+            visible: c.w > 0;
+            width: c.w * 1px;
+            height: 100%;
+            background: c.fill.length == 3
+                ? rgb(c.fill[0], c.fill[1], c.fill[2])
+                : transparent;
+
+            // Right cell separator.
+            Rectangle {
+                x: c.w * 1px - 1px;
+                y: 0px;
+                width: 1px;
+                height: 100%;
+                background: #e5e7eb;
+            }
+
+            Text {
+                x: 6px;
+                y: 2px;
+                width: parent.width - 10px;
+                height: parent.height - 4px;
+                text: c.text;
+                font-size: c.size * 1px;
+                font-weight: c.bold ? 700 : 400;
+                font-italic: c.italic;
+                color: c.tint.length == 3
+                    ? rgb(c.tint[0], c.tint[1], c.tint[2])
+                    : #111827;
+                wrap: word-wrap;
+                overflow: clip;
+                vertical-alignment: center;
+
+                states [
+                    center-align when c.align == 1 : {
+                        horizontal-alignment: center;
+                    }
+                    right-align when c.align == 2 : {
+                        horizontal-alignment: right;
+                    }
+                ]
+            }
+        }
+    }
+}
+
+/// Full-screen document page: title bar, then either the block view (DOCX),
+/// the page view (PPTX slides, pixel-exact PNGs from betteroffice), or the
+/// sheet view (XLSX — an in-app cell grid, since rasterizing a long sheet to
+/// one image is slow and memory-heavy).
 export component DocViewer inherits Rectangle {
     width: 100%;
     height: 100%;
@@ -233,7 +344,7 @@ export component DocViewer inherits Rectangle {
     out property <length> body-w: root.width - 32px;
     out property <length> body-h: root.height - 84px;
 
-    // ── Page view (XLSX / PPTX): the rendered page, fitted into the body ──
+    // ── Page view (PPTX): the rendered slide, fitted into the body ──
     out property <length> fit-h: (DocHost.page-ratio > 0.0)
         ? min(body-h, body-w / DocHost.page-ratio)
         : body-h;
@@ -279,11 +390,76 @@ export component DocViewer inherits Rectangle {
             source: DocHost.frame;
             image-fit: fill;
         }
+    }
+    // Throttle wheel pages: re-arm after a beat so one gesture = one page.
+    Timer {
+        interval: 400ms;
+        running: DocHost.wheel-busy;
+        triggered => { DocHost.wheel-busy = false; }
+    }
 
-        // Previous page (left edge).
+    // ── Sheet view (XLSX): the in-app cell grid, scrollable both ways ──
+    if !DocHost.minimized && !DocHost.failed && DocHost.in-sheet:
+    Rectangle {
+        x: 0;
+        y: 48px;
+        width: 100%;
+        height: parent.height - 48px;
+        background: #ffffff;
+
+        ScrollView {
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: 100%;
+
+            VerticalLayout {
+                // The grid is `xl-total-w` wide, at least the viewport.
+                width: max(DocHost.xl-total-w * 1px, parent.width);
+                spacing: 0px;
+
+                for r in DocHost.xl-rows: XlRowView {
+                    h: r.h;
+                    cells: r.cells;
+                }
+            }
+        }
+
+        // The sheet exceeded the preview budget: banner over the grid.
+        if DocHost.xl-truncated:
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 22px;
+            background: rgba(251, 191, 36, 0.92);
+
+            Text {
+                x: 8px;
+                y: 0px;
+                width: parent.width - 16px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: @tr("Very large sheet — showing only its beginning.");
+                font-size: 11px;
+                color: #422006;
+            }
+        }
+    }
+
+    // ── Pager (page view + sheet view): previous / next + counter ──
+    if !DocHost.minimized && !DocHost.failed && (DocHost.in-pages || DocHost.in-sheet):
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+
+        // Previous sheet / slide (left edge).
         Rectangle {
             x: 12px;
-            y: (parent.height - 56px) / 2;
+            y: 48px + (parent.height - 48px - 56px) / 2;
             width: 36px;
             height: 56px;
             border-radius: 10px;
@@ -311,10 +487,10 @@ export component DocViewer inherits Rectangle {
             }
         }
 
-        // Next page (right edge).
+        // Next sheet / slide (right edge).
         Rectangle {
             x: parent.width - 48px;
-            y: (parent.height - 56px) / 2;
+            y: 48px + (parent.height - 48px - 56px) / 2;
             width: 36px;
             height: 56px;
             border-radius: 10px;
@@ -342,28 +518,28 @@ export component DocViewer inherits Rectangle {
             }
         }
 
-        // Page counter.
+        // Counter: sheet name + position in sheet mode, just the position in page mode.
         Text {
             x: 0;
             y: parent.height - 30px;
             width: 100%;
             height: 22px;
-            text: (DocHost.page + 1) + " / " + DocHost.page-count;
+            text: DocHost.in-sheet
+                ? (
+                    DocHost.sheet-name + "  ·  "
+                    + (DocHost.page + 1) + " / " + DocHost.page-count
+                  )
+                : (DocHost.page + 1) + " / " + DocHost.page-count;
             font-size: 12px;
-            color: rgba(255, 255, 255, 0.6);
+            // The canvas differs by mode: dark in page view, white in sheet view.
+            color: DocHost.in-sheet ? rgba(17, 24, 39, 0.6) : rgba(255, 255, 255, 0.6);
             horizontal-alignment: center;
             vertical-alignment: center;
         }
     }
-    // Throttle wheel pages: re-arm after a beat so one gesture = one page.
-    Timer {
-        interval: 400ms;
-        running: DocHost.wheel-busy;
-        triggered => { DocHost.wheel-busy = false; }
-    }
 
     // ── Block view (DOCX): a scrolling, formatted stack of blocks ──
-    if !DocHost.minimized && !DocHost.failed && !DocHost.in-pages && DocHost.blocks.length > 0:
+    if !DocHost.minimized && !DocHost.failed && DocHost.mode == 0 && DocHost.blocks.length > 0:
     ScrollView {
         x: 0;
         y: 48px;
@@ -391,7 +567,7 @@ export component DocViewer inherits Rectangle {
     }
 
     // Empty (nothing rendered in block mode) hint.
-    if !DocHost.minimized && !DocHost.failed && !DocHost.in-pages && DocHost.blocks.length == 0:
+    if !DocHost.minimized && !DocHost.failed && DocHost.mode == 0 && DocHost.blocks.length == 0:
     Text {
         x: 24px;
         y: 80px;
@@ -445,8 +621,8 @@ export component DocViewer inherits Rectangle {
             overflow: elide;
         }
 
-        // Page view only: no text to copy, so the button is hidden there.
-        if !DocHost.in-pages:
+        // Page view (PNG slides) has no text to copy — hidden there.
+        if DocHost.mode != 1:
         Rectangle {
             x: parent.width - 128px;
             y: 8px;
@@ -469,7 +645,9 @@ export component DocViewer inherits Rectangle {
                 width: 100%;
                 height: 100%;
                 clicked => {
-                    if DocHost.running && !DocHost.failed && DocHost.blocks.length > 0 && !DocHost.copied {
+                    if DocHost.running && !DocHost.failed
+                        && (DocHost.mode == 2 || DocHost.blocks.length > 0)
+                        && !DocHost.copied {
                         DocHost.copied = true;
                         DocHost.copy-text();
                     }

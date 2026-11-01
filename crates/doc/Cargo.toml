@@ -12,7 +12,12 @@ description = "Office document viewer core (betteroffice): spreadsheets and slid
 # collaborative editing engine (see the upstream native-viewer) and is out of
 # scope for a chat preview.
 betteroffice-docx = "0.5"
-# XLSX — `raster` (the default) builds in the Carlito face and sheet→PNG.
+# XLSX — parse + recalc + style tables (`raster` stays on for the Carlito
+# face; sheets are read from the model, not painted to PNG).
 betteroffice-xlsx = "0.5"
+# The raw cell/style model (facade does not re-export it) and the target-
+# agnostic display-text + geometry math — that's the whole of our XLSX path.
+betteroffice-xlsx-model = "0.5"
+betteroffice-xlsx-render = "0.5"
 # PPTX — `raster` is the slide→PNG backend (fonts are caller-supplied).
 betteroffice-pptx = { version = "0.5", features = ["raster"] }
