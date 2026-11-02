@@ -1,19 +1,3 @@
-//! Moment (post) cross-device sync — the *receiving* side.
-//!
-//! When a friend's client publishes a new `social_post`, it notifies the
-//! signal server with `(user_id, peer_id, post_ts)`. This module:
-//!
-//! 1. Asks the server "who published a post in `(since, now]`?".
-//! 2. Filters the answer to our friends (by `peer_id`).
-//! 3. For each friend (newest-first), fetches post metadata + image bytes
-//!    over the binary moment channel.
-//! 4. Stores the post locally with a fresh local `id`, the friend's
-//!    local `users.id` as `author_id`, and the locally-stored media
-//!    paths in `media_urls`/`preview_urls`.
-//! 5. Advances our per-friend `moment_sync` cursor.
-//! 6. Pushes each row to the in-memory Discover list one at a time on the
-//!    Slint event-loop thread.
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -154,11 +138,6 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
         .dir()
         .posts_since(earliest_cursor, now_ts)
         .unwrap_or_default();
-    // Work = one entry per friend that has a newer post than our cursor.
-    // `upper` is the newest post_ts that friend published (the inclusive
-    // window bound used in `request_post_list`); the friend's *entire* new
-    // post set is then fetched in a single round-trip, so we never re-pull or
-    // duplicate a post.
     let mut work: Vec<(i64, String)> = Vec::new();
     for (peer, f) in &friend_by_peer {
         let upper = pointers
@@ -203,12 +182,23 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
         let mut friend_newest: i64 = 0;
         for meta in &post_metas {
             friend_newest = friend_newest.max(meta.timestamp);
-            // Skip posts we already have locally (same author + timestamp is
-            // the stable wire identity). Prevents re-pulling and re-inserting
-            // a row we already downloaded.
-            if sqlite::social_feed::has_post_by_author_ts(&pool, f.local_users_id, meta.timestamp)
-                .await
-                .unwrap_or(false)
+            // Display name fallback, resolved once; used both for the
+            // dedup identity check below and the stored row.
+            let user_name = meta
+                .user_name
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(f.display.as_str());
+
+            if sqlite::social_feed::has_synced_post(
+                &pool,
+                f.local_users_id,
+                user_name,
+                meta.content.as_deref(),
+                meta.timestamp,
+            )
+            .await
+            .unwrap_or(false)
             {
                 continue;
             }
@@ -225,7 +215,7 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
             let created = match sqlite::social_feed::create_post(
                 &pool,
                 f.local_users_id,
-                meta.user_name.as_deref().or(Some(f.display.as_str())),
+                Some(user_name),
                 meta.content.as_deref(),
                 if media_json.is_empty() {
                     None
@@ -238,6 +228,9 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
                     Some(preview_json.as_str())
                 },
                 0,
+                // Store the friend's wire identity as the row's timestamp, so
+                // cursor windows, `get_post_by_ts` and dedup all agree.
+                meta.timestamp,
             )
             .await
             {
@@ -254,11 +247,7 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
             let media: Vec<String> = serde_json::from_str(&media_json).unwrap_or_default();
             let previews: Vec<String> = serde_json::from_str(&preview_json).unwrap_or_default();
             nodes.push(SyncedNode {
-                author: meta
-                    .user_name
-                    .clone()
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or_else(|| f.display.clone()),
+                author: user_name.to_string(),
                 content: meta.content.clone().unwrap_or_default(),
                 media,
                 previews,
@@ -289,10 +278,6 @@ fn peer_short(peer: &str) -> String {
     s
 }
 
-/// Fetch every `meta.n_media` originals (or `n_previews` previews) for the
-/// post, storing them under `group` in the local post-store. Returns the
-/// JSON array of stored absolute paths (empty string when the post has
-/// no media in that category).
 async fn fetch_and_store_media(
     client: &Client<Directory>,
     peer: &str,
@@ -313,13 +298,11 @@ async fn fetch_and_store_media(
         let bytes = client
             .request_post_image(peer, meta.timestamp, which, if is_original { 0 } else { 1 })
             .await?;
-        let stored = if is_original {
-            camera::posts::store_bytes(group, which + 1, "jpg", &bytes)
-                .map_err(|e| anyhow::anyhow!("store_bytes: {e}"))?
-        } else {
-            camera::posts::store_preview_bytes(group, which + 1, "jpg", &bytes)
-                .map_err(|e| anyhow::anyhow!("store_preview_bytes: {e}"))?
-        };
+        // Store by the container the bytes actually carry (sniffed), not a
+        // hard-coded "jpg": WebP is transcoded to JPEG, HEIC kept honest —
+        // see `camera::posts::store_received_image`.
+        let stored = camera::posts::store_received_image(group, which + 1, !is_original, &bytes)
+            .map_err(|e| anyhow::anyhow!("store_received_image: {e}"))?;
         out.push(stored.to_string_lossy().into_owned());
     }
     if out.is_empty() {
@@ -329,10 +312,6 @@ async fn fetch_and_store_media(
     }
 }
 
-/// Push each synced node to the in-memory Discover row set (newest-first,
-/// one at a time) and refresh the Slint views. The row is inserted at the
-/// top of `discover`, so the user sees each new post appear at the very
-/// top in the order they were inserted.
 async fn push_nodes_to_ui(
     weak: Weak<MainWindow>,
     backend: ArcBackend,
@@ -363,6 +342,12 @@ async fn push_nodes_to_ui(
             {
                 let mut g = backend.blocking_write();
                 for r in rows.iter().rev() {
+                    // Safety net: never surface a post the in-memory feed
+                    // already shows (a second insert with a fresh key would
+                    // render the same post twice).
+                    if g.has_post(r.post_id) {
+                        continue;
+                    }
                     let key = g.key_for_post(r.post_id);
                     g.discover.insert(0, DiscoverRow { key, ..r.clone() });
                 }

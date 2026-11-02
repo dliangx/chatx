@@ -1,10 +1,3 @@
-//! Cross-table queries for common chat scenarios.
-//!
-//! These are the "heavy" queries an IM client runs against the local DB:
-//! chat list with denormalized last message, message history with sender
-//! profiles, friend lists with profiles, group rosters, social feed with
-//! author + like state, global search, etc.
-
 use crate::Pool;
 use sqlx::{FromRow, Row as _RowTrait};
 
@@ -36,7 +29,11 @@ pub struct ConversationListItem {
 
 /// Chat list for the current user, ordered for the UI:
 /// pinned first, then by last activity.
-pub async fn chat_list(pool: &Pool, me: &str, limit: u32) -> anyhow::Result<Vec<ConversationListItem>> {
+pub async fn chat_list(
+    pool: &Pool,
+    me: &str,
+    limit: u32,
+) -> anyhow::Result<Vec<ConversationListItem>> {
     let _ = me;
     let rows = sqlx::query_as::<_, ConversationListItem>(
         "SELECT
@@ -153,7 +150,11 @@ pub struct FriendEntry {
     pub they_follow_me: bool,
 }
 
-pub async fn friends_with_profile(pool: &Pool, me: i64, limit: u32) -> anyhow::Result<Vec<FriendEntry>> {
+pub async fn friends_with_profile(
+    pool: &Pool,
+    me: i64,
+    limit: u32,
+) -> anyhow::Result<Vec<FriendEntry>> {
     let rows = sqlx::query_as::<_, FriendEntry>(
         "SELECT
             f.user_id,
@@ -242,7 +243,13 @@ pub struct FeedItem {
 }
 
 /// Global public feed (optional friends-only), including the viewer's like state.
-pub async fn feed(pool: &Pool, viewer: i64, include_friend_posts: bool, limit: u32, offset: u32) -> anyhow::Result<Vec<FeedItem>> {
+pub async fn feed(
+    pool: &Pool,
+    viewer: i64,
+    include_friend_posts: bool,
+    limit: u32,
+    offset: u32,
+) -> anyhow::Result<Vec<FeedItem>> {
     let author_filter = if include_friend_posts {
         "AND (p.author_id = ?1 OR p.visibility = 0 OR EXISTS(SELECT 1 FROM friendships fr WHERE (fr.user_low = ?1 AND fr.user_high = p.author_id) OR (fr.user_high = ?1 AND fr.user_low = p.author_id)))"
     } else {
@@ -277,7 +284,12 @@ pub async fn feed(pool: &Pool, viewer: i64, include_friend_posts: bool, limit: u
 }
 
 /// Author's public posts (profile page).
-pub async fn author_feed(pool: &Pool, author_id: i64, limit: u32, offset: u32) -> anyhow::Result<Vec<FeedItem>> {
+pub async fn author_feed(
+    pool: &Pool,
+    author_id: i64,
+    limit: u32,
+    offset: u32,
+) -> anyhow::Result<Vec<FeedItem>> {
     let rows = sqlx::query_as::<_, FeedItem>(
         "SELECT
             p.id, p.author_id, p.user_name, p.content, p.media_urls, p.preview_urls, p.visibility, p.timestamp,
@@ -315,7 +327,12 @@ pub struct CommentWithAuthor {
     pub author_avatar: Option<String>,
 }
 
-pub async fn post_comments(pool: &Pool, post_id: i64, limit: u32, offset: u32) -> anyhow::Result<Vec<CommentWithAuthor>> {
+pub async fn post_comments(
+    pool: &Pool,
+    post_id: i64,
+    limit: u32,
+    offset: u32,
+) -> anyhow::Result<Vec<CommentWithAuthor>> {
     let rows = sqlx::query_as::<_, CommentWithAuthor>(
         "SELECT
             sc.id, sc.post_id, sc.author_id, sc.content, sc.reply_to, sc.created_at,
@@ -351,46 +368,67 @@ pub async fn search(pool: &Pool, q: &str, limit: u32) -> anyhow::Result<Vec<Sear
     let like = format!("{}{}{}", "%", q.trim(), "%");
     let mut out = Vec::new();
 
-    let mut user_rows = sqlx::query("SELECT id, COALESCE(nickname, username) AS label, username
+    let mut user_rows = sqlx::query(
+        "SELECT id, COALESCE(nickname, username) AS label, username
                                      FROM users WHERE username LIKE ?1 OR nickname LIKE ?1
-                                     ORDER BY COALESCE(nickname, username) LIMIT ?2")
-        .bind(&like)
-        .bind(limit as i64)
-        .fetch_all(pool)
-        .await?;
+                                     ORDER BY COALESCE(nickname, username) LIMIT ?2",
+    )
+    .bind(&like)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
     for r in user_rows.drain(..) {
         let id: i64 = r.get("id");
         let label: String = r.get("label");
         let username: Option<String> = r.try_get("username").ok().flatten();
-        out.push(SearchHit { kind: "user", id, text: label, extra: username });
+        out.push(SearchHit {
+            kind: "user",
+            id,
+            text: label,
+            extra: username,
+        });
     }
 
-    let mut msg_rows = sqlx::query("SELECT m.id, m.text_content, m.conversation_id
+    let mut msg_rows = sqlx::query(
+        "SELECT m.id, m.text_content, m.conversation_id
                                     FROM messages m WHERE m.text_content LIKE ?1
-                                    ORDER BY m.timestamp DESC LIMIT ?2")
-        .bind(&like)
-        .bind(limit as i64)
-        .fetch_all(pool)
-        .await?;
+                                    ORDER BY m.timestamp DESC LIMIT ?2",
+    )
+    .bind(&like)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
     for r in msg_rows.drain(..) {
         let id: i64 = r.get("id");
         let text: Option<String> = r.try_get("text_content").ok().flatten();
         let conv: i64 = r.get("conversation_id");
-        out.push(SearchHit { kind: "message", id, text: text.unwrap_or_default(), extra: Some(conv.to_string()) });
+        out.push(SearchHit {
+            kind: "message",
+            id,
+            text: text.unwrap_or_default(),
+            extra: Some(conv.to_string()),
+        });
     }
 
-    let mut group_rows = sqlx::query("SELECT g.id, g.name, g.owner_id
+    let mut group_rows = sqlx::query(
+        "SELECT g.id, g.name, g.owner_id
                                       FROM groups g WHERE g.name LIKE ?1
-                                      ORDER BY g.name LIMIT ?2")
-        .bind(&like)
-        .bind(limit as i64)
-        .fetch_all(pool)
-        .await?;
+                                      ORDER BY g.name LIMIT ?2",
+    )
+    .bind(&like)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
     for r in group_rows.drain(..) {
         let id: i64 = r.get("id");
         let name: String = r.get("name");
         let owner: i64 = r.get("owner_id");
-        out.push(SearchHit { kind: "group", id, text: name, extra: Some(owner.to_string()) });
+        out.push(SearchHit {
+            kind: "group",
+            id,
+            text: name,
+            extra: Some(owner.to_string()),
+        });
     }
 
     out.truncate(limit as usize);
@@ -413,7 +451,11 @@ pub struct MessageSearchHit {
 /// Only rows stored in plaintext match: group messages are E2E — their body is
 /// a sealed envelope (`is_encrypted = 1`), and `LIKE` on that ciphertext is
 /// meaningless, so those rows are excluded rather than surfacing base64 junk.
-pub async fn search_messages(pool: &Pool, q: &str, limit: u32) -> anyhow::Result<Vec<MessageSearchHit>> {
+pub async fn search_messages(
+    pool: &Pool,
+    q: &str,
+    limit: u32,
+) -> anyhow::Result<Vec<MessageSearchHit>> {
     let q = q.trim();
     if q.is_empty() {
         return Ok(Vec::new());
@@ -443,7 +485,10 @@ pub async fn search_messages(pool: &Pool, q: &str, limit: u32) -> anyhow::Result
 }
 
 /// Convenience: everything a UI needs to render "who is online in this group".
-pub async fn group_online_snapshot(pool: &Pool, group_id: i64) -> anyhow::Result<Vec<GroupRosterEntry>> {
+pub async fn group_online_snapshot(
+    pool: &Pool,
+    group_id: i64,
+) -> anyhow::Result<Vec<GroupRosterEntry>> {
     group_roster(pool, group_id).await
 }
 
@@ -451,8 +496,11 @@ pub async fn group_online_snapshot(pool: &Pool, group_id: i64) -> anyhow::Result
 mod tests {
     use super::*;
     use crate::{
-        conversations::{self, ConversationPatch}, devices, groups, messages::{self, NewMessage},
-        open_memory, users, users::UserPatch,
+        conversations::{self, ConversationPatch},
+        devices, groups,
+        messages::{self, NewMessage},
+        open_memory, users,
+        users::UserPatch,
     };
 
     #[tokio::test]
@@ -483,14 +531,42 @@ mod tests {
         )
         .await
         .unwrap();
-        conversations::upsert(&pool, 2, &ConversationPatch { type_: Some(0), name: None, peer_id: Some("12D3KooWBea".into()), avatar_path: None }).await.unwrap();
-        messages::insert(&pool, &NewMessage::text(2, 1, "hello")).await.unwrap();
+        conversations::upsert(
+            &pool,
+            2,
+            &ConversationPatch {
+                type_: Some(0),
+                name: None,
+                peer_id: Some("12D3KooWBea".into()),
+                avatar_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        messages::insert(&pool, &NewMessage::text(2, 1, "hello"))
+            .await
+            .unwrap();
 
         // Group conversation
         groups::create(&pool, 10, "Squad", 1, None).await.unwrap();
-        groups::add_member(&pool, 10, "peer-b", groups::ROLE_MEMBER).await.unwrap();
-        conversations::upsert(&pool, 10, &ConversationPatch { type_: Some(1), name: Some("Squad".into()), peer_id: None, avatar_path: None }).await.unwrap();
-        messages::insert(&pool, &NewMessage::text(10, 1, "hi group")).await.unwrap();
+        groups::add_member(&pool, 10, "peer-b", groups::ROLE_MEMBER)
+            .await
+            .unwrap();
+        conversations::upsert(
+            &pool,
+            10,
+            &ConversationPatch {
+                type_: Some(1),
+                name: Some("Squad".into()),
+                peer_id: None,
+                avatar_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        messages::insert(&pool, &NewMessage::text(10, 1, "hi group"))
+            .await
+            .unwrap();
 
         let list = chat_list(&pool, "me", 10).await.unwrap();
         assert_eq!(list.len(), 2);
@@ -508,10 +584,32 @@ mod tests {
     #[tokio::test]
     async fn history_with_sender_resolves_profiles_and_reply() {
         let pool = open_memory().await.unwrap();
-        users::upsert(&pool, 10, &UserPatch { nickname: Some("Alice".into()), ..Default::default() }).await.unwrap();
-        conversations::upsert(&pool, 100, &ConversationPatch { type_: Some(0), name: None, peer_id: None, avatar_path: None }).await.unwrap();
+        users::upsert(
+            &pool,
+            10,
+            &UserPatch {
+                nickname: Some("Alice".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        conversations::upsert(
+            &pool,
+            100,
+            &ConversationPatch {
+                type_: Some(0),
+                name: None,
+                peer_id: None,
+                avatar_path: None,
+            },
+        )
+        .await
+        .unwrap();
 
-        let first = messages::insert(&pool, &NewMessage::text(100, 10, "first")).await.unwrap();
+        let first = messages::insert(&pool, &NewMessage::text(100, 10, "first"))
+            .await
+            .unwrap();
         let second = messages::insert(
             &pool,
             &NewMessage {
@@ -533,7 +631,10 @@ mod tests {
         assert_eq!(history[0].reply_to, Some(first));
         assert_eq!(history[0].reply_to_preview.as_deref(), Some("first"));
 
-        let alice_row = history.iter().find(|m| m.sender_user_id == Some(10)).unwrap();
+        let alice_row = history
+            .iter()
+            .find(|m| m.sender_user_id == Some(10))
+            .unwrap();
         assert_eq!(alice_row.sender_nickname.as_deref(), Some("Alice"));
     }
 
@@ -541,9 +642,36 @@ mod tests {
     async fn friends_with_profile_and_feed_joins() {
         let pool = open_memory().await.unwrap();
         // me & two users
-        users::upsert(&pool, 1, &UserPatch { nickname: Some("Me".into()), ..Default::default() }).await.unwrap();
-        users::upsert(&pool, 2, &UserPatch { nickname: Some("One".into()), ..Default::default() }).await.unwrap();
-        users::upsert(&pool, 3, &UserPatch { nickname: Some("Two".into()), ..Default::default() }).await.unwrap();
+        users::upsert(
+            &pool,
+            1,
+            &UserPatch {
+                nickname: Some("Me".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        users::upsert(
+            &pool,
+            2,
+            &UserPatch {
+                nickname: Some("One".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        users::upsert(
+            &pool,
+            3,
+            &UserPatch {
+                nickname: Some("Two".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
         crate::social::add(&pool, 1, 2).await.unwrap();
         crate::social::add(&pool, 1, 3).await.unwrap();
@@ -560,14 +688,27 @@ mod tests {
         assert!(!me_follows.they_follow_me);
 
         // Feed with i_liked
-        let post = crate::social_feed::create_post(&pool, 2, Some("One"), Some("hello feed"), None, None, 0).await.unwrap();
+        let post = crate::social_feed::create_post(
+            &pool,
+            2,
+            Some("One"),
+            Some("hello feed"),
+            None,
+            None,
+            0,
+            1000,
+        )
+        .await
+        .unwrap();
         crate::social_feed::like(&pool, post.id, 1).await.unwrap();
         let items = feed(&pool, 1, true, 10, 0).await.unwrap();
         assert_eq!(items.len(), 1);
         assert!(items[0].i_liked);
         assert_eq!(items[0].author_nickname.as_deref(), Some("One"));
 
-        let c = crate::social_feed::add_comment(&pool, post.id, 3, "nice post", None).await.unwrap();
+        let c = crate::social_feed::add_comment(&pool, post.id, 3, "nice post", None)
+            .await
+            .unwrap();
         let comments = post_comments(&pool, post.id, 10, 0).await.unwrap();
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].id, c.id);
@@ -577,17 +718,51 @@ mod tests {
     #[tokio::test]
     async fn global_search_across_users_messages_groups() {
         let pool = open_memory().await.unwrap();
-        users::upsert(&pool, 1, &UserPatch { username: Some("findable".into()), nickname: Some("Findable".into()), ..Default::default() }).await.unwrap();
-        conversations::upsert(&pool, 100, &ConversationPatch { type_: Some(0), name: None, peer_id: None, avatar_path: None }).await.unwrap();
-        messages::insert(&pool, &NewMessage::text(100, 1, "needle in haystack")).await.unwrap();
-        groups::create(&pool, 10, "Squadron", 1, None).await.unwrap();
+        users::upsert(
+            &pool,
+            1,
+            &UserPatch {
+                username: Some("findable".into()),
+                nickname: Some("Findable".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        conversations::upsert(
+            &pool,
+            100,
+            &ConversationPatch {
+                type_: Some(0),
+                name: None,
+                peer_id: None,
+                avatar_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        messages::insert(&pool, &NewMessage::text(100, 1, "needle in haystack"))
+            .await
+            .unwrap();
+        groups::create(&pool, 10, "Squadron", 1, None)
+            .await
+            .unwrap();
 
         let hits = search(&pool, "find", 10).await.unwrap();
-        assert!(hits.iter().any(|h| h.kind == "user" && h.text == "Findable"));
+        assert!(
+            hits.iter()
+                .any(|h| h.kind == "user" && h.text == "Findable")
+        );
         let hits = search(&pool, "needle", 10).await.unwrap();
-        assert!(hits.iter().any(|h| h.kind == "message" && h.text.contains("needle")));
+        assert!(
+            hits.iter()
+                .any(|h| h.kind == "message" && h.text.contains("needle"))
+        );
         let hits = search(&pool, "squadron", 10).await.unwrap();
-        assert!(hits.iter().any(|h| h.kind == "group" && h.text == "Squadron"));
+        assert!(
+            hits.iter()
+                .any(|h| h.kind == "group" && h.text == "Squadron")
+        );
 
         assert!(search(&pool, "", 10).await.unwrap().is_empty());
     }
@@ -595,7 +770,16 @@ mod tests {
     #[tokio::test]
     async fn message_search_matches_plaintext_dms_and_skips_sealed_rows() {
         let pool = open_memory().await.unwrap();
-        users::upsert(&pool, 1, &UserPatch { username: Some("me".into()), ..Default::default() }).await.unwrap();
+        users::upsert(
+            &pool,
+            1,
+            &UserPatch {
+                username: Some("me".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
         // DM: the shim keys the conversation by the string chat id, stores the
         // body in plaintext (sealed = false) → searchable.

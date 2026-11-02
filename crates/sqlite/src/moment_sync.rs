@@ -20,7 +20,7 @@ pub async fn upsert(pool: &Pool, peer_id: &str, ts: i64) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO moment_sync (peer_id, last_sync_ts)
          VALUES (?1, ?2)
-         ON CONFLICT(peer_id) DO UPDATE SET last_sync_ts = ?2",
+         ON CONFLICT(peer_id) DO UPDATE SET last_sync_ts = MAX(last_sync_ts, ?2)",
     )
     .bind(peer_id)
     .bind(ts)
@@ -31,10 +31,9 @@ pub async fn upsert(pool: &Pool, peer_id: &str, ts: i64) -> anyhow::Result<()> {
 
 /// All rows (the sync loop reads everyone's cursor at once).
 pub async fn all(pool: &Pool) -> anyhow::Result<Vec<MomentSync>> {
-    let rows =
-        sqlx::query_as::<_, MomentSync>("SELECT * FROM moment_sync ORDER BY peer_id")
-            .fetch_all(pool)
-            .await?;
+    let rows = sqlx::query_as::<_, MomentSync>("SELECT * FROM moment_sync ORDER BY peer_id")
+        .fetch_all(pool)
+        .await?;
     Ok(rows)
 }
 
@@ -64,5 +63,19 @@ mod tests {
         assert_eq!(all[0].peer_id, "A");
         assert!(delete(&pool, "A").await.unwrap());
         assert!(read(&pool, "A").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_is_monotonic_never_regresses() {
+        let pool = open_memory().await.unwrap();
+        upsert(&pool, "A", 2000).await.unwrap();
+        // A later round reporting an older high-water mark must not roll the
+        // cursor backwards (that would re-open the fetch window and produce
+        // duplicate posts).
+        upsert(&pool, "A", 1000).await.unwrap();
+        assert_eq!(read(&pool, "A").await.unwrap(), Some(2000));
+        // Forward progress is still applied.
+        upsert(&pool, "A", 3000).await.unwrap();
+        assert_eq!(read(&pool, "A").await.unwrap(), Some(3000));
     }
 }

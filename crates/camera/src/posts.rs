@@ -1,23 +1,3 @@
-//! Persistent storage for social-post images.
-//!
-//! Moment photos come from the camera / photo picker into paths we did not
-//! choose (the system temp dir on Apple, the picker's own copy on desktop),
-//! which the OS or the user may clean at any time. Before a post is
-//! published we therefore:
-//!
-//! 1. copy each original into `$CHATX_HOME/media/posts/<group>/n.<ext>` so
-//!    it survives reboots and temp-dir cleanup (`store_original`), and
-//! 2. derive a small JPEG preview (longest edge ≤ [`PREVIEW_MAX_EDGE`]) into
-//!    `preview/n.jpg` for feed-card / grid thumbnails (`make_preview`).
-//!
-//! When the source format is not decodable by the `image` crate (e.g. HEIC),
-//! `make_preview` returns `Err` and the caller falls back to using the
-//! original as its own preview.
-//!
-//! The database stores the *post-store* paths (`media_urls` = originals,
-//! `preview_urls` = previews), never the temp paths. `remove_post_files`
-//! wipes the whole group dir when a post is deleted.
-
 use std::path::{Path, PathBuf};
 
 /// Longest edge of a generated preview, in pixels.
@@ -79,7 +59,9 @@ pub fn make_preview(src: &Path, group: &str, index: u32) -> Result<PathBuf, Stri
     } else {
         img.resize(nw, nh, image::imageops::FilterType::Lanczos3)
     };
-    let dst = group_dir(group).join("preview").join(format!("{index}.jpg"));
+    let dst = group_dir(group)
+        .join("preview")
+        .join(format!("{index}.jpg"));
     std::fs::create_dir_all(dst.parent().map(Path::to_path_buf).unwrap_or_default())
         .map_err(|e| e.to_string())?;
     small
@@ -109,18 +91,15 @@ pub fn store_preview_bytes(
     bytes: &[u8],
 ) -> Result<PathBuf, String> {
     let ext = if ext.is_empty() { "jpg" } else { ext };
-    let dst = group_dir(group).join("preview").join(format!("{index}.{ext}"));
+    let dst = group_dir(group)
+        .join("preview")
+        .join(format!("{index}.{ext}"));
     std::fs::create_dir_all(dst.parent().map(Path::to_path_buf).unwrap_or_default())
         .map_err(|e| e.to_string())?;
     std::fs::write(&dst, bytes).map_err(|e| e.to_string())?;
     Ok(dst)
 }
 
-/// Best-effort cleanup of a post's stored files. Given any of the post's
-/// stored paths (original or preview), derive the post group dir and remove
-/// the whole tree (originals + preview dir). Errors are skipped — the DB row
-/// is the source of truth and must be deletable even if the media is already
-/// gone (e.g. CHATX_HOME was wiped from under us).
 pub fn remove_post_files(paths: &[String]) {
     let root = std::fs::canonicalize(media_dir()).unwrap_or_else(|_| media_dir());
     for p in paths {
@@ -135,6 +114,148 @@ pub fn remove_post_files(paths: &[String]) {
             let _ = std::fs::remove_dir_all(root.join(group.as_os_str()));
         }
     }
+}
+
+/// Image container, detected from the leading magic bytes rather than the
+/// file extension the sender claimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Container {
+    Jpeg,
+    Png,
+    Gif,
+    WebP,
+    /// HEIC/HEIF — detected but not decodable by this stack today.
+    Heic,
+    Unknown,
+}
+
+/// Detect the image container from the leading magic bytes.
+fn sniff_container(bytes: &[u8]) -> Container {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Container::Jpeg;
+    }
+    if bytes.starts_with(b"GIF8") {
+        return Container::Gif;
+    }
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Container::Png;
+    }
+    // WebP: RIFF container + "WEBP" fourcc at offset 8.
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && bytes[8..12] == *b"WEBP" {
+        return Container::WebP;
+    }
+    // HEIC/HEIF: ISO-BMFF "ftyp" box with an Apple / HEVC brand.
+    if bytes.len() >= 12 && bytes[4..8] == *b"ftyp" {
+        let brand = std::str::from_utf8(&bytes[8..12]).unwrap_or("");
+        if matches!(brand, "heic" | "heix" | "hevc" | "mif1") {
+            return Container::Heic;
+        }
+    }
+    Container::Unknown
+}
+
+fn webp_to_jpeg(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Cursor;
+
+    let decoded = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?
+        .decode()
+        .map_err(|e| e.to_string())?;
+    let (w, h) = (decoded.width(), decoded.height());
+    if w == 0 || h == 0 {
+        return Err("webp has zero dimensions".into());
+    }
+
+    let rgba = decoded.into_rgba8();
+    let mut rgb = image::RgbImage::new(w, h);
+    for (dst, px) in rgb.pixels_mut().zip(rgba.pixels()) {
+        let (r, g, b, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
+        let inv = 255u32 - a;
+        dst[0] = ((r * a + 255 * inv) / 255) as u8;
+        dst[1] = ((g * a + 255 * inv) / 255) as u8;
+        dst[2] = ((b * a + 255 * inv) / 255) as u8;
+    }
+
+    // `write_to` requires `Write + Seek`; a cursor around a `Vec` gives us both.
+    let mut cursor = Cursor::new(Vec::new());
+    rgb.write_to(&mut cursor, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())?;
+    Ok(cursor.into_inner())
+}
+
+pub fn store_received_image(
+    group: &str,
+    index: u32,
+    is_preview: bool,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
+    let store = |ext: &str, data: &[u8]| {
+        if is_preview {
+            store_preview_bytes(group, index, ext, data)
+        } else {
+            store_bytes(group, index, ext, data)
+        }
+    };
+    match sniff_container(bytes) {
+        Container::Jpeg => store("jpg", bytes),
+        Container::Png => store("png", bytes),
+        Container::Gif => store("gif", bytes),
+        Container::Heic => store("heic", bytes),
+        Container::Unknown => store("jpg", bytes),
+        Container::WebP => {
+            let jpeg = webp_to_jpeg(bytes)?;
+            store("jpg", &jpeg)
+        }
+    }
+}
+
+pub fn repair_stored_formats() -> u32 {
+    let base = media_dir();
+    let Ok(entries) = std::fs::read_dir(&base) else {
+        return 0;
+    };
+    let mut repaired = 0u32;
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        for d in [dir.clone(), dir.join("preview")] {
+            let Ok(files) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let p = f.path();
+                let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                let is_jpg_name = name
+                    .rsplit('.')
+                    .next()
+                    .map(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
+                    .unwrap_or(false);
+                if !is_jpg_name {
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&p) else {
+                    continue;
+                };
+                if sniff_container(&bytes) != Container::WebP {
+                    continue;
+                }
+                let Ok(jpeg) = webp_to_jpeg(&bytes) else {
+                    tracing::warn!("[media] could not transcode WebP at {name}; left as-is");
+                    continue;
+                };
+                match std::fs::write(&p, &jpeg) {
+                    Ok(()) => repaired += 1,
+                    Err(e) => tracing::warn!("[media] failed to rewrite {name}: {e}"),
+                }
+            }
+        }
+    }
+    repaired
 }
 
 #[cfg(test)]
@@ -165,5 +286,60 @@ mod tests {
         ]);
         assert!(!stored.exists() && !preview.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sniff_container_detects_each_format() {
+        assert_eq!(
+            sniff_container(&[0xFF, 0xD8, 0xFF, 0xE0, 0x0, 0x10]),
+            Container::Jpeg
+        );
+        assert_eq!(sniff_container(b"GIF89a...."), Container::Gif);
+        assert_eq!(
+            sniff_container(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0]),
+            Container::Png
+        );
+        assert_eq!(
+            sniff_container(b"RIFF\x00\x00\x00\x00WEBPVP8x...."),
+            Container::WebP
+        );
+        assert_eq!(
+            sniff_container(&[0, 0, 0, 20, b'f', b't', b'y', b'p', b'h', b'e', b'i', b'c']),
+            Container::Heic
+        );
+        assert_eq!(
+            sniff_container(b"whatever-not-an-image"),
+            Container::Unknown
+        );
+    }
+
+    #[test]
+    fn webp_to_jpeg_roundtrip() {
+        // Make a small lossless WebP with the codec `image` vendors for us.
+        let w: u32 = 4;
+        let h: u32 = 4;
+        let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+        for _ in 0..(w * h) {
+            rgb.extend([220u8, 20u8, 30u8]);
+        }
+        let mut webp = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut webp)
+            .encode(&rgb, w, h, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        assert_eq!(sniff_container(&webp), Container::WebP);
+
+        let jpeg = webp_to_jpeg(&webp).unwrap();
+        // Decode the JPEG back and check dimensions + color (lossy → tolerance).
+        let decoded = image::ImageReader::new(std::io::Cursor::new(&jpeg))
+            .with_guessed_format()
+            .unwrap();
+        let img = decoded.decode().unwrap();
+        assert_eq!((img.width(), img.height()), (w, h));
+        let px: Vec<u8> = img.into_rgba8().into_raw();
+        assert!(
+            px[0] > 200 && px[1] < 60 && px[2] < 60,
+            "red pixel off: {:?}",
+            &px[..6]
+        );
     }
 }

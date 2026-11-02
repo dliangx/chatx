@@ -78,13 +78,6 @@ fn current_me() -> String {
     CURRENT_ME.read().unwrap().clone()
 }
 
-/// Read the persisted appearance preference (stored in the `settings` table)
-/// before login. `apply_result` — where login side-effects kick in — runs
-/// after the auth screen is already visible, so this restores the saved
-/// scheme early enough for the auth screen to render in it. The DB lives at
-/// `~/.config/chatx/<profile>/messages.db`. `None` means "no DB / no value".
-/// The stored value is a mode: "light", "dark" or "system" (older builds
-/// stored only "light"/"dark"; both are still recognised).
 async fn load_persisted_theme() -> Option<ThemeMode> {
     let base = chatx_core::identity::DeviceIdentity::home_dir();
     let profile = profile().trim().to_lowercase();
@@ -109,10 +102,6 @@ async fn load_persisted_theme() -> Option<ThemeMode> {
     theme_mode_from_db(&v)
 }
 
-/// `ThemeMode` ↔ DB string, using the lowercase variant names. The `ThemeMode`
-/// enum is Slint-generated (a `#[derive(...)]` type, not `Display`-bearing),
-/// so the conversions live here. Unknown values return `None` so callers can
-/// fall back to a sensible default (usually `ThemeMode::System`).
 fn theme_mode_from_db(raw: &str) -> Option<ThemeMode> {
     match raw {
         "light" => Some(ThemeMode::Light),
@@ -139,10 +128,6 @@ fn effective_dark(mode: ThemeMode, system_dark: bool) -> bool {
     }
 }
 
-/// Detect whether the host OS is currently in dark mode, by asking the
-/// underlying winit window for its live `theme()`. Falls back to `true` when
-/// it cannot be determined, so a "follow system" user gets a coherent dark UI
-/// rather than an unexpectedly light one.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn detect_system_dark(window: &slint::Window) -> bool {
     use slint::winit_030::WinitWindowAccessor as _;
@@ -162,9 +147,6 @@ fn detect_system_dark(_window: &slint::Window) -> bool {
     false
 }
 
-/// Drive the whole UI (Slint `Theme` global + the Rust chat renderer + any
-/// open chat) to reflect a requested appearance mode. The live OS signal is
-/// fetched from the winit window so "System" mode tracks the host.
 fn apply_theme_mode(ui: &MainWindow, mode: ThemeMode) {
     let system_dark = detect_system_dark(ui.window());
     let dark = effective_dark(mode, system_dark);
@@ -191,11 +173,6 @@ fn apply_theme_mode(ui: &MainWindow, mode: ThemeMode) {
     }
 }
 
-/// Re-run appearance resolution, only re-applying when the effective scheme
-/// actually flipped. Driven by a timer so we pick up OS light/dark changes
-/// live while mode is "System" (Slint does not expose a change callback for
-/// the OS theme; a 1s poll is cheap — detection is a single winit query and
-/// the apply path no-ops unless the value flipped).
 fn refresh_theme_on_change(weak: &slint::Weak<MainWindow>) {
     let Some(ui) = weak.upgrade() else {
         return;
@@ -219,13 +196,7 @@ fn set_current_chat_id(chat_id: &str) {
 }
 static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PROFILE_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// When set, the album photo picker is serving the EditProfile avatar pick
-/// (rather than the Moment share flow) and the sink should route the first
-/// selection to the avatar draft instead.
 static PICKING_AVATAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// When set, the album photo picker is serving a chat image send rather than
-/// the Moment share flow; the picked photo is routed to that chat.
 static PICKING_CHAT_IMAGE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -377,10 +348,6 @@ fn autologin_path() -> std::path::PathBuf {
     keystore_path(&profile()).with_file_name("autologin")
 }
 
-/// Wipe the entire ChatX home directory (`CHATX_HOME`, or `~/.chatx`) so the
-/// user can start a fresh account: keys, messages db, groups, images, voice,
-/// cached autologin and per-profile data all live under it. Called from the
-/// confirm dialog before switching to sign-up.
 fn clear_user_data() {
     let home = chatx_core::identity::DeviceIdentity::home_dir();
     // Safety: only remove a real, existing, absolute directory (never the
@@ -397,9 +364,6 @@ fn clear_user_data() {
     let _ = std::fs::remove_dir_all(&home_canon);
 }
 
-/// Persist an auto-login *unlock key* (32 random bytes), NOT the password.
-/// The key is the PBKDF2(password, keystore_salt) output used to unseal the
-/// keystore, so the plaintext password never touches disk in a recoverable form.
 fn save_passphrase(_user_id: &str, pass: &str) {
     let Some(ks) = chatx_core::account::Keystore::load(&keystore_path(&profile())).ok() else {
         return;
@@ -879,8 +843,12 @@ pub fn run_app() {
                 dh.set_xl_total_w(0);
                 dh.set_xl_truncated(false);
                 // Release the loaded content the global still references.
-                dh.set_blocks(slint::ModelRc::new(slint::VecModel::from(Vec::<DocBlock>::new())));
-                dh.set_xl_rows(slint::ModelRc::new(slint::VecModel::from(Vec::<XlRow>::new())));
+                dh.set_blocks(slint::ModelRc::new(slint::VecModel::from(
+                    Vec::<DocBlock>::new(),
+                )));
+                dh.set_xl_rows(slint::ModelRc::new(slint::VecModel::from(
+                    Vec::<XlRow>::new(),
+                )));
                 clear_global_overlay(&ui);
             }
         });
@@ -891,7 +859,9 @@ pub fn run_app() {
         });
         let restore_weak = weak.clone();
         ui.global::<DocHost>().on_restore_doc(move || {
-            let Some(ui) = restore_weak.upgrade() else { return };
+            let Some(ui) = restore_weak.upgrade() else {
+                return;
+            };
             let dh = ui.global::<DocHost>();
             if !dh.get_running() {
                 dh.set_minimized(false);
@@ -915,7 +885,13 @@ pub fn run_app() {
                         let lines: Vec<String> = sheet
                             .rows
                             .iter()
-                            .map(|r| r.cells.iter().map(|c| c.text.clone()).collect::<Vec<_>>().join("\t"))
+                            .map(|r| {
+                                r.cells
+                                    .iter()
+                                    .map(|c| c.text.clone())
+                                    .collect::<Vec<_>>()
+                                    .join("\t")
+                            })
                             .collect();
                         let text = lines.join("\n");
                         if !text.trim().is_empty() {
@@ -928,14 +904,20 @@ pub fn run_app() {
                 let blocks = dh.get_blocks();
                 let mut lines: Vec<String> = Vec::new();
                 for i in 0..blocks.row_count() {
-                    let Some(b) = blocks.row_data(i) else { continue };
+                    let Some(b) = blocks.row_data(i) else {
+                        continue;
+                    };
                     if b.kind == 8 {
                         // Table: one line per row, cells tab-separated.
                         for i in 0..b.cells.row_count() {
-                            let Some(row) = b.cells.row_data(i) else { continue };
+                            let Some(row) = b.cells.row_data(i) else {
+                                continue;
+                            };
                             let mut line = String::new();
                             for j in 0..row.row_count() {
-                                let Some(cell) = row.row_data(j) else { continue };
+                                let Some(cell) = row.row_data(j) else {
+                                    continue;
+                                };
                                 if !line.is_empty() {
                                     line.push('\t');
                                 }
@@ -2154,7 +2136,11 @@ fn doc_page_get(index: i32) -> Option<doc::PngPage> {
     if index < 0 {
         return None;
     }
-    DOC_PAGES.with(|c| c.borrow().as_ref().and_then(|v| v.get(index as usize).cloned()))
+    DOC_PAGES.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|v| v.get(index as usize).cloned())
+    })
 }
 
 // XLSX sheet grids of the open sheet-mode viewer; same thread-local
@@ -2173,7 +2159,11 @@ fn xl_sheet_get(index: i32) -> Option<doc::XlSheet> {
     if index < 0 {
         return None;
     }
-    XL_SHEETS.with(|c| c.borrow().as_ref().and_then(|v| v.get(index as usize).cloned()))
+    XL_SHEETS.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|v| v.get(index as usize).cloned())
+    })
 }
 
 /// Fill / tint RGBA quadruple → the slint 3-value color model (`[r, g, b]`;
@@ -2311,12 +2301,7 @@ fn open_doc_page(ui: &MainWindow, path: &str) {
                             level: b.level,
                             text: SharedString::from(b.text),
                             cells: slint_cells,
-                            cols: b
-                                .cells
-                                .iter()
-                                .map(|r| r.len())
-                                .max()
-                                .unwrap_or(0) as i32,
+                            cols: b.cells.iter().map(|r| r.len()).max().unwrap_or(0) as i32,
                             header_rows: b.header_rows,
                             image: sm_img,
                             img_w: iw as i32,
@@ -2347,13 +2332,17 @@ fn open_doc_page(ui: &MainWindow, path: &str) {
         Err(msg) => {
             doc_pages_replace(None);
             xl_sheets_replace(None);
-            dh.set_blocks(slint::ModelRc::new(slint::VecModel::from(Vec::<DocBlock>::new())));
+            dh.set_blocks(slint::ModelRc::new(slint::VecModel::from(
+                Vec::<DocBlock>::new(),
+            )));
             dh.set_frame(slint::Image::default());
             dh.set_page(0);
             dh.set_page_count(0);
             dh.set_mode(0);
             dh.set_sheet_name(SharedString::from(""));
-            dh.set_xl_rows(slint::ModelRc::new(slint::VecModel::from(Vec::<XlRow>::new())));
+            dh.set_xl_rows(slint::ModelRc::new(slint::VecModel::from(
+                Vec::<XlRow>::new(),
+            )));
             dh.set_xl_total_w(0);
             dh.set_xl_truncated(false);
             dh.set_failed(true);
@@ -2646,6 +2635,17 @@ fn apply_result(
             // is OnceLock-guarded so a re-login never double-spawns. It only
             // fires a sync round; if nothing has changed it returns quickly.
             moment::start_timer(weak.clone());
+
+            // One-time media repair (idempotent): rewrite any post image we
+            // pulled from a friend *before* container sniffing — WebP
+            // content stored under a `.jpg` name — into a decodable JPEG.
+            // Same path, so DB `media_urls` rows stay valid.
+            std::thread::spawn(|| {
+                let n = camera::posts::repair_stored_formats();
+                if n > 0 {
+                    tracing::info!("[media] repaired {n} mis-stored WebP post image(s)");
+                }
+            });
 
             if let Some(pool) = pool {
                 let pool = Arc::new(pool);
@@ -2996,8 +2996,7 @@ fn send_chat_voice(
     };
     let is_group = chat_id.starts_with("grp-");
     if let Some(ui) = weak.upgrade() {
-        ui.global::<ChatSession>()
-            .set_send_busy(true);
+        ui.global::<ChatSession>().set_send_busy(true);
     }
     let row_peer: String = {
         backend
@@ -3315,8 +3314,7 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
     };
     let is_group = chat_id.starts_with("grp-");
     if let Some(ui) = weak.upgrade() {
-        ui.global::<ChatSession>()
-            .set_send_busy(true);
+        ui.global::<ChatSession>().set_send_busy(true);
     }
     let me = client.peer_base58();
     let my_peers: Vec<String> = {
@@ -3500,8 +3498,7 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
     };
     let is_group = chat_id.starts_with("grp-");
     if let Some(ui) = weak.upgrade() {
-        ui.global::<ChatSession>()
-            .set_send_busy(true);
+        ui.global::<ChatSession>().set_send_busy(true);
     }
     let me = client.peer_base58();
     let my_peers: Vec<String> = {
@@ -4573,8 +4570,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
 
     if is_group {
         if let Some(ui) = weak.upgrade() {
-            ui.global::<ChatSession>()
-                .set_send_busy(true);
+            ui.global::<ChatSession>().set_send_busy(true);
         }
         let rt = runtime();
         let weak2 = weak.clone();
@@ -4586,8 +4582,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                     touch_chat_activity(&chat_id);
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
-                            ui.global::<ChatSession>()
-                                .set_send_busy(false);
+                            ui.global::<ChatSession>().set_send_busy(false);
                         }
                     });
                     CHAT_SCROLL_POS.write().unwrap().insert(key, 0.0);
@@ -4604,8 +4599,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     }
 
     if let Some(ui) = weak.upgrade() {
-        ui.global::<ChatSession>()
-            .set_send_busy(true);
+        ui.global::<ChatSession>().set_send_busy(true);
     }
     let row_peer: String = {
         backend
@@ -4677,8 +4671,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    ui.global::<ChatSession>()
-                        .set_send_busy(false);
+                    ui.global::<ChatSession>().set_send_busy(false);
                 }
             });
             load_chat_messages(weak2, key);
@@ -5126,21 +5119,26 @@ fn remove_moment_media(weak: slint::Weak<MainWindow>, i: i32) {
             return;
         }
         let removed = m.remove(i as usize);
-        let _ = std::fs::remove_file(std::path::Path::new(&removed));
+        delete_draft_scrap(&removed);
     }
     refresh_moment_media_ui(weak);
 }
 
-/// Clear the draft. Any source files still on disk (temp-dir camera/album
-/// copies, or pre-publish originals) are removed — the persistent copies live
-/// in the post store and are tracked separately in `MOMENT_MEDIA`'s callers.
+fn delete_draft_scrap(path: &str) {
+    let p = std::path::Path::new(path);
+    if p.starts_with(std::env::temp_dir()) {
+        let _ = std::fs::remove_file(p);
+    }
+    // anything else: user's file — leave it untouched.
+}
+
 fn reset_moment_draft() {
     let paths: Vec<String> = {
         let mut m = MOMENT_MEDIA.lock().unwrap();
         std::mem::take(&mut *m)
     };
     for p in &paths {
-        let _ = std::fs::remove_file(std::path::Path::new(p));
+        delete_draft_scrap(p);
     }
 }
 
@@ -5351,6 +5349,7 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
             Some(media_json.as_str()),
             preview_json.as_deref(),
             0,
+            sqlite::now_ms(),
         )
         .await
         {

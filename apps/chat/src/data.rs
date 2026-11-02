@@ -156,6 +156,11 @@ impl DataBackend {
         self.key_to_post.get(&key).copied()
     }
 
+    /// True when a row for this post is already in the in-memory feed set.
+    pub fn has_post(&self, post_id: i64) -> bool {
+        self.post_to_key.contains_key(&post_id)
+    }
+
     pub fn key_for_post(&mut self, post_id: i64) -> i32 {
         if let Some(k) = self.post_to_key.get(&post_id) {
             return *k;
@@ -568,7 +573,9 @@ pub fn snippet_around(text: &str, needle: &str, radius: usize) -> String {
             .unwrap_or(0)
     };
     let start = pos.saturating_sub(radius);
-    let end = (pos + needle_l.len()).saturating_add(radius).min(chars.len());
+    let end = (pos + needle_l.len())
+        .saturating_add(radius)
+        .min(chars.len());
     let mut out = String::new();
     if start > 0 {
         out.push('…');
@@ -626,19 +633,9 @@ pub async fn refresh_chat_row(
     // Use full chat_list to find the matching entry (cheap for a local sqlite on a single user).
     let items = sqlite::joins::chat_list(pool, me, 200).await?;
     let Some(src) = items.iter().find(|c| c.name.as_deref() == Some(chat_id)) else {
-        // Idempotent: group conversations live only in the in-memory backend
-        // (created by `append_chat`, never persisted to the sqlite
-        // `conversations` table), so this fallback is re-entered on every
-        // inbound refresh. Reuse the existing row instead of appending a
-        // duplicate on each message.
         if b.chats.iter().any(|r| r.chat_id == chat_id) {
             return Ok(false);
         }
-        // New conversation: append. Group ids (`grp-…` from the gossipsub
-        // topic) are not in the sqlite chat rows; classify by the `grp-`
-        // prefix so they land in the group list — otherwise they fall into the
-        // DM list and render the stored ciphertext. The creator's `append_chat`
-        // already set a friendly title, so a generic one suffices here.
         let is_group = chat_id.starts_with("grp-");
         let title = if is_group {
             "Group".to_string()
@@ -712,9 +709,7 @@ pub async fn refresh_chat_row(
     // `conversations.type` — `insert_row` always writes type=0 via
     // `ensure_dm`, so a group's type column is unreliable.
     let is_group = chat_id.starts_with("grp-");
-    // Title: for groups use `groups.name` (authoritative, kept on create /
-    // rename) else fall back to the existing row title so a rename survives an
-    // in-place refresh; for DMs use the peer display-name chain.
+
     let title = if is_group {
         group_display_name(pool, &chat_id)
             .await
@@ -735,15 +730,12 @@ pub async fn refresh_chat_row(
             .unwrap_or_else(|| src.id.to_string())
     };
     let peer_id = src.peer_id.clone().unwrap_or_default();
-    // Preserve the local pin state — pinning is a per-user preference that the
-    // refresh source (network/DB mirror) does not authoritatively carry, so we
-    // keep whatever value the row already had instead of clobbering it.
+
     let new = ChatRow {
         key: row.key,
         chat_id: src_chat_key.clone(),
         title,
-        // Group previews are ciphertext at rest, so keep whatever the row
-        // already showed rather than overwriting with the base64 blob.
+
         preview: if is_group {
             row.preview.clone()
         } else {
@@ -814,22 +806,12 @@ pub async fn persist_recommend_toggle(
     Ok(())
 }
 
-/// Resolve a group's display name directly from the local `groups.name` (set
-/// on create / rename) using the numeric `grp-<num>` id. `None` when the group
-/// row is absent or unnamed. Independent of the `conversations` join so it
-/// works even when the `groups.id`/`conversations.id` linkage is missing.
 pub async fn group_display_name(pool: &SqlitePool, chat_id: &str) -> Option<String> {
     let num = chat_id.strip_prefix("grp-")?.parse::<i64>().ok()?;
     let name = sqlite::groups::get(pool, num).await.ok().flatten()?.name;
     (!name.is_empty()).then_some(name)
 }
 
-/// Persist a group to the local `groups` / `group_members` / `conversations`
-/// tables so it has a stable integer id, a rename-able `groups.name`, and a
-/// `conversations.is_pinned` pin flag. The numeric `grp-<num>` part is used as
-/// BOTH the `groups.id` and the `conversations.id`, matching the convention
-/// the `joins::chat_list` query relies on (`LEFT JOIN groups g ON g.id = c.id`).
-/// `owner_user_id` and `peer_id` are my user id + libp2p peer id.
 pub async fn persist_group(
     pool: &SqlitePool,
     chat_id: &str,
@@ -849,9 +831,7 @@ pub async fn persist_group(
             tracing::warn!("[persist_group] groups.add_member({num}) failed: {e}");
         }
     }
-    // Ensure exactly ONE conversation row is keyed by the string chat id (so
-    // pin / rename / message-loading all resolve it). Reuse an existing one if
-    // present (avoids a second row sharing `name`); otherwise create one.
+
     match sqlite::conversations::resolve_id(pool, chat_id).await {
         Ok(Some(cid)) => {
             if let Err(e) = sqlite::conversations::upsert(
@@ -891,10 +871,6 @@ pub async fn persist_group(
     Some(num)
 }
 
-/// Resolve a group-message sender to a display name: the account's nickname,
-/// falling back to its username, falling back to the raw sender string. The
-/// sender may be a libp2p PeerId (group members are keyed by device) or, for
-/// legacy rows, a username.
 pub async fn group_sender_name(pool: &SqlitePool, sender: &str) -> String {
     if let Ok(Some(user_id)) = sqlite::devices::ensure_user_by_peer(pool, sender).await {
         if let Ok(Some(u)) = sqlite::users::get(pool, user_id).await {
@@ -1012,10 +988,18 @@ mod tests {
         .await
         .unwrap();
         sqlite::social::add(&pool, 1, 2).await.unwrap();
-        let post =
-            sqlite::social_feed::create_post(&pool, 2, Some("One"), Some("hello"), None, None, 0)
-                .await
-                .unwrap();
+        let post = sqlite::social_feed::create_post(
+            &pool,
+            2,
+            Some("One"),
+            Some("hello"),
+            None,
+            None,
+            0,
+            1000,
+        )
+        .await
+        .unwrap();
         sqlite::social_feed::like(&pool, post.id, 1).await.unwrap();
 
         let (b, _nickname) = load(&pool, me).await.unwrap();
@@ -1028,11 +1012,6 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_chat_row_materializes_new_dm() {
-        // Regression: the receiving side of a DM has no in-memory chat row,
-        // but the sqlite `conversations` row is created by `ensure_dm` at
-        // message-insert time. `refresh_chat_row` must materialize the
-        // in-memory row from the sqlite row (previously it would silently
-        // return Ok(false), leaving the UI chat list empty).
         let pool = sqlite::open_memory().await.unwrap();
         let me = "me-peer";
         let me_id = 100;

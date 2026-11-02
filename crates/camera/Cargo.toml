@@ -10,9 +10,11 @@ path = "src/lib.rs"
 
 [dependencies]
 tracing = { workspace = true }
-# Image (de)coding for the `posts` module (originals + JPEG previews) and
-# `scan::decode_local_photo`. jpeg/png only — no C toolchain required.
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+    "webp",
+] }
 
 # Apple (macOS + iOS): the AVFoundation shim is Swift; `build.rs` compiles
 # `shim/shim.swift` into an object file and force-links it into the final
@@ -21,11 +23,6 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 [build-dependencies]
 # (none — `build.rs` shells out to `swiftc` / `clang` directly)
 
-# Windows + Linux: nokhwa for capture.
-#   `input-native`    — picks the platform backend (Media Foundation / V4L2)
-#   `output-threaded` — callback-style Camera (our `callback` per frame)
-# default-features=false keeps the `image` codec stack out; we read raw
-# YUYV/GRAY directly, so no decoding feature is required.
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 nokhwa = { version = "0.10.11", default-features = false, features = [
     "input-native",

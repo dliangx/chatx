@@ -1,4 +1,4 @@
-use crate::{new_id, now_ms, Pool};
+use crate::{Pool, new_id, now_ms};
 use sqlx::FromRow;
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
@@ -53,9 +53,9 @@ pub async fn create_post(
     media_urls: Option<&str>,
     preview_urls: Option<&str>,
     visibility: i64,
+    timestamp: i64,
 ) -> anyhow::Result<SocialPost> {
     let id = new_id();
-    let ts = now_ms();
     sqlx::query(
         "INSERT INTO social_posts (id, author_id, user_name, content, media_urls, preview_urls, visibility, timestamp)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -67,7 +67,7 @@ pub async fn create_post(
     .bind(media_urls)
     .bind(preview_urls)
     .bind(visibility)
-    .bind(ts)
+    .bind(timestamp)
     .execute(pool)
     .await?;
     let row = get_post(pool, id).await?;
@@ -84,6 +84,28 @@ pub async fn has_post_by_author_ts(pool: &Pool, author_id: i64, ts: i64) -> anyh
             .bind(ts)
             .fetch_optional(pool)
             .await?;
+    Ok(row.is_some())
+}
+
+pub async fn has_synced_post(
+    pool: &Pool,
+    author_id: i64,
+    user_name: &str,
+    content: Option<&str>,
+    wire_ts: i64,
+) -> anyhow::Result<bool> {
+    if has_post_by_author_ts(pool, author_id, wire_ts).await? {
+        return Ok(true);
+    }
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM social_posts
+          WHERE (user_name IS ?1)
+            AND (content IS ?2)",
+    )
+    .bind(Some(user_name))
+    .bind(content)
+    .fetch_optional(pool)
+    .await?;
     Ok(row.is_some())
 }
 
@@ -123,10 +145,22 @@ pub async fn posts_between(pool: &Pool, since: i64, until: i64) -> anyhow::Resul
 pub async fn delete_post(pool: &Pool, id: i64) -> anyhow::Result<bool> {
     let mut trans = pool.begin().await?;
     {
-        sqlx::query("DELETE FROM social_comments WHERE post_id = ?1").bind(id).execute(trans.as_mut()).await?;
-        sqlx::query("DELETE FROM social_likes WHERE post_id = ?1").bind(id).execute(trans.as_mut()).await?;
-        sqlx::query("DELETE FROM social_recommends WHERE post_id = ?1").bind(id).execute(trans.as_mut()).await?;
-        let n = sqlx::query("DELETE FROM social_posts WHERE id = ?1").bind(id).execute(trans.as_mut()).await?;
+        sqlx::query("DELETE FROM social_comments WHERE post_id = ?1")
+            .bind(id)
+            .execute(trans.as_mut())
+            .await?;
+        sqlx::query("DELETE FROM social_likes WHERE post_id = ?1")
+            .bind(id)
+            .execute(trans.as_mut())
+            .await?;
+        sqlx::query("DELETE FROM social_recommends WHERE post_id = ?1")
+            .bind(id)
+            .execute(trans.as_mut())
+            .await?;
+        let n = sqlx::query("DELETE FROM social_posts WHERE id = ?1")
+            .bind(id)
+            .execute(trans.as_mut())
+            .await?;
         if n.rows_affected() == 0 {
             trans.rollback().await?;
             return Ok(false);
@@ -205,11 +239,13 @@ pub async fn likers(pool: &Pool, post_id: i64) -> anyhow::Result<Vec<i64>> {
 // --- recommends -----------------------------------------------------------
 
 pub async fn bump_recommend_count(pool: &Pool, post_id: i64, delta: i64) -> anyhow::Result<()> {
-    sqlx::query("UPDATE social_posts SET recommend_count = MAX(0, recommend_count + ?2) WHERE id = ?1")
-        .bind(post_id)
-        .bind(delta)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE social_posts SET recommend_count = MAX(0, recommend_count + ?2) WHERE id = ?1",
+    )
+    .bind(post_id)
+    .bind(delta)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -260,17 +296,24 @@ pub async fn has_recommended(pool: &Pool, post_id: i64, user_id: i64) -> anyhow:
 }
 
 pub async fn recommenders(pool: &Pool, post_id: i64) -> anyhow::Result<Vec<i64>> {
-    let rows: Vec<(i64,)> =
-        sqlx::query_as("SELECT user_id FROM social_recommends WHERE post_id = ?1 ORDER BY created_at")
-            .bind(post_id)
-            .fetch_all(pool)
-            .await?;
+    let rows: Vec<(i64,)> = sqlx::query_as(
+        "SELECT user_id FROM social_recommends WHERE post_id = ?1 ORDER BY created_at",
+    )
+    .bind(post_id)
+    .fetch_all(pool)
+    .await?;
     Ok(rows.into_iter().map(|(u,)| u).collect())
 }
 
 // --- comments --------------------------------------------------------------
 
-pub async fn add_comment(pool: &Pool, post_id: i64, author_id: i64, content: &str, reply_to: Option<i64>) -> anyhow::Result<SocialComment> {
+pub async fn add_comment(
+    pool: &Pool,
+    post_id: i64,
+    author_id: i64,
+    content: &str,
+    reply_to: Option<i64>,
+) -> anyhow::Result<SocialComment> {
     let id = new_id();
     let ts = now_ms();
     if get_post(pool, post_id).await?.is_none() {
@@ -296,7 +339,12 @@ pub async fn add_comment(pool: &Pool, post_id: i64, author_id: i64, content: &st
     Ok(row)
 }
 
-pub async fn list_comments(pool: &Pool, post_id: i64, limit: u32, offset: u32) -> anyhow::Result<Vec<SocialComment>> {
+pub async fn list_comments(
+    pool: &Pool,
+    post_id: i64,
+    limit: u32,
+    offset: u32,
+) -> anyhow::Result<Vec<SocialComment>> {
     let rows = sqlx::query_as::<_, SocialComment>(
         "SELECT * FROM social_comments WHERE post_id = ?1 ORDER BY created_at LIMIT ?2 OFFSET ?3",
     )
@@ -334,33 +382,148 @@ mod tests {
     #[tokio::test]
     async fn post_like_comment_roundtrip() {
         let pool = open_memory().await.unwrap();
-        let post = create_post(&pool, 1, Some("u1"), Some("hello world"), None, None, 0).await.unwrap();
+        let post = create_post(
+            &pool,
+            1,
+            Some("u1"),
+            Some("hello world"),
+            None,
+            None,
+            0,
+            1000,
+        )
+        .await
+        .unwrap();
         assert_eq!(post.preview_urls, None);
         assert_eq!(post.like_count, 0);
         assert_eq!(post.comment_count, 0);
 
         assert!(like(&pool, post.id, 2).await.unwrap());
-        assert!(!like(&pool, post.id, 2).await.unwrap(), "double like is a no-op");
-        assert_eq!(get_post(&pool, post.id).await.unwrap().unwrap().like_count, 1);
+        assert!(
+            !like(&pool, post.id, 2).await.unwrap(),
+            "double like is a no-op"
+        );
+        assert_eq!(
+            get_post(&pool, post.id).await.unwrap().unwrap().like_count,
+            1
+        );
         assert!(has_liked(&pool, post.id, 2).await.unwrap());
         assert_eq!(likers(&pool, post.id).await.unwrap(), vec![2]);
 
         assert!(unlike(&pool, post.id, 2).await.unwrap());
         assert!(!unlike(&pool, post.id, 2).await.unwrap());
-        assert_eq!(get_post(&pool, post.id).await.unwrap().unwrap().like_count, 0);
+        assert_eq!(
+            get_post(&pool, post.id).await.unwrap().unwrap().like_count,
+            0
+        );
 
         let c1 = add_comment(&pool, post.id, 1, "nice", None).await.unwrap();
-        let _c2 = add_comment(&pool, post.id, 2, "@u1 agree", Some(c1.id)).await.unwrap();
-        assert_eq!(get_post(&pool, post.id).await.unwrap().unwrap().comment_count, 2);
+        let _c2 = add_comment(&pool, post.id, 2, "@u1 agree", Some(c1.id))
+            .await
+            .unwrap();
+        assert_eq!(
+            get_post(&pool, post.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .comment_count,
+            2
+        );
         assert_eq!(list_comments(&pool, post.id, 10, 0).await.unwrap().len(), 2);
 
         assert!(delete_comment(&pool, c1.id).await.unwrap());
-        assert_eq!(get_post(&pool, post.id).await.unwrap().unwrap().comment_count, 1);
+        assert_eq!(
+            get_post(&pool, post.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .comment_count,
+            1
+        );
 
         assert!(delete_post(&pool, post.id).await.unwrap());
         assert!(get_post(&pool, post.id).await.unwrap().is_none());
-        assert_eq!(list_comments(&pool, post.id, 10, 0).await.unwrap().len(), 0, "comments cascade-deleted");
+        assert_eq!(
+            list_comments(&pool, post.id, 10, 0).await.unwrap().len(),
+            0,
+            "comments cascade-deleted"
+        );
         assert!(!delete_post(&pool, post.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn has_synced_post_identity() {
+        let pool = open_memory().await.unwrap();
+        // Fresh rows store the wire timestamp: exact ts identity matches.
+        create_post(&pool, 1, Some("u1"), Some("hi"), None, None, 0, 123)
+            .await
+            .unwrap();
+        assert!(
+            has_synced_post(&pool, 1, "u1", Some("hi"), 123)
+                .await
+                .unwrap(),
+            "wire ts identity matches"
+        );
+        // A re-shared post arrives under a bumped ts (recommend propagation)
+        // — the stable name+content identity must still match.
+        assert!(
+            has_synced_post(&pool, 1, "u1", Some("hi"), 99999)
+                .await
+                .unwrap(),
+            "content identity catches a post re-shared with a bumped ts"
+        );
+        // The report scenario: our OWN post comes back to us after a friend
+        // re-recommended it — attributed to the friend's local row (a
+        // different author_id), with the ts bumped. The wire carries no
+        // author id, only the name, so (name, content) must match.
+        assert!(
+            has_synced_post(&pool, 7, "u1", Some("hi"), 99996)
+                .await
+                .unwrap(),
+            "own post returned via a friend's re-recommend is deduped"
+        );
+        // A genuinely different post (different content) must not match.
+        assert!(
+            !has_synced_post(&pool, 1, "u1", Some("different"), 99998)
+                .await
+                .unwrap()
+        );
+        // A different author (different display name) posting the same text
+        // must be kept distinct — the name is part of the identity.
+        create_post(&pool, 1, Some("other"), Some("hi"), None, None, 0, 55)
+            .await
+            .unwrap();
+        assert!(
+            has_synced_post(&pool, 1, "other", Some("hi"), 55)
+                .await
+                .unwrap()
+        );
+        // And a post under yet another name is not swallowed by either row.
+        assert!(
+            !has_synced_post(&pool, 1, "third", Some("hi"), 56)
+                .await
+                .unwrap()
+        );
+        // Legacy rows stored a *local* fetch time, not the wire ts — they are
+        // only catchable via the content identity.
+        create_post(&pool, 1, Some("u2"), Some("legacy"), None, None, 0, 424242)
+            .await
+            .unwrap();
+        assert!(
+            has_synced_post(&pool, 1, "u2", Some("legacy"), 555)
+                .await
+                .unwrap()
+        );
+        // Empty content is stored as NULL — the `IS` match must be NULL-safe.
+        create_post(&pool, 2, Some("u3"), None, Some("m"), None, 0, 777)
+            .await
+            .unwrap();
+        assert!(has_synced_post(&pool, 2, "u3", None, 777).await.unwrap());
+        assert!(
+            !has_synced_post(&pool, 2, "u3", Some("text"), 888)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -368,7 +531,18 @@ mod tests {
         let pool = open_memory().await.unwrap();
         let media = r#"["/h/media/posts/p_1/1.jpg"]"#;
         let preview = r#"["/h/media/posts/p_1/preview/1.jpg"]"#;
-        let post = create_post(&pool, 1, Some("u1"), Some("with photos"), Some(media), Some(preview), 0).await.unwrap();
+        let post = create_post(
+            &pool,
+            1,
+            Some("u1"),
+            Some("with photos"),
+            Some(media),
+            Some(preview),
+            0,
+            1000,
+        )
+        .await
+        .unwrap();
         assert_eq!(post.user_name.as_deref(), Some("u1"));
         assert_eq!(post.preview_urls.as_deref(), Some(preview));
         let back = get_post(&pool, post.id).await.unwrap().unwrap();
