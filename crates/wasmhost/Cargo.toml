@@ -11,7 +11,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-wasmer = { workspace = true, features = ["v8"] }
+wasmer = { workspace = true, features = ["cranelift"] }
 
 [target.'cfg(not(windows))'.dependencies]
 wasmer = { workspace = true, features = ["cranelift"] }
