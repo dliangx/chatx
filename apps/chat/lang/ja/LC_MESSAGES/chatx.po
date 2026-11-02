@@ -378,3 +378,42 @@ msgstr "このグループでの自分のニックネーム"
 
 msgid "Pin chat"
 msgstr "チャットを固定"
+
+msgid "Add to group"
+msgstr "グループに追加"
+
+msgid "Already in this group"
+msgstr "すでにこのグループに参加中"
+
+msgid "Chat settings"
+msgstr "チャット設定"
+
+msgid "Forward to…"
+msgstr "転送…"
+
+msgid "Incoming"
+msgstr "着信中"
+
+msgid "Member"
+msgstr "メンバー"
+
+msgid "Open PDF viewer"
+msgstr "PDFビューアーを開く"
+
+msgid "Open document viewer"
+msgstr "ドキュメントビューアーを開く"
+
+msgid "Open sandbox app (x.hello)"
+msgstr "サンドボックスアプリ（x.hello）を開く"
+
+msgid "This document has no readable content."
+msgstr "このドキュメントには読み取り可能な内容がありません。"
+
+msgid "Very large sheet — showing only its beginning."
+msgstr "非常に大きなシートのため、先頭部分のみを表示しています。"
+
+msgid "You"
+msgstr "あなた"
+
+msgid "starting…"
+msgstr "起動中…"

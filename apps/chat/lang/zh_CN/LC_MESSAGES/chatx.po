@@ -378,3 +378,42 @@ msgstr "我在本群的昵称"
 
 msgid "Pin chat"
 msgstr "置顶聊天"
+
+msgid "Add to group"
+msgstr "添加到群"
+
+msgid "Already in this group"
+msgstr "已在本群"
+
+msgid "Chat settings"
+msgstr "聊天设置"
+
+msgid "Forward to…"
+msgstr "转发…"
+
+msgid "Incoming"
+msgstr "来电"
+
+msgid "Member"
+msgstr "成员"
+
+msgid "Open PDF viewer"
+msgstr "打开 PDF 阅读器"
+
+msgid "Open document viewer"
+msgstr "打开文档阅读器"
+
+msgid "Open sandbox app (x.hello)"
+msgstr "打开沙盒应用 (x.hello)"
+
+msgid "This document has no readable content."
+msgstr "文档没有可读内容。"
+
+msgid "Very large sheet — showing only its beginning."
+msgstr "表格过大，仅先显示开头部分。"
+
+msgid "You"
+msgstr "我"
+
+msgid "starting…"
+msgstr "启动中…"

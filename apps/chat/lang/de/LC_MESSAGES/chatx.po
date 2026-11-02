@@ -378,3 +378,42 @@ msgstr "Mein Spitzname in dieser Gruppe"
 
 msgid "Pin chat"
 msgstr "Chat anheften"
+
+msgid "Add to group"
+msgstr "Zur Gruppe hinzufügen"
+
+msgid "Already in this group"
+msgstr "Bereits in dieser Gruppe"
+
+msgid "Chat settings"
+msgstr "Chat-Einstellungen"
+
+msgid "Forward to…"
+msgstr "Weiterleiten an…"
+
+msgid "Incoming"
+msgstr "Eingehend"
+
+msgid "Member"
+msgstr "Mitglied"
+
+msgid "Open PDF viewer"
+msgstr "PDF-Viewer öffnen"
+
+msgid "Open document viewer"
+msgstr "Dokumenten-Viewer öffnen"
+
+msgid "Open sandbox app (x.hello)"
+msgstr "Sandbox-App (x.hello) öffnen"
+
+msgid "This document has no readable content."
+msgstr "Dieses Dokument hat keinen lesbaren Inhalt."
+
+msgid "Very large sheet — showing only its beginning."
+msgstr "Sehr großes Blatt — nur der Anfang wird angezeigt."
+
+msgid "You"
+msgstr "Du"
+
+msgid "starting…"
+msgstr "wird gestartet…"

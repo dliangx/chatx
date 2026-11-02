@@ -378,3 +378,42 @@ msgstr "Мой псевдоним в этой группе"
 
 msgid "Pin chat"
 msgstr "Закрепить чат"
+
+msgid "Add to group"
+msgstr "Добавить в группу"
+
+msgid "Already in this group"
+msgstr "Уже в этом чате"
+
+msgid "Chat settings"
+msgstr "Настройки чата"
+
+msgid "Forward to…"
+msgstr "Переслать…"
+
+msgid "Incoming"
+msgstr "Входящий"
+
+msgid "Member"
+msgstr "Участник"
+
+msgid "Open PDF viewer"
+msgstr "Открыть PDF-просмотрщик"
+
+msgid "Open document viewer"
+msgstr "Открыть просмотрщик документов"
+
+msgid "Open sandbox app (x.hello)"
+msgstr "Открыть sandbox-приложение (x.hello)"
+
+msgid "This document has no readable content."
+msgstr "В этом документе нет читаемого содержимого."
+
+msgid "Very large sheet — showing only its beginning."
+msgstr "Очень большой лист — показывается только начало."
+
+msgid "You"
+msgstr "Вы"
+
+msgid "starting…"
+msgstr "запуск…"
