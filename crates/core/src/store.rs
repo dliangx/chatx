@@ -108,7 +108,9 @@ impl Store {
 
     /// Insert a new message. `kind = Kind::Text` for a plain text row,
     /// `Kind::Voice`/`Kind::Image` for media (the path is written to the
-    /// `media_path` column).
+    /// `media_path` column). Returns the row's timestamp id (`t`) so a caller
+    /// that needs to track the fresh row (e.g. an optimistic send badge) can
+    /// key onto it.
     pub async fn push(
         &self,
         chat_id: &str,
@@ -116,7 +118,7 @@ impl Store {
         text: &str,
         sealed: bool,
         kind: Kind,
-    ) {
+    ) -> i64 {
         let t = now_ms();
         let msg = StoredMsg {
             id: t as i64,
@@ -165,6 +167,7 @@ impl Store {
             )
             .await;
         }
+        msg.id
     }
 
     pub fn all(&self) -> Vec<StoredMsg> {
@@ -291,8 +294,8 @@ mod tests {
         let store = Store::with_sql(db.clone(), "QmMe");
         let chat = dm_chat_id("QmMe", "QmOther");
 
-        store.push(&chat, "QmMe", "hi", false, Kind::Text).await;
-        store.push(&chat, "QmOther", "yo", true, Kind::Text).await;
+        let _ = store.push(&chat, "QmMe", "hi", false, Kind::Text).await;
+        let _ = store.push(&chat, "QmOther", "yo", true, Kind::Text).await;
         let me = "QmMe";
         assert_eq!(store.all().len(), 2);
         assert!(store

@@ -1211,7 +1211,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 Ok(Ok(Ok(()))) => {
                     tracing::debug!("[dm] acked via {addr}");
                     let chat = store::dm_chat_id(&self.peer_base58(), peer_base58);
-                    self.store
+                    let _ = self
+                        .store
                         .push(&chat, &self.peer_base58(), text, false, store::Kind::Text)
                         .await;
                     tracing::debug!("[dm] send_dm done, chat={chat}");
@@ -1323,7 +1324,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         local_path: &str,
         duration_ms: u64,
     ) {
-        self.store
+        let _ = self
+            .store
             .push(
                 chat_id,
                 sender,
@@ -1337,8 +1339,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .await;
     }
 
-    /// Record a photo in the chat store (after the image is on disk).
-    pub async fn persist_image(&self, chat_id: &str, sender: &str, local_path: &str) {
+    /// Record a photo in the chat store (after the image is on disk). Returns
+    /// the row's timestamp id so the caller can tag an optimistic send badge.
+    pub async fn persist_image(&self, chat_id: &str, sender: &str, local_path: &str) -> i64 {
         self.store
             .push(
                 chat_id,
@@ -1349,11 +1352,12 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     path: local_path.to_string(),
                 },
             )
-            .await;
+            .await
     }
 
     pub async fn persist_file(&self, chat_id: &str, sender: &str, name: &str, local_path: &str) {
-        self.store
+        let _ = self
+            .store
             .push(
                 chat_id,
                 sender,
@@ -1424,6 +1428,22 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
         }
         anyhow::bail!("failed to deliver to {peer_base58}: {last_err}");
+    }
+
+    /// Acknowledge an inbound photo to `peer_base58` **after** the app has
+    /// durably written the image file and persisted its row. Unblocks the
+    /// sender's `send_image_cmd` waiter (flipping its badge to "sent"). A no-op
+    /// if the inbound channel has already been acked or expired.
+    pub async fn ack_image(&self, peer_base58: &str, id: u64) -> anyhow::Result<()> {
+        let peer: PeerId = peer_base58
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
+        self.running
+            .cmd_tx
+            .send(Cmd::AckImage { peer, id })
+            .map_err(|e| anyhow::anyhow!("swarm command sender closed: {e}"))?;
+        tracing::debug!("[image] ack_image to={peer_base58} id={id}");
+        Ok(())
     }
 
     /// Send a document file (pdf/docx/xlsx/pptx) to `peer_base58` over the DM channel and wait for the peer's ack; the caller writes `data` locally first and calls [`Self::persist_file`] after ack (mirrors `send_image_cmd` + `persist_image`).
@@ -2023,7 +2043,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 (crate::account::b64(wire.as_bytes()), true)
             }
         };
-        self.store
+        let _ = self
+            .store
             .push(&env.group_id, &env.from, &text_field, sealed, kind)
             .await;
         Ok(())
@@ -2397,7 +2418,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     message::MsgKind::Dm => {
                         let text = req.text.clone().unwrap_or_default();
                         let chat = store::dm_chat_id(&self.peer_base58(), &peer_b58);
-                        self.store
+                        let _ = self
+                            .store
                             .push(
                                 &chat,
                                 &peer_b58,

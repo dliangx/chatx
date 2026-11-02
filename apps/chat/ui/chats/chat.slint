@@ -37,6 +37,10 @@ export struct MessageData {
     avatar: image,
     /// Time label shown below the voice bubble body (e.g. "14:32").
     voice_time: string,
+    /// Image-row send badge: 0 none · 1 sending · 2 sent (✓) · 3 failed (!).
+    /// Shown bottom-right over OWN image bubbles so a send reads as sending /
+    /// sent / failed without a global spinner.
+    send_state: int,
 }
 
 export global ChatSession {
@@ -429,6 +433,42 @@ export component ChatView inherits Rectangle {
                         height: parent.height;
                         source: msg.image_img;
                         image-fit: contain;
+                    }
+                }
+
+                if msg.is_self && msg.send_state >= 1:
+                Rectangle {
+                    out property <length> bsz: 22px;
+                    width: bsz;
+                    height: bsz;
+                    x: parent.width - 6px - 36px - 8px - bsz - 4px;
+                    y: msg.height - bsz - 4px;
+                    border-radius: bsz / 2;
+                    // "sent" (2): white chip with a dark check ·
+                    // "sending" (1): same chip, faded to read as in-flight ·
+                    // "failed" (3): dark chip with a red "!".
+                    background: msg.send_state == 3 ? Theme.bg : Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    opacity: msg.send_state == 1 ? 0.55 : 1.0;
+
+                    if msg.send_state == 3:
+                    Text {
+                        width: 100%;
+                        height: 100%;
+                        text: "!";
+                        color: Theme.danger;
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    if msg.send_state != 3:
+                    Icon {
+                        width: bsz;
+                        height: bsz;
+                        size: bsz - 8px;
+                        glyph: Glyph.finish;
+                        tint: Theme.fg;
                     }
                 }
             }

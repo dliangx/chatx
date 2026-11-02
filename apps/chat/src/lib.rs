@@ -13,6 +13,7 @@ pub mod data;
 use data::ArcBackend;
 pub mod call;
 pub mod call_dispatcher;
+pub mod chat;
 pub mod image;
 pub mod moment;
 pub mod process;
@@ -2834,11 +2835,12 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                         .await;
                         continue;
                     }
-                    if let chatx_core::swarm::ChatEvent::Image { peer, data } = &evt {
+                    if let chatx_core::swarm::ChatEvent::Image { peer, data, id } = &evt {
                         handle_inbound_image(
                             weak.clone(),
                             &peer.to_base58(),
                             data.clone(),
+                            *id,
                         )
                         .await;
                         continue;
@@ -2904,9 +2906,14 @@ async fn handle_inbound_voice(
 
 /// Handle an inbound photo message: write the bytes to disk, persist an image
 /// row for the DM with the sender, and refresh the current chat if visible.
-async fn handle_inbound_image(weak: slint::Weak<MainWindow>, peer_base58: &str, data: Vec<u8>) {
+async fn handle_inbound_image(
+    weak: slint::Weak<MainWindow>,
+    peer_base58: &str,
+    data: Vec<u8>,
+    id: u64,
+) {
     tracing::debug!(
-        "[chat-image] INBOUND from={peer_base58} bytes={}",
+        "[chat-image] INBOUND from={peer_base58} id={id} bytes={}",
         data.len()
     );
     let Some(client) = CLIENT.lock().unwrap().clone() else {
@@ -2915,6 +2922,9 @@ async fn handle_inbound_image(weak: slint::Weak<MainWindow>, peer_base58: &str, 
     };
     let me = client.peer_base58();
     let chat_id = dm_chat_id(&me, peer_base58);
+    // `data` is the original image bytes, sent raw over the wire (no
+    // lossless-compression envelope — both peers treat a photo as an opaque
+    // HD byte blob; see the `chat` module header for the design decision).
     match image::store_image_bytes(&data, None).await {
         Ok(path) => {
             let path_str = path.to_string_lossy().into_owned();
@@ -2923,7 +2933,14 @@ async fn handle_inbound_image(weak: slint::Weak<MainWindow>, peer_base58: &str, 
                 path.display(),
                 data.len()
             );
-            client.persist_image(&chat_id, peer_base58, &path_str).await;
+            let _row = client.persist_image(&chat_id, peer_base58, &path_str).await;
+            // Durable now: original + preview on disk, row committed. Only now
+            // do we tell the sender it is "sent" (its badge flips from
+            // sending to sent). A failed write above skips this, so the
+            // sender's wait resolves as a timeout, not a false "sent".
+            if let Err(e) = client.ack_image(peer_base58, id).await {
+                tracing::warn!("[chat-image] ack after persist failed: {e}");
+            }
             refresh_inbound_chat(weak, chat_id).await;
         }
         Err(e) => {
@@ -3313,9 +3330,6 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
         return;
     };
     let is_group = chat_id.starts_with("grp-");
-    if let Some(ui) = weak.upgrade() {
-        ui.global::<ChatSession>().set_send_busy(true);
-    }
     let me = client.peer_base58();
     let my_peers: Vec<String> = {
         let row_peer: String = backend
@@ -3350,6 +3364,17 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
             return;
         }
     };
+    if bytes.len() as u64 > crate::chat::CHAT_IMAGE_MAX_BYTES {
+        let mb = bytes.len() as f64 / 1_048_576.0;
+        set_chat_status(
+            weak,
+            format!(
+                "Image is {mb:.0} MB — chat images are limited to {} MB.",
+                crate::chat::CHAT_IMAGE_MAX_BYTES as f64 / 1_048_576.0
+            ),
+        );
+        return;
+    }
     let rt = runtime();
     let weak2 = weak.clone();
     let c = client.clone();
@@ -3373,9 +3398,8 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
             }
             return;
         }
-        // Store the original + produce the preview in one blocking task (awaited
-        // so this task has a reactor). Runs before the send, so when the chat
-        // reloads its rows the on-disk photos — and their previews — are present.
+        // 1. Store the original + produce the preview (blocking, awaited so the
+        //    on-disk photo + its thumb are present the moment the row appears).
         let local_path = match image::store_image_bytes(&bytes, src_ext.as_deref()).await {
             Ok(p) => p.to_string_lossy().into_owned(),
             Err(e) => {
@@ -3384,19 +3408,32 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
                 return;
             }
         };
+        // 2. Optimistic: persist the row NOW (before the wire send) so the bubble
+        //    is visible immediately with a "sending" badge, not behind a spinner.
+        let row_t = c.persist_image(&chat_id, &me, &local_path).await;
+        tracing::debug!(
+            "[chat-image] optimistic persist chat={chat_id} t={row_t} ({} bytes)",
+            bytes.len()
+        );
+        crate::chat::note_image_sending(&chat_id, row_t);
+        load_chat_messages(weak2.clone(), key);
         let mut last_err = if my_peers.is_empty() {
             "Cannot determine peer".to_string()
         } else {
             String::new()
         };
+        // 3. Wire payload = the ORIGINAL (HD) bytes, sent raw.
+        let wire = bytes;
         let mut sent = false;
         'outer: for cand in &my_peers {
             if cand == &me {
                 continue;
             }
-            match c.send_image_cmd(cand, bytes.clone()).await {
+            match c.send_image_cmd(cand, wire.clone()).await {
                 Ok(_) => {
-                    c.persist_image(&chat_id, &me, &local_path).await;
+                    // The only ack we wait on is the peer's, now sent only AFTER
+                    // it durably persists the image; reaching here = "sent".
+                    crate::chat::set_image_state(&chat_id, row_t, crate::chat::SEND_STATE_SENT);
                     sent = true;
                     tracing::debug!("[chat-image] sent -> {cand}");
                     break 'outer;
@@ -3409,6 +3446,12 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
         }
         if sent {
             touch_chat_activity(&chat_id);
+        } else {
+            crate::chat::set_image_state(
+                &chat_id,
+                row_t,
+                crate::chat::SEND_STATE_FAILED,
+            );
         }
         let msg = if sent {
             String::new()
@@ -3417,10 +3460,10 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
         } else {
             last_err
         };
-        set_chat_status(weak3, msg.clone());
-        if sent {
-            load_chat_messages(weak2, key);
+        if !msg.is_empty() {
+            set_chat_status(weak3, msg);
         }
+        load_chat_messages(weak2, key);
     });
 }
 
@@ -4528,7 +4571,28 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                     let older_sum: f32 = heights.iter().skip(i + 1).sum();
                     let rows_above = (n.saturating_sub(1).saturating_sub(i)) as f32;
                     let top = PAD + rows_above * GAP + older_sum;
-                    to_message_data(m, scale, top)
+                    let mut md = to_message_data(m, scale, top);
+                    // Stamp the per-row send badge onto self image rows from the
+                    // in-flight registry. A self image NOT in the registry is a
+                    // settled/delivered row -> "sent"; anything in the registry
+                    // (sending / failed) overrides that. Incoming (non-self)
+                    // image rows leave `send_state` at 0 = no badge.
+                    if let Some(src) = rows.get(i) {
+                        if let chatx_core::store::Kind::Image { .. } = &src.kind {
+                            let is_self = src.sender == me_peer || src.sender == me;
+                            if is_self {
+                                md.send_state =
+                                    match crate::chat::image_state(&chat_id, src.t as i64) {
+                                        crate::chat::SEND_STATE_NONE
+                                        | crate::chat::SEND_STATE_SENT => {
+                                            crate::chat::SEND_STATE_SENT
+                                        }
+                                        other => other, // sending(1) / failed(3)
+                                    };
+                            }
+                        }
+                    }
+                    md
                 })
                 .collect();
             let content_h = if n == 0 {

@@ -12,7 +12,7 @@ use libp2p::mdns::{Config as MdnsConfig, Event as MdnsEvent};
 use libp2p::request_response::cbor::{self, Behaviour as Blob};
 use libp2p::request_response::json::Behaviour as Chat;
 use libp2p::request_response::{
-    Config as RrConfig, Event as RrEvent, Message as RrMessage, ProtocolSupport,
+    Config as RrConfig, Event as RrEvent, Message as RrMessage, ProtocolSupport, ResponseChannel,
 };
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::swarm::{StreamProtocol, SwarmEvent};
@@ -113,11 +113,15 @@ pub enum ChatEvent {
     },
 
     /// Persistent photo message received from a peer. The application layer is
-    /// expected to write `data` (image bytes) to disk and then call
-    /// [`crate::Client::persist_image`] to record it into the chat store.
+    /// expected to write `data` (image bytes) to disk and call
+    /// [`crate::Client::persist_image`] to record it into the chat store, and
+    /// only **then** call [`crate::Client::ack_image`] so the sender's "sent"
+    /// badge is confirmed after the photo is durably persisted. `id` tags this
+    /// inbound message — pair it with the sender to send the acknowledgement.
     Image {
         peer: PeerId,
         data: Vec<u8>,
+        id: u64,
     },
 
     /// Persistent document file (pdf/docx/xlsx/pptx) received from a peer; `name` = sender's basename — the app writes `data` to disk and records the row via [`crate::Client::persist_file`].
@@ -221,6 +225,14 @@ pub enum Cmd {
         data: Vec<u8>,
         ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
     },
+    /// Acknowledge an inbound photo: the app has durably written the image and
+    /// persisted its row, so we may now tell the sender it is "sent". Replies
+    /// the `ImageAck` on the retained inbound channel (see
+    /// [`Running::pending_inbound_image`]).
+    AckImage {
+        peer: PeerId,
+        id: u64,
+    },
     /// Send a document file (pdf/docx/xlsx/pptx); `name` = sender's basename (persisted/shown at the receiver); same peer-ack lifecycle as [`Cmd::SendImage`].
     SendFile {
         peer: PeerId,
@@ -271,6 +283,13 @@ pub struct Running {
     pub listen_addrs: Arc<Mutex<Vec<Multiaddr>>>,
     pub my_peer_id: PeerId,
     pub pending_acks: Arc<Mutex<HashMap<u64, (PeerId, oneshot::Sender<anyhow::Result<()>>)>>>,
+    /// Inbound photo channels awaiting the app's "ack after persist" reply.
+    /// Keyed by inbound `ImageRequest::id` -> `(sender, channel, received_at)`.
+    /// The channel is kept (not acked on receipt) so the app can send the
+    /// `ImageAck` only once the image + its row are durably persisted. Entries
+    /// expire so a crashed app can't leak channels — the sender then times out.
+    pub pending_inbound_image:
+        Arc<Mutex<HashMap<u64, (PeerId, ResponseChannel<ImageAck>, std::time::Instant)>>>,
     /// In-flight binary (moment) request waiters, keyed by `PostRequest::id`.
     pub pending_blobs: Arc<Mutex<HashMap<u64, (PeerId, oneshot::Sender<anyhow::Result<crate::moment::PostResponse>>)>>>,
     /// Shared pool over the local SQLite db, used by the serving side of the
@@ -442,6 +461,9 @@ pub async fn boot(
     let (injected_tx, injected_rx) = mpsc::unbounded_channel();
     let listen_addrs: Arc<Mutex<Vec<Multiaddr>>> = Arc::new(Mutex::new(Vec::new()));
     let pending_acks = Arc::new(Mutex::new(HashMap::new()));
+    let pending_inbound_image:
+        Arc<Mutex<HashMap<u64, (PeerId, ResponseChannel<ImageAck>, std::time::Instant)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let pending_blobs = Arc::new(Mutex::new(HashMap::new()));
     let connected = Arc::new(Mutex::new(HashMap::new()));
     let dial_backoff = Arc::new(Mutex::new(HashMap::new()));
@@ -465,6 +487,7 @@ pub async fn boot(
         listen_addrs: Arc::clone(&listen_addrs),
         my_peer_id: my_peer,
         pending_acks: Arc::clone(&pending_acks),
+        pending_inbound_image: Arc::clone(&pending_inbound_image),
         pending_blobs: Arc::clone(&pending_blobs),
         pool: pool.clone(),
         connected: Arc::clone(&connected),
@@ -663,6 +686,26 @@ async fn swarm_loop(
                     );
                     let req = ImageRequest { id, from, data };
                     let _rid = swarm.behaviour_mut().image.send_request(&peer, req);
+                }
+                Some(Cmd::AckImage { peer, id }) => {
+                    match running.pending_inbound_image.lock().unwrap().remove(&id) {
+                        Some((_sender, channel, _at)) => {
+                            let _ = swarm
+                                .behaviour_mut()
+                                .image
+                                .send_response(channel, ImageAck { id });
+                            tracing::debug!(
+                                "[swarm] IMAGE ACK SENT to={peer} id={} (after app persist)",
+                                id
+                            );
+                        }
+                        // Not in the table (already acked, expired, or never held) —
+                        // nothing to send; the sender will resolve on timeout.
+                        None => tracing::debug!(
+                            "[swarm] IMAGE ACK DROPPED to={peer} id={} (no channel)",
+                            id
+                        ),
+                    }
                 }
                 Some(Cmd::SendFile {
                     peer,
@@ -1013,11 +1056,29 @@ async fn swarm_loop(
                                     request.id,
                                     request.data.len()
                                 );
-                                let ack = ImageAck { id: request.id };
-                                let _ = swarm.behaviour_mut().image.send_response(channel, ack);
+                                // Hold the inbound channel and do NOT ack here: the
+                                // app must acknowledge (via `Cmd::AckImage`) only
+                                // after it has durably persisted the image + its
+                                // row. Prune any expired unclaimed channels so a
+                                // crashed app can't leak them.
+                                {
+                                    let now = std::time::Instant::now();
+                                    let ttl = std::time::Duration::from_secs(60);
+                                    let mut m = running.pending_inbound_image.lock().unwrap();
+                                    m.retain(|_, (_, _, at)| now.duration_since(*at) < ttl);
+                                }
+                                running
+                                    .pending_inbound_image
+                                    .lock()
+                                    .unwrap()
+                                    .insert(
+                                        request.id,
+                                        (peer.clone(), channel, std::time::Instant::now()),
+                                    );
                                 let _ = ev.send(ChatEvent::Image {
                                     peer,
                                     data: request.data,
+                                    id: request.id,
                                 });
                             }
                             RrMessage::Response { response, .. } => {

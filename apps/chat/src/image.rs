@@ -618,6 +618,9 @@ pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageDa
             }
         },
         voice_time: SharedString::from(m.time),
+        // 0 = no badge; the model build in `load_chat_messages` overwrites this
+        // with the in-flight send state for self image rows.
+        send_state: 0,
     }
 }
 
