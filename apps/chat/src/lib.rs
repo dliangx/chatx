@@ -2855,6 +2855,32 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                         .await;
                         continue;
                     }
+                    // A new NAT-traversable address (UPnP-mapped public IP or a
+                    // relay-circuit reservation) is now dialable. Re-announce our
+                    // endpoint list to the directory immediately so remote peers
+                    // can reach us without waiting up to 15s for the periodic
+                    // heartbeat. `heartbeat()` does blocking directory HTTP and
+                    // `self`/client is the owning `Arc` here; debounce so the
+                    // UPnP + relay confirmations that fire together result in one
+                    // announce.
+                    if let chatx_core::swarm::ChatEvent::ExternalAddrConfirmed { address } = &evt {
+                        tracing::info!(%address, "pump: external addr confirmed — heartbeat now");
+                        let rc = client.clone();
+                        static HB_BUSY: std::sync::atomic::AtomicBool =
+                            std::sync::atomic::AtomicBool::new(false);
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let _ = HB_BUSY
+                                .compare_exchange(
+                                    false,
+                                    true,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            rc.heartbeat();
+                            HB_BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
+                        });
+                        continue;
+                    }
                     let touched = client.process_event(evt).await;
                     if let Some(touched) = touched {
                         refresh_inbound_chat(weak.clone(), touched).await;

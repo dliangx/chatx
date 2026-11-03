@@ -19,6 +19,10 @@ mod relay;
 #[derive(Clone)]
 struct App {
     db: Arc<db::Sdb>,
+    /// Advertised circuit-relay multiaddrs (populated by the relay task once it
+    /// is listening). Served via `GET /v1/relays` so clients can discover a
+    /// relay without operator-provided `CHATX_RELAYS`.
+    relays: Arc<tokio::sync::Mutex<Vec<String>>>,
 }
 
 #[derive(Deserialize)]
@@ -378,6 +382,16 @@ async fn health() -> ApiResult {
     Ok(ok_json(&"ok"))
 }
 
+/// List the advertised relay addresses so a client can discover a NAT
+/// traversal relay without an operator-supplied `CHATX_RELAYS`. Each entry is a
+/// full multiaddr of the form `/ip4/<host>/tcp/<port>/p2p/<relay_peer_id>`.
+async fn list_relays(State(app): State<App>) -> ApiResult {
+    let relays = app.relays.lock().await.clone();
+    let out: Vec<chatx_core::signal::RelayInfo> =
+        relays.into_iter().map(|addr| chatx_core::signal::RelayInfo { addr }).collect();
+    Ok(ok_json(&out))
+}
+
 async fn upsert_group(
     State(App { db, .. }): State<App>,
     Path(group_id): Path<String>,
@@ -642,6 +656,7 @@ async fn list_posts(
 pub(crate) fn make_router(app: App) -> Router {
     Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/relays", get(list_relays))
         .route("/v1/users", get(list_users))
         .route("/v1/users/{user_id}", put(upsert_user).get(resolve_user))
         .route(
@@ -710,7 +725,8 @@ async fn main() {
         "directory restored"
     );
 
-    let app = App { db };
+    let relays = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let app = App { db, relays: relays.clone() };
 
     let router = make_router(app.clone());
 
@@ -720,14 +736,29 @@ async fn main() {
     tracing::info!(%addr, "chatx-signal listening");
 
     // Built-in circuit-relay v2 server (enable with a CHATX_RELAY_ADDR value,
-    // disable with `CHATX_RELAY_ADDR=off`). Defaults to 0.0.0.0:4039.
+    // disable with `CHATX_RELAY_ADDR=off`). Defaults to 0.0.0.0:4039. Once the
+    // relay is listening it publishes its advertise multiaddr into `relays` so
+    // clients can discover it via `GET /v1/relays`.
     let relay_spec = std::env::var("CHATX_RELAY_ADDR").unwrap_or_else(|_| "0.0.0.0:4039".into());
     if relay_spec.to_ascii_lowercase() != "off" {
         let relay_addr: SocketAddr = relay_spec
             .parse()
             .expect("CHATX_RELAY_ADDR must be host:port or `off`");
+        let relays = relays.clone();
         tokio::spawn(async move {
-            if let Err(e) = relay::serve(relay_addr).await {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<String>();
+            let serve = tokio::spawn(relay::start(relay_addr, ready_tx));
+            // Await the ready notification *and* run the serve task; publish the
+            // advertise address for the clients' `GET /v1/relays`.
+            let advertise = ready_rx.await;
+            match advertise {
+                Ok(addr) => {
+                    relays.lock().await.push(addr.clone());
+                    tracing::info!(%addr, "relay advertised via GET /v1/relays");
+                }
+                Err(e) => tracing::warn!(%e, "relay ready channel closed before announcing"),
+            }
+            if let Err(e) = serve.await {
                 tracing::error!(%e, "relay exited");
             }
         });
@@ -767,7 +798,10 @@ mod http_tests {
                     .unwrap();
                 rt.block_on(async move {
                     let db = Arc::new(db::open(&path).await.unwrap());
-                    let app = App { db: db.clone() };
+                    let app = App {
+                        db: db.clone(),
+                        relays: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                    };
                     // Seed one server-mode group: owner "owner" + member "member-a".
                     let mut members = std::collections::BTreeMap::new();
                     for (pid, sign, e2e) in
@@ -805,6 +839,17 @@ mod http_tests {
                 _db: dir,
             }
         }
+    }
+
+    #[test]
+    fn relays_endpoint_returns_empty_list() {
+        use chatx_core::signal::{DirectoryClient, HttpDirectory};
+        let server = Server::start();
+        let dir = HttpDirectory::new(server.base.clone());
+
+        // The test server starts without a relay task, so `GET /v1/relays`
+        // must answer with an empty JSON list (not an error).
+        assert!(dir.list_relays().is_empty(), "server with no relay lists none");
     }
 
     #[test]

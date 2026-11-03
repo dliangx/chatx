@@ -150,6 +150,13 @@ pub enum ChatEvent {
     Connected(PeerId),
     Disconnected(PeerId),
     Listening(Multiaddr),
+    /// An external (NAT-traversable) address has been confirmed for this
+    /// device — e.g. a UPnP-mapped public IP, or a reserved relay-circuit
+    /// address. The application should re-announce endpoints to the directory
+    /// (heartbeat) now so remote peers can dial it.
+    ExternalAddrConfirmed {
+        address: Multiaddr,
+    },
     GroupPacket {
         topic: String,
         from: PeerId,
@@ -339,6 +346,24 @@ pub fn split_relay_addr(full: &Multiaddr) -> Option<(PeerId, Multiaddr)> {
         }
     }
     None
+}
+
+/// Parse a list of full relay multiaddr strings (as returned by the
+/// directory's `GET /v1/relays`, or the `CHATX_RELAYS` env var) into
+/// `(relay_peer_id, dialable_base)` pairs. Malformed or non-relay entries
+/// are skipped with a debug log.
+pub fn parse_relay_strings(specs: &[String]) -> Vec<(PeerId, Multiaddr)> {
+    let mut out = Vec::new();
+    for s in specs {
+        match s.parse::<Multiaddr>() {
+            Ok(addr) => match split_relay_addr(&addr) {
+                Some(pair) => out.push(pair),
+                None => tracing::debug!("[relay] {:?} has no /p2p/... component; ignored", s),
+            },
+            Err(e) => tracing::debug!("[relay] {s:?}: {e}"),
+        }
+    }
+    out
 }
 
 fn parse_relay_env() -> Vec<(PeerId, Multiaddr)> {
@@ -812,10 +837,14 @@ async fn swarm_loop(
                 // heartbeat/`refresh` path re-announces them to the directory.
                 SwarmEvent::ExternalAddrConfirmed { address } => {
                     let mut addrs = running.listen_addrs.lock().unwrap();
-                    if !addrs.iter().any(|a| a == &address) {
+                    let new = !addrs.iter().any(|a| a == &address);
+                    if new {
                         addrs.push(address.clone());
                     }
-                    tracing::debug!("[swarm] EXTERNAL ADDR {address}");
+                    tracing::info!("[swarm] EXTERNAL ADDR CONFIRMED {address}");
+                    if new {
+                        let _ = ev.send(ChatEvent::ExternalAddrConfirmed { address });
+                    }
                 }
                 SwarmEvent::ExternalAddrExpired { address } => {
                     running
@@ -1238,5 +1267,37 @@ async fn swarm_loop(
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_relay_strings_accepts_full_multiaddr() {
+        // Build a valid full relay multiaddr for an arbitrary real peer id.
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let full = format!("/ip4/1.2.3.4/tcp/4039/p2p/{peer}");
+        let specs = vec![full.clone(), "not a multiaddr".to_string()];
+        let out = parse_relay_strings(&specs);
+        assert_eq!(out.len(), 1, "one valid, one malformed");
+        assert_eq!(out[0].0, peer);
+        assert_eq!(
+            out[0].1.to_string(),
+            "/ip4/1.2.3.4/tcp/4039",
+            "base should exclude the /p2p/ component"
+        );
+    }
+
+    #[test]
+    fn parse_relay_strings_ignores_missing_p2p() {
+        let specs = vec!["/ip4/1.2.3.4/tcp/4039".to_string()];
+        assert!(
+            parse_relay_strings(&specs).is_empty(),
+            "a relay addr without /p2p/ is unusable"
+        );
     }
 }

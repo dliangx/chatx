@@ -97,22 +97,58 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok(client)
     }
 
-    pub fn reconnect_groups(&self) {
+    /// Reserve a circuit-relay slot on every known relay (skipped when a
+    /// circuit is already reserved). Split out of [`Self::reconnect_groups`]
+    /// so relay auto-discovery can trigger it independently of group re-sub.
+    pub fn reserve_relays(&self) {
         let have_circuit = self.running.listen_addrs.lock().unwrap().iter().any(|a| {
             a.iter()
                 .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2pCircuit))
         });
-        if !have_circuit {
-            let relays: Vec<(PeerId, Multiaddr)> = self.running.relays.lock().unwrap().clone();
-            for (peer, base) in relays {
-                if let Err(e) = self.running.cmd_tx.send(Cmd::ReserveRelay {
-                    relay_peer: peer,
-                    relay_addr: base,
-                }) {
-                    tracing::warn!("reserve relay {peer}: {e}");
-                }
+        if have_circuit {
+            return;
+        }
+        let relays: Vec<(PeerId, Multiaddr)> = self.running.relays.lock().unwrap().clone();
+        for (peer, base) in relays {
+            if let Err(e) = self.running.cmd_tx.send(Cmd::ReserveRelay {
+                relay_peer: peer,
+                relay_addr: base,
+            }) {
+                tracing::warn!("reserve relay {peer}: {e}");
             }
         }
+    }
+
+    /// Ask the directory for available circuit relays (`GET /v1/relays`) and
+    /// merge them into the local relay set, reserving a circuit on any that is
+    /// new. `CHATX_RELAYS` keeps precedence: relays already configured via the
+    /// environment are kept and the server's list only fills in what is missing.
+    /// Fire-and-forget — a directory without relay discovery simply yields an
+    /// empty list and this is a no-op.
+    pub async fn discover_relays(&self) {
+        if !self.running.relays.lock().unwrap().is_empty() {
+            tracing::debug!("[dir] using relays from CHATX_RELAYS; skipping server discovery");
+            return;
+        }
+        let server_relays = self.dir().list_relays();
+        if server_relays.is_empty() {
+            return;
+        }
+        let parsed = sw::parse_relay_strings(&server_relays);
+        let mut existing = self.running.relays.lock().unwrap();
+        for (peer, base) in parsed {
+            if existing.iter().any(|(p, _)| *p == peer) {
+                continue;
+            }
+            tracing::info!("[dir] discovered relay {peer} from directory");
+            existing.push((peer, base));
+        }
+        drop(existing);
+        self.reserve_relays();
+    }
+
+    pub fn reconnect_groups(&self) {
+        self.reserve_relays();
 
         let group_ids: Vec<String> = self.groups.read().keys().cloned().collect();
         for group_id in &group_ids {
@@ -641,6 +677,48 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
     pub fn heartbeat(&self) {
         let ep = self.endpoints_with_egress();
+        // NAT diagnostics (transition-based, warn once per state change):
+        // surface the "registered behind NAT, nobody can dial me" failure mode
+        // only when we cross into / out of the non-routable state. If every
+        // advertised endpoint is private and we have no relay circuit, cross-NAT
+        // peers cannot reach us. Once we recover (public IP / relay appears) we
+        // log info-level so the operator can see the state flip — but we do NOT
+        // spam the same warn line every 15s heartbeat while still behind NAT.
+        let has_public = ep.iter().any(|e| is_routable_public_or_circuit(e));
+        static NAT_WARNED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !has_public {
+            if NAT_WARNED
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                tracing::warn!(
+                    endpoints = %ep.join(","),
+                    "no public or relay endpoint advertised — device is behind NAT; peers on \
+                     other networks cannot reach it (enable a relay or UPnP/STUN)"
+                );
+            }
+        } else {
+            if NAT_WARNED
+                .compare_exchange(
+                    true,
+                    false,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                tracing::info!(
+                    endpoints = %ep.join(","),
+                    "routable public endpoint now advertised — cross-NAT dialing should succeed"
+                );
+            }
+        }
         let user_rec = UserRecord {
             user_id: self.account.user_id().to_string(),
             e2e_public: self.account.e2e_public().to_string(),
@@ -839,6 +917,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
     async fn refresh_directory_auto(&self, label: impl Into<String>) -> anyhow::Result<()> {
         self.dir.check()?;
+        // Best-effort: learn the directory's circuit relays before we register,
+        // so the freshly-announced endpoints already include a relay-circuit
+        // address (the only NAT-traversal fallback when direct dial fails).
+        self.discover_relays().await;
         let my = self.device.peer_base58();
         if let Ok(existing) = self.dir.resolve_device(&my) {
             if existing.user_id == self.account.user_id() {
@@ -2457,6 +2539,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 }
                 gid
             }
+            // `ExternalAddrConfirmed` is surfaced to the application layer (the
+            // event pump) so it can immediately re-announce endpoints via
+            // `heartbeat()`; the core deliberately does not act on it here
+            // since `self` is a bare `&Client`, not the owning `Arc`.
             _ => None,
         }
     }
@@ -2543,6 +2629,41 @@ fn tcp_port_of(addr: &str) -> Option<u16> {
             })
         })
         .filter(|p| *p != 0)
+}
+
+/// True when a multiaddr is dial-able from *another* network — i.e. it carries
+/// a public (non-link-local / non-RFC1918, non-loopback) IPv4, or it is a
+/// relay-circuit address (`/p2p-circuit/...`). Private LAN addresses such as
+/// `192.168.*`, `10.*`, `172.16-31.*`, `127.*` and `::1` are NOT routable.
+fn is_routable_public_or_circuit(addr: &str) -> bool {
+    let Ok(m) = addr.parse::<Multiaddr>() else {
+        return false;
+    };
+    let mut has_public_ip = false;
+    for c in m.iter() {
+        match c {
+            libp2p::multiaddr::Protocol::P2pCircuit => return true,
+            libp2p::multiaddr::Protocol::Ip4(ip) => {
+                if !ip.is_loopback()
+                    && !ip.is_unspecified()
+                    && !ip.is_private()
+                    && !ip.is_link_local()
+                {
+                    has_public_ip = true;
+                }
+            }
+            libp2p::multiaddr::Protocol::Ip6(ip) => {
+                if !ip.is_loopback()
+                    && !ip.is_unspecified()
+                    && !ip.is_unicast_link_local()
+                {
+                    has_public_ip = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    has_public_ip
 }
 
 fn unroutable_reason(addr: &Multiaddr) -> Option<&'static str> {
