@@ -37,6 +37,15 @@ pub struct PostPointer {
     pub post_ts: i64,
 }
 
+/// A relay advertisement returned by `GET /v1/relays`. Clients use this
+/// address to reserve a circuit relay slot on the relay.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RelayInfo {
+    /// Full multiaddr including `/p2p/<relay_peer_id>` — exactly the value
+    /// that used to be put into `CHATX_RELAYS`.
+    pub addr: String,
+}
+
 pub const ONLINE_TTL_MS: u64 = 30_000;
 
 pub trait DirectoryClient: Sync + Send {
@@ -133,6 +142,14 @@ pub trait DirectoryClient: Sync + Send {
 
     fn check(&self) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    /// Discover available circuit relays from the directory. Returns a list of
+    /// full multiaddrs of the form `/ip4/host/tcp/port/p2p/<peer_id>`.
+    /// Empty when the directory has no relays configured or the endpoint is
+    /// not supported (older servers).
+    fn list_relays(&self) -> Vec<String> {
+        Vec::new()
     }
     fn touch_presence(&self, peer_id: &str, endpoints: &[String]) -> bool {
         if let Ok(mut rec) = self.resolve_device(peer_id) {
@@ -604,6 +621,22 @@ impl Default for HttpDirectory {
 impl DirectoryClient for HttpDirectory {
     fn check(&self) -> anyhow::Result<()> {
         self.ping()
+    }
+
+    fn list_relays(&self) -> Vec<String> {
+        let url = format!("{}/v1/relays", self.base);
+        match http_client().request("GET", &url).call() {
+            Ok(resp) => resp
+                .into_json::<Vec<RelayInfo>>()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| r.addr)
+                .collect(),
+            Err(e) => {
+                tracing::debug!("[dir] list_relays failed: {e}");
+                Vec::new()
+            }
+        }
     }
 
     fn upsert_user(&self, user: &UserRecord) {
