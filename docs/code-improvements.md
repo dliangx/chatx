@@ -495,19 +495,23 @@
 
 **状态**: ✅ 完成
 
-### 35. [ ] Phase 2 — STUN 公网 IP 发现
+### 35. [x] Phase 2 — STUN 公网 IP 发现
 
 **问题**: `current_egress_ip()` 返回私有 IP，被当作公网地址上报；节点真实公网 IP 仍未知。
 
-**位置**: `crates/core/src/lib.rs:2631`（`current_egress_ip`）, `endpoints_with_egress`（`lib.rs:699`）
+**位置**: `crates/core/src/stun.rs`（新增）, `crates/core/src/lib.rs`（`endpoints_with_egress` + `start_presence_loop`）
 
-**修改方向**:
-1. 轻量 STUN（RFC 5389 binding request）向公共 STUN 服务查询真实公网 IP + 映射端口
-2. 仅当探测到公网 IP 时才追加 `/ip4/<public>/tcp/<mapped-port>` 到 `endpoints`
-3. 替换/补充现有 8.8.8.8 egress 探测（那个只返回 LAN IP）
-4. STUN 应放入 `spawn_blocking`（阻塞 UDP I/O）
+**已实现**:
+- 新增 `crates/core/src/stun.rs`（RFC 5389 STUN binding，IPv4 + IPv6，
+  MAPPED + XOR-MAPPED，多服务器 fallback，120s 进程级缓存，
+  含 `PublicIp` / `discover()` / `discover_cached()` API）
+- `endpoints_with_egress` 改造：优先 STUN 公网 IP（配本机真实监听端口），
+  无 STUN 时回退原 LAN egress 逻辑
+- `start_presence_loop` 新增 prewarm 线程（非阻塞 STUN 探测 + 立即心跳），
+  确保首次上报即带公网地址
+- 新增 5 个单元测试（含真实网络 live probe）
 
-**验收标准**: 家用宽带后启动，目录里出现 `x.x.x.x`（公网）端点；外网 peer 可直连
+**状态**: ✅ 完成
 
 ### 36. [ ] Phase 2 — 信令辅助 TCP hole-punching
 
