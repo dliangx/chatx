@@ -7,7 +7,7 @@
 //! streams — it never sees message plaintext nor holds any chatx keys.
 //!
 //! Deployment:
-//!   cargo run -p chatx-signal                     # relay on 0.0.0.0:4039
+//!   cargo run -p chatx-signal                     # relay on 0.0.0.0:1883
 //!   CHATX_RELAY_ADDR=0.0.0.0:5000 cargo run -p chatx-signal
 //!   CHATX_RELAY_ADDR=off ...                      # disable
 
@@ -17,7 +17,7 @@ use libp2p::{Multiaddr, PeerId, SwarmBuilder};
 
 /// Start the circuit-relay server. When the relay is listening (first
 /// `NewListenAddr` event fires) the fully-qualified advertise multiaddr
-/// (e.g. `/ip4/1.2.3.4/tcp/4039/p2p/12D3Koo...`) is sent via `ready_tx`.
+/// (e.g. `/ip4/1.2.3.4/tcp/1883/p2p/12D3Koo...`) is sent via `ready_tx`.
 /// The function blocks until the relay exits.
 pub async fn start(
     addr: std::net::SocketAddr,

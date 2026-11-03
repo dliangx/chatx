@@ -834,7 +834,7 @@ async fn main() {
     eprintln!("chatx-signal log file: {}", log_path.display());
 
     let addr: SocketAddr = std::env::var("CHATX_SIGNAL_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:8787".into())
+        .unwrap_or_else(|_| "0.0.0.0:8080".into())
         .parse()
         .expect("CHATX_SIGNAL_ADDR must be a socket address");
 
@@ -869,10 +869,10 @@ async fn main() {
     tracing::info!(%addr, "chatx-signal listening");
 
     // Built-in circuit-relay v2 server (enable with a CHATX_RELAY_ADDR value,
-    // disable with `CHATX_RELAY_ADDR=off`). Defaults to 0.0.0.0:4039. Once the
+    // disable with `CHATX_RELAY_ADDR=off`). Defaults to 0.0.0.0:1883. Once the
     // relay is listening it publishes its advertise multiaddr into `relays` so
     // clients can discover it via `GET /v1/relays`.
-    let relay_spec = std::env::var("CHATX_RELAY_ADDR").unwrap_or_else(|_| "0.0.0.0:4039".into());
+    let relay_spec = std::env::var("CHATX_RELAY_ADDR").unwrap_or_else(|_| "0.0.0.0:1883".into());
     if relay_spec.to_ascii_lowercase() != "off" {
         let relay_addr: SocketAddr = relay_spec
             .parse()
