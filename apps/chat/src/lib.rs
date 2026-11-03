@@ -2619,6 +2619,10 @@ fn apply_result(
             let client = Arc::new(client);
             client.heartbeat();
             client.start_presence_loop();
+            // Long-poll the directory for wake notices (TCP hole-punch
+            // coordination). Safe to call on every login — no-op after the
+            // first one thanks to the client-side cooldown.
+            client.start_notify_pump();
             start_group_conn_sweeper();
             let approved = client
                 .status()

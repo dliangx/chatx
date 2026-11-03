@@ -35,6 +35,10 @@ pub struct Client<D: DirectoryClient + ?Sized> {
     events: tokio::sync::Mutex<sw::EventRx>,
     groups: RwLock<BTreeMap<String, Group>>,
     groups_dir: std::path::PathBuf,
+    /// Last successful wake_peer timestamp per peer (ms since epoch). Used to
+    /// rate-limit wake requests to ~1 per 30 s, bounding server load from a
+    /// flaky peer.
+    wake_last: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
 #[derive(Debug)]
@@ -92,6 +96,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             events: tokio::sync::Mutex::new(events),
             groups: RwLock::new(groups),
             groups_dir,
+            wake_last: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
 
         client.reconnect_groups();
@@ -159,6 +164,114 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 tracing::warn!("re-subscribe group {group_id}: {e}");
             }
         }
+    }
+
+    /// Ask the directory to wake up `peer_base58` so it dials this device
+    /// back. This is the coordinator step of TCP hole-punching: when a direct
+    /// dial to the peer fails (both behind NAT, no shared relay), asking the
+    /// server to poke it causes it to dial us at the same instant we are trying
+    /// to dial it, which opens both NAT mappings. Best-effort — returns `true`
+    /// when the server accepted the request; callers should treat `false`
+    /// (older server / offline) as "no punch available" and continue with the
+    /// relay fallback.
+    pub fn wake_peer(&self, peer_base58: &str) -> bool {
+        if peer_base58 == self.peer_base58() {
+            return false;
+        }
+        // Per-peer cooldown: don't hammer the server if this peer is flaky.
+        let now = crate::message::now_ms();
+        {
+            let map = self.wake_last.lock().unwrap();
+            if let Some(&last) = map.get(peer_base58) {
+                if now.saturating_sub(last) < 30_000 {
+                    tracing::debug!(peer = peer_base58, "[hole-punch] throttled (within 30 s)");
+                    return false;
+                }
+            }
+        }
+        let me = self.peer_base58();
+        let ok = self.dir().notify(peer_base58, &me);
+        if ok {
+            self.wake_last.lock().unwrap().insert(peer_base58.to_string(), now);
+            tracing::info!(peer = peer_base58, "[hole-punch] requested server wake for peer");
+        } else {
+            tracing::debug!(peer = peer_base58, "[hole-punch] notify unsupported or failed; proceeding to relay fallback");
+        }
+        ok
+    }
+
+    /// Dial a peer by peer id, treating it as a wake response: resolve the
+    /// peer's endpoints and initiate a dial. Called by the notice pump when
+    /// the peer asked us (via `wake_peer`) to dial back. No-op when we are
+    /// already connected to them or when the peer id is malformed — the pump
+    /// keeps polling regardless.
+    pub fn dial_peer_by_id(&self, peer_base58: &str) {
+        let me = self.peer_base58();
+        if peer_base58 == me {
+            return;
+        }
+        if self.peer_connected_str(peer_base58) {
+            tracing::debug!(peer = peer_base58, "[hole-punch] already connected; skipping");
+            return;
+        }
+        let _ = self.warm_dial_peer(peer_base58);
+    }
+
+    /// Cheap connected check that accepts a base-58 peer id string.
+    pub fn peer_connected_str(&self, peer_base58: &str) -> bool {
+        let Ok(pid) = peer_base58.parse::<PeerId>() else {
+            return false;
+        };
+        self.running
+            .connected
+            .lock()
+            .unwrap()
+            .get(&pid)
+            .copied()
+            .unwrap_or(0)
+            > 0
+    }
+
+    /// Run one notice-poll round: block (up to ~50 s) on the long-poll, and
+    /// for every wake notice received, dial the sender back. Called by a
+    /// background thread that the app pumps (see `start_notify_pump`). Returns
+    /// the number of peers dialed in this round.
+    pub fn process_wakes(&self) -> u32 {
+        let me = self.peer_base58();
+        let notices = self.dir().poll_notices(&me);
+        let mut dialed = 0u32;
+        for n in notices {
+            if n.from == me {
+                continue;
+            }
+            tracing::info!(from = %n.from, at = n.at, "[hole-punch] received wake — dialing back");
+            self.dial_peer_by_id(&n.from);
+            dialed += 1;
+        }
+        dialed
+    }
+
+    /// Start a background thread that long-polls the directory for wake
+    /// notices and dials the sender back on arrival. Safe to call multiple
+    /// times — only the first call spawns the thread.
+    pub fn start_notify_pump(self: &Arc<Self>) {
+        static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if STARTED.set(()).is_err() {
+            return;
+        }
+        let client = self.clone();
+        let _ = std::thread::Builder::new()
+            .name("chatx-notify-pump".to_string())
+            .spawn(move || loop {
+                let n = client.process_wakes();
+                if n == 0 {
+                    // No notices in this window; the long-poll already blocked
+                    // for the server timeout, which is the natural pacing. No
+                    // additional sleep needed (and one would just delay the
+                    // next punch by a second or two).
+                }
+            })
+            .expect("spawn notify pump thread");
     }
 
     pub fn connect_to_group(&self, group_id: &str) -> Result<(), anyhow::Error> {
@@ -1318,6 +1431,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let e2e = self.e2e_public().to_string();
         let timeout = std::time::Duration::from_secs(8);
 
+        // Round 1: try every dialable endpoint. Track the last error for
+        // diagnostics.
         let mut last_err = String::new();
         for addr in &candidates {
             tracing::debug!("[dm] attempting send -> {addr}");
@@ -1341,16 +1456,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 continue;
             }
             match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(Ok(()))) => {
-                    tracing::debug!("[dm] acked via {addr}");
-                    let chat = store::dm_chat_id(&self.peer_base58(), peer_base58);
-                    let _ = self
-                        .store
-                        .push(&chat, &self.peer_base58(), text, false, store::Kind::Text)
-                        .await;
-                    tracing::debug!("[dm] send_dm done, chat={chat}");
-                    return Ok(chat);
-                }
+                Ok(Ok(Ok(()))) => return self.commit_dm(peer_base58, text).await,
                 Ok(Ok(Err(e))) => {
                     tracing::warn!("[dm] send to {addr} failed: {e}");
                     last_err = e.to_string();
@@ -1367,7 +1473,65 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 }
             }
         }
+
+        // Round 2: hole-punch. Ask the directory to poke the peer, wait a
+        // short window for it to be woken and dial us back, then retry with
+        // a fresh endpoint list. Without this the message is lost because
+        // libp2p request-response doesn't buffer in-flight messages.
+        if self.wake_peer(peer_base58) {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            if let Ok(rec2) = self.dir.resolve_device(peer_base58) {
+                for endpoint in &rec2.endpoints {
+                    let Ok(addr) = endpoint.parse::<Multiaddr>() else { continue };
+                    if let Some(reason) = unroutable_reason(&addr) {
+                        tracing::debug!("[dm] retry: skip unroutable ({reason}): {addr}");
+                        continue;
+                    }
+                    tracing::debug!("[dm] retry (post-wake) -> {addr}");
+                    if let Err(e) = self.running.cmd_tx.send(Cmd::Connect { peer: peer.clone(), addr: addr.clone() }) {
+                        last_err = format!("cmd channel closed: {e}");
+                        continue;
+                    }
+                    let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+                    let sent_cmd = self.running.cmd_tx.send(Cmd::SendText {
+                        peer: peer.clone(),
+                        from: from.clone(),
+                        e2e: e2e.clone(),
+                        text: text.to_string(),
+                        ack_tx: Some(tx),
+                    });
+                    if let Err(e) = sent_cmd {
+                        last_err = format!("cmd channel closed: {e}");
+                        continue;
+                    }
+                    match tokio::time::timeout(timeout, rx).await {
+                        Ok(Ok(Ok(()))) => return self.commit_dm(peer_base58, text).await,
+                        Ok(Ok(Err(e))) => {
+                            tracing::warn!("[dm] retry send to {addr} failed: {e}");
+                            last_err = e.to_string();
+                        }
+                        Ok(Err(_)) => {
+                            last_err = "peer connection dropped before ack".to_string();
+                        }
+                        Err(_) => {
+                            last_err = format!("no ack from peer within {}s (retry)", timeout.as_secs());
+                        }
+                    }
+                }
+            }
+        }
         anyhow::bail!("failed to deliver to {peer_base58}: {last_err}");
+    }
+
+    /// After an ack: persist the DM locally and return the chat id.
+    async fn commit_dm(&self, peer_base58: &str, text: &str) -> anyhow::Result<String> {
+        let chat = store::dm_chat_id(&self.peer_base58(), peer_base58);
+        let _ = self
+            .store
+            .push(&chat, &self.peer_base58(), text, false, store::Kind::Text)
+            .await;
+        tracing::debug!("[dm] send_dm done, chat={chat}");
+        Ok(chat)
     }
 
     /// Send a voice message to `peer_base58` over the DM channel and wait for

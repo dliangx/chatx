@@ -21,6 +21,21 @@ fn http_client() -> &'static ureq::Agent {
     &A
 }
 
+/// Dedicated agent for the wake-notice long-poll. The server holds the
+/// connection open for up to ~45 s before timing out, so we need a matching
+/// client read timeout — we use 50 s to leave some margin, but cap it below
+/// ~60 s so a stuck server can't wedge the pump.
+fn poll_http_client() -> &'static ureq::Agent {
+    static P: std::sync::LazyLock<ureq::Agent> = std::sync::LazyLock::new(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(5))
+            .timeout_read(std::time::Duration::from_secs(50))
+            .timeout_write(std::time::Duration::from_secs(8))
+            .build()
+    });
+    &P
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UserResolve {
     pub user: UserRecord,
@@ -44,6 +59,27 @@ pub struct RelayInfo {
     /// Full multiaddr including `/p2p/<relay_peer_id>` — exactly the value
     /// that used to be put into `CHATX_RELAYS`.
     pub addr: String,
+}
+
+/// A "peer X wants to reach me" wake notice, delivered by the directory to
+/// coordinate simultaneous TCP dials (hole punching). A client long-polls
+/// `/v1/notifications` and receives a `[Notice, ...]` payload within ~45 s.
+///
+/// Semantics:
+///   - `peer_id`: target (the long-polling client's own peer id; the sender
+///     is identified by `from`).
+///   - `from`:  the peer id of the peer that asked the server to wake this
+///     target. The target should now dial this peer (via `warm_dial_peer`)
+///     as soon as this notice is observed.
+///   - `at`: when the sender called the server (ms since epoch).
+///
+/// No payload (message/ack) flows through this channel — it is purely a
+/// "ping me over P2P" coordinator.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Notice {
+    pub peer_id: String,
+    pub from: String,
+    pub at: u64,
 }
 
 pub const ONLINE_TTL_MS: u64 = 30_000;
@@ -151,6 +187,32 @@ pub trait DirectoryClient: Sync + Send {
     fn list_relays(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// Ask the directory to wake up `peer_id` immediately (server-side wake
+    /// push). Best-effort: returns `true` when the server accepted the notice
+    /// and `false` on any failure (older server, network drop, timeout). The
+    /// peer will receive it on its own long-poll (`poll_notices`) within one
+    /// poll window (server-side ~45 s; the client-side timeout is shorter).
+    /// Used as a step in TCP hole-punching to coordinate a simultaneous dial.
+    fn notify(&self, _peer_id: &str, _from: &str) -> bool {
+        false
+    }
+
+    /// Long-poll the directory for a wake notice addressed to this peer.
+    /// Returns an empty `Vec` when:
+    ///   - the server is an older version that doesn't implement this
+    ///   - there is no pending notice and the timeout expires
+    ///   - the request otherwise fails
+    ///
+    /// Returns a `Vec` with one or more entries when a wake arrived.
+    ///
+    /// The implementation SHOULD cap its own deadline below ~60 s; the
+    /// caller (the pump task) runs this in a background std::thread and is
+    /// not sensitive to the exact duration.
+    fn poll_notices(&self, _peer_id: &str) -> Vec<Notice> {
+        Vec::new()
+    }
+
     fn touch_presence(&self, peer_id: &str, endpoints: &[String]) -> bool {
         if let Ok(mut rec) = self.resolve_device(peer_id) {
             rec.seen = crate::message::now_ms();
@@ -634,6 +696,39 @@ impl DirectoryClient for HttpDirectory {
                 .collect(),
             Err(e) => {
                 tracing::debug!("[dir] list_relays failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    fn notify(&self, peer_id: &str, from: &str) -> bool {
+        let url = format!("{}/v1/notify?peer_id={}", self.base, peer_id);
+        let body = format!(r#"{{"from":"{}"}}"#, from);
+        match http_client()
+            .request("POST", &url)
+            .set("content-type", "application/json")
+            .send_string(&body)
+        {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::debug!("[dir] notify {peer_id} failed: {e}");
+                false
+            }
+        }
+    }
+
+    fn poll_notices(&self, peer_id: &str) -> Vec<Notice> {
+        let url = format!("{}/v1/notifications?peer_id={}", self.base, peer_id);
+        match poll_http_client().request("GET", &url).call() {
+            Ok(resp) => match resp.into_json::<Vec<Notice>>() {
+                Ok(notices) => notices,
+                Err(e) => {
+                    tracing::debug!("[dir] poll_notices parse failed: {e}");
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                tracing::debug!("[dir] poll_notices failed: {e}");
                 Vec::new()
             }
         }

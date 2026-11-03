@@ -16,13 +16,75 @@ use serde::{Deserialize, Serialize};
 mod db;
 mod relay;
 
+/// A single "peer X wants to reach me" wake notice. Carried by the
+/// `/v1/notify` + `/v1/notifications` long-poll pair so two cross-NAT peers
+/// can coordinate a simultaneous dial attempt over TCP.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Notice {
+    pub(crate) peer_id: String,
+    pub(crate) from: String,
+    pub(crate) at: u64,
+}
+
+/// Server-side broadcast of wake notices. One `Notice` (target-peer, sender,
+/// timestamp) is pushed by `POST /v1/notify`; a `GET /v1/notifications`
+/// long-poll handler subscribes, waits up to ~45 s, and drains every notice
+/// for the caller's own peer id in arrival order. Uses `tokio::sync::broadcast`
+/// so every subscriber sees the same stream (broadcast is fine for the wake
+/// case — duplicates across subscribers are harmless, and the cap is just a
+/// memory ceiling).
+#[derive(Debug, Clone)]
+pub(crate) struct Notifies {
+    sender: tokio::sync::broadcast::Sender<Notice>,
+    poll_timeout: std::time::Duration,
+}
+
+impl Notifies {
+    pub(crate) fn new(poll_timeout: std::time::Duration) -> Self {
+        let (sender, _rx) = tokio::sync::broadcast::channel(256);
+        Self { sender, poll_timeout }
+    }
+    pub(crate) fn push(&self, notice: Notice) {
+        // `send` returns a "no receivers" error if nobody is long-polling —
+        // expected on startup; ignore (log at debug in the handler instead).
+        let _ = self.sender.send(notice);
+    }
+    /// Wait (long-poll) up to `poll_timeout` for notices addressed to
+    /// `peer_id`. Returns on the first matching notice, or after the timeout
+    /// with `[]`. Extra buffered notices for other peers are drained to
+    /// `continue()` — they belong to other subscribers.
+    pub(crate) async fn wait_for(&self, peer_id: &str) -> Vec<Notice> {
+        let mut rx = self.sender.subscribe();
+        let deadline = tokio::time::Instant::now() + self.poll_timeout;
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Vec::new();
+            }
+            let remaining = deadline - now;
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(n)) if n.peer_id == peer_id => return vec![n],
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) => return Vec::new(),
+                Err(_) => return Vec::new(),
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
-struct App {
+pub(crate) struct App {
     db: Arc<db::Sdb>,
     /// Advertised circuit-relay multiaddrs (populated by the relay task once it
     /// is listening). Served via `GET /v1/relays` so clients can discover a
     /// relay without operator-provided `CHATX_RELAYS`.
     relays: Arc<tokio::sync::Mutex<Vec<String>>>,
+    /// Wake-notice fan-out for TCP hole-punching. A client that wants to reach
+    /// B calls `POST /v1/notify?peer_id=<B>`; B's long-poll
+    /// (`GET /v1/notifications?peer_id=<B>`) wakes up within seconds, and both
+    /// sides now simultaneously dial each other — which opens both NAT mappings
+    /// in the same window.
+    notifies: Notifies,
 }
 
 #[derive(Deserialize)]
@@ -31,6 +93,12 @@ struct IdQuery {
     exclude: Option<String>,
     #[serde(default)]
     status: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NotifyQuery {
+    #[serde(default)]
+    peer_id: String,
 }
 
 type ApiResult = Result<Response, (StatusCode, String)>;
@@ -392,6 +460,61 @@ async fn list_relays(State(app): State<App>) -> ApiResult {
     Ok(ok_json(&out))
 }
 
+/// `POST /v1/notify?peer_id=<target_peer_id>` — body: `{"from": "<my_peer>"}`.
+/// Ask the server to wake up `target_peer_id` immediately. Used as the first
+/// step of TCP hole-punching: A can't reach B through direct dials, so A asks
+/// the directory to poke B, who will then dial A back on top of A's own
+/// outbound attempt — opening both NAT mappings at the same instant.
+///
+/// The server does not need to validate `from` here: this is a best-effort
+/// wake, not an authenticated channel, and the only action it triggers is
+/// making a peer try to dial another peer it is already allowed to talk to.
+async fn notify_peer(
+    State(app): State<App>,
+    Query(q): Query<NotifyQuery>,
+    body: String,
+) -> ApiResult {
+    #[derive(Deserialize)]
+    struct Body {
+        #[serde(default)]
+        from: String,
+    }
+    let Body { from } = serde_json::from_str(&body)
+        .map_err(|e| bad(StatusCode::BAD_REQUEST, format!("bad body: {e}")))?;
+    if q.peer_id.is_empty() {
+        return Err(bad(StatusCode::BAD_REQUEST, "peer_id query param required"));
+    }
+    if from == q.peer_id {
+        // A self-notification ("wake me up") is a no-op that could also be
+        // used as a cheap probe; reject it.
+        return Err(bad(
+            StatusCode::BAD_REQUEST,
+            "from must be a different peer_id",
+        ));
+    }
+    app.notifies.push(Notice {
+        peer_id: q.peer_id.clone(),
+        from,
+        at: now_ms(),
+    });
+    Ok(ok_json(&"ok"))
+}
+
+/// `GET /v1/notifications?peer_id=<my_peer>` — long-poll the server for
+/// wake notices addressed to this peer. Returns within ~45 s with either
+/// `[]` (timeout, no wakes) or `[Notice, ...]` (wakes; the server drains
+/// the full burst before replying).
+async fn poll_notices(
+    State(app): State<App>,
+    Query(q): Query<NotifyQuery>,
+) -> ApiResult {
+    if q.peer_id.is_empty() {
+        return Err(bad(StatusCode::BAD_REQUEST, "peer_id query param required"));
+    }
+    let out = app.notifies.wait_for(&q.peer_id).await;
+    Ok(ok_json(&out))
+}
+
 async fn upsert_group(
     State(App { db, .. }): State<App>,
     Path(group_id): Path<String>,
@@ -657,6 +780,8 @@ pub(crate) fn make_router(app: App) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/relays", get(list_relays))
+        .route("/v1/notify", post(notify_peer))
+        .route("/v1/notifications", get(poll_notices))
         .route("/v1/users", get(list_users))
         .route("/v1/users/{user_id}", put(upsert_user).get(resolve_user))
         .route(
@@ -726,7 +851,15 @@ async fn main() {
     );
 
     let relays = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let app = App { db, relays: relays.clone() };
+    // Long-poll waits up to 45 s: long enough that the ~15 s client presence
+    // tick comfortably fits, short enough that a server restart or peer churn
+    // doesn't strand a connection for a full minute.
+    let notifies = Notifies::new(std::time::Duration::from_secs(45));
+    let app = App {
+        db,
+        relays: relays.clone(),
+        notifies,
+    };
 
     let router = make_router(app.clone());
 
@@ -801,6 +934,8 @@ mod http_tests {
                     let app = App {
                         db: db.clone(),
                         relays: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                        // Short poll (1 s) so the long-poll test doesn't block.
+                        notifies: Notifies::new(std::time::Duration::from_secs(1)),
                     };
                     // Seed one server-mode group: owner "owner" + member "member-a".
                     let mut members = std::collections::BTreeMap::new();
@@ -850,6 +985,58 @@ mod http_tests {
         // The test server starts without a relay task, so `GET /v1/relays`
         // must answer with an empty JSON list (not an error).
         assert!(dir.list_relays().is_empty(), "server with no relay lists none");
+    }
+
+    /// Round-trip a wake notice: A asks to wake B; B's long-poll receives it
+    /// (with the short 1 s poll timeout configured on the test `App`).
+    /// A concurrent long-poll that times out must still respond (with `[]`),
+    /// not hang forever.
+    #[test]
+    fn wake_notice_roundtrip() {
+        use chatx_core::signal::{DirectoryClient, HttpDirectory, Notice};
+        let server = Server::start();
+        let dir = HttpDirectory::new(server.base.clone());
+
+        // B starts a long-poll for "peer-B" in a background thread.
+        let poll_dir = HttpDirectory::new(server.base.clone());
+        let join = std::thread::spawn(move || {
+            poll_dir.poll_notices("peer-B")
+        });
+
+        // Give B a moment to be subscribed, then A posts a wake.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let wake_dir = HttpDirectory::new(server.base.clone());
+        assert!(
+            wake_dir.notify("peer-B", "peer-A"),
+            "notify must return true for an accepted wake"
+        );
+
+        // B should receive the notice within the test's 1 s window.
+        let notices = join.join().expect("poll thread panicked");
+        assert_eq!(notices.len(), 1, "B should see exactly one wake");
+        assert_eq!(notices[0].peer_id, "peer-B");
+        assert_eq!(notices[0].from, "peer-A");
+        assert!(notices[0].at > 0);
+    }
+
+    /// A peer polling for notices it was never sent must time out (empty
+    /// result), not hang. With the test server's 1 s poll timeout this
+    /// returns quickly.
+    #[test]
+    fn wake_notice_timeout_when_nothing() {
+        use chatx_core::signal::DirectoryClient;
+        use chatx_core::signal::HttpDirectory;
+        let server = Server::start();
+        let dir = HttpDirectory::new(server.base.clone());
+        let start = std::time::Instant::now();
+        let out = dir.poll_notices("nobody-wakes-me");
+        let dur = start.elapsed();
+        assert!(out.is_empty(), "no wake was sent, so the result is empty");
+        // Should not take much longer than the test's 1 s poll timeout.
+        assert!(
+            dur.as_secs() <= 5,
+            "poll_notices took too long: {dur:?} (test expects ~1 s timeout)"
+        );
     }
 
     #[test]
