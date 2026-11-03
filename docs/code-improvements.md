@@ -539,6 +539,37 @@
 - QUIC multiaddr 必须带 `/quic-v1` 后缀，仅 `/udp/...` 会被拒绝
 - 测试：core 23 / e2e 15 / signal 8 全绿
 
+### 38. [x] Phase 0 — relay advertise 公网地址 & 跨 LAN 诊断 ✅
+
+**问题**: relay 默认绑定 `0.0.0.0:1883`，`GET /v1/relays` advertise 出去的却是
+`/ip4/0.0.0.0/tcp/1883/p2p/...` —— 一个**任何跨网段客户端都拨不通**的地址。
+后果：
+- B `reserve_relays` 永远连不上（dial 自己失败），`ReservationReqAccepted`
+  不来，`/p2p-circuit` 进不了目录
+- A 看到 B 的端点只有私有 LAN（192.168 / 172.30 等），dial 必超时
+- 1883 端口放行了也没用 —— 地址本身不可路由
+
+**位置**: `signaling/src/relay.rs`（advertise 计算）、`crates/core/src/lib.rs`
+（诊断）
+
+**已做**:
+- relay 启动时 `resolve_public_host()`：优先 `CHATX_RELAY_ADVERTISE=<公网host:port>`
+  （支持 IP 或域名 DNS 解析），其次出站 UDP 探测 `8.8.8.8:53` 拿 local IP，
+  最后回退保留原地址并 `warn!`
+- announce 时 `with_public_host()` 把 listen 地址的 IP 替换成公网 host，
+  保留原始 transport（`/tcp/` 或 `/udp/...quic-v1`）
+- 即使监听在 `0.0.0.0` / 私有 IP，advertise 出去的一定是**可拨号**地址
+- 新增 3 个 signal 单测覆盖 TCP/UDP advertise / 回退
+- 方案 3 诊断：`diagnose_lan_only_candidates`（lib.rs:2967）在 `send_dm` /
+  `send_friendq` 前检测"全部候选都是私有 LAN 且无 /p2p-circuit"，30s 内
+  每 peer 只 warn 一次，直接给出排查清单
+- 方案 4 诊断：`heartbeat` 的 NAT warn 现在带 `stun = <STUN 状态>` 字段，
+  方便区分是"STUN 未命中"还是"对称 NAT"
+
+**部署**: 在 relay 启动时设置
+`CHATX_RELAY_ADVERTISE=<公网host:port>`（如 `139.159.201.87:1883`），
+否则 relay 会尝试出站探测，探测到的若是私有 IP 会 `warn!` 提示。
+
 ---
 
 ## 实施路线图
@@ -552,11 +583,12 @@ Phase 0 — 外网连通 (NAT 穿透)
   P0-NAT-35 ⑤ STUN 公网 IP 发现              ✅ 完成
   P0-NAT-36 ⑥ 信令辅助 TCP hole-punching     ✅ 完成
   P0-NAT-37 ⑦ 启用 QUIC/UDP 传输              ✅ 完成
+  P0-NAT-38 ⑧ relay advertise 公网地址+诊断    ✅ 完成
 
   ⇒ Phase 0 全部交付：自动发现 relay、UPnP/relay 确认立即上报、无公网地址
-     诊断日志、STUN 公网 IP 发现、信令辅助 TCP hole-punching、QUIC/UDP 传输。
-     外→外连接在有内置 relay 的场景下已可打通（无需 CHATX_RELAYS），并具备
-     UDP 直连 + hole-punching 能力。
+     诊断日志、STUN 公网 IP 发现、信令辅助 TCP hole-punching、QUIC/UDP 传输、
+     relay advertise 可拨号公网地址。外→外连接在有内置 relay 的场景下已可打通
+     （无需 CHATX_RELAYS），并具备 UDP 直连 + hole-punching 能力。
 
 Phase 1 — 稳定性 (Week 1-2)
   P0-1  优雅关闭

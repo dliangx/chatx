@@ -1305,4 +1305,28 @@ mod tests {
             "a relay addr without /p2p/ is unusable"
         );
     }
+
+    /// Regression: the exact shape the built-in relay now advertises via
+    /// `GET /v1/relays` — a *public* IP (not `0.0.0.0`), the default 1883
+    /// port, and a full `/p2p/` peer suffix — must parse into a usable
+    /// (relay_peer, dialable_base) pair. This is the address a remote client
+    /// dials to reserve a circuit, so a parse failure here silently kills
+    /// cross-NAT delivery.
+    #[test]
+    fn parses_real_relay_advertise_shape() {
+        let peer = "12D3KooWL7v2eLzk86VrBvkt33GiXqBH9rkx5FZPnJJBLuW3tqLP"
+            .parse::<PeerId>()
+            .expect("valid base58 peer id from the live relay");
+        let specs = vec![
+            format!("/ip4/139.159.201.87/tcp/1883/p2p/{peer}")
+        ];
+        let out = parse_relay_strings(&specs);
+        assert_eq!(out.len(), 1, "relay advertise addr must parse");
+        assert_eq!(out[0].0, peer);
+        assert_eq!(
+            out[0].1.to_string(),
+            "/ip4/139.159.201.87/tcp/1883",
+            "dialable base keeps the public IP + port, drops /p2p/"
+        );
+    }
 }

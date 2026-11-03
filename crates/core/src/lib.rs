@@ -811,10 +811,17 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 )
                 .is_ok()
             {
+                let stun_state = match stun::discover_cached() {
+                    Some(_) => "STUN hit but symmetric NAT",
+                    None => "STUN miss (outbound UDP blocked / offline / prewarm not done)",
+                };
                 tracing::warn!(
                     endpoints = %ep.join(","),
-                    "no public or relay endpoint advertised — device is behind NAT; peers on \
-                     other networks cannot reach it (enable a relay or UPnP/STUN)"
+                    stun = %stun_state,
+                    "no public or relay endpoint advertised — reachable only on the local LAN; \
+                     cross-network dialing will fail. \
+                     Check: (1) outbound UDP to ephemeral ports (2) CHATX_RELAYS configured \
+                     (3) server /v1/relays has a usable relay"
                 );
             }
         } else {
@@ -1427,6 +1434,13 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             );
         }
 
+        // Diagnostic: if no candidate is cross-network dialable (neither a
+        // public IP nor a /p2p-circuit), the dial is very likely to fail —
+        // the peer is either on a different LAN (different /24) or simply not
+        // attached to a relay. Warn up front instead of letting the user
+        // believe the send is in flight only to time out 8s later.
+        diagnose_lan_only_candidates(&candidates, peer_base58);
+
         let from = self.peer_base58();
         let e2e = self.e2e_public().to_string();
         let timeout = std::time::Duration::from_secs(8);
@@ -1838,6 +1852,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         if candidates.is_empty() {
             anyhow::bail!("device {peer_base58} has no dialable endpoint");
         }
+
+        // Diagnostic: same pre-check as `send_dm` Round 1.
+        diagnose_lan_only_candidates(&candidates, peer_base58);
 
         let from = self.peer_base58();
         let e2e = self.e2e_public().to_string();
@@ -2934,6 +2951,56 @@ fn is_routable_public_or_circuit(addr: &str) -> bool {
         }
     }
     has_public_ip
+}
+
+/// Diagnostic. Warn once when the dial candidates carry **neither** a public
+/// IP nor a `/p2p-circuit` address — i.e. only private-LAN / loopback
+/// endpoints are left.
+///
+/// Situations this catches:
+/// - A on 192.168.5.x, B on 172.30.x / 192.168.99.x: both private but
+///   different /24s, unreachable across NAT, so the dial is doomed.
+/// - B is not attached to any relay (empty `/v1/relays`, `CHATX_RELAYS`
+///   unset, reservation not completed); the directory only has B's LAN
+///   addresses, so the dial is doomed.
+///
+/// Without this the user sees an 8s timeout plus `no ack`, and cannot tell
+/// a link problem from a topology problem. This states the fact directly
+/// ("LAN-only candidates") and points at STUN / relay to check.
+///
+/// **Non-blocking, no return value**: a pure diagnostic; the caller proceeds
+/// to Round 1.
+fn diagnose_lan_only_candidates(candidates: &[Multiaddr], peer: &str) {
+    // `is_routable_public_or_circuit` already covers both cross-network
+    // reachability forms (public IP and /p2p-circuit), so "any of them"
+    // means the candidates include something dialable from another network.
+    if candidates.iter().any(|a| is_routable_public_or_circuit(&a.to_string())) {
+        return;
+    }
+    // Dedup: avoid the same peer re-triggering the warn on every attempt
+    // (30 s window).
+    use std::sync::Mutex;
+    static RECENT: std::sync::LazyLock<Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+        std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+    let now = std::time::Instant::now();
+    {
+        let mut m = RECENT.lock().unwrap();
+        m.retain(|_, t| now.duration_since(*t) < std::time::Duration::from_secs(30));
+        if m.contains_key(peer) {
+            return;
+        }
+        m.insert(peer.to_string(), now);
+    }
+    let list: Vec<String> = candidates.iter().map(|a| a.to_string()).collect();
+    tracing::warn!(
+        peer,
+        candidates = %list.join(", "),
+        "peer exposes only private-LAN endpoints (no /p2p-circuit or public IP) \
+         — cross-network dialing from here is doomed to fail. \
+         Check: (1) peer has CHATX_RELAYS configured (2) server /v1/relays \
+         has a usable relay (3) peer STUN returned a public IP \
+         (4) outbound UDP not blocked by NAT"
+    );
 }
 
 fn unroutable_reason(addr: &Multiaddr) -> Option<&'static str> {
