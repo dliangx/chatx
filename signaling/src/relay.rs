@@ -31,6 +31,7 @@ pub async fn start(
         .with_tokio()
         .with_tcp(Default::default(), libp2p::noise::Config::new, libp2p::yamux::Config::default)
         .expect("tcp+noise+yamux")
+        .with_quic()
         .with_behaviour(|_k| libp2p::relay::Behaviour::new(peer_id, libp2p::relay::Config::default()))?
         .build();
 
@@ -38,7 +39,10 @@ pub async fn start(
         .parse()
         .map_err(|e| anyhow::anyhow!("parse listen addr: {e}"))?;
     swarm.listen_on(tcp.clone()).map_err(|e| anyhow::anyhow!("listen {tcp}: {e}"))?;
-    tracing::info!(%tcp, "relay listening");
+    let udp: Multiaddr = format!("/ip4/{}/udp/{}/quic-v1", addr.ip(), addr.port())
+        .parse()
+        .map_err(|e| anyhow::anyhow!("parse listen addr: {e}"))?;
+    swarm.listen_on(udp.clone()).map_err(|e| anyhow::anyhow!("listen quic {udp}: {e}"))?;
 
     let mut announced = Some(ready_tx);
     loop {

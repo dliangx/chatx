@@ -1843,6 +1843,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let e2e = self.e2e_public().to_string();
         let timeout = std::time::Duration::from_secs(8);
         let mut last_err = String::new();
+
+        // Round 1: try every dialable endpoint. Track the last error for
+        // diagnostics. (Same shape as `send_dm` Round 1.)
         for addr in &candidates {
             tracing::debug!("[friendq] send -> {peer_base58} via {addr}");
             if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
@@ -1874,6 +1877,58 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 }
                 Ok(Err(_)) => last_err = "peer connection dropped before ack".to_string(),
                 Err(_) => last_err = format!("no ack from peer within {:?}s", timeout.as_secs()),
+            }
+        }
+
+        // Round 2: hole-punch. Ask the directory to poke the peer, wait a
+        // short window for it to be woken / for its STUN-derived public
+        // endpoint or a relay circuit to land, then dial the peer back using
+        // a freshly-resolved endpoint list. Without this the request is lost
+        // because libp2p request-response doesn't buffer in-flight messages.
+        // Mirrors `send_dm` Round 2 exactly (lib.rs:1481-1522).
+        if self.wake_peer(peer_base58) {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            if let Ok(rec2) = self.dir.resolve_device(peer_base58) {
+                for endpoint in &rec2.endpoints {
+                    let Ok(addr) = endpoint.parse::<Multiaddr>() else {
+                        continue;
+                    };
+                    if let Some(reason) = unroutable_reason(&addr) {
+                        tracing::debug!("[friendq] retry: skip unroutable ({reason}): {addr}");
+                        continue;
+                    }
+                    tracing::debug!("[friendq] retry (post-wake) -> {addr}");
+                    if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
+                        peer: peer.clone(),
+                        addr: addr.clone(),
+                    }) {
+                        last_err = format!("cmd channel closed: {e}");
+                        continue;
+                    }
+                    let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+                    if let Err(e) = self.running.cmd_tx.send(Cmd::SendText {
+                        peer: peer.clone(),
+                        from: from.clone(),
+                        e2e: e2e.clone(),
+                        text: frame.to_string(),
+                        ack_tx: Some(tx),
+                    }) {
+                        last_err = format!("cmd channel closed: {e}");
+                        continue;
+                    }
+                    match tokio::time::timeout(timeout, rx).await {
+                        Ok(Ok(Ok(()))) => {
+                            tracing::debug!("[friendq] acked via {addr} (retry)");
+                            return Ok(());
+                        }
+                        Ok(Ok(Err(e))) => {
+                            tracing::warn!("[friendq] retry send to {addr} failed: {e}");
+                            last_err = e.to_string();
+                        }
+                        Ok(Err(_)) => last_err = "peer connection dropped before ack".to_string(),
+                        Err(_) => last_err = format!("no ack from peer within {}s (retry)", timeout.as_secs()),
+                    }
+                }
             }
         }
         anyhow::bail!("failed to deliver friendq to {peer_base58}: {last_err}");

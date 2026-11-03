@@ -461,6 +461,7 @@ pub async fn boot(
             libp2p::yamux::Config::default,
         )
         .expect("tcp+noise+yamux")
+        .with_quic()
         .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
         .with_behaviour(move |_k, relay| Net {
             mdns,
@@ -480,6 +481,10 @@ pub async fn boot(
     swarm
         .listen_on(tcp0)
         .map_err(|e| anyhow::anyhow!("listen tcp: {e}"))?;
+    let udp0: Multiaddr = "/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap();
+    swarm
+        .listen_on(udp0)
+        .map_err(|e| anyhow::anyhow!("listen quic: {e}"))?;
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel();

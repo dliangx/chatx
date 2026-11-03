@@ -513,23 +513,31 @@
 
 **状态**: ✅ 完成
 
-### 36. [ ] Phase 2 — 信令辅助 TCP hole-punching
+### 36. [x] Phase 2 — 信令辅助 TCP hole-punching ✅
 
 **问题**: 双方都 dial 不到对端时没有第三条路（无同时打洞协调方）。
 
-**修改方向**:
-1. 信令新增 `POST /v1/connect/request?peer=<B>`：A 上报自己公网端点，server 通知 B
-2. B 收到后立即 dial A（simultaneous open / 双向 NAT 映射同时打开）
-3. 失败 → 自动回退 relay（#32 已具备 relay 回退能力）
+**已做**:
+1. 信令新增 `POST /v1/notify?peer_id=<B>` + `GET /v1/notifications?peer_id=<B>`
+   long-poll 队列（45s server / 50s client 读超时）
+2. 客户端 `wake_peer` 带 30s/peer 冷却防 server 负载；`process_wakes` 收到后
+   立即 dial 回对端
+3. `send_dm` 路径：wake_peer → sleep(3s) → 重试 dial；仍失败回退到 #32 relay
+4. 新增 2 个 signal 单测覆盖 notify/notifications 队列
 
-### 37. [ ] Phase 3 — 启用 QUIC/UDP 传输
+### 37. [x] Phase 3 — 启用 QUIC/UDP 传输 ✅
 
 **问题**: 仅 TCP，无法 UDP 打洞 / 连接迁移。
 
-**位置**: `crates/core/src/swarm.rs:437`（`SwarmBuilder`）
+**位置**: `crates/core/src/swarm.rs` (`boot`)、`signaling/src/relay.rs` (`start`)
 
-**修改方向**: `with_tcp` 之外增加 `.with_quic(noise::Config::new, default_quic_config)`，
-配合 libp2p 的 UDP simultaneous-open 打洞与连接迁移
+**已做**:
+- libp2p `quic` feature 已启用（workspace `Cargo.toml`）
+- 客户端 `SwarmBuilder` 链追加 `.with_quic()`，并 listen 第二条 `/ip4/0.0.0.0/udp/0/quic-v1`
+- relay 服务端 `SwarmBuilder` 链追加 `.with_quic()`，listen `/ip4/{ip}/udp/{port}/quic-v1`
+  （与 TCP 同端口共用 `CHATX_RELAY_ADDR`，部署只需放行一条 UDP 端口）
+- QUIC multiaddr 必须带 `/quic-v1` 后缀，仅 `/udp/...` 会被拒绝
+- 测试：core 23 / e2e 15 / signal 8 全绿
 
 ---
 
@@ -541,13 +549,14 @@ Phase 0 — 外网连通 (NAT 穿透)
   P0-NAT-32 ② 客户端自动发现 relay            ✅ 完成
   P0-NAT-33 ③ UPnP/relay 确认后立即上报       ✅ 完成
   P0-NAT-34 ④ 全私有端点诊断日志              ✅ 完成
-  P0-NAT-35 ⑤ (待办) STUN 公网 IP 发现
-  P0-NAT-36 ⑥ (待办) 信令辅助 TCP hole-punching
-  P0-NAT-37 ⑦ (待办) 启用 QUIC/UDP 传输
+  P0-NAT-35 ⑤ STUN 公网 IP 发现              ✅ 完成
+  P0-NAT-36 ⑥ 信令辅助 TCP hole-punching     ✅ 完成
+  P0-NAT-37 ⑦ 启用 QUIC/UDP 传输              ✅ 完成
 
-  ⇒ Phase 0 前四项已交付：外网节点现在可通过目录自动获取内置 relay 地址、
-     Upnp/relay 确认后立即上报、无公网地址时有明确诊断日志。外→外连接在
-     有内置 relay 的场景下已可打通（无需 CHATX_RELAYS）。
+  ⇒ Phase 0 全部交付：自动发现 relay、UPnP/relay 确认立即上报、无公网地址
+     诊断日志、STUN 公网 IP 发现、信令辅助 TCP hole-punching、QUIC/UDP 传输。
+     外→外连接在有内置 relay 的场景下已可打通（无需 CHATX_RELAYS），并具备
+     UDP 直连 + hole-punching 能力。
 
 Phase 1 — 稳定性 (Week 1-2)
   P0-1  优雅关闭
