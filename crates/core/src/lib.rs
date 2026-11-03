@@ -7,6 +7,7 @@ pub mod message;
 pub mod moment;
 pub mod signal;
 pub mod store;
+pub mod stun;
 pub mod swarm;
 
 pub use libp2p;
@@ -745,6 +746,27 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             return;
         }
         let client = self.clone();
+
+        // Prewarm the STUN cache off the login/UI thread: `stun::discover()`
+        // does blocking UDP I/O for up to ~18 s worst case (6 servers × 3 s
+        // each). Run it in the presence thread before the first heartbeat so
+        // endpoints already carry the public IP by the first announce.
+        let prewarm = client.clone();
+        let _ = std::thread::Builder::new()
+            .name("chatx-stun-prewarm".to_string())
+            .spawn(move || {
+                let res = stun::discover();
+                match res {
+                    Ok(Some(ip)) => tracing::info!(ip = %ip, "STUN prewarm OK"),
+                    Ok(None) => tracing::debug!("STUN prewarm: no public IP found (NAT blocks UDP / offline)"),
+                    Err(e) => tracing::warn!(%e, "STUN prewarm failed"),
+                }
+                // Trigger one immediate heartbeat so the directory learns our
+                // new endpoints without waiting the 15 s tick.
+                prewarm.heartbeat();
+            })
+            .expect("spawn stun prewarm thread");
+
         let handle = std::thread::Builder::new()
             .name("chatx-presence".to_string())
             .spawn(move || {
@@ -759,18 +781,47 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let _ = handle;
     }
 
+    /// Build the endpoint list advertised to the directory. Prefers the real
+    /// **public** IP (learned via STUN, see [`stun`]) and the actual listening
+    /// port, which is the only address a peer on another network can dial. When
+    /// STUN is unavailable we fall back to the previous LAN-egress behavior so
+    /// same-subnet peers still connect.
+    ///
+    /// The lookup is non-blocking ([`stun::discover_cached`]): `discover()`
+    /// (which does UDP I/O) is run in the prewarm thread started by
+    /// [`Self::start_presence_loop`].
     fn endpoints_with_egress(&self) -> Vec<String> {
-        let mut v = self.endpoints();
+        let public = stun::discover_cached();
+        let base = self.endpoints();
+        if let Some(ip) = public {
+            match base.iter().find_map(|a| tcp_port_of(a)) {
+                Some(port) => {
+                    let ip_proto = match ip.ip {
+                        std::net::IpAddr::V4(_) => "ip4",
+                        std::net::IpAddr::V6(_) => "ip6",
+                    };
+                    let mut list = Vec::with_capacity(base.len() + 1);
+                    list.push(format!("/{ip_proto}/{}/tcp/{port}", ip.ip));
+                    list.extend(base);
+                    return list;
+                }
+                None => {
+                    tracing::warn!(
+                        "STUN public IP {ip} found but no listening port known yet; \
+                         advertising local endpoints only"
+                    );
+                }
+            }
+        }
+        // Fallback (STUN not yet done / no public IP): the legacy LAN egress
+        // endpoint, which is useful for same-network peers.
+        let mut v = base;
         if let Some(ip) = current_egress_ip() {
             if let Some(pos) = v.iter().position(|a| a.contains(&ip)) {
                 v.swap_remove(pos);
             }
-            let port = v.iter().find_map(|a| tcp_port_of(a));
-            match port {
-                Some(p) => v.insert(0, format!("/ip4/{ip}/tcp/{p}")),
-                None => {
-                    tracing::warn!("[dir] no listening port found; not advertising egress {ip}");
-                }
+            if let Some(p) = v.iter().find_map(|a| tcp_port_of(a)) {
+                v.insert(0, format!("/ip4/{ip}/tcp/{p}"));
             }
         }
         v
