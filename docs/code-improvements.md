@@ -130,24 +130,29 @@
 
 ---
 
-### 7. [ ] DM 离线队列 + 重连补发
-
-**问题**: `send_dm` 失败后消息直接丢弃。数据库 `offline_messages` 表存在但无生产代码调用。群组有 server inbox 轮询，DM 没有。
-
-**位置**:
-- `crates/core/src/lib.rs:1153-1238` — `send_dm` 失败即放弃
-- `crates/sqlite/migrations/0001_baseline.sql:235-245` — `offline_messages` 表（dead code）
-- `crates/sqlite/src/server.rs:31-75` — `enqueue/pending_for/mark_delivered` API（仅测试调用）
-- 信令服务器 `signaling/src/main.rs:434-508` — 仅有 group inbox，无 DM inbox
-
-**修改方向**:
-1. `send_dm` 失败时调用 `offline_messages::enqueue(pool, ...)`
-2. 后台 task 监听 `Connected` 事件 → `pending_for(peer)` → 逐条重发 → `mark_delivered`
-3. 指数退避: 1s, 2s, 4s, 8s... 最大 120s；超过 6 次标记 `failed`
-4. UI 侧：status=0 (sending) 展示发送中，重连后自动消失
-5. 可选：信令服务器增加 DM inbox（类似 group inbox），离线 peer 上线后从 server 拉取
-
-**验收标准**: 断网发 5 条消息 → 恢复网络 → 5 条全部送达 peer
+ ### 7. [x] DM 离线队列 + 重连补发 ✅
+ 
+ **问题**: `send_dm` 失败后消息直接丢弃（无本地留痕）。群组有 server inbox 轮询，DM 没有；`offline_messages`（账号级/server 收件箱）表是死代码且语义不匹配 chatx 的 peer-to-peer 加密 DM。
+ 
+ **位置**:
+ - `crates/core/src/lib.rs:1406` 旧 `send_dm` 失败即 `bail!`，消息没落任何地方
+ - `crates/sqlite/migrations/0001_baseline.sql:235` `offline_messages` 表（账号语义，未采用）
+ 
+ **方案**: client-side 本地队列（不动 P2P 协议、不依赖 server DM inbox）：
+ 1. `insert_mine_sending`（`store.rs`）— 发送前就把自己的文本行以 `status=SENDING` 落库，UI 立即可见"发送中"气泡（与旧"成功后才 insert"相反，彻底消除无气泡 + 无法重试的死角）
+ 2. `dm_send_queue`（`0009_dm_send_queue.sql`）+ `sqlite::queue` — 以本地 `messages.id` 为键的待重发表
+ 3. `send_dm` 重构：落库+入队 → `try_send_dm_once`（抽出的原 dial 逻辑：候选端点 + wake 打洞重试）→ ack 成功则 `status=SENT`+删队，失败则保留（行停留 SENDING、队行 attempts=0）
+ 4. `start_dm_redeliver`（登录时 spawn，OnceLock 去重）— tokio task 每 1.5s 扫描到期队行 → `try_send_dm_once` 重发；失败 `bump`（退避 5s→15s→1m→…→1h，共 `MAX_ATTEMPTS=12` ≈10h 预算）到顶则 `status=FAILED`+删队
+ 5. `process_event` 里 `Discovered` 事件命中 → `redeliver_due(Some(peer))` 立即快路径重发该 peer（不等同 1.5s tick）
+ 6. `apps/chat` 发送失败不再弹"Send failed"（消息已排队），改刷新聊天显示 SENDING 气泡
+ 
+ **刻意取舍**:
+ - **仅文本入队** — media（voice/image 64MiB）重发代价大，保留"失败手动重试"，避免内存/流量爆炸
+ - **明文入队** — 与现状一致（DM 本就落本地 SQLite 明文表），不引入新暴露面
+ - **12 次放弃**（非无限重试）— 防永久不可达 peer 的垃圾堆积；用户可手动重发
+ - **去重未做**（#6 独立项）— 极端情况下重发可能双投，接收端不按 id 去重；接受，待 #6 补齐
+ 
+ **验收标准**: 断网发 5 条 → UI 显示 5 条"发送中"且不崩溃不丢失 → 恢复网络/对端上线 → ≤15s 内全部送达，气泡转"已发送" → 12 次（~10h）后仍不可达则转"发送失败"，消息仍在本地库
 
 ---
 

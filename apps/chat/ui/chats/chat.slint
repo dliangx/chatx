@@ -174,10 +174,7 @@ export component ChatView inherits Rectangle {
         width: 22px;
         height: 22px;
     }
-    in-out property <bool> scrolled: false;
-    in-out property <bool> scroll-guard: false;
     in-out property <bool> requested: false;
-    in-out property <length> last-reported: -1px;
     in-out property <int> my-token: 0;
 
     Timer {
@@ -198,6 +195,13 @@ export component ChatView inherits Rectangle {
         interactive: ChatSession.messages.length > 0;
 
         flicked => {
+            // User released a drag: remember where it landed (bottom=0, top=max).
+            // Persisting only on real user drags keeps the "stuck to bottom"
+            // memory intact across new messages, which the old per-frame report
+            // used to clobber mid-re-layout and stall auto-scroll.
+            ChatSession.update-scroll(
+                root.chat-id,
+                (fk.content-height - fk.height) + fk.content-y);
             if (root.my-token != ChatSession.scroll-token) {
                 root.my-token = ChatSession.scroll-token;
             }
@@ -211,28 +215,6 @@ export component ChatView inherits Rectangle {
                 root.my-token = ChatSession.scroll-token;
                 let max = fk.content-height - fk.height;
                 fk.content-y = (max > 0px) ? (ChatSession.scroll-dist - max) : 0px;
-                root.last-reported = ChatSession.scroll-dist;
-                root.scrolled = true;
-                root.scroll-guard = true;
-            }
-        }
-
-        Timer {
-            interval: 16ms;
-            running: root.scroll-guard;
-            triggered => { root.scroll-guard = false; }
-        }
-
-        Timer {
-            interval: 16ms;
-            running: root.scrolled && !root.scroll-guard
-                && fk.interactive && (fk.content-height > fk.height);
-            triggered => {
-                let d = (fk.content-height - fk.height) + fk.content-y;
-                if (d < root.last-reported - 1px || d > root.last-reported + 1px) {
-                    root.last-reported = d;
-                    ChatSession.update-scroll(root.chat-id, d);
-                }
             }
         }
 

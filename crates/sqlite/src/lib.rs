@@ -10,6 +10,7 @@ pub mod groups;
 pub mod joins;
 pub mod messages;
 pub mod moment_sync;
+pub mod queue;
 pub mod notes;
 pub mod settings;
 pub mod server;
@@ -19,6 +20,10 @@ pub mod users;
 
 pub use sqlx::{self, SqlitePool as Pool};
 pub use sqlx::sqlite::SqlitePoolOptions;
+
+pub use messages::{
+    MSG_TYPE_TEXT, STATUS_DELIVERED, STATUS_FAILED, STATUS_READ, STATUS_SENDING, STATUS_SENT,
+};
 
 /// Which kind of media `MsgRow::media_path` points at (used to disambiguate a
 /// voice clip from a photo, since both store a `media_path`).

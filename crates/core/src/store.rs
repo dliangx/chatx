@@ -1,6 +1,7 @@
 use crate::message::now_ms;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
+use sqlite::messages::{NewMessage, MSG_TYPE_TEXT, STATUS_SENDING};
 
 /// A stored chat message — text, a voice clip, or a photo.
 #[derive(Debug, Clone)]
@@ -35,7 +36,7 @@ impl StoredMsg {
     }
 }
 
-pub fn dm_chat_id(peer_a: &str, peer_b: &str) -> String {
+    pub fn dm_chat_id(peer_a: &str, peer_b: &str) -> String {
     let (x, y) = if peer_a <= peer_b {
         (peer_a, peer_b)
     } else {
@@ -79,6 +80,57 @@ impl Default for Store {
 }
 
 impl Store {
+    /// Insert our own outbound text row with `status = sending` and return
+    /// its id. The caller (core) uses the id to drive the offline queue:
+    /// it is bumped to `sent` once the peer acks, or `failed` when the
+    /// retry budget is exhausted. See `queue.rs`.
+    pub async fn insert_mine_sending(
+        &self,
+        chat_id: &str,
+        text: &str,
+    ) -> anyhow::Result<i64> {
+        let Some(db) = &self.db else {
+            anyhow::bail!("Store::insert_mine_sending requires a sql backend");
+        };
+        let t = now_ms();
+        let id = t as i64;
+        let conversation_id = sqlite::conversations::ensure_dm(db, chat_id).await?;
+        let sender_user_id = sqlite::devices::ensure_user_by_peer(db, &self.me).await?;
+        let msg = NewMessage {
+            id: Some(id),
+            conversation_id,
+            sender_user_id,
+            sender_peer_id: Some(self.me.clone()),
+            msg_type: MSG_TYPE_TEXT,
+            text_content: Some(text.to_string()),
+            timestamp: Some(t as i64),
+            status: Some(STATUS_SENDING),
+            from_me: true,
+            ..Default::default()
+        };
+        let id = sqlite::messages::insert(db, &msg).await?;
+        // Mirror in-memory so the active chat list reflects it immediately.
+        self.msgs.write().push(StoredMsg {
+            id,
+            chat_id: chat_id.to_string(),
+            sender: self.me.clone(),
+            text: text.to_string(),
+            sealed: false,
+            t,
+            kind: Kind::Text,
+        });
+        Ok(id)
+    }
+
+    /// Bump the status of a local message row (e.g. `sending` → `sent` on
+    /// ack, or → `failed` after exhausted retries).
+    pub async fn set_status(&self, msg_id: i64, status: i64) -> anyhow::Result<()> {
+        let Some(db) = &self.db else {
+            return Ok(());
+        };
+        sqlite::messages::set_status(db, msg_id, status).await
+    }
+
     pub fn new() -> Self {
         Self {
             msgs: parking_lot::RwLock::new(Vec::new()),

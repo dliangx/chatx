@@ -2623,6 +2623,10 @@ fn apply_result(
             // coordination). Safe to call on every login — no-op after the
             // first one thanks to the client-side cooldown.
             client.start_notify_pump();
+            // DM offline redelivery: re-push any text DMs that failed to
+            // deliver while the peer was offline. Safe to call on every
+            // login — no-op after the first thanks to the OnceLock.
+            client.start_dm_redeliver();
             start_group_conn_sweeper();
             let approved = client
                 .status()
@@ -3992,12 +3996,13 @@ async fn refresh_inbound_chat(weak: slint::Weak<MainWindow>, chat_id: String) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak2.upgrade() {
             let state = ui.global::<AppState>();
-            publish_to_views(&state, backend2.clone());
             if is_current {
                 if let Some(k) = k {
+                    CHAT_SCROLL_POS.write().unwrap().insert(k, 0.0);
                     load_chat_messages(ui.as_weak(), k);
                 }
             }
+            publish_to_views(&state, backend2.clone());
         }
     });
 }
@@ -4396,6 +4401,19 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 return;
             }
         };
+        // Snapshot of outbound text rows the peer hasn't acked yet (the DM
+        // offline queue). Keyed by local `messages.id` — the same key that
+        // `StoredMsg.id` carries — so we can stamp the matching row in the
+        // model build below without any further DB access from the Slint
+        // (sync) closure.
+        let pending_msg_ids: std::collections::HashSet<i64> =
+            match sqlite::queue::all_pending_ids(&pool).await {
+                Ok(ids) => ids.into_iter().collect(),
+                Err(e) => {
+                    tracing::warn!("[chat] all_pending_ids failed: {e}");
+                    std::collections::HashSet::new()
+                }
+            };
         ensure_renderer();
 
         let mut rows = rows;
@@ -4594,7 +4612,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             // `to_message_data` already fills `image_img` from each photo's small
             // cached preview (a memory hit after the first switch), so the full
             // original is never decoded here — only in the viewer on tap.
-            let messages: Vec<crate::MessageData> = rendered
+            let mut messages: Vec<crate::MessageData> = rendered
                 .into_iter()
                 .enumerate()
                 .map(|(i, m)| {
@@ -4619,6 +4637,19 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                                         }
                                         other => other, // sending(1) / failed(3)
                                     };
+                            }
+                        }
+                    }
+                    // Offline DM queue stamp: an OUTBOUND text row still in
+                    // `dm_send_queue` (peer never acked yet) shows a small
+                    // purple send-check in the bubble's outer corner plus its
+                    // time below — "stored locally, waiting for the peer".
+                    if md.send_state == crate::chat::SEND_STATE_NONE {
+                        if let Some(r) = rows.get(i) {
+                            if (r.sender == me_peer || r.sender == me)
+                                && pending_msg_ids.contains(&r.id)
+                            {
+                                md.send_state = crate::chat::SEND_STATE_SENDING;
                             }
                         }
                     }
@@ -4727,48 +4758,63 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
     let my_peer = client.peer_base58();
     tracing::debug!("[send] dm candidates: {me_peers:?}, me={my_peer}");
     rt.spawn(async move {
-        let mut last_err: String = if me_peers.is_empty() {
-            "Cannot determine peer (conversation missing peer id)".to_string()
-        } else {
-            String::new()
-        };
-        let mut sent = false;
-        'outer: for cand in &me_peers {
-            if cand == &my_peer {
-                tracing::debug!("[send] skip self {cand}");
-                continue;
-            }
-            tracing::debug!("[send] dm trying peer={cand}");
-            match client.send_dm(cand, &body).await {
-                Ok(_) => {
-                    tracing::debug!("[send] dm ok -> {cand}");
-                    touch_chat_activity(&chat_id);
-                    sent = true;
-                    break 'outer;
+        if me_peers.is_empty() || me_peers.iter().all(|p| *p == my_peer) {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.global::<ChatSession>().set_send_busy(false);
                 }
-                Err(e) => {
-                    tracing::warn!("[send] dm peer={cand} failed: {e}");
-                    last_err = e.to_string();
-                }
-            }
-        }
-        if !sent {
-            let msg = if last_err.trim().is_empty() {
-                "Peer is offline".to_string()
-            } else {
-                last_err
-            };
-            tracing::warn!("[send] dm ALL candidates failed: {msg}");
-            cs_set_send_status(weak, format!("Send failed: {msg}"));
+                cs_set_send_status(weak, "Cannot determine peer".to_string());
+            });
             return;
         }
+
+        // Phase 1 — stage the message (single local SENDING row + redelivery
+        // queue entry) keyed to the primary candidate, then refresh the chat
+        // so the "发送中" bubble appears IMMEDIATELY, before any network I/O.
+        let primary: String = me_peers
+            .iter()
+            .find(|p| **p != my_peer)
+            .cloned()
+            .unwrap_or_default();
+        let (chat, msg_id) = match client.queue_dm_text(&primary, &body).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("[send] queue_dm_text failed: {e}");
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.global::<ChatSession>().set_send_busy(false);
+                    }
+                    cs_set_send_status(weak, format!("Send failed: {e}"));
+                });
+                return;
+            }
+        };
+        touch_chat_activity(&chat_id);
         {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<ChatSession>().set_send_busy(false);
                 }
             });
-            load_chat_messages(weak2, key);
+            load_chat_messages(weak2.clone(), key);
+        }
+
+        // Phase 2 — attempt live delivery to the queued peer right now. On
+        // ack the row flips SENDING→SENT (refresh once); otherwise it stays
+        // SENDING and the `start_dm_redeliver` task retries in the background.
+        // Neither outcome is a terminal failure — the bubble is on screen.
+        tracing::debug!("[send] dm trying peer={primary}");
+        match client.deliver_dm(msg_id, &primary, &body).await {
+            Ok(true) => {
+                tracing::debug!("[send] dm ok -> {primary}");
+                load_chat_messages(weak2, key);
+            }
+            Ok(false) => {
+                tracing::info!("[send] dm to {primary} not deliverable now — queued for redelivery");
+            }
+            Err(e) => {
+                tracing::warn!("[send] dm to {primary} failed: {e} — will retry");
+            }
         }
     });
 }

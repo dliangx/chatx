@@ -254,6 +254,130 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// Start a background thread that long-polls the directory for wake
     /// notices and dials the sender back on arrival. Safe to call multiple
     /// times — only the first call spawns the thread.
+    /// Start the DM redelivery loop: a tokio task that scans
+    /// `dm_send_queue` for due rows (~1.5 s cadence) and reuses
+    /// [`Self::try_send_dm_once`] to push them. Bumps the row's attempt
+    /// counter on failure (or marks the message row `failed` when the 12
+    /// attempt budget is exhausted), and removes the row on success.
+    ///
+    /// Safe to call multiple times — only the first call spawns.
+    ///
+    /// Runs on a **dedicated thread with its own `current_thread` tokio
+    /// runtime** (mirrors `start_presence_loop`): the login flow invokes
+    /// this from the Slint UI thread, which has no ambient tokio context, so
+    /// `Handle::current()` would panic. A self-contained runtime also means
+    /// the redelivery loop keeps pacing independently of the app's runtime.
+    pub fn start_dm_redeliver(self: &Arc<Self>) {
+        static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if STARTED.set(()).is_err() {
+            return;
+        }
+        let client = self.clone();
+        let _ = std::thread::Builder::new()
+            .name("chatx-dm-redeliver".to_string())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build dm-redeliver runtime");
+                rt.block_on(async {
+                    let mut tick = tokio::time::interval(std::time::Duration::from_millis(1500));
+                    // First tick fires immediately — pick up anything queued by
+                    // a prior run (the app may restart while the peer is still
+                    // offline and the local row is still SENDING).
+                    loop {
+                        tick.tick().await;
+                        client.redeliver_due(None).await;
+                    }
+                });
+            })
+            .expect("spawn dm-redeliver thread");
+    }
+
+    /// One redelivery round: scan `dm_send_queue` for due rows and send
+    /// each. Intentionally idempotent — multiple calls in quick succession
+    /// (e.g. from a Connected-event handler) are harmless because rows are
+    /// processed independently and the peer's ack is the terminal state.
+    /// `peer` = `None` to drain all due rows (polling-task path), or a
+    /// specific base58 peer id to drain only its rows (event fast-path).
+    pub async fn redeliver_due(&self, peer: Option<&str>) {
+        let Some(pool) = self.store.pool() else {
+            return;
+        };
+        let res = match peer {
+            Some(p) => sqlite::queue::due_for_peer(&pool, p, 16).await,
+            None => sqlite::queue::due(&pool, 16).await,
+        };
+        let rows = match res {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("[redeliver] due scan failed: {e}");
+                return;
+            }
+        };
+        if rows.is_empty() {
+            return;
+        }
+        for row in rows {
+            // Re-read the text from the local `messages` row (the queue only
+            // stores the id — single source of truth for content).
+            let Some(text) = sqlite::messages::get(&pool, row.msg_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|m| m.text_content)
+            else {
+                // Local row missing (user deleted?) — drop the queue row.
+                let _ = sqlite::queue::give_up(&pool, row.msg_id).await;
+                tracing::debug!(msg_id = row.msg_id, "[redeliver] local row missing — dropped");
+                continue;
+            };
+            if text.is_empty() {
+                let _ = sqlite::queue::give_up(&pool, row.msg_id).await;
+                continue;
+            }
+            tracing::info!(
+                msg_id = row.msg_id,
+                peer = %row.peer_base58,
+                attempt = row.attempts,
+                "[redeliver] retrying offline DM"
+            );
+            match self.try_send_dm_once(&row.peer_base58, &text).await {
+                Ok(()) => {
+                    let _ = self.store.set_status(row.msg_id, sqlite::STATUS_SENT).await;
+                    let _ = sqlite::queue::give_up(&pool, row.msg_id).await; // drop from queue
+                    tracing::info!(msg_id = row.msg_id, peer = %row.peer_base58, "[redeliver] DELIVERED");
+                }
+                Err(why) => {
+                    let attempts = match sqlite::queue::bump(&pool, row.msg_id).await {
+                        Ok(a) => a,
+                        Err(e) => {
+                            tracing::warn!("[redeliver] bump failed: {e}");
+                            continue;
+                        }
+                    };
+                    if attempts >= sqlite::queue::MAX_ATTEMPTS {
+                        let _ = self.store.set_status(row.msg_id, sqlite::STATUS_FAILED).await;
+                        let _ = sqlite::queue::give_up(&pool, row.msg_id).await;
+                        tracing::warn!(
+                            msg_id = row.msg_id,
+                            peer = %row.peer_base58,
+                            attempts,
+                            "[redeliver] giving up — marked FAILED (reason: {why})"
+                        );
+                    } else {
+                        tracing::debug!(
+                            msg_id = row.msg_id,
+                            peer = %row.peer_base58,
+                            attempts,
+                            "[redeliver] failed, scheduled next attempt ({why})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     pub fn start_notify_pump(self: &Arc<Self>) {
         static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         if STARTED.set(()).is_err() {
@@ -1403,18 +1527,111 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
     }
 
+    /// Send a DM to `peer_base58` and wait for the peer's ack.
+    ///
+    /// Behaviour:
+    /// 1. Pre-insert a local `status = SENDING` row (UI-visible immediately,
+    ///    "发送中" bubble).
+    /// 2. Enqueue the row into the DM send queue (so the redelivery task can
+    ///    retry it if the peer is offline right now).
+    /// 3. Attempt a live dial (round 1 = all known endpoints, round 2 = wake
+    ///    peer and re-try).
+    /// 4a. On ack: bump row to `sent`, drop the queue row, return chat id.
+    /// 4b. On failure: keep both the local row and the queue row (attempts
+    ///     remain 0 — the redelivery task will own the backoff). Return an
+    ///     `Err` describing the last attempt; the UI shows a transient
+    ///     "sending in background" notice and the bubble stays in SENDING
+    ///     state until the peer acks or the 12-attempt budget (~10 h) is
+    ///     exhausted, at which point the row flips to `failed`.
+    ///
+    /// **Text only** — media (voice/image/file) keeps the legacy "fail and
+    /// let the user retry" semantics: `send_dm` is only used for
+    /// `Kind::Text` rows and the queue table is only populated with text
+    /// rows.
+    /// Stage a text DM for delivery WITHOUT dialing: pre-insert the local
+    /// `status = SENDING` row and enqueue it for redelivery, then return the
+    /// chat id + local message id immediately. This is the part the UI calls
+    /// **before** any network I/O so the "发送中" bubble appears instantly,
+    /// even when the peer is offline.
+    ///
+    /// Returns `Ok((chat_id, msg_id))`. The local-row insert is the contract
+    /// (the UI relies on the row existing right after this returns), so a db
+    /// failure here is a hard error; the enqueue is best-effort on top.
+    pub async fn queue_dm_text(
+        &self,
+        peer_base58: &str,
+        text: &str,
+    ) -> anyhow::Result<(String, i64)> {
+        let chat = store::dm_chat_id(&self.peer_base58(), peer_base58);
+        let msg_id = self.store.insert_mine_sending(&chat, text).await?;
+        if let Some(pool) = self.store.pool() {
+            let _ = sqlite::queue::enqueue(&pool, msg_id, peer_base58, &chat).await;
+        }
+        tracing::debug!("[dm] queued peer={peer_base58} msg_id={msg_id} chat={chat}");
+        Ok((chat, msg_id))
+    }
+
+    /// Attempt to deliver an already-queued text DM right now (the "live"
+    /// path): try every dialable endpoint, then wake-and-retry. On ack the
+    /// local row flips `SENDING`→`SENT` and the redelivery queue row is
+    /// dropped. On failure the row stays `SENDING` and the
+    /// `start_dm_redeliver` task owns the backoff.
+    ///
+    /// Returns `Ok(true)` when the peer acked this attempt, `Ok(false)` when
+    /// it didn't (queued for retry). A directory/db-level error that prevented
+    /// even attempting a dial is returned as `Err`.
+    pub async fn deliver_dm(
+        &self,
+        msg_id: i64,
+        peer_base58: &str,
+        text: &str,
+    ) -> anyhow::Result<bool> {
+        match self.try_send_dm_once(peer_base58, text).await {
+            Ok(()) => {
+                if let Some(pool) = self.store.pool() {
+                    let _ = self.store.set_status(msg_id, sqlite::STATUS_SENT).await;
+                    let _ = sqlite::queue::give_up(&pool, msg_id).await; // drop queue row
+                }
+                tracing::debug!("[dm] delivered peer={peer_base58}");
+                Ok(true)
+            }
+            Err(why) => {
+                tracing::info!(
+                    "[dm] live deliver failed peer={peer_base58} ({why}); redelivery loop owns it"
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    /// Send a DM in one shot: [`queue_dm_text`] + [`deliver_dm`].
+    ///
+    /// **Text only** — media (voice/image/file) keeps the legacy "fail and
+    /// let the user retry" semantics: `send_dm` is only used for
+    /// `Kind::Text` rows and the `dm_send_queue` table is only populated with
+    /// text rows.
     pub async fn send_dm(&self, peer_base58: &str, text: &str) -> anyhow::Result<String> {
-        tracing::debug!("[dm] send_dm peer={peer_base58} text_len={}", text.len());
+        let (chat, msg_id) = self.queue_dm_text(peer_base58, text).await?;
+        self.deliver_dm(msg_id, peer_base58, text).await?;
+        Ok(chat)
+    }
+
+    /// Live dial attempt (round 1 = all endpoints, round 2 = wake + retry).
+    /// Returns `Ok(())` on peer ack or `Err(last_err_description)`. Does NOT
+    /// touch the local message row or queue — that's the caller's job so
+    /// both the sync `send_dm` path and the async redelivery path can share
+    /// the same dial logic.
+    async fn try_send_dm_once(&self, peer_base58: &str, text: &str) -> Result<(), String> {
         let rec = self
             .dir
             .resolve_device(peer_base58)
-            .map_err(|e| anyhow::anyhow!("device {peer_base58} not found in directory: {e}"))?;
+            .map_err(|e| format!("device {peer_base58} not found in directory: {e}"))?;
         if rec.endpoints.is_empty() {
-            anyhow::bail!("device {peer_base58} is offline (no endpoints)");
+            return Err(format!("device {peer_base58} is offline (no endpoints)"));
         }
         let peer: PeerId = peer_base58
             .parse()
-            .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
+            .map_err(|e| format!("bad peer: {e}"))?;
 
         let mut candidates: Vec<Multiaddr> = Vec::new();
         for endpoint in &rec.endpoints {
@@ -1429,8 +1646,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             candidates.push(addr);
         }
         if candidates.is_empty() {
-            anyhow::bail!(
+            return Err(
                 "device {peer_base58} has no dialable endpoint (only loopback/tcp0 addrs are registered — restart the peer with a LAN-reachable address)"
+                    .to_string(),
             );
         }
 
@@ -1463,7 +1681,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 continue;
             }
             match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(Ok(()))) => return self.commit_dm(peer_base58, text).await,
+                Ok(Ok(Ok(()))) => {
+                    tracing::debug!("[dm] send to {addr} ACK'd");
+                    return Ok(());
+                }
                 Ok(Ok(Err(e))) => {
                     tracing::warn!("[dm] send to {addr} failed: {e}");
                     last_err = e.to_string();
@@ -1512,7 +1733,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         continue;
                     }
                     match tokio::time::timeout(timeout, rx).await {
-                        Ok(Ok(Ok(()))) => return self.commit_dm(peer_base58, text).await,
+                        Ok(Ok(Ok(()))) => {
+                            tracing::debug!("[dm] retry send to {addr} ACK'd");
+                            return Ok(());
+                        }
                         Ok(Ok(Err(e))) => {
                             tracing::warn!("[dm] retry send to {addr} failed: {e}");
                             last_err = e.to_string();
@@ -1527,18 +1751,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 }
             }
         }
-        anyhow::bail!("failed to deliver to {peer_base58}: {last_err}");
-    }
-
-    /// After an ack: persist the DM locally and return the chat id.
-    async fn commit_dm(&self, peer_base58: &str, text: &str) -> anyhow::Result<String> {
-        let chat = store::dm_chat_id(&self.peer_base58(), peer_base58);
-        let _ = self
-            .store
-            .push(&chat, &self.peer_base58(), text, false, store::Kind::Text)
-            .await;
-        tracing::debug!("[dm] send_dm done, chat={chat}");
-        Ok(chat)
+         Err(format!("failed to deliver to {peer_base58}: {last_err}"))
     }
 
     /// Send a voice message to `peer_base58` over the DM channel and wait for
@@ -2770,6 +2983,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
     pub async fn process_event(&self, evt: sw::ChatEvent) -> Option<String> {
         use sw::ChatEvent as E;
+        // Fast-path for offline DM redelivery: the moment a peer's address is
+        // re-discovered (mDNS / new relay endpoint), push any pending rows
+        // without waiting for the 1.5 s poll tick. Best-effort — the
+        // redelivery task remains the backstop if this fails.
+        if let sw::ChatEvent::Discovered { peer, .. } = &evt {
+            let b58 = peer.to_base58();
+            self.redeliver_due(Some(b58.as_str())).await;
+        }
         match evt {
             E::Text { peer, req } => {
                 let peer_b58 = peer.to_base58();
