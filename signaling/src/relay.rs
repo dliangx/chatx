@@ -150,6 +150,31 @@ pub async fn start(
         .map_err(|e| anyhow::anyhow!("parse listen addr: {e}"))?;
     swarm.listen_on(udp.clone()).map_err(|e| anyhow::anyhow!("listen quic {udp}: {e}"))?;
 
+    // CRITICAL for reservation: the relay v2 server must include the client's
+    // observed address in the reservation success response. It sources that list
+    // from `swarm.external_addresses` (see `libp2p::relay::Behaviour` →
+    // `AcceptReservationReq { addrs: self.external_addresses … }`). When we only
+    // listen on `0.0.0.0`/private addrs and never register an external address,
+    // that list is empty, the client sees `NoAddressesInReservation`, and it
+    // drops the circuit listener — so no `/p2p-circuit` endpoint ever surfaces.
+    // Register the public base for both transports so the handshake completes.
+    if let Some(host) = public_host {
+        let pub_tcp = format!("/ip4/{host}/tcp/{}", addr.port());
+        let pub_udp = format!("/ip4/{host}/udp/{}/quic-v1", addr.port());
+        for s in [pub_tcp, pub_udp] {
+            if let Ok(m) = s.parse::<Multiaddr>() {
+                swarm.add_external_address(m.clone());
+                tracing::info!(%m, "relay registered external address");
+            }
+        }
+    } else {
+        tracing::warn!(
+            "no public host — relay reservation responses will carry no address \
+             and clients will fail with NoAddressesInReservation. Set \
+             CHATX_RELAY_ADVERTISE=<public-host:port>"
+        );
+    }
+
     let mut announced = Some(ready_tx);
     loop {
         match swarm.next().await {

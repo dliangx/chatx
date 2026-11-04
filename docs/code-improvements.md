@@ -539,36 +539,33 @@
 - QUIC multiaddr 必须带 `/quic-v1` 后缀，仅 `/udp/...` 会被拒绝
 - 测试：core 23 / e2e 15 / signal 8 全绿
 
-### 38. [x] Phase 0 — relay advertise 公网地址 & 跨 LAN 诊断 ✅
+### 38. [x] Phase 0 — relay advertise 公网地址 & reservation 握手 ✅
 
-**问题**: relay 默认绑定 `0.0.0.0:1883`，`GET /v1/relays` advertise 出去的却是
-`/ip4/0.0.0.0/tcp/1883/p2p/...` —— 一个**任何跨网段客户端都拨不通**的地址。
-后果：
-- B `reserve_relays` 永远连不上（dial 自己失败），`ReservationReqAccepted`
-  不来，`/p2p-circuit` 进不了目录
-- A 看到 B 的端点只有私有 LAN（192.168 / 172.30 等），dial 必超时
-- 1883 端口放行了也没用 —— 地址本身不可路由
+**问题**: relay 有两个相互独立的 bug 导致跨网段 `/p2p-circuit` 建不起来：
+1. relay 默认绑定 `0.0.0.0:1883`，advertise 出去的是
+   `/ip4/0.0.0.0/tcp/1883/p2p/...` —— 任何跨网段客户端都拨不通
+2. 更隐蔽：relay server 从未 `add_external_address`，`swarm.external_addresses`
+   为空 → relay v2 协议里 reservation 成功响应的 `addrs` 为空 → 客户端
+   报 `NoAddressesInReservation` 直接关掉 circuit listener → 目录永远没有
+   `/p2p-circuit`（这就是"server reservation accepted 但客户端连不上"的根因）
 
-**位置**: `signaling/src/relay.rs`（advertise 计算）、`crates/core/src/lib.rs`
-（诊断）
+**位置**: `signaling/src/relay.rs`（advertise + external address 注册）
 
 **已做**:
 - relay 启动时 `resolve_public_host()`：优先 `CHATX_RELAY_ADVERTISE=<公网host:port>`
-  （支持 IP 或域名 DNS 解析），其次出站 UDP 探测 `8.8.8.8:53` 拿 local IP，
-  最后回退保留原地址并 `warn!`
+  （支持 IP 或域名 DNS 解析），其次出站 UDP 探测拿 local IP，最后回退保留原地址并 `warn!`
 - announce 时 `with_public_host()` 把 listen 地址的 IP 替换成公网 host，
   保留原始 transport（`/tcp/` 或 `/udp/...quic-v1`）
-- 即使监听在 `0.0.0.0` / 私有 IP，advertise 出去的一定是**可拨号**地址
-- 新增 3 个 signal 单测覆盖 TCP/UDP advertise / 回退
-- 方案 3 诊断：`diagnose_lan_only_candidates`（lib.rs:2967）在 `send_dm` /
-  `send_friendq` 前检测"全部候选都是私有 LAN 且无 /p2p-circuit"，30s 内
-  每 peer 只 warn 一次，直接给出排查清单
-- 方案 4 诊断：`heartbeat` 的 NAT warn 现在带 `stun = <STUN 状态>` 字段，
-  方便区分是"STUN 未命中"还是"对称 NAT"
+- **关键**：`swarm.add_external_address(pub_tcp/pub_udp)` 让 relay 在 reservation
+  响应里能带回地址，客户端 `NoAddressesInReservation` 不再触发，`/p2p-circuit`
+  正常进入地址簿与目录
+- `swarm.rs` `Cmd::ReserveRelay`：显式 `add_peer_address(relay, base)` 确保客户端
+  能拨到 relay（不要 `swarm.dial`，那会破坏 relay 内部的 reservation 握手）
+- 新增 signal 单测覆盖 TCP/UDP advertise / 回退，及真实 `/v1/relays` 格式解析
 
-**部署**: 在 relay 启动时设置
-`CHATX_RELAY_ADVERTISE=<公网host:port>`（如 `139.159.201.87:1883`），
-否则 relay 会尝试出站探测，探测到的若是私有 IP 会 `warn!` 提示。
+**部署**: relay 启动时设置 `CHATX_RELAY_ADVERTISE=<公网host:port>`
+（如 `139.159.201.87:1883`）。未设置时 relay 仍可出站探测，但探测到私有 IP
+会 `warn!` 且 reservation 可能失败。
 
 ---
 

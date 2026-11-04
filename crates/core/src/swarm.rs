@@ -804,10 +804,12 @@ async fn swarm_loop(
                         .with(libp2p::multiaddr::Protocol::P2p(relay_peer))
                         .with(libp2p::multiaddr::Protocol::P2pCircuit)
                         .with(libp2p::multiaddr::Protocol::P2p(me));
+                    // Give the relay client its dial target. Don't `dial` here —
+                    // the client reserves over the connection it dials itself in
+                    // `listen_on`; a pre-dial breaks that handshake.
+                    swarm.add_peer_address(relay_peer, relay_addr.clone());
                     if let Err(e) = swarm.listen_on(circuit.clone()) {
-                        tracing::warn!("reserve relay {relay_peer}: {e}");
-                    } else {
-                        tracing::debug!("[swarm] reserve relay via {circuit}");
+                        tracing::warn!(%relay_peer, %circuit, "reserve relay: {e}");
                     }
                 }
                 Some(Cmd::Disconnect { peer }) => {
