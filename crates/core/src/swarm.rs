@@ -65,6 +65,13 @@ pub struct Net {
     pub mdns: Mdns,
     pub upnp: Upnp,
     pub relay: libp2p::relay::client::Behaviour,
+    /// DCUtR — coordinates relay→direct hole-punching. Once the relay
+    /// circuit is up, `/libp2p/dcutr` runs over it: peers exchange observed
+    /// public addresses (CONNECT) and clock offsets (SYNC), then dial each
+    /// other's public UDP simultaneously (QUIC simultaneous-open does the
+    /// actual punching). On success the connection is demoted from
+    /// `/p2p-circuit` to a direct QUIC address automatically.
+    pub dcutr: libp2p::dcutr::Behaviour,
     pub chat: Chat<ChatRequest, ChatResponse>,
     pub group: libp2p::gossipsub::Behaviour,
     // libp2p ping keeps the muxed TCP connection alive across idle periods:
@@ -473,10 +480,13 @@ pub async fn boot(
         .expect("tcp+noise+yamux")
         .with_quic()
         .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
-        .with_behaviour(move |_k, relay| Net {
+        .with_behaviour(move |k, relay| {
+            let my_peer = libp2p::PeerId::from_public_key(&k.public());
+            Net {
             mdns,
             upnp: Upnp::default(),
             relay,
+            dcutr: libp2p::dcutr::Behaviour::new(my_peer),
             chat,
             blob,
             voice,
@@ -484,6 +494,7 @@ pub async fn boot(
             file,
             group,
             ping,
+            }
         })?
         .build();
 
@@ -985,7 +996,23 @@ async fn swarm_loop(
                             tracing::debug!("[swarm] RELAY reservation accepted from {relay_peer_id}");
                         }
                     }
-                    NetEvent::Mdns(m) => {
+                     // DCUtR: relay→direct hole-punch completed (Ok) or failed
+                     // (Err — connection stays on the relay; the §A escalation
+                     // path remains a backstop once we learn the peer's real
+                     // address).
+                     NetEvent::Dcutr(libp2p::dcutr::Event { remote_peer_id, result }) => {
+                         match result {
+                             Ok(_) => tracing::info!(
+                                 %remote_peer_id,
+                                 "[dcutr] hole-punch SUCCEEDED — upgraded relay→direct"
+                             ),
+                             Err(e) => tracing::warn!(
+                                 %remote_peer_id,
+                                 "[dcutr] hole-punch failed: {e} — staying on relay"
+                             ),
+                         }
+                     }
+                     NetEvent::Mdns(m) => {
                         if let MdnsEvent::Discovered(ips) = m {
                             for (p, addr) in ips {
                                 swarm.add_peer_address(p, addr.clone());

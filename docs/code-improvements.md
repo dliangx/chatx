@@ -583,9 +583,44 @@
   地址抖动时反复重拨
 - 新增单测 `is_relayed_detects_circuit_only`
 
-**说明**: 不依赖 QUIC connection migration / DCUtR（libp2p-quic 当前
+**说明**: 不依赖 QUIC connection migration（libp2p-quic 当前
 `migration(false)`，开启需 patch 库）。§A 用应用层"新地址到达即重 dial"实现，
 改动小、风险低，已能满足 relay→直连升级。
+
+### 40. [x] Phase 0 — DCUtR 协同 relay→直连打洞（QUIC）✅
+
+**问题**: §A（#39）只能被动等对端广播新地址才升级；缺少 libp2p 原生的
+DCUtR（Direct-connection Upgrade Through Relay）协调器。DCUtR 让 relay 电路
+上的对端通过 `/libp2p/dcutr` 流主动交换 ObsAddrs（CONNECT）与时钟偏移（SYNC），
+同时发起 QUIC 双向 dial。libp2p-quic 0.13 已内置 simultaneous-open（QUIC
+允许 client/listener 同时握手），只要双方都有公网 UDP 地址 + relay 电路
+就自动打洞，无需 DCUtR 也可以——但 DCUtR 提供时钟同步让双方"同时"发包，
+成功率显著提升（特别是两个都是端口随机化的 Cone NAT 的情况）。
+
+**位置**:
+- `Cargo.toml:30` — workspace `libp2p` crate `features` 列表新增 `"dcutr"`
+- `crates/core/src/swarm.rs:67-75` — `Net` 结构体新增 `dcutr: libp2p::dcutr::Behaviour` 字段
+- `crates/core/src/swarm.rs:477-480` — `with_behaviour` 闭包内用 `k.public()` 构造
+  `libp2p::dcutr::Behaviour::new(my_peer)`
+- `crates/core/src/swarm.rs:~1003` — event loop `NetEvent::Dcutr` 分支
+  （`[dcutr] hole-punch SUCCEEDED/failed — peer …` 日志）
+- **relay 服务端**（`signaling/src/relay.rs`）**无需任何改动** —— DCUtR
+  流在已建立的 relay 电路上协商，relay 只做透明字节搬运，与
+  `/libp2p/dcustr` 协议版本无关
+
+**已做**:
+- workspace `Cargo.toml` 开启 libp2p `dcutr` feature
+- `swarm.rs::Net` 加 `dcutr` 字段（`Behaviour::new(local_peer_id)` 即可，
+  无额外配置项——libp2p-dcutr 0.14 默认配置已经合理）
+- `swarm_loop` 里 `NetEvent::Dcutr` 分支打 INFO（成功）/ WARN（失败）日志，
+  便于线上判断升级是否真的发生
+- `cargo build --workspace` + `cargo test --workspace` 全绿
+
+**验收**: 跨 NAT 双方 relay 电路建立后，几秒内应看到
+`[dcutr] hole-punch SUCCEEDED` INFO 日志，且随后 `ConnectionEstablished`
+的 endpoint multiaddr 从 `/p2p-circuit` 变成 `/ip4/<公网>/udp/<端口>/quic-v1`
+（即直连 QUIC）。若 Alice STUN miss（`miss` 即出站 UDP 被挡），
+打洞会失败落到 WARN——属网络限制，DCUtR 无能为力。
 
 ---
 
@@ -601,11 +636,14 @@ Phase 0 — 外网连通 (NAT 穿透)
   P0-NAT-36 ⑥ 信令辅助 TCP hole-punching     ✅ 完成
   P0-NAT-37 ⑦ 启用 QUIC/UDP 传输              ✅ 完成
   P0-NAT-38 ⑧ relay advertise 公网地址+诊断    ✅ 完成
+  P0-NAT-39 ⑨ relay→直连升级（应用层重 dial）  ✅ 完成
+  P0-NAT-40 ⑩ DCUtR 协同 QUIC 打洞             ✅ 完成
 
   ⇒ Phase 0 全部交付：自动发现 relay、UPnP/relay 确认立即上报、无公网地址
      诊断日志、STUN 公网 IP 发现、信令辅助 TCP hole-punching、QUIC/UDP 传输、
-     relay advertise 可拨号公网地址。外→外连接在有内置 relay 的场景下已可打通
-     （无需 CHATX_RELAYS），并具备 UDP 直连 + hole-punching 能力。
+     relay advertise 可拨号公网地址、relay→直连升级（§A 应用层 + DCUtR 主动
+     协同打洞，双保险）。外→外连接在有内置 relay 的场景下已可打通（无需
+     CHATX_RELAYS），并具备 UDP 直连 + hole-punching 能力。
 
 Phase 1 — 稳定性 (Week 1-2)
   P0-1  优雅关闭
