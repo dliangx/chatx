@@ -305,6 +305,9 @@ pub struct Running {
     pub connected: Arc<Mutex<HashMap<PeerId, u32>>>,
     pub dial_backoff: Arc<Mutex<HashMap<String, (u64, u32)>>>,
     pub dial_fail_log: Arc<Mutex<HashMap<String, u64>>>,
+    /// Last relay->direct escalation attempt per peer (ms since epoch). Cooldown
+    /// guard so a flapping peer isn't re-dialed on every connection event.
+    pub escalation_last: Arc<Mutex<HashMap<PeerId, u64>>>,
     pub relays: Arc<Mutex<Vec<(PeerId, Multiaddr)>>>,
     pub injected: mpsc::UnboundedSender<ChatEvent>,
 }
@@ -335,6 +338,13 @@ fn is_own_address(addr: &Multiaddr, running: &Running) -> bool {
         .unwrap()
         .iter()
         .any(|a| a == addr)
+}
+
+/// True when `addr` carries a `/p2p-circuit` segment — i.e. it is a
+/// relay-tunneled route rather than a direct transport path.
+fn is_relayed(addr: &Multiaddr) -> bool {
+    addr.iter()
+        .any(|c| matches!(c, libp2p::multiaddr::Protocol::P2pCircuit))
 }
 
 pub fn split_relay_addr(full: &Multiaddr) -> Option<(PeerId, Multiaddr)> {
@@ -498,6 +508,7 @@ pub async fn boot(
     let connected = Arc::new(Mutex::new(HashMap::new()));
     let dial_backoff = Arc::new(Mutex::new(HashMap::new()));
     let dial_fail_log = Arc::new(Mutex::new(HashMap::new()));
+    let escalation_last = Arc::new(Mutex::new(HashMap::new()));
     let relays = Arc::new(Mutex::new(parse_relay_env()));
 
     let me = *swarm.local_peer_id();
@@ -523,6 +534,7 @@ pub async fn boot(
         connected: Arc::clone(&connected),
         dial_backoff: Arc::clone(&dial_backoff),
         dial_fail_log: Arc::clone(&dial_fail_log),
+        escalation_last: Arc::clone(&escalation_last),
         relays: Arc::clone(&relays),
         injected: injected_tx.clone(),
     });
@@ -866,6 +878,44 @@ async fn swarm_loop(
                     *running.connected.lock().unwrap().entry(peer_id).or_insert(0) += 1;
                     running.dial_backoff.lock().unwrap().remove(&peer_id.to_base58()); // reachable again — clear backoff
                     let _ = ev.send(ChatEvent::Connected(peer_id));
+                }
+                SwarmEvent::NewExternalAddrOfPeer { peer_id, address } => {
+                    // §A escalation: the peer just advertised a *new* address.
+                    // If that's a direct (non-relay) address and we're currently
+                    // connected to this peer, re-dial so libp2p re-contends and
+                    // prefers direct (bandwidth/latency saving). Bounded by a
+                    // per-peer cooldown.
+                    if peer_id != running.my_peer_id
+                        && !is_relayed(&address)
+                        && running.connected.lock().unwrap().contains_key(&peer_id)
+                    {
+                        const COOLDOWN_MS: u64 = 30_000;
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        let allow = {
+                            let m = running.escalation_last.lock().unwrap();
+                            m.get(&peer_id)
+                                .map(|last| now.saturating_sub(*last) >= COOLDOWN_MS)
+                                .unwrap_or(true)
+                        };
+                        if allow {
+                            {
+                                let mut m = running.escalation_last.lock().unwrap();
+                                m.insert(peer_id, now);
+                            }
+                            running
+                                .dial_backoff
+                                .lock()
+                                .unwrap()
+                                .remove(&peer_id.to_base58());
+                            tracing::info!(%peer_id, %address, "new direct addr from peer — re-dial to upgrade from relay");
+                            if let Err(e) = swarm.dial(peer_id) {
+                                tracing::debug!(%peer_id, "escalate re-dial: {e}");
+                            }
+                        }
+                    }
                 }
                 SwarmEvent::ConnectionClosed { peer_id, .. } => {
                     tracing::debug!("[swarm] DISCONNECTED from {peer_id}");
@@ -1280,6 +1330,22 @@ async fn swarm_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_relayed_detects_circuit_only() {
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        // A real circuit addr: /ip4/.../tcp/.../p2p/<relay>/p2p-circuit/p2p/<me>
+        let relay: Multiaddr = format!("/ip4/1.2.3.4/tcp/1883/p2p/{peer}/p2p-circuit/p2p/{peer}")
+            .parse()
+            .unwrap();
+        let direct: Multiaddr = "/ip4/1.2.3.4/tcp/1883".parse().unwrap();
+        let direct_udp: Multiaddr = "/ip4/1.2.3.4/udp/1883/quic-v1".parse().unwrap();
+        assert!(is_relayed(&relay), "circuit addr is relayed");
+        assert!(!is_relayed(&direct), "tcp direct is not relayed");
+        assert!(!is_relayed(&direct_udp), "udp direct is not relayed");
+    }
 
     #[test]
     fn parse_relay_strings_accepts_full_multiaddr() {

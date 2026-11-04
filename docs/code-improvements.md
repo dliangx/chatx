@@ -567,6 +567,26 @@
 （如 `139.159.201.87:1883`）。未设置时 relay 仍可出站探测，但探测到私有 IP
 会 `warn!` 且 reservation 可能失败。
 
+### 39. [x] Phase 3 — relay→直连升级（§A）✅
+
+**问题**: 连接一旦走上 relay 就一直走 relay。即使对端后来暴露了直连地址
+（换到同一 Wi-Fi / NAT 可打洞），chatx 也不会升级，白白消耗 relay 带宽与延迟。
+
+**位置**: `crates/core/src/swarm.rs`
+
+**已做**:
+- 监听 `NewExternalAddrOfPeer`：当对端新广播一个**非 relay**（无 `/p2p-circuit`）
+  地址、且本端当前已与该 peer 有连接时，触发重新 `dial` —— libp2p 重新并发
+  竞争所有已知地址，从而优先选到直连路径
+- 新增 `is_relayed(addr)` 助手判断地址是否含 `/p2p-circuit`
+- `Running.escalation_last` 记录每 peer 最近升级时间，30s 冷却防抖，避免
+  地址抖动时反复重拨
+- 新增单测 `is_relayed_detects_circuit_only`
+
+**说明**: 不依赖 QUIC connection migration / DCUtR（libp2p-quic 当前
+`migration(false)`，开启需 patch 库）。§A 用应用层"新地址到达即重 dial"实现，
+改动小、风险低，已能满足 relay→直连升级。
+
 ---
 
 ## 实施路线图
