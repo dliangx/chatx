@@ -4612,7 +4612,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             // `to_message_data` already fills `image_img` from each photo's small
             // cached preview (a memory hit after the first switch), so the full
             // original is never decoded here — only in the viewer on tap.
-            let mut messages: Vec<crate::MessageData> = rendered
+            let messages: Vec<crate::MessageData> = rendered
                 .into_iter()
                 .enumerate()
                 .map(|(i, m)| {
@@ -4776,7 +4776,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
             .find(|p| **p != my_peer)
             .cloned()
             .unwrap_or_default();
-        let (chat, msg_id) = match client.queue_dm_text(&primary, &body).await {
+        let (_chat, msg_id) = match client.queue_dm_text(&primary, &body).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("[send] queue_dm_text failed: {e}");

@@ -22,26 +22,39 @@ pub fn current() -> Option<Arc<PluginInstance>> {
 
 /// Locate the built `x.hello` artifact (`scripts/build_x.sh` output).
 ///
-/// Dev layout: the chat exe lives at `<root>/apps/chat` while the artifact
-/// sits at `<root>/x-t/x.hello/0.1.0/app.wasm`, so we probe the cwd first
-/// (running from the repo root) and fall back to paths resolved from the
-/// executable location.
+/// Probe order:
+///   1. The cwd — covers `cargo run` from the repo root (dev layout, where
+///      `x-t/` sits beside the source tree).
+///   2. The `.app` bundle's `Resources/x-t` — the artifact is shipped inside
+///      `Chatx.app/Contents/Resources/x-t` (see `scripts/build_osx.sh`), so a
+///      released bundle is self-contained and works even after being copied
+///      to `/Applications` or another machine.
+///   3. Walking up from the executable's directory — covers any other host
+///      layout where the exe is somewhere under the repo.
 fn find_hello_wasm() -> Result<PathBuf, String> {
     let rel = PathBuf::from("x-t/x.hello/0.1.0/app.wasm");
-    let mut cands: Vec<PathBuf> = Vec::new();
-    cands.push(std::env::current_dir().ok().map(|d| d.join(&rel)).unwrap_or_default());
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Ok(d) = std::env::current_dir() {
+        bases.push(d);
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for up in 0..4 {
+            // Bundle: dir is `Chatx.app/Contents/MacOS`; resources live at
+            // `Chatx.app/Contents/Resources`.
+            if let Some(contents) = dir.parent() {
+                bases.push(contents.join("Resources"));
+            }
+            for up in 0..6 {
                 let mut p = dir.to_path_buf();
                 for _ in 0..up {
                     p = p.parent().unwrap_or(dir).to_path_buf();
                 }
-                cands.push(p.join(&rel));
+                bases.push(p);
             }
         }
     }
-    for c in cands {
+    for b in bases {
+        let c = b.join(&rel);
         if c.is_file() {
             return Ok(c);
         }
@@ -59,8 +72,16 @@ pub fn open_hello(width: u32, height: u32, dpr_x10: u32) -> Result<(), String> {
         // Re-opened before the old one was released; keep the live one.
         return Ok(());
     }
-    let path = find_hello_wasm()?;
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    const ASSET: &str = "x-t/x.hello/0.1.0/app.wasm";
+    let bytes = bridge::read_asset(ASSET)
+        .ok_or_else(|| {
+            "x.hello app.wasm not found (tried APK assets and filesystem) — run scripts/build_x.sh from the repo root"
+                .to_string()
+        })
+        .or_else(|_| {
+            let path = find_hello_wasm()?;
+            std::fs::read(&path).map_err(|e| e.to_string())
+        })?;
     let inst = wasmhost::open("x.hello", bytes, width, height, dpr_x10)
         .map_err(|e| e.to_string())?;
     *INST.lock().unwrap() = Some(inst);

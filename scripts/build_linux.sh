@@ -198,10 +198,28 @@ fi
 BIN="$ROOT/target/$TARGET/$MODE/chatx"
 [ -x "$BIN" ] || { echo "binary not found: $BIN" >&2; exit 1; }
 
+# ── X mini-app artifacts (x-t/) — same self-contained approach as build_osx ──
+# Built via scripts/build_x.sh (wasm32-wasip1); bundled next to the exe so the
+# X extension page works after extraction. Warn + continue if unavailable.
+if [ -x "$ROOT/scripts/build_x.sh" ]; then
+  echo "==> building X mini-app (x-t/)"
+  chmod +x "$ROOT/scripts/build_x.sh" 2>/dev/null || true
+  bash "$ROOT/scripts/build_x.sh" || echo "   (build_x.sh failed — X page will be unavailable)"
+fi
+
 # ── package ─────────────────────────────────────────────────────────────────
 echo "==> packaging $OUT_DIR"
 rm -rf "$OUT_DIR"; mkdir -p "$OUT_DIR"
 install -m 0755 "$BIN" "$OUT_DIR/chatx"
+
+HAVE_X=0
+if [ -f "$ROOT/x-t/x.hello/0.1.0/app.wasm" ]; then
+  cp -R "$ROOT/x-t" "$OUT_DIR/x-t"
+  HAVE_X=1
+  echo "    -> bundled x-t/ ($(du -sh "$OUT_DIR/x-t" | awk '{print $1}'))"
+else
+  echo "   (x-t/x.hello artifact absent — X extension page will report missing wasm)"
+fi
 
 cat > "$OUT_DIR/chatx.desktop" <<'DESK'
 [Desktop Entry]
@@ -218,9 +236,12 @@ if [ -f "$ROOT/app-icon.png" ]; then
 fi
 
 TARBALL="$OUT_DIR/chatx-${TARGET/-unknown-/}-${MODE}.tar.gz"
-tar -czf "$TARBALL" -C "$OUT_DIR" chatx chatx.desktop chatx.png 2>/dev/null \
-  || tar -czf "$TARBALL" -C "$OUT_DIR" chatx chatx.desktop
-echo "  -> $TARBALL"
+# Collect whatever we actually produced (icon may be absent) into the archive.
+ENTRIES=(chatx chatx.desktop)
+[ -f "$OUT_DIR/chatx.png" ] && ENTRIES+=(chatx.png)
+[ "$HAVE_X" -eq 1 ] && ENTRIES+=(x-t)
+tar -czf "$TARBALL" -C "$OUT_DIR" "${ENTRIES[@]}"
+echo "  -> $TARBALL (${#ENTRIES[@]} items: ${ENTRIES[*]})"
 
 # ── what the *target* machine needs (glibc build) ──────────────────────────
 echo

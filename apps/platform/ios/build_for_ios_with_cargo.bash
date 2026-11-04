@@ -127,12 +127,31 @@ fi
 
 [ -x "$BIN_SRC" ] || { echo "✗ rust binary not found: $BIN_SRC" >&2; exit 1; }
 
+# ── X mini-app artifacts (x-t/) ─────────────────────────────────────────────
+# The X extension page loads `x-t/x.hello/0.1.0/app.wasm` relative to the
+# executable / cwd (see apps/chat/src/xhost.rs). Ship it inside the .app,
+# next to the binary, so a signed/installed bundle is self-contained.
+X_WASM="$ROOT/x-t/x.hello/0.1.0/app.wasm"
+if [ ! -f "$X_WASM" ] && [ -x "$ROOT/scripts/build_x.sh" ]; then
+  echo "==> building X mini-app (x-t/)"
+  bash "$ROOT/scripts/build_x.sh" >/dev/null 2>&1 || true
+fi
+
 # ── install into the Xcode products dir ─────────────────────────────────────
 DEST="${TARGET_BUILD_DIR}/${EXECUTABLE_PATH}"
 echo "==> $BIN_SRC  ->  $DEST"
-mkdir -p "$(dirname "$DEST")"
+APPDIR="$(dirname "$DEST")"
+mkdir -p "$APPDIR"
 cp -f "$BIN_SRC" "$DEST"
 chmod +x "$DEST"
+
+if [ -f "$X_WASM" ]; then
+  rm -rf "$APPDIR/x-t"
+  cp -R "$ROOT/x-t" "$APPDIR/x-t"
+  echo "    -> bundled x-t/ into $APPDIR ($(du -sh "$APPDIR/x-t" | awk '{print $1}'))"
+else
+  echo "   (x-t/x.hello artifact absent — X extension page will report missing wasm)"
+fi
 
 codesign --force --sign - "$DEST" 2>/dev/null || true
 echo "✓ installed $DEST ($(du -h "$DEST" | awk '{print $1}'))"

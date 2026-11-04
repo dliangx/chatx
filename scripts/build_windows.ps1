@@ -125,6 +125,24 @@ $Bin = Join-Path $Root "target\$Target\$Mode\chatx.exe"
 if (-not (Test-Path $Bin)) { Err "binary not found: $Bin" }
 Ok "built:  $Bin  ($([math]::Round((Get-Item $Bin).Length / 1MB,1)) MB)"
 
+# ── X mini-app artifacts (x-t/) — same self-contained approach as build_osx ──
+# Built via scripts/build_x.sh (wasm32-wasip1); placed next to chatx.exe so the
+# X extension page works after extraction. Try a bash; fall back to a prebuilt.
+$XBuild = Join-Path $Root "scripts\build_x.sh"
+$XWasm = Join-Path $Root "x-t\x.hello\0.1.0\app.wasm"
+if (Test-Path $XBuild) {
+    $bash = if (Get-Command bash -ErrorAction SilentlyContinue) { "bash" } else { $null }
+    if ($bash) {
+        Say "building X mini-app (x-t/)"
+        Push-Location $Root
+        & $bash "scripts/build_x.sh"
+        Pop-Location
+        if ($LASTEXITCODE -ne 0) { Write-Host "   (build_x.sh failed — X page will be unavailable)" -ForegroundColor Yellow }
+    } else {
+        Write-Host "   (no bash found to run build_x.sh — relying on a prebuilt x-t/)" -ForegroundColor Yellow
+    }
+}
+
 # ── package ────────────────────────────────────────────────────────────────────
 # Kill any running chatx.exe so we can overwrite the packaged copy.
 Get-Process chatx -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -136,8 +154,19 @@ New-Item -ItemType Directory -Force $OutDir | Out-Null
 # Overwrite in place (avoids "directory in use" errors when the folder is open in Explorer).
 Copy-Item $Bin (Join-Path $OutDir "chatx.exe") -Force
 
+$XDir = Join-Path $Root "x-t"
+if (Test-Path $XDir) {
+    Remove-Item -Recurse -Force (Join-Path $OutDir "x-t") -ErrorAction SilentlyContinue
+    Copy-Item -Recurse -Force $XDir (Join-Path $OutDir "x-t")
+    Ok "bundled x-t/ into the package"
+} else {
+    Write-Host "   (x-t/x.hello artifact absent — X extension page will report missing wasm)" -ForegroundColor Yellow
+}
+
 $Zip = Join-Path $OutDir ("chatx-x64-{0}-windows.zip" -f $Mode)
-Compress-Archive -Path (Join-Path $OutDir "chatx.exe") -DestinationPath $Zip -Force
+$zipEntries = @( (Join-Path $OutDir "chatx.exe") )
+if (Test-Path (Join-Path $OutDir "x-t")) { $zipEntries += (Join-Path $OutDir "x-t") }
+Compress-Archive -Path $zipEntries -DestinationPath $Zip -Force
 Ok "zip:  $Zip  ($([math]::Round((Get-Item $Zip).Length / 1KB,0)) KB)"
 
 Write-Host ""

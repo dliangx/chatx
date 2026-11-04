@@ -129,6 +129,23 @@ PLIST
 # PkgInfo (classic, still read by some tooling).
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+# X mini-app artifacts (x-t/) — ship them inside the bundle so the X extension
+# page is self-contained when the .app is moved or installed elsewhere. Built
+# via scripts/build_x.sh (wasm32-wasip1); if that toolchain is unavailable we
+# warn and continue with a bundle that lacks the X page assets.
+if [ -x "$ROOT/scripts/build_x.sh" ]; then
+  echo "==> building X mini-app (x-t/)"
+  chmod +x "$ROOT/scripts/build_x.sh" 2>/dev/null || true
+  bash "$ROOT/scripts/build_x.sh" || echo "   (build_x.sh failed — X page will be unavailable)"
+  if [ -f "$ROOT/x-t/x.hello/0.1.0/app.wasm" ]; then
+    rm -rf "$APP/Contents/Resources/x-t"
+    cp -R "$ROOT/x-t" "$APP/Contents/Resources/x-t"
+    echo "    -> bundled x-t/ into Resources ($(du -sh "$APP/Contents/Resources/x-t" | awk '{print $1}'))"
+  else
+    echo "   (x-t/x.hello artifact absent — X extension page will report missing wasm)"
+  fi
+fi
+
 # ── 4. code sign (ad-hoc by default so Gatekeeper local runs work) ──────────
 echo "==> codesign"
 if [ -n "$SIGN_IDENTITY" ]; then
