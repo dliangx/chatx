@@ -270,6 +270,9 @@ msgstr "ビデオ会議"
 msgid "Write a comment…"
 msgstr "コメントを書く…"
 
+msgid "X extension"
+msgstr "X 拡張"
+
 msgid "You haven't posted a moment yet"
 msgstr "まだモーメントを投稿していません"
 

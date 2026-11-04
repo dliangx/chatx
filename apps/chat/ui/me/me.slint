@@ -51,6 +51,15 @@ export component MeView inherits Rectangle {
 
             SettingItem {
                 width: 100%;
+                id: 6;
+                icon: Glyph.app;
+                title: @tr("X extension");
+                selected: root.selected-key == 6;
+                clicked => { root.selected-key = 6; AppState.push-sub(SubPageType.MyX, 0); }
+            }
+
+            SettingItem {
+                width: 100%;
                 id: 4;
                 icon: Glyph.setting;
                 title: @tr("Settings");

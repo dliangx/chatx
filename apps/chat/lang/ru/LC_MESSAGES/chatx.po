@@ -270,6 +270,9 @@ msgstr "Видеовстреча"
 msgid "Write a comment…"
 msgstr "Написать комментарий…"
 
+msgid "X extension"
+msgstr "Расширение X"
+
 msgid "You haven't posted a moment yet"
 msgstr "Вы ещё не поделились моментом"
 

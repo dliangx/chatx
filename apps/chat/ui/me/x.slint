@@ -1,0 +1,94 @@
+import { Header } from "../components/header.slint";
+import { Icon, Glyph, Variant } from "../components/icon.slint";
+import { Theme } from "../theme.slint";
+import { AppState } from "../components/app_state.slint";
+
+export component MyXView inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: Theme.bg;
+
+    Header {
+        name: @tr("X extension");
+    }
+
+    out property <length> cell: 100px;
+    out property <length> gap: 12px;
+    out property <length> icon: 80px;
+
+    Flickable {
+        y: 49px;
+        width: 100%;
+        height: parent.height - 49px - (AppState.is-mobile ? AppState.bottom-nav : 0px);
+        interactive: true;
+        content-width: parent.width;
+
+        FlexboxLayout {
+            padding-top: 18px;
+            padding-bottom: 18px;
+            padding-left: 12px;
+            padding-right: 12px;
+            width: parent.width;
+            spacing: root.gap;
+
+            Rectangle {
+                width: root.cell;
+                height: root.cell;
+                border-radius: 12px;
+                background: Theme.surface;
+                Icon {
+                    x: (parent.width - 80px) / 2;
+                    y: (parent.height - 80px) / 2;
+                    size: 80px;
+                    glyph: Glyph.app;
+                    variant: Variant.filled;
+                    tint: Theme.brand;
+                }
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => { AppState.open-mini-app(); }
+                }
+            }
+
+            Rectangle {
+                width: root.cell;
+                height: root.cell;
+                border-radius: 12px;
+                background: Theme.surface;
+                Icon {
+                    x: (parent.width - 80px) / 2;
+                    y: (parent.height - 80px) / 2;
+                    size: 80px;
+                    glyph: Glyph.file-pdf;
+                }
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => { AppState.open-pdf(); }
+                }
+            }
+
+            Rectangle {
+                width: root.cell;
+                height: root.cell;
+                border-radius: 12px;
+                background: Theme.surface;
+                Icon {
+                    x: (parent.width - 80px) / 2;
+                    y: (parent.height - 80px) / 2;
+                    size: 80px;
+                    glyph: Glyph.file-word;
+                }
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => { AppState.open-doc(); }
+                }
+            }
+        }
+    }
+}

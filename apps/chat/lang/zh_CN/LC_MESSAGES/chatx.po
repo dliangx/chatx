@@ -270,6 +270,9 @@ msgstr "视频会议"
 msgid "Write a comment…"
 msgstr "写下你的评论…"
 
+msgid "X extension"
+msgstr "X 扩展"
+
 msgid "You haven't posted a moment yet"
 msgstr "还没有发表 Moment"
 

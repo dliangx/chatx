@@ -270,6 +270,9 @@ msgstr "Reunión de vídeo"
 msgid "Write a comment…"
 msgstr "Escribe un comentario…"
 
+msgid "X extension"
+msgstr "Extensión X"
+
 msgid "You haven't posted a moment yet"
 msgstr "Aún no has publicado un momento"
 

@@ -1,7 +1,11 @@
 import { Header } from "../components/header.slint";
 import { SettingItem } from "../components/item.slint";
 import { Glyph, Icon, Variant } from "../components/icon.slint";
-import { SubPageType, AppState, ThemeMode } from "../components/app_state.slint";
+import {
+    SubPageType,
+    AppState,
+    ThemeMode,
+} from "../components/app_state.slint";
 import { Theme } from "../theme.slint";
 import { Dropdown } from "../components/dropdown.slint";
 
@@ -10,260 +14,152 @@ export component SettingView inherits Rectangle {
     height: 100%;
     background: Theme.bg;
 
-    Header {
-        name: @tr("setting");
-    }
-
+    VerticalLayout {
+        Header {
+            name: @tr("setting");
+        }
     // Language row: title + icon on the left, a theme-aware Dropdown on the
     // right that lists every bundled language. Selecting one updates
     // `AppState.lang` and fires `select-language` so the Rust handler
     // re-selects the bundled catalog.
-    Rectangle {
-        y: 49px;
-        width: 100%;
-        height: 48px;
-        background: transparent;
+        Rectangle {
+            width: 100%;
+            height: 48px;
+            background: transparent;
 
-        Icon {
-            x: 8px;
-            y: 12px;
-            size: 24px;
-            glyph: Glyph.configuration;
-            variant: Variant.raw;
-            tint: Theme.fg;
-        }
-        Text {
-            x: 40px;
-            y: 0px;
-            width: parent.width - 216px;
-            height: parent.height;
-            vertical-alignment: center;
-            text: @tr("Language");
-            font-size: 14px;
-            color: Theme.fg;
-        }
+            Icon {
+                x: 8px;
+                y: 12px;
+                size: 24px;
+                glyph: Glyph.configuration;
+                variant: Variant.raw;
+                tint: Theme.fg;
+            }
 
-        Dropdown {
-            x: parent.width - 180px;
-            y: 8px;
-            width: 168px;
-            height: 32px;
-            model: ["English", "中文", "Deutsch", "français", "русский",
-                    "Español", "العربية", "日本語"];
-            current-value:
-                AppState.lang == "en" ? "English"
-                : AppState.lang == "zh_CN" ? "中文"
-                : AppState.lang == "de" ? "Deutsch"
-                : AppState.lang == "fr" ? "français"
-                : AppState.lang == "ru" ? "русский"
-                : AppState.lang == "es" ? "Español"
-                : AppState.lang == "ar" ? "العربية"
-                : AppState.lang == "ja" ? "日本語"
-                : "English";
-            selected(value) => {
-                let code = value == "English" ? "en"
-                    : value == "中文" ? "zh_CN"
-                    : value == "Deutsch" ? "de"
-                    : value == "français" ? "fr"
-                    : value == "русский" ? "ru"
-                    : value == "Español" ? "es"
-                    : value == "العربية" ? "ar"
-                    : value == "日本語" ? "ja"
-                    : "en";
-                if (AppState.lang != code) {
+            Text {
+                x: 40px;
+                y: 0px;
+                width: parent.width - 216px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: @tr("Language");
+                font-size: 14px;
+                color: Theme.fg;
+            }
+
+            Dropdown {
+                x: parent.width - 180px;
+                y: 8px;
+                width: 168px;
+                height: 32px;
+                model: [
+                    "English",
+                    "中文",
+                    "Deutsch",
+                    "français",
+                    "русский",
+                    "Español",
+                    "العربية",
+                    "日本語"
+                ];
+                current-value: AppState.lang == "en" ? "English"
+                    : AppState.lang == "zh_CN" ? "中文"
+                    : AppState.lang == "de" ? "Deutsch"
+                    : AppState.lang == "fr" ? "français"
+                    : AppState.lang == "ru" ? "русский"
+                    : AppState.lang == "es" ? "Español"
+                    : AppState.lang == "ar" ? "العربية"
+                    : AppState.lang == "ja" ? "日本語"
+                    : "English";
+                selected(value) => {
+                    let code = value == "English" ? "en"
+                        : value == "中文" ? "zh_CN"
+                        : value == "Deutsch" ? "de"
+                        : value == "français" ? "fr"
+                        : value == "русский" ? "ru"
+                        : value == "Español" ? "es"
+                        : value == "العربية" ? "ar"
+                        : value == "日本語" ? "ja"
+                        : "en";
+                    if (AppState.lang != code) {
                     // `select-language` owns the string it receives; pass it
                     // in, and let the handler publish the new language into
                     // `AppState.lang`.
                     AppState.select-language(code);
+                    }
                 }
+            }
+
+            Rectangle {
+                x: 40px;
+                y: 48px;
+                width: 100%;
+                height: 1px;
+                background: Theme.border;
             }
         }
 
+        // Appearance row: title + icon on the left, a theme-aware Dropdown on the
+        // right that shows the current choice and drops down the three options.
+        // Selecting one fires `select-theme(ThemeMode)` which the Rust handler
+        // applies (Slint `Theme` global + bubble renderer + persistence).
         Rectangle {
-            x: 40px;
-            y: 48px;
             width: 100%;
-            height: 1px;
-            background: Theme.border;
-        }
-    }
+            height: 48px;
+            background: transparent;
 
-    // Appearance row: title + icon on the left, a theme-aware Dropdown on the
-    // right that shows the current choice and drops down the three options.
-    // Selecting one fires `select-theme(ThemeMode)` which the Rust handler
-    // applies (Slint `Theme` global + bubble renderer + persistence).
-    Rectangle {
-        y: 97px;
-        width: 100%;
-        height: 48px;
-        background: transparent;
+            Icon {
+                x: 8px;
+                y: 12px;
+                size: 24px;
+                glyph: Glyph.configuration;
+                variant: Variant.raw;
+                tint: Theme.fg;
+            }
 
-        Icon {
-            x: 8px;
-            y: 12px;
-            size: 24px;
-            glyph: Glyph.configuration;
-            variant: Variant.raw;
-            tint: Theme.fg;
-        }
-        Text {
-            x: 40px;
-            y: 0px;
-            width: parent.width - 216px;
-            height: parent.height;
-            vertical-alignment: center;
-            text: @tr("Appearance");
-            font-size: 14px;
-            color: Theme.fg;
-        }
+            Text {
+                x: 40px;
+                y: 0px;
+                width: parent.width - 216px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: @tr("Appearance");
+                font-size: 14px;
+                color: Theme.fg;
+            }
 
-        Dropdown {
-            x: parent.width - 180px;
-            y: 8px;
-            width: 168px;
-            height: 32px;
-            model: [@tr("Light"), @tr("Dark"), @tr("Follow system")];
-            current-value: Theme.mode == ThemeMode.Light ? @tr("Light")
-                : (Theme.mode == ThemeMode.Dark ? @tr("Dark") : @tr("Follow system"));
-            selected(value) => {
-                let m = value == @tr("Light") ? ThemeMode.Light
-                    : (value == @tr("Dark") ? ThemeMode.Dark : ThemeMode.System);
-                if (Theme.mode != m) {
-                    AppState.select-theme(m);
+            Dropdown {
+                x: parent.width - 180px;
+                y: 8px;
+                width: 168px;
+                height: 32px;
+                model: [@tr("Light"), @tr("Dark"), @tr("Follow system")];
+                current-value: Theme.mode == ThemeMode.Light ? @tr("Light")
+                    : (Theme.mode == ThemeMode.Dark ? @tr("Dark") : @tr("Follow system"));
+                selected(value) => {
+                    let m = value == @tr("Light") ? ThemeMode.Light
+                        : (value == @tr("Dark") ? ThemeMode.Dark : ThemeMode.System);
+                    if (Theme.mode != m) {
+                        AppState.select-theme(m);
+                    }
                 }
+            }
+
+            Rectangle {
+                x: 40px;
+                y: 48px;
+                width: 100%;
+                height: 1px;
+                background: Theme.border;
             }
         }
 
-        Rectangle {
-            x: 40px;
-            y: 48px;
+        SettingItem {
             width: 100%;
-            height: 1px;
-            background: Theme.border;
+            id: 1;
+            icon: Glyph.close-circle;
+            title: @tr("Sign out");
+            clicked => { AppState.logout(); }
         }
-    }
-
-    // X mini-app sandbox entry (P0: x.hello smoke plugin). Runs the wasm
-    // instance from crates/wasmhost; the page itself lives in ui/x.slint.
-    Rectangle {
-        y: 145px;
-        width: 100%;
-        height: 48px;
-        background: transparent;
-
-        Icon {
-            x: 16px;
-            y: 12px;
-            size: 24px;
-            glyph: Glyph.app;
-            tint: Theme.fg;
-        }
-        Text {
-            x: 48px;
-            y: 0px;
-            width: parent.width - 72px;
-            height: parent.height;
-            vertical-alignment: center;
-            text: @tr("Open sandbox app (x.hello)");
-            font-size: 14px;
-            color: Theme.fg;
-        }
-        Icon {
-            x: parent.width - 32px;
-            y: 12px;
-            size: 24px;
-            glyph: Glyph.right;
-            tint: Theme.fg-muted;
-        }
-        TouchArea {
-            width: 100%;
-            height: 100%;
-            clicked => { AppState.open-mini-app(); }
-        }
-    }
-
-    // Native PDF viewer entry (crates/pdf): file picker → full-screen viewer.
-    Rectangle {
-        y: 193px;
-        width: 100%;
-        height: 48px;
-        background: transparent;
-
-        Icon {
-            x: 16px;
-            y: 12px;
-            size: 24px;
-            glyph: Glyph.fill;
-            tint: Theme.fg;
-        }
-        Text {
-            x: 48px;
-            y: 0px;
-            width: parent.width - 72px;
-            height: parent.height;
-            vertical-alignment: center;
-            text: @tr("Open PDF viewer");
-            font-size: 14px;
-            color: Theme.fg;
-        }
-        Icon {
-            x: parent.width - 32px;
-            y: 12px;
-            size: 24px;
-            glyph: Glyph.right;
-            tint: Theme.fg-muted;
-        }
-        TouchArea {
-            width: 100%;
-            height: 100%;
-            clicked => { AppState.open-pdf(); }
-        }
-    }
-
-    // Office document viewer entry (office-oxide): file picker → full-screen text viewer.
-    Rectangle {
-        y: 241px;
-        width: 100%;
-        height: 48px;
-        background: transparent;
-
-        Icon {
-            x: 16px;
-            y: 12px;
-            size: 24px;
-            glyph: Glyph.notes;
-            tint: Theme.fg;
-        }
-        Text {
-            x: 48px;
-            y: 0px;
-            width: parent.width - 72px;
-            height: parent.height;
-            vertical-alignment: center;
-            text: @tr("Open document viewer");
-            font-size: 14px;
-            color: Theme.fg;
-        }
-        Icon {
-            x: parent.width - 32px;
-            y: 12px;
-            size: 24px;
-            glyph: Glyph.right;
-            tint: Theme.fg-muted;
-        }
-        TouchArea {
-            width: 100%;
-            height: 100%;
-            clicked => { AppState.open-doc(); }
-        }
-    }
-
-    SettingItem {
-        y: 289px;
-        width: 100%;
-        id: 1;
-        icon: Glyph.close-circle;
-        title: @tr("Sign out");
-        clicked => { AppState.logout(); }
     }
 }

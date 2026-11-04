@@ -270,6 +270,9 @@ msgstr "اجتماع فيديو"
 msgid "Write a comment…"
 msgstr "اكتب تعليقاً…"
 
+msgid "X extension"
+msgstr "امتداد X"
+
 msgid "You haven't posted a moment yet"
 msgstr "لم تشارك لحظة بعد"
 

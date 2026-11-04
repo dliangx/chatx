@@ -270,6 +270,9 @@ msgstr "Videokonferenz"
 msgid "Write a comment…"
 msgstr "Kommentar schreiben…"
 
+msgid "X extension"
+msgstr "X-Erweiterung"
+
 msgid "You haven't posted a moment yet"
 msgstr "Du hast noch keinen Moment geteilt"
 
