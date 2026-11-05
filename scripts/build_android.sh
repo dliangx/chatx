@@ -96,25 +96,62 @@ for f in "${CLASS_FILES[@]}"; do echo "    $f"; done
   "${CLASS_FILES[@]}"
 ls -lh "$OUT_DIR/classes.dex"
 
-# ── 5. zipalign (with 4096-page alignment for native lib mmap) ─────────────
+# ── 5b. X mini-app artifacts (x-t/) — built via scripts/build_x.sh ──────────
+# Packaged under the APK's assets/ directory. The chat UI's xhost.rs reads it
+# from the AssetManager (via `bridge::read_asset` → `NativeBridge.extractAsset`)
+# and falls back to the cwd / walking-up path otherwise.
+echo "▶ build_x.sh (X mini-app wasm)"
+if [ -x "$ROOT/scripts/build_x.sh" ]; then
+  chmod +x "$ROOT/scripts/build_x.sh" 2>/dev/null || true
+  bash "$ROOT/scripts/build_x.sh" >/dev/null 2>&1 || echo "   (build_x.sh failed — X page will be unavailable in APK)"
+fi
+
+# ── 7. zipalign (with 4096-page alignment for native lib mmap) ─────────────
 rm -f "$APK_RAW" "$APK_ALIGNED"
 echo "▶ zipalign -p 4"
 mkdir -p "$OUT_DIR/lib/arm64-v8a"
 cp "$SO_STRIPPED" "$OUT_DIR/lib/arm64-v8a/libchatx.so"
 
-# Add the .so to the APK in STORE mode (no compression). Android 10+ expects
-# page-aligned uncompressed libs so it can mmap them from the APK directly.
+# ── Native C++ runtime ─────────────────────────────────────────────────────
+# `libchatx.so` is linked against the NDK's shared C++ runtime. On a Mac host
+# the toolchain defaults to the shared variant, so the .so carries a
+# DT_NEEDED for `libc++_shared.so` (+ `libunwind.so`). If we only ship
+# `libchatx.so`, dlopen fails at launch → `UnsatisfiedLinkError` + KILL.
+# Ship the arm64-v8a slice from the NDK sysroot alongside the app lib.
+NDK_SYS_LIB_DIR="${ANDROID_NDK_HOME%/}/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android"
+if [ -d "$NDK_SYS_LIB_DIR" ]; then
+  mkdir -p "$OUT_DIR/lib/arm64-v8a"
+  for lib in libc++_shared.so libunwind.so; do
+    if [ -f "$NDK_SYS_LIB_DIR/$lib" ]; then
+      cp -f "$NDK_SYS_LIB_DIR/$lib" "$OUT_DIR/lib/arm64-v8a/$lib"
+      echo "   + $lib"
+    fi
+  done
+else
+  echo "   ⚠ NDK sysroot not found ($NDK_SYS_LIB_DIR) — APK will crash on launch (missing libc++_shared.so)" >&2
+fi
+
+# Add all the libs we staged (libchatx.so + the C++ runtime) to the APK in
+# STORE mode (no compression). Android 10+ expects page-aligned uncompressed
+# libs so it can mmap them from the APK directly.
 cd "$OUT_DIR"
-zip -X -0 "$APK_BASE" "lib/arm64-v8a/libchatx.so" >/dev/null
+for lib in "$OUT_DIR"/lib/arm64-v8a/*.so; do
+  zip -X -0 "$APK_BASE" "lib/arm64-v8a/$(basename "$lib")" >/dev/null
+done
 # Add classes.dex (our Shell/Capture/NativeBridge classes).
 cp classes.dex.staged classes.dex 2>/dev/null || true
 zip -X -0 "$APK_BASE" "classes.dex" >/dev/null
+# Add the X mini-app assets (built in step 5b).
+if [ -d "$OUT_DIR/assets" ]; then
+  zip -X -r "$APK_BASE" "assets" >/dev/null
+  echo "   -> added assets/"
+fi
 cd "$ROOT"
 
 "$ZIPALIGN" -p -v -f 4 "$APK_BASE" "$APK_ALIGNED" | tail -n 3
 echo "  aligned: $(ls -lh "$APK_ALIGNED" | awk '{print $5}')"
 
-# ── 6. sign ────────────────────────────────────────────────────────────────
+# ── 8. sign ────────────────────────────────────────────────────────────────
 KS="$HOME/.android/debug.keystore"
 if [[ ! -f "$KS" ]]; then
   echo "creating debug keystore: $KS"
@@ -131,7 +168,7 @@ echo "▶ apksigner sign"
   --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
   --out "$APK_OUT" "$APK_ALIGNED"
 
-# ── 7. verify ──────────────────────────────────────────────────────────────
+# ── 9. verify ──────────────────────────────────────────────────────────────
 echo "──────── result ────────"
 ls -lh "$APK_OUT"
 echo

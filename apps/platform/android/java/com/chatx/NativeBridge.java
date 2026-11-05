@@ -73,4 +73,87 @@ public final class NativeBridge {
     public static void autoStop() {
         Capture.stop();
     }
+
+    // ── Asset installation ─────────────────────────────────────────────────
+    // Called from Shell.onCreate: copies all of `assets/x-t/...` into the
+    // app's private files dir so the Rust side can read it via a plain
+    // filesystem path (`home_dir()` == `getFilesDir()` on Android).
+    public static void installAssets(android.app.Activity a) {
+        android.content.res.AssetManager am = a.getAssets();
+        java.io.File target = new java.io.File(a.getFilesDir().getAbsolutePath(), "x-t");
+        copyDir(am, "x-t", target);
+    }
+
+    private static void copyDir(android.content.res.AssetManager am, String src, java.io.File dst) {
+        String[] entries;
+        try {
+            entries = am.list(src);
+        } catch (Exception e) {
+            android.util.Log.w("chatx.xbridge", "list(" + src + ") failed: " + e);
+            return;
+        }
+        if (entries == null) return;
+        dst.mkdirs();
+        for (String name : entries) {
+            String child = src.isEmpty() ? name : src + "/" + name;
+            java.io.File out = new java.io.File(dst, name);
+            String[] sub;
+            try { sub = am.list(child); } catch (Exception e) { sub = null; }
+            if (sub != null && sub.length > 0) {
+                copyDir(am, child, out);
+            } else {
+                java.io.InputStream is = null;
+                java.io.FileOutputStream os = null;
+                try {
+                    is = am.open(child);
+                    os = new java.io.FileOutputStream(out);
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = is.read(buf)) > 0) os.write(buf, 0, n);
+                    android.util.Log.i("chatx.xbridge", "installAssets: copied " + child + " (" + out.length() + "B)");
+                } catch (Exception e) {
+                    android.util.Log.e("chatx.xbridge", "installAssets: " + child + " failed: " + e);
+                } finally {
+                    try { if (is != null) is.close(); } catch (Exception ignored) {}
+                    try { if (os != null) os.close(); } catch (Exception ignored) {}
+                }
+            }
+        }
+    }
+
+    // ── Asset reading (X mini-app bridge) ─────────────────────────────────
+    //
+    // Called from Rust (`bridge::read_asset`) to load `x-t/...` plugin
+    // artifacts packed under `assets/` in the APK. Streams the asset to
+    // `dst` on the regular filesystem (which Rust reads from); returns
+    // silently on any miss so the caller's `std::fs::read` fails.
+
+    public static void extractAsset(String src, String dst) {
+        android.util.Log.i("chatx.xbridge", "extractAsset ENTER: " + src + " -> " + dst);
+        android.app.Activity a = Shell.activity();
+        if (a == null) {
+            android.util.Log.w("chatx.xbridge", "extractAsset: Shell.activity() == null — bailing");
+            return;
+        }
+        android.content.res.AssetManager am = a.getAssets();
+        java.io.InputStream is = null;
+        java.io.FileOutputStream os = null;
+        try {
+            is = am.open(src);
+            os = new java.io.FileOutputStream(dst);
+            byte[] buf = new byte[8192];
+            int total = 0, n;
+            while ((n = is.read(buf)) > 0) { os.write(buf, 0, n); total += n; }
+            os.close(); os = null;
+            is.close(); is = null;
+            android.util.Log.i("chatx.xbridge", "extractAsset ok: " + src + " -> " + dst + " (" + total + "B)");
+        } catch (Throwable e) {
+            try { if (os != null) os.close(); } catch (Exception ignored) {}
+            try { if (is != null) is.close(); } catch (Exception ignored) {}
+            new java.io.File(dst).delete();
+            android.util.Log.e("chatx.xbridge", "extractAsset FAILED: " + src
+                + " -> " + dst + " : " + e, e);
+            return;
+        }
+    }
 }

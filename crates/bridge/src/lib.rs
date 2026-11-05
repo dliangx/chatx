@@ -76,6 +76,23 @@ pub fn request_mic_start() {
 pub fn request_mic_stop() {
     jni::request_mic_stop();
 }
+
+/// Read a file out of the APK's `assets/` directory (X mini-app plugins).
+///
+/// Android shell: `Shell`/`NativeBridge.readAsset` reads from the Activity's
+/// `AssetManager`. Returns `Some(bytes)` on hit, `None` if the file is not
+/// present or the JVM is not yet attached.
+///
+/// Non-Android targets: this is a no-op (desktop ships the artifacts on the
+/// regular filesystem — see `apps/chat::xhost`).
+#[cfg(target_os = "android")]
+pub fn read_asset(path: &str) -> Option<Vec<u8>> {
+    jni::read_asset_jni(path)
+}
+#[cfg(not(target_os = "android"))]
+pub fn read_asset(_path: &str) -> Option<Vec<u8>> {
+    None
+}
 #[cfg(all(target_os = "ios", feature = "has-ios-shim"))]
 pub fn request_screen_share_start() {
     shim_impl::request_screen_share_start();

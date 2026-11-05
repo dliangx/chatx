@@ -43,6 +43,15 @@ public final class Shell extends android.app.NativeActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         activityRef = this;
+        // Materialise the X mini-app assets (assets/x-t/...) into the app's
+        // private files dir so the Rust side can read them via a plain
+        // filesystem path (home_dir() == getFilesDir() here). This avoids the
+        // flaky Rust → Java JNI FindClass route for asset reads.
+        try {
+            NativeBridge.installAssets(this);
+        } catch (Throwable t) {
+            Log.w(TAG, "installAssets failed: " + t);
+        }
         if (allGranted()) {
             NativeBridge.autoStart(this);
         } else {

@@ -37,6 +37,10 @@ fn find_hello_wasm() -> Result<PathBuf, String> {
     if let Ok(d) = std::env::current_dir() {
         bases.push(d);
     }
+    // Android / app-private data dir: `home_dir()` (== the Java `getFilesDir()`
+    // where `installAssets` copies the asset at startup).
+    let home = chatx_core::identity::DeviceIdentity::home_dir();
+    bases.push(home);
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             // Bundle: dir is `Chatx.app/Contents/MacOS`; resources live at
@@ -73,17 +77,30 @@ pub fn open_hello(width: u32, height: u32, dpr_x10: u32) -> Result<(), String> {
         return Ok(());
     }
     const ASSET: &str = "x-t/x.hello/0.1.0/app.wasm";
-    let bytes = bridge::read_asset(ASSET)
-        .ok_or_else(|| {
-            "x.hello app.wasm not found (tried APK assets and filesystem) — run scripts/build_x.sh from the repo root"
-                .to_string()
-        })
-        .or_else(|_| {
-            let path = find_hello_wasm()?;
-            std::fs::read(&path).map_err(|e| e.to_string())
-        })?;
+    // Primary path: read via the JNI asset bridge (APK `assets/`).
+    // Fallback: a plain filesystem probe (covers the Java `installAssets`
+    // copy into the app-private files dir, and desktop dev layouts).
+    let bytes = if let Some(b) = bridge::read_asset(ASSET) {
+        tracing::info!("[x] read_asset hit: {} bytes", b.len());
+        b
+    } else {
+        let path = match find_hello_wasm() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("[x] filesystem probe failed: {e}");
+                return Err(e);
+            }
+        };
+        tracing::info!("[x] using filesystem path: {}", path.display());
+        let b = std::fs::read(&path).map_err(|e| e.to_string())?;
+        tracing::info!("[x] loaded via fs: {} bytes", b.len());
+        b
+    };
     let inst = wasmhost::open("x.hello", bytes, width, height, dpr_x10)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            tracing::warn!("[x] wasmhost::open failed: {e}");
+            e.to_string()
+        })?;
     *INST.lock().unwrap() = Some(inst);
     Ok(())
 }

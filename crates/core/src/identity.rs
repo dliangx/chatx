@@ -73,11 +73,28 @@ impl DeviceIdentity {
         if let Ok(p) = std::env::var("CHATX_HOME") {
             return std::path::PathBuf::from(p);
         }
-        #[cfg(windows)]
-        let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
-        #[cfg(not(windows))]
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        std::path::PathBuf::from(format!("{home}/.chatx"))
+        // Android has no `$HOME`: app processes run with the CWD at `/`, so the
+        // naive `$HOME/.chatx` would resolve to an unwritable path and every
+        // keystore write (e.g. Sign up) would fail with "Permission denied".
+        // The OS-conventional app-private data dir is `/data/user/0/<pkg>/files`
+        // — owned by and always writable by the app. `PACKAGE_ID` is set by the
+        // Zygote for the running app; `com.chatx` is the bundle id fallback.
+        #[cfg(target_os = "android")]
+        {
+            let pkg = std::env::var("PACKAGE_ID")
+                .ok()
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| "com.chatx".to_string());
+            return std::path::PathBuf::from(format!("/data/user/0/{pkg}/files"));
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            #[cfg(windows)]
+            let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
+            #[cfg(all(not(windows), not(target_os = "android")))]
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            std::path::PathBuf::from(format!("{home}/.chatx"))
+        }
     }
 
     pub fn profile_dir(profile: &str) -> std::path::PathBuf {

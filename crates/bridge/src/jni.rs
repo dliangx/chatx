@@ -74,7 +74,7 @@ fn call_native_bridge_void(method: &str) -> bool {
             return false;
         }
     };
-    match env.call_static_method::<_, _, _>("com.chatx.NativeBridge", method, "()V", &[]) {
+    match env.call_static_method::<_, _, _>("com/chatx/NativeBridge", method, "()V", &[]) {
         Ok(_) => true,
         Err(e) => {
             tracing::warn!("[bridge] {method}: Java static call failed: {e}");
@@ -224,5 +224,82 @@ pub extern "system" fn Java_com_chatx_NativeBridge_permissionChanged(
             ERR_OK
         }
         _ => ERR_INVALID_ARG,
+    }
+}
+
+// ── Asset reading (X mini-app plugins packed in assets/) ──────────────────
+//
+// Rust → Java: `NativeBridge.extractAsset(String src, String dst) : void`
+//
+// The Java shell opens the named asset and writes its bytes to `dst` on the
+// regular filesystem. Rust then reads it with `std::fs::read` (same call
+// the desktop / iOS paths use). This is the simplest correct cross-object
+// marshalling path and avoids jni-crate `JValueGen → JByteArray` conversions.
+//
+// Single well-known temp file: the chat UI invokes `read_asset` once per
+// X extension open, so parallelism is not a real concern here.
+
+pub(crate) fn read_asset_jni(path: &str) -> Option<Vec<u8>> {
+    let vm = match VM.get() {
+        Some(v) => v,
+        None => {
+            tracing::warn!("[x-bridge] read_asset: no VM cached (no Java→Rust call happened yet)");
+            return None;
+        }
+    };
+    let dst = std::env::temp_dir().join("chatx_x_asset");
+    let dst_str = dst.to_string_lossy().into_owned();
+    let _ = std::fs::remove_file(&dst);
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("[x-bridge] read_asset: attach failed: {e}");
+            return None;
+        }
+    };
+    let jsrc = match env.new_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("[x-bridge] read_asset: new_string(src) failed: {e}");
+            return None;
+        }
+    };
+    let jdst = match env.new_string(&dst_str) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("[x-bridge] read_asset: new_string(dst) failed: {e}");
+            return None;
+        }
+    };
+    match env.call_static_method::<_, _, _>(
+        "com/chatx/NativeBridge",
+        "extractAsset",
+        "(Ljava/lang/String;Ljava/lang/String;)V",
+        &[(&jsrc).into(), (&jdst).into()],
+    ) {
+        Ok(_) => tracing::info!("[x-bridge] extractAsset call returned ok"),
+        Err(e) => {
+            tracing::warn!("[x-bridge] read_asset: extractAsset call failed: {e}");
+            return None;
+        }
+    };
+    // Check for a pending Java exception (activity null, asset not openable, or
+    // Java-side throw) — `call_static_method` may surface it as Err but we
+    // clear it here so a follow-up JNI call on this thread doesn't misbehave.
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+        tracing::warn!("[x-bridge] extractAsset left a pending Java exception — most likely Shell.activity() was null or assets.open() threw; check logcat for the Java stack");
+        return None;
+    }
+    match std::fs::read(&dst) {
+        Ok(b) => {
+            let _ = std::fs::remove_file(&dst);
+            tracing::info!("[x-bridge] read_asset: got {} bytes from {dst_str}", b.len());
+            Some(b)
+        }
+        Err(e) => {
+            tracing::warn!("[x-bridge] read_asset: read {dst_str} failed: {e} (asset likely missing or activity null)");
+            None
+        }
     }
 }

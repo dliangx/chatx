@@ -23,10 +23,11 @@ pub fn default_log_path() -> PathBuf {
         }
         return p;
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    let dir = home.join(".chatx");
+    // Reuse `home_dir()` so the log lives next to the keystore (and, on
+    // Android, lands in the app-private data dir rather than an unwritable
+    // `/tmp` — which on Android doesn't exist, so the subscriber init would
+    // have been silently dropping every `tracing` call, including auth errors).
+    let dir = crate::identity::DeviceIdentity::home_dir();
     let _ = std::fs::create_dir_all(&dir);
     dir.join("chatx.log")
 }
@@ -73,15 +74,25 @@ pub fn init_at(log_path: &std::path::Path) -> Result<(), Box<dyn std::error::Err
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
 
     let reg = tracing_subscriber::registry()
-        .with(filter)
         .with(
-            tracing_subscriber::fmt::layer()
+            // Layer 1: file (persistent, under `home_dir()`; on Android that's
+            // the app's private `files` dir, so the log survives reboots).
+            tracing_subscriber::fmt::Layer::new()
                 .with_writer(shared)
                 .with_ansi(false)
                 .with_level(true)
                 .with_file(true)
                 .with_line_number(true),
-        );
+        )
+        .with(
+            // Layer 2: stderr — surfaces in `adb logcat` (Android) or the
+            // terminal (desktop) for quick post-mortem without `run-as`.
+            tracing_subscriber::fmt::Layer::new()
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
+                .with_level(true),
+        )
+        .with(filter);
 
     // try_init only errors when a global subscriber already exists
     // (duplicate init); treat that as success — either way the process

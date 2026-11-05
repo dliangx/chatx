@@ -142,9 +142,17 @@ fn detect_system_dark(window: &slint::Window) -> bool {
         .unwrap_or(true)
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "android")]
 fn detect_system_dark(_window: &slint::Window) -> bool {
-    // No OS-appearance bridge installed for mobile yet; default to light UI.
+    // Android: the shell (Java side) can later expose the Activity's
+    // `Configuration.uiMode` via a tiny JNI static; for now default to light.
+    false
+}
+
+#[cfg(target_os = "ios")]
+fn detect_system_dark(_window: &slint::Window) -> bool {
+    // iOS: OS-appearance bridge (UIScene / ObjC shim exposing UIUserInterfaceStyle)
+    // lands later; default to light for now.
     false
 }
 
