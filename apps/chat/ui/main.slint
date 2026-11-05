@@ -74,14 +74,24 @@ export component MainWindow inherits Window {
     // physical edge — the native iOS/Android look. Mobile only; hidden while a
     // sub-page is open (sub-top < 0 means we're on the root tab where the bar
     // shows); zero-height (invisible) when there's no bottom inset / on desktop.
-    if root.logged-in && AppState.is-mobile
-        && AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top < 0:
+    if root.logged-in && AppState.is-mobile:
     Rectangle {
         x: root.safe-area-insets.left;
         y: root.height - root.safe-area-insets.bottom;
         width: root.width - root.safe-area-insets.right - root.safe-area-insets.left;
         height: root.safe-area-insets.bottom;
-        background: Theme.surface;
+        background: AppState.nav-state.tabs[AppState.nav-state.active-tab].sub-top < 0
+            ? Theme.surface
+            : Theme.bg;
+    }
+
+    if root.logged-in && AppState.is-mobile:
+    Rectangle {
+        x: root.safe-area-insets.left;
+        y: 0px;
+        width: root.width - root.safe-area-insets.right - root.safe-area-insets.left;
+        height: root.safe-area-insets.top;
+        background: Theme.bg;
     }
 
     if !root.logged-in:

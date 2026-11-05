@@ -10,13 +10,16 @@ component NavTab inherits Rectangle {
 
     background: transparent;
 
-    // Icon (~24px) + caption (~14px) + gap, centered vertically in the tab's
-    // content band (`root.height`). Kept well clear of the bottom so it sits
-    // above the home-indicator / nav-bar inset the bar background extends into.
-    out property <length> tab-h: root.height;
+    // Top padding for the icon+caption block. The same-colour home-indicator /
+    // nav-bar band (painted by main.slint) sits directly below the bar, so the
+    // block is anchored with a generous top margin rather than centred in the
+    // thin content band — otherwise the icon+caption read as "hugging the
+    // top" with the empty shelf hanging below. Kept small enough that the
+    // 40px icon+caption still clears the 49px iOS content band (no clip).
+    out property <length> top-pad: 8px;
     Icon {
         x: (parent.width - 24px) / 2;
-        y: (root.tab-h - 40px) / 2;
+        y: root.top-pad;
         size: 24px;
         glyph: root.glyph;
         variant: root.index == root.active-tab ? Variant.filled : Variant.raw;
@@ -25,7 +28,7 @@ component NavTab inherits Rectangle {
 
     Text {
         x: 0;
-        y: (root.tab-h - 40px) / 2 + 27px;
+        y: root.top-pad + 27px;
         width: 100%;
         height: 14px;
         text: root.label;
