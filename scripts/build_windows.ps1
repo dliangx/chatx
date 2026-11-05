@@ -125,22 +125,16 @@ $Bin = Join-Path $Root "target\$Target\$Mode\chatx.exe"
 if (-not (Test-Path $Bin)) { Err "binary not found: $Bin" }
 Ok "built:  $Bin  ($([math]::Round((Get-Item $Bin).Length / 1MB,1)) MB)"
 
-# ── X mini-app artifacts (x-t/) — same self-contained approach as build_osx ──
-# Built via scripts/build_x.sh (wasm32-wasip1); placed next to chatx.exe so the
-# X extension page works after extraction. Try a bash; fall back to a prebuilt.
-$XBuild = Join-Path $Root "scripts\build_x.sh"
-$XWasm = Join-Path $Root "x-t\x.hello\0.1.0\app.wasm"
+# ── X mini-app artifacts (x-t/) ─────────────────────────────────────────────────
+# Built via scripts/build_x.ps1 (wasm32-wasip1); placed next to chatx.exe so the
+# X extension page works after extraction.
+$XBuild = Join-Path $Root "scripts\build_x.ps1"
 if (Test-Path $XBuild) {
-    $bash = if (Get-Command bash -ErrorAction SilentlyContinue) { "bash" } else { $null }
-    if ($bash) {
-        Say "building X mini-app (x-t/)"
-        Push-Location $Root
-        & $bash "scripts/build_x.sh"
-        Pop-Location
-        if ($LASTEXITCODE -ne 0) { Write-Host "   (build_x.sh failed — X page will be unavailable)" -ForegroundColor Yellow }
-    } else {
-        Write-Host "   (no bash found to run build_x.sh — relying on a prebuilt x-t/)" -ForegroundColor Yellow
-    }
+    Say "building X mini-app (x-t/)"
+    & $XBuild
+    if ($LASTEXITCODE -ne 0) { Write-Host "   (build_x.ps1 failed — X page will be unavailable)" -ForegroundColor Yellow }
+} else {
+    Write-Host "   (build_x.ps1 not found — relying on a prebuilt x-t/)" -ForegroundColor Yellow
 }
 
 # ── package ────────────────────────────────────────────────────────────────────
