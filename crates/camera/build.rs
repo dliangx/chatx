@@ -26,6 +26,7 @@ fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let shim_src = std::path::Path::new(&manifest_dir).join("shim/shim.swift");
     let photos_src = std::path::Path::new(&manifest_dir).join("shim/photos.swift");
+    let filepick_src = std::path::Path::new(&manifest_dir).join("shim/filepick.swift");
     if !shim_src.exists() {
         eprintln!(
             "error: camera shim not found at {}; \
@@ -35,20 +36,30 @@ fn main() {
         std::process::exit(1);
     }
     let has_photos = photos_src.exists();
+    let has_filepick = filepick_src.exists();
     if has_photos {
         eprintln!("[camera build] photo picker shim: {}", photos_src.display());
     } else {
         eprintln!("[camera build] photo picker shim not present — album pick disabled");
     }
+    if has_filepick {
+        eprintln!("[camera build] file picker shim: {}", filepick_src.display());
+    } else {
+        eprintln!("[camera build] file picker shim not present — file pick disabled");
+    }
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let out_obj = format!("{out_dir}/shim_camera.o");
     let out_obj_photos = format!("{out_dir}/shim_photos.o");
+    let out_obj_filepick = format!("{out_dir}/shim_filepick.o");
     let out_lib = format!("{out_dir}/libshim_camera.a");
 
     println!("cargo:rerun-if-changed={}", shim_src.display());
     if has_photos {
         println!("cargo:rerun-if-changed={}", photos_src.display());
+    }
+    if has_filepick {
+        println!("cargo:rerun-if-changed={}", filepick_src.display());
     }
 
     let (swift_target, sdk_name) = match target.as_str() {
@@ -98,12 +109,21 @@ fn main() {
     if has_photos {
         run(swiftc(&photos_src, &out_obj_photos));
     }
+    if has_filepick {
+        run(swiftc(&filepick_src, &out_obj_filepick));
+    }
 
+    let mut ar_args = vec![out_obj];
+    if has_photos {
+        ar_args.push(out_obj_photos);
+    }
+    if has_filepick {
+        ar_args.push(out_obj_filepick);
+    }
     let ar = std::process::Command::new("ar")
         .arg("rs")
         .arg(&out_lib)
-        .arg(&out_obj)
-        .args(if has_photos { Some(out_obj_photos) } else { None })
+        .args(&ar_args)
         .status()
         .expect("failed to invoke `ar`");
     if !ar.success() {

@@ -21,6 +21,17 @@ public final class NativeBridge {
     public static native int audioPlayPcm(byte[] data, int len, int sampleRate, int channels);
     public static native int permissionChanged(int perm, int granted);
 
+    // Java shell → Rust: called when the SAF document picker finishes.
+    // Pass the absolute path of the copied file, or "" on cancel / no pick.
+    // Implemented in `crates/bridge/src/jni.rs` (Java_com_chatx_NativeBridge_filePickDone).
+    public static native int filePickDone(String path);
+
+    // Java shell → Rust: called when the photo picker finishes.
+    // Pass the newline-joined absolute paths of the copied images, or "" on
+    // cancel / no pick.
+    // Implemented in `crates/bridge/src/jni.rs` (Java_com_chatx_NativeBridge_photosPicked).
+    public static native int photosPicked(String paths);
+
     // ── Screen share ─────────────────────────────────────────────────────
     //
     // These are *regular* static methods (not native). Rust calls them as
@@ -60,6 +71,29 @@ public final class NativeBridge {
      *  No-op if not running. */
     public static void stopMicCapture() {
         Capture.stopMic();
+    }
+
+    // ── File picker (SAF) ──────────────────────────────────────────────────
+    //
+    // Called from Rust. `bridge::jni::request_file_pick()` (see
+    // `crates/bridge/src/jni.rs`) invokes this method as a JNI static
+    // (`call_native_bridge_void("openFilePicker")`). The picker's result
+    // flows back through {@link FilePicker#onActivityResult} and ultimately
+    // into {@link #filePickDone(String)} (a JNI native method implemented
+    // in {@code crates/bridge/src/jni.rs}).
+    public static void openFilePicker() {
+        FilePicker.launch();
+    }
+
+    // ── Photo picker ───────────────────────────────────────────────────────
+    //
+    // Called from Rust (`bridge::jni::request_photos_pick`), which uses the
+    // JNI static call form `(I)V` passing the selection limit `max`. The
+    // picker's result flows back through {@link FilePicker#onActivityResult}
+    // and ultimately into {@link #photosPicked(String)} (a JNI native method
+    // in {@code crates/bridge/src/jni.rs}).
+    public static void openPhotosPicker(int max) {
+        FilePicker.launchPhotos(max);
     }
 
     private NativeBridge() {}

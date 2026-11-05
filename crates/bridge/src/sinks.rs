@@ -110,3 +110,78 @@ pixel_slot!(camera);
 audio_slot!(audio_in);
 pixel_slot!(screen);
 audio_slot!(audio_out);
+
+/// Single-string slot used by the mobile file pickers (iOS / Android).
+///
+/// - **iOS** — the Swift shim (`shim/filepick.swift`) delivers a single
+///   absolute path (or `None` on cancel) via `_chatx_rust_filepick_done`.
+/// - **Android** — the Java shell copies the picked file to the app's private
+///   `getFilesDir()` and calls `NativeBridge.filePickDone(String)` (native
+///   method implemented in `jni.rs`), which delivers `Some(path)` to this slot.
+/// `None` is delivered (empty path) on cancel.
+///
+/// The consumer (typically `camera::filepick`) installs a `Fn(Option<String>)`
+/// callback on this slot.
+#[allow(dead_code)]
+pub mod filepick {
+    use super::Slot;
+    use std::sync::OnceLock;
+
+    #[doc(hidden)]
+    pub(crate) static SLOT: OnceLock<Slot<Option<String>>> = OnceLock::new();
+
+    fn slot() -> &'static Slot<Option<String>> {
+        SLOT.get_or_init(|| Slot::new())
+    }
+
+    /// Install the consumer called when the user makes (or cancels) a selection.
+    /// `Some(path)` = file picked (absolute path readable by the consumer);
+    /// `None` = user cancelled or the picker could not present.
+    pub fn set(cb: Box<dyn Fn(Option<String>) + Send + 'static>) {
+        slot().set(cb)
+    }
+
+    /// Deliver a picked-file path to the installed consumer. `empty` (or
+    /// `None`) means "no selection" / "cancelled". Returns `true` when a
+    /// consumer was installed and ran, `false` otherwise.
+    pub fn deliver(path: Option<String>) -> bool {
+        match path {
+            Some(p) if !p.trim().is_empty() => slot().call(Some(p)),
+            _ => slot().call(None),
+        }
+    }
+}
+
+/// Multi-file slot used by the mobile photo pickers (iOS / Android).
+///
+/// The consumer (typically `camera::album`) installs a `Fn(Vec<String>)`
+/// callback on this slot; an empty `Vec` means "user cancelled / nothing
+/// picked".
+#[allow(dead_code)]
+pub mod photos {
+    use super::Slot;
+    use std::sync::OnceLock;
+
+    #[doc(hidden)]
+    pub(crate) static SLOT: OnceLock<Slot<Vec<String>>> = OnceLock::new();
+
+    fn slot() -> &'static Slot<Vec<String>> {
+        SLOT.get_or_init(|| Slot::new())
+    }
+
+    pub fn set(cb: Box<dyn Fn(Vec<String>) + Send + 'static>) {
+        slot().set(cb)
+    }
+
+    /// Deliver a list of picked-file paths (or an empty vec on cancel).
+    pub fn deliver(paths: Vec<String>) -> bool {
+        // Filter out empty / whitespace entries (e.g. trailing delimiters in
+        // the null-joined transport string).
+        let cleaned: Vec<String> = paths
+            .into_iter()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        slot().call(cleaned)
+    }
+}

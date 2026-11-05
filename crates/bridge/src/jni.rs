@@ -32,7 +32,7 @@
 use crate::sinks;
 use std::sync::OnceLock;
 
-use jni::objects::{JByteArray, JClass};
+use jni::objects::{JByteArray, JClass, JString, GlobalRef};
 use jni::sys::{jint, jsize};
 use jni::{JavaVM, JNIEnv};
 
@@ -46,6 +46,20 @@ pub const ERR_NO_CONSUMER: jint = -3;
 /// its own) can attach to the JVM and call back into Java.
 static VM: OnceLock<JavaVM> = OnceLock::new();
 
+/// Global reference to the `com.chatx.NativeBridge` class. Captured on the
+/// first Java → Rust JNI call by promoting the in-scope `jclass` to a global
+/// ref via `new_global_ref`.
+///
+/// **Why this exists:** `JNIEnv::call_static_method("com/chatx/NativeBridge")`
+/// goes through `FindClass`, which in jni 0.21 uses the **boot classloader**
+/// (the one attached to the calling thread) — but `com.chatx.NativeBridge`
+/// lives in the APK's own `classes.dex`, only visible to the **app
+/// classloader**. Calling it this way produces
+/// `java.lang.ClassNotFoundException: com.chatx.NativeBridge` even when the
+/// class is perfectly loaded. Caching the class object we already received
+/// from Java sidesteps `FindClass` entirely.
+static BRIDGE_CLASS: OnceLock<GlobalRef> = OnceLock::new();
+
 /// Capture a global handle on the VM on the first callback. Idempotent.
 fn maybe_cache_jvm(env: &mut JNIEnv) {
     if VM.get().is_some() {
@@ -56,10 +70,46 @@ fn maybe_cache_jvm(env: &mut JNIEnv) {
     }
 }
 
+/// Remember the `com.chatx.NativeBridge` class for later Rust→Java static
+/// calls. Called at the top of every Java→Rust JNI entry point so the first
+/// one in (even if it's `permissionChanged` before any of our features)
+/// seeds the slot. Idempotent.
+fn cache_bridge_class(env: &mut JNIEnv, cls: &JClass) {
+    if BRIDGE_CLASS.get().is_some() {
+        return;
+    }
+    // Wrap the existing `jclass` pointer in the `JObject<'static>` shape that
+    // `new_global_ref` accepts, then promote it to a global ref. This is
+    // safe because (a) the pointer is a valid JNI object reference and
+    // (b) the JNI spec permits calling `NewGlobalRef` on any valid object
+    // reference (including class objects).
+    let obj = unsafe { jni::objects::JObject::from_raw(cls.as_raw() as *mut _) };
+    if let Ok(gr) = env.new_global_ref(obj) {
+        let _ = BRIDGE_CLASS.set(gr);
+    }
+}
+
+/// Combined setup — cache both the VM and the `NativeBridge` class. Called
+/// from every Java→Rust JNI entry point so any subsequent Rust→Java static
+/// call (e.g. `request_file_pick`) can attach to the JVM and invoke methods
+/// on the class. Idempotent.
+fn setup_bridge(env: &mut JNIEnv, cls: &JClass) {
+    maybe_cache_jvm(env);
+    cache_bridge_class(env, cls);
+}
+
 /// Attach the calling thread (as daemon — so it auto-detaches on exit and
 /// doesn't hold the JVM open) and call `com.chatx.NativeBridge.<method>`
-/// as a static void. Returns `true` on success.
+/// as a static void against the cached class object. Returns `true` on
+/// success.
 fn call_native_bridge_void(method: &str) -> bool {
+    let bridged = match BRIDGE_CLASS.get() {
+        Some(c) => c,
+        None => {
+            tracing::warn!("[bridge] {method}: NativeBridge class not yet cached — bailing");
+            return false;
+        }
+    };
     let vm = match VM.get() {
         Some(v) => v,
         None => {
@@ -74,7 +124,41 @@ fn call_native_bridge_void(method: &str) -> bool {
             return false;
         }
     };
-    match env.call_static_method::<_, _, _>("com/chatx/NativeBridge", method, "()V", &[]) {
+    match env.call_static_method::<_, _, _>(bridged, method, "()V", &[]) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!("[bridge] {method}: Java static call failed: {e}");
+            false
+        }
+    }
+}
+
+/// As [`call_native_bridge_void`] but with a single `int` parameter
+/// (signature `(I)V`).
+fn call_native_bridge_int(method: &str, value: i32) -> bool {
+    let bridged = match BRIDGE_CLASS.get() {
+        Some(c) => c,
+        None => {
+            tracing::warn!("[bridge] {method}: NativeBridge class not yet cached — bailing");
+            return false;
+        }
+    };
+    let vm = match VM.get() {
+        Some(v) => v,
+        None => {
+            tracing::warn!("[bridge] {method}: no JVM handle cached yet; skipping");
+            return false;
+        }
+    };
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("[bridge] {method}: attach current thread failed: {e}");
+            return false;
+        }
+    };
+    let args = [jni::objects::JValue::Int(value)];
+    match env.call_static_method::<_, _, _>(bridged, method, "(I)V", &args) {
         Ok(_) => true,
         Err(e) => {
             tracing::warn!("[bridge] {method}: Java static call failed: {e}");
@@ -111,17 +195,60 @@ pub fn request_mic_stop() {
     _ = call_native_bridge_void("stopMicCapture");
 }
 
+/// Ask the Java shell to open the system document picker (SAF
+/// `Intent.ACTION_OPEN_DOCUMENT`). On success the shell copies the chosen
+/// file to the app's private dir and calls back into Rust via
+/// [`Java_com_chatx_NativeBridge_filePickDone`]. On cancel the shell calls
+/// [`Java_com_chatx_NativeBridge_filePickDone`] with an empty string.
+///
+/// No-op if there is no live activity.
+pub fn request_file_pick() {
+    _ = call_native_bridge_void("openFilePicker");
+}
+
+/// Ask the Java shell to open the system photo picker
+/// (`ACTION_PICK` with `image/*`). On success the shell copies the chosen
+/// image(s) to the app's private dir and calls back into Rust via
+/// [`Java_com_chatx_NativeBridge_photosPicked`] with the newline-joined
+/// absolute paths ("`"` on cancel).
+///
+/// No-op if there is no live activity.
+pub fn request_photos_pick(max: u32) {
+    _ = call_native_bridge_int("openPhotosPicker", max as i32);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_chatx_NativeBridge_photosPicked(
+    mut env: JNIEnv,
+    cls: JClass,
+    paths: JString,
+) -> jint {
+    setup_bridge(&mut env, &cls);
+    let out: Vec<String> = if paths.as_raw().is_null() {
+        Vec::new()
+    } else if let Ok(js) = env.get_string(&paths) {
+        let s: String = js.into();
+        s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()
+    } else {
+        Vec::new()
+    };
+    if !sinks::photos::deliver(out) {
+        return ERR_NO_CONSUMER;
+    }
+    ERR_OK
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_chatx_NativeBridge_cameraFrameIn(
     mut env: JNIEnv,
-    _class: JClass,
+    cls: JClass,
     data: JByteArray,
     _len: jsize,
     width: jint,
     height: jint,
     fmt: jint,
 ) -> jint {
-    maybe_cache_jvm(&mut env);
+    setup_bridge(&mut env, &cls);
     if (width <= 0) || (height <= 0) {
         return ERR_INVALID_ARG;
     }
@@ -138,13 +265,13 @@ pub extern "system" fn Java_com_chatx_NativeBridge_cameraFrameIn(
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_chatx_NativeBridge_audioPcmIn(
     mut env: JNIEnv,
-    _class: JClass,
+    cls: JClass,
     data: JByteArray,
     _len: jsize,
     sample_rate: jint,
     channels: jint,
 ) -> jint {
-    maybe_cache_jvm(&mut env);
+    setup_bridge(&mut env, &cls);
     if (sample_rate <= 0) || (channels != 1 && channels != 2) {
         return ERR_INVALID_ARG;
     }
@@ -164,14 +291,14 @@ pub extern "system" fn Java_com_chatx_NativeBridge_audioPcmIn(
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_chatx_NativeBridge_screenFrameIn(
     mut env: JNIEnv,
-    _class: JClass,
+    cls: JClass,
     data: JByteArray,
     _len: jsize,
     width: jint,
     height: jint,
     fmt: jint,
 ) -> jint {
-    maybe_cache_jvm(&mut env);
+    setup_bridge(&mut env, &cls);
     if (width <= 0) || (height <= 0) {
         return ERR_INVALID_ARG;
     }
@@ -188,13 +315,13 @@ pub extern "system" fn Java_com_chatx_NativeBridge_screenFrameIn(
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_chatx_NativeBridge_audioPlayPcm(
     mut env: JNIEnv,
-    _class: JClass,
+    cls: JClass,
     data: JByteArray,
     _len: jsize,
     sample_rate: jint,
     channels: jint,
 ) -> jint {
-    maybe_cache_jvm(&mut env);
+    setup_bridge(&mut env, &cls);
     if (sample_rate <= 0) || (channels != 1 && channels != 2) {
         return ERR_INVALID_ARG;
     }
@@ -213,11 +340,12 @@ pub extern "system" fn Java_com_chatx_NativeBridge_audioPlayPcm(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_chatx_NativeBridge_permissionChanged(
-    _env: JNIEnv,
-    _class: JClass,
+    mut env: JNIEnv,
+    cls: JClass,
     perm: jint,
     granted: jint,
 ) -> jint {
+    setup_bridge(&mut env, &cls);
     match perm {
         1 | 2 | 3 => {
             tracing::debug!("[bridge] permission perm={perm} granted={granted}");
@@ -225,6 +353,36 @@ pub extern "system" fn Java_com_chatx_NativeBridge_permissionChanged(
         }
         _ => ERR_INVALID_ARG,
     }
+}
+
+/// Java shell → Rust: notification that the system document picker has
+/// completed. `NativeBridge.filePickDone(String path)` is called on the main
+/// thread after the SAF flow finishes, with the absolute path of the
+/// copied file (or "" on cancel / no pick). Delivers the result to the
+/// installed `sinks::filepick` consumer (typically `camera::filepick`).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_chatx_NativeBridge_filePickDone(
+    mut env: JNIEnv,
+    cls: JClass,
+    path: JString,
+) -> jint {
+    setup_bridge(&mut env, &cls);
+    let path_owned: Option<String> = if path.as_raw().is_null() {
+        None
+    } else if let Ok(js) = env.get_string(&path) {
+        let s: String = js.into();
+        if s.trim().is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    } else {
+        None
+    };
+    if !sinks::filepick::deliver(path_owned) {
+        return ERR_NO_CONSUMER;
+    }
+    ERR_OK
 }
 
 // ── Asset reading (X mini-app plugins packed in assets/) ──────────────────

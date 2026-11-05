@@ -179,18 +179,42 @@ mod desktop {
     pub fn cancel() {}
 }
 
+/// Android — driven by the Java shell's photo picker
+/// (`Intent.ACTION_PICK` with `image/*`). The shell copies the chosen
+/// image(s) into the app's private dir and calls back into Rust via
+/// `NativeBridge.photosPicked(String)` (a JNI native method in
+/// `crates/bridge/src/jni.rs`) which delivers a `Vec<String>` of absolute
+/// paths (empty `Vec` = cancel) to the `bridge` photo sink.
+#[cfg(target_os = "android")]
+use android as backend;
+#[cfg(target_os = "android")]
+mod android {
+    pub fn set_photos_sink<F: Fn(Vec<String>) + Send + 'static>(sink: F) {
+        bridge::set_photos_consumer(Box::new(sink));
+    }
+
+    pub fn pick_photos(max: u32) -> Result<(), String> {
+        bridge::request_photos_pick(max);
+        Ok(())
+    }
+
+    pub fn cancel() {}
+}
+
 #[cfg(not(any(
     target_os = "macos",
     target_os = "ios",
     target_os = "windows",
-    target_os = "linux"
+    target_os = "linux",
+    target_os = "android"
 )))]
 use stub as backend;
 #[cfg(not(any(
     target_os = "macos",
     target_os = "ios",
     target_os = "windows",
-    target_os = "linux"
+    target_os = "linux",
+    target_os = "android"
 )))]
 mod stub {
     pub fn set_photos_sink<F: Fn(Vec<String>) + Send + 'static>(_sink: F) {}

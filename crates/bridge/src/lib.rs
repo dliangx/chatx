@@ -77,6 +77,64 @@ pub fn request_mic_stop() {
     jni::request_mic_stop();
 }
 
+/// Ask the Android shell to open the system document picker
+/// (`SAF`/Storage Access Framework via `Intent.ACTION_OPEN_DOCUMENT`). The
+/// shell copies the chosen file to the app's private dir and calls back
+/// into Rust via `NativeBridge.filePickDone(String)` (a JNI native method
+/// in `crates/bridge/src/jni.rs`) which delivers `Some(path)` (or `None`
+/// on cancel) to the consumer installed via [`set_file_pick_consumer`].
+///
+/// No-op on non-Android targets.
+#[cfg(target_os = "android")]
+pub fn request_file_pick() {
+    jni::request_file_pick();
+}
+#[cfg(not(target_os = "android"))]
+pub fn request_file_pick() {
+    tracing::warn!("[bridge] file_pick: not an Android target — no-op");
+}
+
+/// Install the consumer that receives a picked-file path (`Some(path)`) or
+/// `None` on cancel / no pick. Used by `crates/camera::filepick::android`
+/// so a freshly-armed pick always fires the latest-sink consumer.
+///
+/// On non-Android targets this is a no-op — the platform file picker
+/// is delivered by other paths (osascript / zenity / kdialog / Swift shim)
+/// via their own sink slot.
+#[cfg(target_os = "android")]
+pub fn set_file_pick_consumer(cb: Box<dyn Fn(Option<String>) + Send + 'static>) {
+    sinks::filepick::set(cb)
+}
+#[cfg(not(target_os = "android"))]
+pub fn set_file_pick_consumer(_cb: Box<dyn Fn(Option<String>) + Send + 'static>) {}
+
+/// Ask the Android shell to open the system photo picker
+/// (`Intent.ACTION_PICK` with `image/*`). The shell copies the chosen
+/// image(s) to the app's private dir and calls back into Rust via
+/// `NativeBridge.photosPicked(String)` (a JNI native method in
+/// `crates/bridge/src/jni.rs`) which delivers the `Vec` of absolute paths
+/// (empty `Vec` on cancel) to the consumer installed via
+/// [`set_photos_consumer`].
+///
+/// No-op on non-Android targets.
+#[cfg(target_os = "android")]
+pub fn request_photos_pick(max: u32) {
+    jni::request_photos_pick(max);
+}
+#[cfg(not(target_os = "android"))]
+pub fn request_photos_pick(_max: u32) {
+    tracing::warn!("[bridge] photos_pick: not an Android target — no-op");
+}
+
+/// Install the consumer that receives picked photo paths (`Vec<String>`);
+/// an empty `Vec` means cancel / nothing picked.
+#[cfg(target_os = "android")]
+pub fn set_photos_consumer(cb: Box<dyn Fn(Vec<String>) + Send + 'static>) {
+    sinks::photos::set(cb)
+}
+#[cfg(not(target_os = "android"))]
+pub fn set_photos_consumer(_cb: Box<dyn Fn(Vec<String>) + Send + 'static>) {}
+
 /// Read a file out of the APK's `assets/` directory (X mini-app plugins).
 ///
 /// Android shell: `Shell`/`NativeBridge.readAsset` reads from the Activity's

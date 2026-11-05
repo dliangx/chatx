@@ -52,6 +52,9 @@ public final class Shell extends android.app.NativeActivity {
         } catch (Throwable t) {
             Log.w(TAG, "installAssets failed: " + t);
         }
+        // Register the SAF file picker so Rust (`bridge::jni::request_file_pick`)
+        // can launch the system "open document" dialog.
+        FilePicker.attach(this);
         if (allGranted()) {
             NativeBridge.autoStart(this);
         } else {
@@ -63,6 +66,7 @@ public final class Shell extends android.app.NativeActivity {
     protected void onDestroy() {
         try { NativeBridge.autoStop(); } catch (Throwable ignored) {}
         try { ScreenShare.stop(); } catch (Throwable ignored) {}
+        FilePicker.detach();
         activityRef = null;
         super.onDestroy();
     }
@@ -78,6 +82,13 @@ public final class Shell extends android.app.NativeActivity {
                 ScreenShare.onActivityResult(resultCode, data);
             } catch (Throwable t) {
                 Log.e(TAG, "ScreenShare.onActivityResult failed: " + t);
+            }
+        } else if (requestCode == FilePicker.REQ_FILE || requestCode == FilePicker.REQ_PHOTOS) {
+            Log.i(TAG, "onActivityResult: forwarding SAF file / photo pick (" + requestCode + ")");
+            try {
+                FilePicker.onActivityResult(requestCode, resultCode, data);
+            } catch (Throwable t) {
+                Log.e(TAG, "FilePicker.onActivityResult failed: " + t);
             }
         }
     }

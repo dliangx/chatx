@@ -63,6 +63,65 @@ mod apple {
     pub fn cancel() {}
 }
 
+/// iOS — driven by the native Swift shim `shim/filepick.swift`
+/// (`UIDocumentPickerViewController`). Selection is handed back to Rust via
+/// the `_chatx_rust_filepick_done` trampoline as a single absolute path, or
+/// `(nil, 0)` on cancel / no file.
+#[cfg(target_os = "ios")]
+use ios as backend;
+#[cfg(target_os = "ios")]
+mod ios {
+    use std::sync::{Mutex, OnceLock};
+
+    static SINK: OnceLock<Mutex<Box<dyn Fn(Option<String>) + Send>>> = OnceLock::new();
+
+    /// Swift → Rust trampoline (declared via `@_silgen_name("_chatx_rust_filepick_done")`
+    /// in `shim/filepick.swift`).
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn _chatx_rust_filepick_done(data: *const u8, n: i32) {
+        let path = if data.is_null() || n <= 0 {
+            None
+        } else {
+            let buf = unsafe { std::slice::from_raw_parts(data, n as usize) };
+            let s = String::from_utf8_lossy(buf).to_string().trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
+        };
+        if let Some(slot) = SINK.get() {
+            if let Ok(g) = slot.lock() {
+                (g)(path)
+            }
+        }
+    }
+
+    unsafe extern "C" {
+        fn chatx_filepick_pick() -> i32;
+        fn chatx_filepick_cancel();
+    }
+
+    pub fn set_file_sink<F: Fn(Option<String>) + Send + 'static>(sink: F) {
+        if let Some(slot) = SINK.get() {
+            if let Ok(mut g) = slot.lock() {
+                *g = Box::new(sink)
+            }
+        } else {
+            let _ = SINK.set(Mutex::new(Box::new(sink)));
+        }
+    }
+
+    pub fn pick_file() -> Result<(), String> {
+        let r = unsafe { chatx_filepick_pick() };
+        if r == 0 {
+            Ok(())
+        } else {
+            Err("Failed to open the file picker (foreground window unavailable)".to_string())
+        }
+    }
+
+    pub fn cancel() {
+        unsafe { chatx_filepick_cancel() }
+    }
+}
+
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use desktop as backend;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -149,9 +208,46 @@ mod desktop {
     pub fn cancel() {}
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+/// Android — driven by the Java shell's SAF picker
+/// (`Intent.ACTION_OPEN_DOCUMENT`). The shell copies the chosen file to the
+/// app's private dir and calls back into Rust via
+/// `NativeBridge.filePickDone(String)` (a JNI native method in
+/// `crates/bridge/src/jni.rs`) which delivers `Some(path)` to the
+/// `bridge` file-pick consumer. Cancels deliver `None` (empty path).
+#[cfg(target_os = "android")]
+use android as backend;
+#[cfg(target_os = "android")]
+mod android {
+    /// Install the consumer that receives the picked file (or `None`).
+    /// `bridge` owns the slot; this replaces the previous consumer so a
+    /// freshly-armed pick delivers to the latest caller.
+    pub fn set_file_sink<F: Fn(Option<String>) + Send + 'static>(sink: F) {
+        bridge::set_file_pick_consumer(Box::new(sink))
+    }
+
+    pub fn pick_file() -> Result<(), String> {
+        bridge::request_file_pick();
+        Ok(())
+    }
+
+    pub fn cancel() {}
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows",
+    target_os = "linux",
+    target_os = "android"
+)))]
 use stub as backend;
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows",
+    target_os = "linux",
+    target_os = "android"
+)))]
 mod stub {
     pub fn set_file_sink<F: Fn(Option<String>) + Send + 'static>(_sink: F) {}
     pub fn pick_file() -> Result<(), String> {
