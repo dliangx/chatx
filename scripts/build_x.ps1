@@ -35,13 +35,17 @@ function Build-App {
     $wasmLog = ""
     try {
         Push-Location $X
+        $prevErr = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         $wasmLog = cargo build --release --target wasm32-wasip1 -p $Pkg 2>&1
+        $ErrorActionPreference = $prevErr
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             Err "cargo build failed:`n$wasmLog"
         }
         Pop-Location
     } catch {
+        if ($X -and (Test-Path $X)) { Pop-Location }
         Err "cargo build failed: $_"
     }
 
@@ -76,15 +80,22 @@ function Build-App {
   "sha256": "$hash"
 }
 "@
-    Set-Content -Path (Join-Path $out "manifest.json") -Value $manifest -Encoding UTF8NoBOM
+    # Write manifest as UTF8 without BOM
+    $manifestPath = Join-Path $out "manifest.json"
+    [System.IO.File]::WriteAllText($manifestPath, $manifest)
 
     $size = (Get-Item (Join-Path $out "app.wasm")).Length
-    Ok " -> $out\app.wasm ($size bytes, sha256 $([string]::Substring($hash, 0, 12))...)"
+    Ok " -> $out\app.wasm ($size bytes, sha256 $($hash.Substring(0, 12))...)"
 }
 
 # rustup target
+$prevErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 rustup target add wasm32-wasip1 2>$null
-if ($LASTEXITCODE -ne 0) { Ok "wasm32-wasip1 target already installed" }
+$ErrorActionPreference = $prevErrorAction
+if ($LASTEXITCODE -ne 0) {
+    Err "Failed to add wasm32-wasip1 target"
+}
 
 # P0: hello only.
 Build-App -Pkg "hello" -AppId "x.hello" -Version "0.1.0"
