@@ -5,6 +5,7 @@
 //! [`SignalFrame`]s through a [`crate::SignalTransport`] and feeding inbound
 //! frames into [`PeerCall::handle_inbound`].
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use webrtc_rs::api::APIBuilder;
@@ -71,6 +72,13 @@ struct Inner {
     remote_audio: Mutex<Option<Box<dyn Fn(&[u8], u32, u32) + Send + Sync + 'static>>>,
     remote_cam: Mutex<Option<Box<dyn Fn(Vec<u8>, u32, u32) + Send + Sync + 'static>>>,
     remote_scr: Mutex<Option<Box<dyn Fn(Vec<u8>, u32, u32) + Send + Sync + 'static>>>,
+    /// Inbound ICE candidates that arrived before the remote SDP was applied
+    /// are buffered here and flushed (in order) right after
+    /// `set_remote_description` succeeds.
+    pending_ice: Mutex<Vec<RTCIceCandidateInit>>,
+    /// Set once `set_remote_description` has completed for this peer
+    /// connection. Gates [`Inner::pending_ice`] buffering.
+    remote_desc_ready: std::sync::atomic::AtomicBool,
 }
 
 impl Inner {
@@ -109,8 +117,53 @@ impl PeerCall {
             remote_audio: Mutex::new(None),
             remote_cam: Mutex::new(None),
             remote_scr: Mutex::new(None),
+            pending_ice: Mutex::new(Vec::new()),
+            remote_desc_ready: std::sync::atomic::AtomicBool::new(false),
         });
         Self { inner }
+    }
+
+    /// Buffer an ICE candidate that arrived before the remote SDP was applied,
+    /// or apply it directly if the session is already ready.
+    fn accept_remote_ice(&self, init: RTCIceCandidateInit) {
+        if !self
+            .inner
+            .remote_desc_ready
+            .load(Ordering::Acquire)
+        {
+            self.inner.pending_ice.lock().unwrap().push(init);
+            tracing::trace!("add_ice_candidate deferred — remote SDP not applied yet");
+            return;
+        }
+        let pc = self.pc();
+        runtime().spawn(async move {
+            if let Err(e) = pc.add_ice_candidate(init).await {
+                tracing::warn!(err = %e, "add_ice_candidate failed");
+            }
+        });
+    }
+
+    /// Apply all buffered ICE candidates in order. Called right after a
+    /// successful `set_remote_description` (offer or answer).
+    fn flush_pending_ice(&self) {
+        let pending: Vec<RTCIceCandidateInit> = self
+            .inner
+            .pending_ice
+            .lock()
+            .unwrap()
+            .drain(..)
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let call = self.clone();
+        runtime().spawn(async move {
+            for init in pending {
+                if let Err(e) = call.pc().add_ice_candidate(init).await {
+                    tracing::warn!(err = %e, "flush add_ice_candidate failed");
+                }
+            }
+        });
     }
 
     fn pc(&self) -> Arc<RTCPeerConnection> {
@@ -473,10 +526,14 @@ impl PeerCall {
                         return Ok(());
                     }
                 };
+                let call = call.clone();
                 runtime().spawn(async move {
                     if let Err(e) = pc.set_remote_description(desc).await {
                         tracing::warn!(err = %e, "set_remote(offer) failed");
+                        return;
                     }
+                    call.inner.remote_desc_ready.store(true, Ordering::Release);
+                    call.flush_pending_ice();
                 });
                 Ok(())
             }
@@ -490,10 +547,14 @@ impl PeerCall {
                         return Ok(());
                     }
                 };
+                let call = call.clone();
                 runtime().spawn(async move {
                     if let Err(e) = pc.set_remote_description(desc).await {
                         tracing::warn!(err = %e, "set_remote(answer) failed");
+                        return;
                     }
+                    call.inner.remote_desc_ready.store(true, Ordering::Release);
+                    call.flush_pending_ice();
                 });
                 Ok(())
             }
@@ -509,12 +570,7 @@ impl PeerCall {
                     sdp_mline_index: Some(*sdp_mline_index),
                     username_fragment: Some(ufrag.clone()),
                 };
-                let pc = self.pc();
-                runtime().spawn(async move {
-                    if let Err(e) = pc.add_ice_candidate(init).await {
-                        tracing::warn!(err = %e, "add_ice_candidate failed");
-                    }
-                });
+                self.accept_remote_ice(init);
                 Ok(())
             }
             SignalKind::MuteMic(on) => {

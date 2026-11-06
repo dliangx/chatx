@@ -1038,24 +1038,32 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let public = stun::discover_cached();
         let base = self.endpoints();
         if let Some(ip) = public {
-            match base.iter().find_map(|a| tcp_port_of(a)) {
-                Some(port) => {
-                    let ip_proto = match ip.ip {
-                        std::net::IpAddr::V4(_) => "ip4",
-                        std::net::IpAddr::V6(_) => "ip6",
-                    };
-                    let mut list = Vec::with_capacity(base.len() + 1);
-                    list.push(format!("/{ip_proto}/{}/tcp/{port}", ip.ip));
-                    list.extend(base);
-                    return list;
+            let ip_proto = match ip.ip {
+                std::net::IpAddr::V4(_) => "ip4",
+                std::net::IpAddr::V6(_) => "ip6",
+            };
+            let public_ip = ip.ip;
+            let tcp_port = base.iter().find_map(|a| tcp_port_of(a));
+            let udp_port = base.iter().find_map(|a| udp_port_of(a));
+            if tcp_port.is_some() || udp_port.is_some() {
+                let mut list = Vec::with_capacity(base.len() + 2);
+                if let Some(port) = tcp_port {
+                    list.push(format!("/{ip_proto}/{public_ip}/tcp/{port}"));
                 }
-                None => {
-                    tracing::warn!(
-                        "STUN public IP {ip} found but no listening port known yet; \
-                         advertising local endpoints only"
-                    );
+                // QUIC is the primary direct path and what DCUtR hole-punching
+                // coordinates over — only advertising the TCP public endpoint
+                // previously left cross-network peers without a public QUIC
+                // candidate, suppressing hole-punch success.
+                if let Some(port) = udp_port {
+                    list.push(format!("/{ip_proto}/{public_ip}/udp/{port}/quic-v1"));
                 }
+                list.extend(base);
+                return list;
             }
+            tracing::warn!(
+                "STUN public IP {ip} found but no listening port known yet; \
+                 advertising local endpoints only"
+            );
         }
         // Fallback (STUN not yet done / no public IP): the legacy LAN egress
         // endpoint, which is useful for same-network peers.
@@ -1682,7 +1690,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(Ok(()))) => {
-                    tracing::debug!("[dm] send to {addr} ACK'd");
+                    tracing::info!(
+                        path = classify_transport(addr),
+                        "[dm] send delivered via {addr}"
+                    );
                     return Ok(());
                 }
                 Ok(Ok(Err(e))) => {
@@ -1734,7 +1745,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     }
                     match tokio::time::timeout(timeout, rx).await {
                         Ok(Ok(Ok(()))) => {
-                            tracing::debug!("[dm] retry send to {addr} ACK'd");
+                            tracing::info!(
+                                path = classify_transport(&addr),
+                                "[dm] retry delivered via {addr}"
+                            );
                             return Ok(());
                         }
                         Ok(Ok(Err(e))) => {
@@ -1816,7 +1830,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(Ok(()))) => {
-                    tracing::debug!("[voice] acked via {addr}");
+                    tracing::info!(
+                        path = classify_transport(&addr),
+                        "[voice] delivered via {addr}"
+                    );
                     return Ok(());
                 }
                 Ok(Ok(Err(e))) => {
@@ -1930,7 +1947,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(Ok(()))) => {
-                    tracing::debug!("[image] acked via {addr}");
+                    tracing::info!(
+                        path = classify_transport(&addr),
+                        "[image] delivered via {addr}"
+                    );
                     return Ok(());
                 }
                 Ok(Ok(Err(e))) => {
@@ -2012,7 +2032,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(Ok(()))) => {
-                    tracing::debug!("[file] acked via {addr}");
+                    tracing::info!(
+                        path = classify_transport(&addr),
+                        "[file] delivered via {addr}"
+                    );
                     return Ok(());
                 }
                 Ok(Ok(Err(e))) => {
@@ -2088,7 +2111,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(Ok(()))) => {
-                    tracing::debug!("[friendq] acked via {addr}");
+                    tracing::info!(
+                        path = classify_transport(addr),
+                        "[friendq] delivered via {addr}"
+                    );
                     return Ok(());
                 }
                 Ok(Ok(Err(e))) => {
@@ -2138,7 +2164,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     }
                     match tokio::time::timeout(timeout, rx).await {
                         Ok(Ok(Ok(()))) => {
-                            tracing::debug!("[friendq] acked via {addr} (retry)");
+                            tracing::info!(
+                                path = classify_transport(&addr),
+                                "[friendq] retry delivered via {addr}"
+                            );
                             return Ok(());
                         }
                         Ok(Ok(Err(e))) => {
@@ -3129,6 +3158,44 @@ fn tcp_port_of(addr: &str) -> Option<u16> {
         .filter(|p| *p != 0)
 }
 
+fn udp_port_of(addr: &str) -> Option<u16> {
+    addr.parse::<Multiaddr>()
+        .ok()
+        .as_ref()
+        .and_then(|a| {
+            a.iter().find_map(|c| {
+                if let libp2p::multiaddr::Protocol::Udp(p) = c {
+                    Some(p)
+                } else {
+                    None
+                }
+            })
+        })
+        .filter(|p| *p != 0)
+}
+
+/// Classify a dialable multiaddr into a coarse transport token for log output.
+/// Returns:
+///   - `"relay-circuit"`  when the address tunnels through a relay
+///   - `"direct-quic"`    when it is a direct QUIC/UDP path
+///   - `"direct-tcp"`     when it is a direct TCP path
+///   - `"other"`          for anything else (e.g. websocket, dns)
+fn classify_transport(addr: &Multiaddr) -> &'static str {
+    if addr
+        .iter()
+        .any(|c| matches!(c, libp2p::multiaddr::Protocol::P2pCircuit))
+    {
+        return "relay-circuit";
+    }
+    if addr.iter().any(|c| matches!(c, libp2p::multiaddr::Protocol::Udp(_))) {
+        return "direct-quic";
+    }
+    if addr.iter().any(|c| matches!(c, libp2p::multiaddr::Protocol::Tcp(_))) {
+        return "direct-tcp";
+    }
+    "other"
+}
+
 /// True when a multiaddr is dial-able from *another* network — i.e. it carries
 /// a public (non-link-local / non-RFC1918, non-loopback) IPv4, or it is a
 /// relay-circuit address (`/p2p-circuit/...`). Private LAN addresses such as
@@ -3169,11 +3236,21 @@ fn unroutable_reason(addr: &Multiaddr) -> Option<&'static str> {
     for comp in addr.iter() {
         match comp {
             libp2p::multiaddr::Protocol::Tcp(0) => saw_tcp0 = true,
-            libp2p::multiaddr::Protocol::Ip4(ip) if ip.is_loopback() || ip.is_unspecified() => {
-                return Some("loopback/wildcard ip");
+            libp2p::multiaddr::Protocol::Dns(_) | libp2p::multiaddr::Protocol::Dns6(_) => {
+                return Some("dns/mdns name (not directly dialable)");
             }
-            libp2p::multiaddr::Protocol::Ip6(ip) if ip.is_loopback() || ip.is_unspecified() => {
-                return Some("loopback/wildcard ip");
+            libp2p::multiaddr::Protocol::Ip4(ip)
+                if ip.is_loopback()
+                    || ip.is_unspecified()
+                    || ip.is_private()
+                    || ip.is_link_local() =>
+            {
+                return Some("private/loopback ip");
+            }
+            libp2p::multiaddr::Protocol::Ip6(ip)
+                if ip.is_loopback() || ip.is_unspecified() || ip.is_unicast_link_local() =>
+            {
+                return Some("private/loopback ip");
             }
             _ => {}
         }
