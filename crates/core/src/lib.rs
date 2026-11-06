@@ -420,7 +420,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 attempt = row.attempts,
                 "[redeliver] retrying offline DM"
             );
-            match self.try_send_dm_once(&row.peer_base58, &text).await {
+            match self.try_send_dm_once(&row.peer_base58, &text, row.msg_id as u64).await {
                 Ok(()) => {
                     let _ = self.store.set_status(row.msg_id, sqlite::STATUS_SENT).await;
                     let _ = sqlite::queue::give_up(&pool, row.msg_id).await; // drop from queue
@@ -1439,6 +1439,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             e2e,
             text: text.to_string(),
             ack_tx: None,
+            client_id: None,
         })?;
         Ok(())
     }
@@ -1679,7 +1680,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         peer_base58: &str,
         text: &str,
     ) -> anyhow::Result<bool> {
-        match self.try_send_dm_once(peer_base58, text).await {
+        match self.try_send_dm_once(peer_base58, text, msg_id as u64).await {
             Ok(()) => {
                 if let Some(pool) = self.store.pool() {
                     let _ = self.store.set_status(msg_id, sqlite::STATUS_SENT).await;
@@ -1714,7 +1715,15 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// touch the local message row or queue — that's the caller's job so
     /// both the sync `send_dm` path and the async redelivery path can share
     /// the same dial logic.
-    async fn try_send_dm_once(&self, peer_base58: &str, text: &str) -> Result<(), String> {
+    ///
+    /// `client_id` is the stable sender-local id of this logical message; it
+    /// is carried on every attempt so the receiver can dedup a redelivery.
+    async fn try_send_dm_once(
+        &self,
+        peer_base58: &str,
+        text: &str,
+        client_id: u64,
+    ) -> Result<(), String> {
         let rec = self
             .dir
             .resolve_device(peer_base58)
@@ -1766,6 +1775,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 e2e: e2e.clone(),
                 text: text.to_string(),
                 ack_tx: Some(tx),
+                client_id: Some(client_id),
             });
             if let Err(e) = sent_cmd {
                 last_err = format!("cmd channel closed: {e}");
@@ -1826,6 +1836,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         e2e: e2e.clone(),
                         text: text.to_string(),
                         ack_tx: Some(tx),
+                        client_id: Some(client_id),
                     });
                     if let Err(e) = sent_cmd {
                         last_err = format!("cmd channel closed: {e}");
@@ -2194,6 +2205,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 e2e: e2e.clone(),
                 text: frame.to_string(),
                 ack_tx: Some(tx),
+                client_id: None,
             }) {
                 last_err = format!("cmd channel closed: {e}");
                 continue;
@@ -2247,6 +2259,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         e2e: e2e.clone(),
                         text: frame.to_string(),
                         ack_tx: Some(tx),
+                        client_id: None,
                     }) {
                         last_err = format!("cmd channel closed: {e}");
                         continue;
@@ -3118,7 +3131,37 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 match req.kind {
                     message::MsgKind::Dm => {
                         let text = req.text.clone().unwrap_or_default();
+                        // Receiver-side idempotency. `req.client_id` is the
+                        // sender's stable local id for this logical message,
+                        // carried on every redelivery. On first sight we record
+                        // it and persist; on a repeat of the same id (a
+                        // redelivery that the sender re-sent because its ACK
+                        // was lost/timed out) we drop the copy so the user
+                        // never sees the same message twice. `None` means the
+                        // sender is legacy or it's a control frame (friend
+                        // request) — those are never deduplicated here.
                         let chat = store::dm_chat_id(&self.peer_base58(), &peer_b58);
+                        if let (Some(cid), Some(pool)) = (req.client_id, self.store.pool()) {
+                            let fresh = match sqlite::inbound_seen::mark(&pool, cid as i64, &peer_b58).await {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    // Table query failed — degrade to "persist it"
+                                    // rather than silently dropping a real message.
+                                    tracing::warn!("[dm] dedup mark failed: {e}; persisting");
+                                    true
+                                }
+                            };
+                            if !fresh {
+                                tracing::debug!(
+                                    client_id = cid,
+                                    peer = %peer_b58,
+                                    "[dm] duplicate redelivery dropped"
+                                );
+                                return None;
+                            }
+                            // Opportunistic retention sweep (cheap, indexed).
+                            let _ = sqlite::inbound_seen::prune(&pool).await;
+                        }
                         let _ = self
                             .store
                             .push(

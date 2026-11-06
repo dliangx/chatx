@@ -43,6 +43,13 @@ pub struct ChatRequest {
     pub e2e: String,
     pub text: Option<String>,
     pub sealed: Option<String>,
+    /// Sender's local `messages.id` for this logical message. Stable across
+    /// every redelivery of the same message (unlike `id`, which is minted
+    /// fresh per send for ACK matching). The receiver uses it to drop
+    /// duplicate redeliveries. `None` for legacy senders / control frames —
+    /// those are never deduplicated on the receiver side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<u64>,
     #[serde(default)]
     pub kind: MsgKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]

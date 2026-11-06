@@ -216,6 +216,9 @@ pub enum Cmd {
         e2e: String,
         text: String,
         ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+        /// Stable sender-local message id, carried on the wire for receiver-side
+        /// dedup of redeliveries. `None` = not dedup-eligible (legacy / fire-and-forget).
+        client_id: Option<u64>,
     },
     SendAudio {
         peer: PeerId,
@@ -667,7 +670,12 @@ async fn swarm_loop(
                     e2e,
                     text,
                     ack_tx,
+                    client_id,
                 }) => {
+                    // `id` is minted fresh PER SEND so concurrent redeliveries of
+                    // the same logical message each carry a distinct request/id,
+                    // and their ACKs don't cross-match. `client_id` is the
+                    // stable sender-local id used for receiver-side dedup.
                     let id: u64 = rand::random();
                     if let Some(tx) = ack_tx {
                         pending_acks
@@ -681,6 +689,7 @@ async fn swarm_loop(
                         e2e,
                         text: Some(text),
                         sealed: None,
+                        client_id,
                         kind: crate::message::MsgKind::Dm,
                         group_id: None,
                         audio: None,
@@ -704,6 +713,7 @@ async fn swarm_loop(
                         e2e,
                         text: None,
                         sealed: None,
+                        client_id: None,
                         kind: crate::message::MsgKind::Audio,
                         group_id: None,
                         audio: Some(AudioPayload {
@@ -729,6 +739,7 @@ async fn swarm_loop(
                         e2e,
                         text: None,
                         sealed: None,
+                        client_id: None,
                         kind: crate::message::MsgKind::Webrtc,
                         group_id: None,
                         audio: None,
@@ -849,6 +860,7 @@ async fn swarm_loop(
                         e2e,
                         text: None,
                         sealed: Some(sealed),
+                        client_id: None,
                         kind: crate::message::MsgKind::GroupKey,
                         group_id: Some(group_id),
                         audio: None,

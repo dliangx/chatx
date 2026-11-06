@@ -7,6 +7,7 @@
 pub mod conversations;
 pub mod devices;
 pub mod groups;
+pub mod inbound_seen;
 pub mod joins;
 pub mod messages;
 pub mod moment_sync;
