@@ -1019,8 +1019,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 .is_ok()
             {
                 let stun_state = match stun::discover_cached() {
-                    Some(_) => "STUN hit but symmetric NAT",
-                    None => "STUN miss (outbound UDP blocked / offline / prewarm not done)",
+                    Some(p) => format!("STUN {p}"),
+                    None => "STUN miss (outbound UDP blocked / offline / prewarm not done)".to_string(),
                 };
                 tracing::warn!(
                     endpoints = %ep.join(","),
@@ -1084,9 +1084,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .spawn(move || {
                 let res = stun::discover();
                 match res {
-                    Ok(Some(ip)) => tracing::info!(ip = %ip, "STUN prewarm OK"),
+                    Ok(Some(profile)) => tracing::info!(profile = %profile, "STUN prewarm OK (NAT fingerprint)"),
                     Ok(None) => tracing::debug!(
-                        "STUN prewarm: no public IP found (NAT blocks UDP / offline)"
+                        "STUN prewarm: no fingerprint (outbound UDP blocked / offline)"
                     ),
                     Err(e) => tracing::warn!(%e, "STUN prewarm failed"),
                 }
@@ -1110,48 +1110,66 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let _ = handle;
     }
 
-    /// Build the endpoint list advertised to the directory. Prefers the real
-    /// **public** IP (learned via STUN, see [`stun`]) and the actual listening
-    /// port, which is the only address a peer on another network can dial. When
-    /// STUN is unavailable we fall back to the previous LAN-egress behavior so
-    /// same-subnet peers still connect.
+    /// Build the endpoint list advertised to the directory.
     ///
-    /// The lookup is non-blocking ([`stun::discover_cached`]): `discover()`
-    /// (which does UDP I/O) is run in the prewarm thread started by
-    /// [`Self::start_presence_loop`].
+    /// Layers, in order of preference by libp2p's dialer:
+    ///   1. `listen_addrs` (UPnP-mapped, relay-circuit, or other
+    ///      `ExternalAddrConfirmed` entries) — already public and dialable.
+    ///   2. STUN `NatProfile` public IP + our real TCP/UDP listen ports —
+    ///      only included when the fingerprint is **not EDM** (symmetric).
+    ///      On EDM, the STUN-mapped port is the probe socket's port, not
+    ///      our listen port, and destination-specific mappings mean the
+    ///      advertised address would mislead dialers (the dialer would hit a
+    ///      port the NAT assigned to a *different* destination).
+    ///   3. LAN egress fallback — same-subnet peers.
+    ///
+    /// Lookup is non-blocking: [`stun::discover()`] does UDP I/O, so it
+    /// runs in the prewarm thread started by
+    /// [`Self::start_presence_loop`]. `endpoints()` returns the `base` (see
+    /// above) without doing any network I/O.
     fn endpoints_with_egress(&self) -> Vec<String> {
-        let public = stun::discover_cached();
         let base = self.endpoints();
-        if let Some(ip) = public {
-            let ip_proto = match ip.ip {
-                std::net::IpAddr::V4(_) => "ip4",
-                std::net::IpAddr::V6(_) => "ip6",
-            };
-            let public_ip = ip.ip;
-            let tcp_port = base.iter().find_map(|a| tcp_port_of(a));
-            let udp_port = base.iter().find_map(|a| udp_port_of(a));
-            if tcp_port.is_some() || udp_port.is_some() {
-                let mut list = Vec::with_capacity(base.len() + 2);
-                if let Some(port) = tcp_port {
-                    list.push(format!("/{ip_proto}/{public_ip}/tcp/{port}"));
+        let nat_profile = stun::discover_cached();
+
+        if let Some(profile) = nat_profile {
+            let is_edm = profile.mapping == crate::stun::Mapping::Edm;
+            if !is_edm {
+                let ip_proto = match profile.ip {
+                    std::net::IpAddr::V4(_) => "ip4",
+                    std::net::IpAddr::V6(_) => "ip6",
+                };
+                let public_ip = profile.ip;
+                let tcp_port = base.iter().find_map(|a| tcp_port_of(a));
+                let udp_port = base.iter().find_map(|a| udp_port_of(a));
+                if tcp_port.is_some() || udp_port.is_some() {
+                    let mut list = base;
+                    if let Some(port) = udp_port {
+                        list.push(format!("/{ip_proto}/{public_ip}/udp/{port}/quic-v1"));
+                    }
+                    if let Some(port) = tcp_port {
+                        list.push(format!("/{ip_proto}/{public_ip}/tcp/{port}"));
+                    }
+                    return list;
                 }
-                // QUIC is the primary direct path and what DCUtR hole-punching
-                // coordinates over — only advertising the TCP public endpoint
-                // previously left cross-network peers without a public QUIC
-                // candidate, suppressing hole-punch success.
-                if let Some(port) = udp_port {
-                    list.push(format!("/{ip_proto}/{public_ip}/udp/{port}/quic-v1"));
-                }
-                list.extend(base);
-                return list;
+                tracing::warn!(
+                    profile = %profile,
+                    "STUN public IP {public_ip} known but no listening port known yet; \
+                     advertising local endpoints only"
+                );
+            } else {
+                tracing::debug!(
+                    profile = %profile,
+                    "EDM (symmetric NAT) fingerprint — skipping the STUN public \
+                     candidate (it would advertise the STUN probe socket's \
+                     mapped port, not our listen port). Relying on UPnP / \
+                     relay-mapped addresses in `listen_addrs`, which are the \
+                     only trustworthy public candidates on this host. TURN is \
+                     the recommended path for this link."
+                );
             }
-            tracing::warn!(
-                "STUN public IP {ip} found but no listening port known yet; \
-                 advertising local endpoints only"
-            );
         }
-        // Fallback (STUN not yet done / no public IP): the legacy LAN egress
-        // endpoint, which is useful for same-network peers.
+
+        // Fallback / same-subnet: the legacy LAN egress endpoint.
         let mut v = base;
         if let Some(ip) = current_egress_ip() {
             if let Some(pos) = v.iter().position(|a| a.contains(&ip)) {
@@ -1373,6 +1391,18 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
     pub fn store(&self) -> Arc<Store> {
         Arc::clone(&self.store)
+    }
+
+    /// Live AutoNAT reachability verdict — `true` iff an outside node dialed
+    /// us back successfully on one of our advertised candidates. `false`
+    /// covers both "behind a private / symmetric NAT" and "AutoNAT hasn't
+    /// probed yet" — callers should treat the unknown state as *conservative*
+    /// (advertise public candidate but flag lower confidence), not as
+    /// "definitely symmetric".
+    pub fn nat_public(&self) -> bool {
+        self.running
+            .nat_public
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn endpoints(&self) -> Vec<String> {

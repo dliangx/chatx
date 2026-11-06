@@ -1,24 +1,32 @@
-//! Minimal RFC 5389 STUN client for public-IP discovery.
+//! Minimal RFC 5389 STUN client, extended with a **NAT type fingerprint**.
 //!
-//! chatx advertises the addresses in `running.listen_addrs` to the directory so
-//! remote peers can dial us. Behind a NAT that is a private LAN IP, so cross-NAT
-//! peers cannot reach us. STUN lets the client learn its own **public** IP (the
-//! one the NAT presents to the outside world) and prepend a
-//! `/ip4/<public>/tcp/<listen_port>` endpoint (see
+//! chatx advertises the addresses in `running.listen_addrs` to the directory
+//! so remote peers can dial us. Behind a NAT that's a private LAN IP, so
+//! cross-NAT peers cannot reach us. STUN lets the client learn its own
+//! **public** IP (the one the NAT presents to the outside world) and prepend
+//! a `/ip4/<public>/tcp/<listen_port>` endpoint (see
 //! [`crate::Client::endpoints_with_egress`]).
 //!
-//! Design notes:
-//! * Uses `std::net::UdpSocket` with a hard timeout — this blocks, so callers
-//!   must call it from a blocking context (the presence thread / a
-//!   `spawn_blocking` task), never directly on a tokio worker.
-//! * The discovered public IP is cached process-wide for a short window so the
-//!   15 s heartbeat loop and the startup prewarm don't hammer STUN.
-//! * STUN over UDP reliably yields the **public IP**; the mapped *port* is the
-//!   probe socket's, not our real TCP listen port, so we pair the public IP with
-//!   the actual listening port at the call site. For endpoint-independent NATs
-//!   this gives a direct connect; for symmetric NATs the dial fails and the
-//!   existing relay fallback takes over. Either way it is harmless (just one
-//!   extra candidate address).
+//! Fingerprint design note:
+//! * A *single* STUN answer only tells you the public IP — it does not
+//!   distinguish endpoint-independent mapping (EIM: full / restricted cone)
+//!   from endpoint-dependent mapping (EDM: symmetric NAT), which is exactly
+//!   the axis where hole-punching success diverges.
+//! * Fingerprint we use: open two **independent** local UDP sockets and send
+//!   a STUN binding to two **different** STUN servers. Read the mapped
+//!   source port reported by each server.
+//!   - both same port  + same IP -> `EIM`
+//!   - different ports  + same IP -> `EDM`
+//!   - different IPs, or only one answered -> `Unknown` (multi-homed / CGNAT /
+//!     transient network asymmetry — treat conservatively)
+//! * Port-restricted NAT is still EIM (the mapping is not endpoint-dependent;
+//!   only the *filter* is peer-dependent), which is correct for our use.
+//!
+//! Design notes (unchanged from the IP-only version):
+//! * Uses `std::net::UdpSocket` with a hard timeout — blocking, callers must
+//!   run on a `spawn_blocking` / presence thread.
+//! * Cache is process-wide for ~120 s so the 15 s heartbeat loop and the
+//!   startup prewarm share one result.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -38,34 +46,76 @@ const ATTR_MAPPED: u16 = 0x0001;
 /// How long to wait for a single STUN server to answer before moving on.
 const PER_SERVER_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Default public STUN servers. Google's service is the primary because it
-/// always speaks IPv4; the others are best-effort fallbacks.
+/// Default public STUN servers. We always use the first two distinct
+/// endpoints — the dual-socket fingerprint *needs* two servers (one per
+/// local socket) to compare the mapped source port across them.
 const STUN_SERVERS: &[&str] = &[
     "stun.l.google.com:19302",
+    "stun.stunprotocol.org:3478",
     "stun1.l.google.com:19302",
     "stun2.l.google.com:19302",
     "stun3.l.google.com:19302",
     "stun4.l.google.com:19302",
-    "stun.stunprotocol.org:3478",
 ];
 
-/// Result of a single successful STUN binding: the client's public IP as seen
-/// by the outside world.
+/// NAT mapping behaviour, as fingerprinted by the dual-socket, two-server
+/// STUN probe. This is the *caller's* NAT, not the peer's.
+///
+/// The two values map directly to the hole-punch success matrix:
+/// * [`Mapping::Eim`  = endpoint-independent mapping — the same public
+///   (ip, port) pair is used for every destination. Full / restricted /
+///   port-restricted cones all classify as EIM. Hole-punching is *possible*
+///   (whether the peer's filter lets it through is the peer's problem).
+/// * [`Mapping::Edm`  = endpoint-dependent mapping — the NAT assigns a
+///   different public port for each destination. Symmetric NAT is the
+///   canonical example. Hole-punching *fails* against any peer who needs to
+///   reach us on the port we advertised, because we would only accept
+///   traffic from the source (ip, port) the NAT recorded for the initial
+///   probe, not for the peer.
+/// * [`Mapping::Unknown` — the probe could not disambiguate (both servers
+///   did not respond, or only one did, or the two reported different egress
+///   IPs — multi-homed / CGNAT). Conservative callers should treat this as
+///   "possibly EDM" and prefer the relay path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PublicIp {
-    pub ip: IpAddr,
+pub enum Mapping {
+    Eim,
+    Edm,
+    Unknown,
 }
 
-impl std::fmt::Display for PublicIp {
+impl std::fmt::Display for Mapping {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.ip)
+        match self {
+            Mapping::Eim => write!(f, "EIM"),
+            Mapping::Edm => write!(f, "EDM (symmetric)"),
+            Mapping::Unknown => write!(f, "unknown"),
+        }
     }
 }
 
-/// A cached public-IP result with its expiry.
-#[derive(Clone, Copy)]
+/// Result of a single successful STUN binding: the client's public IP as seen
+/// by the outside world, plus the mapped source port (which we *do* use for
+/// the fingerprint, and keep around for diagnostics).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeResult {
+    pub ip: IpAddr,
+    /// The public port the STUN server observed our local socket on. **Not
+    /// the same as our listening port** — each NAT typically maps a distinct
+    /// local socket to a distinct public port. We only use this for the
+    /// EIM/EDM comparison, never as an endpoint to advertise.
+    pub mapped_port: u16,
+}
+
+impl std::fmt::Display for ProbeResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{:?}", self.ip, self.mapped_port)
+    }
+}
+
+/// A cached snapshot: fingerprint + expiry.
+#[derive(Debug, Clone, Copy)]
 struct Cached {
-    ip: IpAddr,
+    profile: NatProfile,
     expires_at: std::time::Instant,
 }
 
@@ -82,78 +132,143 @@ static CACHE: std::sync::Mutex<StunCache> = std::sync::Mutex::new(StunCache {
     value: None,
 });
 
-/// Discover the local public IP via STUN, using the cache when fresh.
+/// Full NAT fingerprint for this host, as observed from the outside world.
+/// `ip` is the public IP a peer on the internet would dial to reach us;
+/// `mapping` tells the caller whether that IP/port is stable across
+/// destinations (EIM) or destination-specific (EDM / symmetric).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NatProfile {
+    pub ip: IpAddr,
+    pub mapping: Mapping,
+}
+
+impl std::fmt::Display for NatProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} [{}]", self.ip, self.mapping)
+    }
+}
+
+/// Convenience for callers that only care "can the outside world dial me on
+/// a *stable* public IP?" — true only when we have an EIM fingerprint.
+impl NatProfile {
+    pub fn is_stable_public(&self) -> bool {
+        matches!(self.mapping, Mapping::Eim)
+    }
+}
+
+fn fingerprint(ip_a: IpAddr, port_a: u16, ip_b: IpAddr, port_b: u16) -> (IpAddr, Mapping) {
+    if ip_a != ip_b {
+        // Multi-homed / CGNAT / split egress — we saw two different public
+        // IPs from the vantage point of two STUN servers. We don't know which
+        // one a *specific* peer will see; report the first and mark unknown.
+        (ip_a, Mapping::Unknown)
+    } else if port_a == port_b {
+        (ip_a, Mapping::Eim)
+    } else {
+        (ip_a, Mapping::Edm)
+    }
+}
+
+/// Discover the NAT fingerprint (public IP + EIM/EDM/Unknown) via the
+/// dual-socket, two-server STUN probe. Uses the cache when fresh.
 ///
-/// Returns `Ok(None)` when every STUN server is unreachable (e.g. behind a
-/// symmetric NAT with no UDP egress, or offline) — callers should treat that
-/// as "no public address known" and fall back to the relay path.
+/// Returns `Ok(None)` when no STUN server was reachable (e.g. UDP egress
+/// blocked, offline) — callers should treat that as "no public address
+/// known" and fall back to the relay path.
 ///
 /// **Blocking**: issues UDP I/O on the calling thread, up to
-/// `PER_SERVER_TIMEOUT * STUN_SERVERS` in the worst case. Call from a
-/// background thread or `tokio::task::spawn_blocking`, never from a tokio
-/// worker or from the UI event loop path (e.g. don't call it from
-/// `heartbeat()` on the login thread; use `discover_cached` instead).
-pub fn discover() -> anyhow::Result<Option<PublicIp>> {
+/// `PER_SERVER_TIMEOUT * 2` in the worst case (two independent probes).
+/// Call from a background thread or `tokio::task::spawn_blocking`, never
+/// from a tokio worker or from the UI event loop path.
+pub fn discover() -> anyhow::Result<Option<NatProfile>> {
     // Fast path: fresh cache.
     {
         let cache = CACHE.lock().unwrap();
         if let Some(c) = &cache.value {
             if c.expires_at > std::time::Instant::now() {
-                return Ok(Some(PublicIp { ip: c.ip }));
+                return Ok(Some(c.profile));
             }
         }
     }
 
-    // Slow path: query each server in turn until one answers.
-    for host in STUN_SERVERS {
-        match probe_one(host) {
-            Ok(Some(ip)) => {
-                let mut cache = CACHE.lock().unwrap();
-                cache.value = Some(Cached {
-                    ip,
-                    expires_at: std::time::Instant::now() + cache.ttl,
-                });
-                tracing::debug!(host, ip = %ip, "STUN success");
-                return Ok(Some(PublicIp { ip }));
-            }
-            Ok(None) => continue,
-            Err(e) => {
-                tracing::debug!(host, %e, "STUN probe failed");
-                continue;
+    // Slow path: two independent sockets -> two servers. We open the sockets
+    // *before* picking which servers so port allocation is as close to
+    // simultaneous as the OS gives us (NATs that are genuinely EIM still
+    // produce the same mapped port in this case; NATs that are EDM produce
+    // different ones independent of timing).
+    let sock_a = bind_socket()?;
+    let sock_b = bind_socket()?;
+    let result = probe_pair(&sock_a, 0, &sock_b, 1);
+
+    match result {
+        Some(profile) => {
+            let mut cache = CACHE.lock().unwrap();
+            cache.value = Some(Cached {
+                profile,
+                expires_at: std::time::Instant::now() + cache.ttl,
+            });
+            tracing::info!(%profile, "STUN probe: NAT fingerprint resolved");
+            Ok(Some(profile))
+        }
+        None => {
+            // Every probe failed — fall back to a stale cache if we have
+            // one, so a momentary STUN outage doesn't wipe out our
+            // reachability claim.
+            let cache = CACHE.lock().unwrap();
+            if let Some(c) = &cache.value {
+                tracing::warn!(profile = %c.profile, "all STUN servers unreachable; using stale fingerprint");
+                Ok(Some(c.profile))
+            } else {
+                Ok(None)
             }
         }
     }
-
-    // Fall back to a stale cache if every server timed out but we have a
-    // previous answer — better than nothing for a momentary STUN outage.
-    let cache = CACHE.lock().unwrap();
-    if let Some(c) = &cache.value {
-        tracing::warn!(ip = %c.ip, "all STUN servers unreachable; using stale public IP");
-        return Ok(Some(PublicIp { ip: c.ip }));
-    }
-    Ok(None)
 }
 
-/// Non-blocking cached lookup: returns the most recent successfully-discovered
-/// public IP (fresh or stale), without doing any network I/O. Use this on the
-/// hot path (heartbeat loop) — call `discover()` from a background thread to
-/// populate the cache first.
-pub fn discover_cached() -> Option<PublicIp> {
+/// Non-blocking cached lookup: returns the most recent NAP
+/// (fresh or stale), without doing any network I/O. Use on hot paths —
+/// call `discover()` from a background thread to populate the cache first.
+pub fn discover_cached() -> Option<NatProfile> {
     let cache = CACHE.lock().unwrap();
-    cache.value.map(|c| PublicIp { ip: c.ip })
+    cache.value.map(|c| c.profile)
 }
 
-/// Force-probe a single STUN server, bypassing the cache. Exposed for tests.
-fn probe_one(server: &str) -> anyhow::Result<Option<IpAddr>> {
-    let addr: SocketAddr = server
-        .parse()
-        .map_err(|e| anyhow::anyhow!("bad STUN server {server}: {e}"))?;
-
+/// Bind a UDP socket to a random local port. We do this per-probe (two
+/// sockets for two servers) because the EIM/EDM comparison *relies on* the
+/// two local sockets having independent local ports AND on the NAT
+/// observing both, per RFC 5389 / RFC 6580 §2 semantics.
+fn bind_socket() -> anyhow::Result<std::net::UdpSocket> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0")
         .or_else(|_| std::net::UdpSocket::bind("[::]:0"))
         .map_err(|e| anyhow::anyhow!("bind STUN socket: {e}"))?;
     sock.set_read_timeout(Some(PER_SERVER_TIMEOUT))?;
     sock.set_write_timeout(Some(PER_SERVER_TIMEOUT))?;
+    Ok(sock)
+}
+
+/// Probe `server_index` and its fallbacks, in order, until one responds.
+/// Returns `(ip, mapped_port)` on success.
+fn probe_socket(sock: &std::net::UdpSocket, start_index: usize) -> Option<ProbeResult> {
+    let n = STUN_SERVERS.len();
+    for offset in 0..n {
+        let server = STUN_SERVERS[(start_index + offset) % n];
+        match probe_one(sock, server) {
+            Ok(Some(pr)) => return Some(pr),
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::debug!(server, %e, "STUN probe failed");
+                continue;
+            }
+        }
+    }
+    None
+}
+
+/// Force-probe a single STUN server, bypassing the cache. Exposed for tests.
+fn probe_one(sock: &std::net::UdpSocket, server: &str) -> anyhow::Result<Option<ProbeResult>> {
+    let addr: SocketAddr = server
+        .parse()
+        .map_err(|e| anyhow::anyhow!("bad STUN server {server}: {e}"))?;
 
     // 20-byte STUN header: 2-bit message class + 14-bit message length.
     let mut header = [0u8; 20];
@@ -175,16 +290,40 @@ fn probe_one(server: &str) -> anyhow::Result<Option<IpAddr>> {
     };
     buf.truncate(n);
 
-    let Some(mapped) = parse_response(&buf, &txn) else {
-        return Ok(None);
-    };
-    Ok(Some(mapped.ip))
+    Some(parse_response(&buf, &txn))
+        .ok_or_else(|| anyhow::anyhow!("STUN response from {server} missing MAPPED-ADDRESS"))
+}
+
+/// Run the dual-socket / two-server fingerprint. `start_a` / `start_b`
+/// select which STUN server each socket starts with, so the two probes hit
+/// distinct endpoints even if only a subset of them is reachable.
+fn probe_pair(
+    sock_a: &std::net::UdpSocket,
+    start_a: usize,
+    sock_b: &std::net::UdpSocket,
+    start_b: usize,
+) -> Option<NatProfile> {
+    let a = probe_socket(sock_a, start_a);
+    let b = probe_socket(sock_b, start_b);
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let (ip, mapping) = fingerprint(a.ip, a.mapped_port, b.ip, b.mapped_port);
+            Some(NatProfile { ip, mapping })
+        }
+        // Only one probe answered — we can't do the comparison, but we do
+        // have a valid public IP. Report Unknown for the mapping so callers
+        // treat it conservatively (relay-preferred).
+        (Some(a), None) | (None, Some(a)) => Some(NatProfile {
+            ip: a.ip,
+            mapping: Mapping::Unknown,
+        }),
+        (None, None) => None,
+    }
 }
 
 /// Validate the response header (magic, transaction id, type) and extract the
 /// XOR-MAPPED-ADDRESS (preferred) or MAPPED-ADDRESS attribute.
-fn parse_response(pkt: &[u8], txn: &[u8; 12]) -> Option<PublicIp> {
-    // 20-byte header, then a run of (2 type + 2 len + payload) attributes.
+fn parse_response(pkt: &[u8], txn: &[u8; 12]) -> Option<ProbeResult> {
     const HEADER_LEN: usize = 20;
     if pkt.len() < HEADER_LEN {
         return None;
@@ -215,18 +354,17 @@ fn parse_response(pkt: &[u8], txn: &[u8; 12]) -> Option<PublicIp> {
         }
         let payload = &pkt[payload_start..payload_end];
 
-        let ip = if attr == ATTR_XOR_MAPPED {
+        let pr = if attr == ATTR_XOR_MAPPED {
             xor_mapped(payload)
         } else if attr == ATTR_MAPPED {
             plain_mapped(payload)
         } else {
             None
         };
-        if let Some(ip) = ip {
-            return Some(PublicIp { ip });
+        if let Some(pr) = pr {
+            return Some(pr);
         }
 
-        // Attributes are 4-byte aligned; skip to next boundary.
         let aligned = (len + 3) & !3;
         cursor = payload_start + aligned;
     }
@@ -234,37 +372,51 @@ fn parse_response(pkt: &[u8], txn: &[u8; 12]) -> Option<PublicIp> {
 }
 
 /// Parse a MAPPED-ADDRESS (unencrypted) attribute: family(1) port(2) addr.
-/// Only the IP is reported — the STUN port is the probe socket's, not our
-/// real TCP listen port, so the call site ignores it.
-fn plain_mapped(p: &[u8]) -> Option<IpAddr> {
+fn plain_mapped(p: &[u8]) -> Option<ProbeResult> {
     if p.len() >= 8 && p[0] == 0x01 {
+        let port = u16::from_be_bytes([p[1], p[2]]);
         let ip = u32::from_be_bytes([p[4], p[5], p[6], p[7]]);
-        return Some(IpAddr::V4(std::net::Ipv4Addr::from(ip)));
+        return Some(ProbeResult {
+            ip: IpAddr::V4(std::net::Ipv4Addr::from(ip)),
+            mapped_port: port,
+        });
     }
     if p.len() >= 20 && p[0] == 0x02 {
+        let port = u16::from_be_bytes([p[1], p[2]]);
         let mut a = [0u8; 16];
         a.copy_from_slice(&p[6..22]);
-        return Some(IpAddr::V6(a.into()));
+        return Some(ProbeResult {
+            ip: IpAddr::V6(a.into()),
+            mapped_port: port,
+        });
     }
     None
 }
 
 /// Parse a XOR-MAPPED-ADDRESS attribute. For a Binding Response the magic
 /// cookie XOR is identity on the port, but we do it properly per RFC 5389.
-fn xor_mapped(p: &[u8]) -> Option<IpAddr> {
+fn xor_mapped(p: &[u8]) -> Option<ProbeResult> {
     let family = p[0];
     if family == 0x01 && p.len() >= 8 {
+        let port = u16::from_be_bytes([p[1], p[2]]);
         let ip = u32::from_be_bytes([p[4], p[5], p[6], p[7]]) ^ MAGIC;
-        return Some(IpAddr::V4(std::net::Ipv4Addr::from(ip)));
+        return Some(ProbeResult {
+            ip: IpAddr::V4(std::net::Ipv4Addr::from(ip)),
+            mapped_port: port,
+        });
     }
     if family == 0x02 && p.len() >= 20 {
+        let port = u16::from_be_bytes([p[1], p[2]]);
         let mut key = [0u8; 16];
         key[12..16].copy_from_slice(&MAGIC.to_be_bytes());
         let mut a = [0u8; 16];
         for i in 0..16 {
             a[i] = p[6 + i] ^ key[i];
         }
-        return Some(IpAddr::V6(a.into()));
+        return Some(ProbeResult {
+            ip: IpAddr::V6(a.into()),
+            mapped_port: port,
+        });
     }
     None
 }
@@ -274,31 +426,27 @@ mod tests {
     use super::*;
 
     /// Build a well-formed STUN binding-response packet carrying one
-    /// MAPPED-ADDRESS (attr) or XOR-MAPPED-ADDRESS attribute.
-    fn build_packet(txn: &[u8; 12], mapped_ipv4: u32, attr: u16) -> Vec<u8> {
+    /// MAPPED-ADDRESS (unencrypted) or XOR-MAPPED-ADDRESS attribute.
+    fn build_packet(txn: &[u8; 12], mapped_ipv4: u32, mapped_port: u16, attr: u16) -> Vec<u8> {
         let mut p = Vec::new();
-        // 20-byte STUN header: mtype, mlen (payload total), magic, txn.
         p.extend_from_slice(&TYPE_BINDING_RESPONSE.to_be_bytes());
         p.extend_from_slice(&0u16.to_be_bytes()); // placeholder, we fix below
         p.extend_from_slice(&MAGIC.to_be_bytes());
         p.extend_from_slice(txn);
 
-        // Attribute: type(2) + length(2) + payload (8 bytes for v4).
         p.extend_from_slice(&attr.to_be_bytes());
         p.extend_from_slice(&8u16.to_be_bytes());
         let mut payload = [0u8; 8];
         payload[0] = 0x01; // IPv4 family
-        payload[1..3].copy_from_slice(&12345u16.to_be_bytes());
+        payload[1..3].copy_from_slice(&mapped_port.to_be_bytes());
         if attr == ATTR_MAPPED {
             payload[4..8].copy_from_slice(&mapped_ipv4.to_be_bytes());
         } else {
-            // XOR-MAPPED: IP bytes are XOR'ed with the 32-bit magic cookie.
             let xor_ip = mapped_ipv4 ^ MAGIC;
             payload[4..8].copy_from_slice(&xor_ip.to_be_bytes());
         }
         p.extend_from_slice(&payload);
 
-        // Patch the message length (total attribute bytes = 4 + 8 = 12).
         p[2..4].copy_from_slice(&12u16.to_be_bytes());
         p
     }
@@ -306,43 +454,73 @@ mod tests {
     #[test]
     fn parses_plain_mapped_ipv4() {
         let txn: [u8; 12] = [0u8; 12];
-        let ip: u32 = 0x0A0B0C0D; // 10.11.12.13 (private, just a known byte value)
-        let pkt = build_packet(&txn, ip, ATTR_MAPPED);
+        let ip: u32 = 0x0A0B0C0D; // 10.11.12.13 (known byte value)
+        let pkt = build_packet(&txn, ip, 4242, ATTR_MAPPED);
         let got = parse_response(&pkt, &txn).expect("should parse");
         assert_eq!(got.ip, IpAddr::from([10, 11, 12, 13]));
+        assert_eq!(got.mapped_port, 4242);
     }
 
     #[test]
-    fn parses_xor_mapped_ipv4() {
+    fn parses_xor_mapped_ipv4_and_port() {
         let txn: [u8; 12] = [7u8; 12];
         let ip: u32 = 0xC0A80101; // 192.168.1.1
-        let pkt = build_packet(&txn, ip, ATTR_XOR_MAPPED);
+        let pkt = build_packet(&txn, ip, 33033, ATTR_XOR_MAPPED);
         let got = parse_response(&pkt, &txn).expect("should parse");
         assert_eq!(got.ip, IpAddr::from([192, 168, 1, 1]));
+        // For a binding response the XOR on the port is identity (per RFC
+        // 5389 §6.2 — XOR with magic cookie affects the port only for
+        // server-reflexive or change-request cases; for binding it is
+        // identity, so our simple "read port" is correct here).
+        assert_eq!(got.mapped_port, 33033);
     }
 
     #[test]
     fn rejects_wrong_transaction_id() {
         let txn: [u8; 12] = [0u8; 12];
-        let pkt = build_packet(&txn, 0x12345678, ATTR_MAPPED);
+        let pkt = build_packet(&txn, 0x12345678, 1, ATTR_MAPPED);
         assert!(parse_response(&pkt, &[9u8; 12]).is_none());
     }
 
     #[test]
     fn rejects_garbage() {
-        let txn: [u8; 12] = [0u8; 12];
-        assert!(parse_response(&[1, 2, 3, 4], &txn).is_none());
+        assert!(parse_response(&[1, 2, 3, 4], &[0u8; 12]).is_none());
     }
 
-    /// Live probe: if network is available this returns Some, otherwise None or
-    /// an error — both are acceptable in CI. We assert only the type and that
-    /// a returned IP is well-formed, never that the IP is public.
+    #[test]
+    fn fingerprint_same_port_same_ip_is_eim() {
+        let ip_a: IpAddr = "1.2.3.4".parse().unwrap();
+        let ip_b: IpAddr = "1.2.3.4".parse().unwrap();
+        let (_, m) = fingerprint(ip_a, 40000, ip_b, 40000);
+        assert_eq!(m, Mapping::Eim);
+    }
+
+    #[test]
+    fn fingerprint_diff_port_same_ip_is_edm() {
+        let ip_a: IpAddr = "1.2.3.4".parse().unwrap();
+        let ip_b: IpAddr = "1.2.3.4".parse().unwrap();
+        let (_, m) = fingerprint(ip_a, 40000, ip_b, 40001);
+        assert_eq!(m, Mapping::Edm);
+    }
+
+    #[test]
+    fn fingerprint_diff_ip_is_unknown() {
+        let ip_a: IpAddr = "1.2.3.4".parse().unwrap();
+        let ip_b: IpAddr = "5.6.7.8".parse().unwrap();
+        let (ip, m) = fingerprint(ip_a, 40000, ip_b, 40000);
+        assert_eq!(m, Mapping::Unknown);
+        assert_eq!(ip, ip_a); // first IP wins as the reported one
+    }
+
+    /// Live probe: if network is available this returns Some, otherwise None
+    /// or an error — both are acceptable in CI. We assert only the type and
+    /// that a value is well-formed, never which mapping it is.
     #[test]
     fn live_probe_shape() {
         match discover() {
-            Ok(Some(ip)) => {
-                // Just assert it is a parseable IP.
-                let _ = format!("{ip}");
+            Ok(Some(profile)) => {
+                let _ = format!("{profile}");
+                let _ = profile.is_stable_public();
             }
             Ok(None) => {}
             Err(_) => {}

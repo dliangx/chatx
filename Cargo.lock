@@ -1743,6 +1743,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chatx-nat-probe"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chatx-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "chatx-signal"
 version = "0.1.0"
 dependencies = [
@@ -5130,6 +5141,7 @@ dependencies = [
  "futures-timer",
  "getrandom 0.2.17",
  "libp2p-allow-block-list",
+ "libp2p-autonat",
  "libp2p-connection-limits",
  "libp2p-core",
  "libp2p-dcutr",
@@ -5163,6 +5175,31 @@ dependencies = [
  "libp2p-core",
  "libp2p-identity",
  "libp2p-swarm",
+]
+
+[[package]]
+name = "libp2p-autonat"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fab5e25c49a7d48dac83d95d8f3bac0a290d8a5df717012f6e34ce9886396c0b"
+dependencies = [
+ "async-trait",
+ "asynchronous-codec",
+ "either",
+ "futures",
+ "futures-bounded",
+ "futures-timer",
+ "libp2p-core",
+ "libp2p-identity",
+ "libp2p-request-response",
+ "libp2p-swarm",
+ "quick-protobuf",
+ "quick-protobuf-codec",
+ "rand 0.8.8",
+ "rand_core 0.6.4",
+ "thiserror 2.0.20",
+ "tracing",
+ "web-time",
 ]
 
 [[package]]

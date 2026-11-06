@@ -15,8 +15,19 @@ use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::time::Duration;
 use libp2p::futures::StreamExt as _;
-use libp2p::swarm::SwarmEvent;
+use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder};
+
+/// Compose the relay v2 behaviour with the AutoNAT server side, so the same
+/// listener also answers AutoNAT dial-back probes from clients (which need a
+/// peer with a *global* IP that the client itself is reaching — which is
+/// exactly the situation when the client has dialed the relay).
+#[derive(NetworkBehaviour)]
+#[behaviour(prelude = "libp2p::swarm::derive_prelude")]
+struct RelayNet {
+    relay: libp2p::relay::Behaviour,
+    autonat: libp2p::autonat::Behaviour,
+}
 
 /// The libp2p relay defaults are tuned for low-concurrency public relays and
 /// are far too tight for a *private* chatx relay that has to bridge DM media
@@ -159,12 +170,30 @@ pub async fn start(
     // routable. `None` ⇒ announce the address as-is (with a warn above).
     let public_host = resolve_public_host().await;
 
+    // AutoNAT server config — this side is *only* answering inbound probes,
+    // so the client-side knobs (boot_delay, retry_interval) are irrelevant to
+    // us, but the server-side knobs matter: `throttle_clients_global_max` and
+    // `throttle_clients_peer_max` bound how many clients we can answer per
+    // second. Relays see many clients probing at once (a new app boot does
+    // not rate-limit the autonat probe), so raise these to a generous but
+    // still bounded value. `only_global_ips: false` because the client we
+    // are answering is, from the relay's viewpoint, an *inbound* connection
+    // whose public-vs-private nature is exactly what we are probing.
+    let autonat_cfg = libp2p::autonat::Config {
+        throttle_clients_global_max: 600,
+        throttle_clients_peer_max: 60,
+        only_global_ips: false,
+        ..libp2p::autonat::Config::default()
+    };
     let mut swarm = SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
         .with_tcp(Default::default(), libp2p::noise::Config::new, libp2p::yamux::Config::default)
         .expect("tcp+noise+yamux")
         .with_quic()
-        .with_behaviour(|_k| libp2p::relay::Behaviour::new(peer_id, relay_config()))?
+        .with_behaviour(|_k| RelayNet {
+            relay: libp2p::relay::Behaviour::new(peer_id, relay_config()),
+            autonat: libp2p::autonat::Behaviour::new(peer_id, autonat_cfg),
+        })?
         .build();
 
     // Bind to all interfaces (force `0.0.0.0` when the operator supplied a
@@ -228,18 +257,27 @@ pub async fn start(
             Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
                 tracing::info!(%peer_id, "relay connected");
             }
-            Some(SwarmEvent::Behaviour(libp2p::relay::Event::ReservationReqAccepted {
-                src_peer_id,
-                renewed,
-            })) => {
-                tracing::info!(%src_peer_id, renewed, "relay reservation accepted");
-            }
-            Some(SwarmEvent::Behaviour(libp2p::relay::Event::CircuitReqAccepted {
-                src_peer_id,
-                dst_peer_id,
-            })) => {
-                tracing::info!(%src_peer_id, %dst_peer_id, "relay circuit");
-            }
+            Some(SwarmEvent::Behaviour(relay_ev)) => match relay_ev {
+                RelayNetEvent::Relay(libp2p::relay::Event::ReservationReqAccepted {
+                    src_peer_id,
+                    renewed,
+                }) => {
+                    tracing::info!(%src_peer_id, renewed, "relay reservation accepted");
+                }
+                RelayNetEvent::Relay(libp2p::relay::Event::CircuitReqAccepted {
+                    src_peer_id,
+                    dst_peer_id,
+                }) => {
+                    tracing::info!(%src_peer_id, %dst_peer_id, "relay circuit");
+                }
+                RelayNetEvent::Autonat(libp2p::autonat::Event::InboundProbe(p)) => {
+                    tracing::debug!(?p, "relay autonat inbound probe (acting as probe server)");
+                }
+                RelayNetEvent::Autonat(libp2p::autonat::Event::OutboundProbe(p)) => {
+                    tracing::debug!(?p, "relay autonat outbound probe");
+                }
+                _ => {}
+            },
             Some(_) => {}
             None => break,
         }

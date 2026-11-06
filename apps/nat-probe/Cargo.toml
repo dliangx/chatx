@@ -1,0 +1,15 @@
+[package]
+name = "chatx-nat-probe"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "chatx-nat-probe"
+path = "src/main.rs"
+
+[dependencies]
+chatx-core = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

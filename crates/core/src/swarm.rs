@@ -72,6 +72,15 @@ pub struct Net {
     /// actual punching). On success the connection is demoted from
     /// `/p2p-circuit` to a direct QUIC address automatically.
     pub dcutr: libp2p::dcutr::Behaviour,
+    /// AutoNAT — dial-back probes to peer nodes that answer "can you see me?"
+    /// with the address they actually connected on. Ground-truth reachability
+    /// verdict: `Public(addr)` means an outside node dialed our advertised
+    /// candidate successfully (EIM-friendly NAT / UPnP / public), `Private`
+    /// means every probe was refused (symmetric NAT, UDP blocked, CGNAT).
+    /// Combined with the dual-socket STUN fingerprint in [`crate::stun`] this
+    /// tells the caller which hole-punching matrix cell it sits in — see
+    /// `endpoints_with_egress` for how the two signals are fused.
+    pub autonat: libp2p::autonat::Behaviour,
     pub chat: Chat<ChatRequest, ChatResponse>,
     pub group: libp2p::gossipsub::Behaviour,
     // libp2p ping keeps the muxed TCP connection alive across idle periods:
@@ -172,6 +181,13 @@ pub enum ChatEvent {
     /// (heartbeat) now so remote peers can dial it.
     ExternalAddrConfirmed {
         address: Multiaddr,
+    },
+    /// AutoNAT flipped its reachability verdict. `Public(addr)` means an
+    /// outside node dialed us back successfully; `Private` means every probe
+    /// was refused. The app can flip the NAT badge on settings / log an
+    /// informational line. `addr` is `None` for Private.
+    NatStatus {
+        public: Option<Multiaddr>,
     },
     GroupPacket {
         topic: String,
@@ -341,6 +357,13 @@ pub struct Running {
     /// `link_direct`. A non-zero count (with zero direct) means the peer is
     /// reachable but only via the relay → the chat dot is yellow.
     pub link_relay: Arc<Mutex<HashMap<PeerId, u32>>>,
+    /// Live AutoNAT reachability verdict (`true` = outside node dialed us,
+    /// `false` = private/blocked/unknown). Written from `swarm_loop` on
+    /// `Autonat(StatusChanged)` events, read synchronously by the directory
+    /// announce path (`endpoints_with_egress`) to decide whether our STUN
+    /// public-IP candidate is *trustworthy* — a symmetric NAT also produces a
+    /// public IP via STUN, but peers can never dial it.
+    pub nat_public: Arc<std::sync::atomic::AtomicBool>,
     /// Peers with a dial in flight (a `swarm.dial` issued but not yet
     /// established or failed). Presence == "connecting / hole-punching in
     /// progress" (grey + pulsing dot). Added in `Cmd::Connect`, cleared once the
@@ -513,6 +536,24 @@ pub async fn boot(
             .with_timeout(std::time::Duration::from_secs(20)),
     );
 
+    // AutoNAT probe config — defaults are tuned for "eventually figure out
+    // whether I'm reachable"; we want a verdict *fast* enough (within one or
+    // two boot delay windows) that the first directory heartbeat already
+    // reflects it. `use_connected: false` keeps the probe scope tight: we
+    // explicitly add the relay as a fixed server (it's the one peer we're
+    // guaranteed to reach through every network), and don't want any
+    // connected peer silently becoming a probe server (that would turn every
+    // DM into an autonat dial-back request).
+    let autonat_cfg = libp2p::autonat::Config {
+        boot_delay: std::time::Duration::from_secs(6),
+        retry_interval: std::time::Duration::from_secs(30),
+        refresh_interval: std::time::Duration::from_secs(15 * 60),
+        // We explicitly add the relay as a fixed server (`add_server` bypasses
+        // this check) — disable the connected-peer path so we don't turn
+        // every DM into an auto-nat dial-back request.
+        use_connected: false,
+        ..libp2p::autonat::Config::default()
+    };
     let mut swarm = SwarmBuilder::with_existing_identity(device.keypair())
         .with_tokio()
         .with_tcp(
@@ -525,11 +566,13 @@ pub async fn boot(
         .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
         .with_behaviour(move |k, relay| {
             let my_peer = libp2p::PeerId::from_public_key(&k.public());
+            let autonat = libp2p::autonat::Behaviour::new(my_peer, autonat_cfg);
             Net {
             mdns,
             upnp: Upnp::default(),
             relay,
             dcutr: libp2p::dcutr::Behaviour::new(my_peer),
+            autonat,
             chat,
             blob,
             voice,
@@ -567,16 +610,40 @@ pub async fn boot(
     let link_direct: Arc<Mutex<HashMap<PeerId, u32>>> = Arc::new(Mutex::new(HashMap::new()));
     let link_relay: Arc<Mutex<HashMap<PeerId, u32>>> = Arc::new(Mutex::new(HashMap::new()));
     let dialing: Arc<Mutex<std::collections::HashSet<PeerId>>> = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    // Start UNKNOWN (false) — the heartbeat NAT diagnostic treats `false` as
+    // the conservative "can't prove reachability yet" state. Flipped by the
+    // first `StatusChanged` event once the relay probe has an answer.
+    let nat_public: Arc<std::sync::atomic::AtomicBool> = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let me = *swarm.local_peer_id();
     for (peer, base) in relays.lock().unwrap().iter().cloned() {
         let circuit = base
+            .clone()
             .with(libp2p::multiaddr::Protocol::P2p(peer))
             .with(libp2p::multiaddr::Protocol::P2pCircuit)
             .with(libp2p::multiaddr::Protocol::P2p(me));
         match swarm.listen_on(circuit.clone()) {
             Ok(_) => tracing::debug!("[swarm] reserving relay slot on {circuit}"),
             Err(e) => tracing::warn!("reserve relay {peer}: {e}"),
+        }
+        // Register the relay as a fixed AutoNAT probe server. The relay is
+        // the one peer every client is *guaranteed* to be able to reach
+        // (outbound TCP/QUIC, or the very circuit we just reserved over), so
+        // its dial-back answer is the most trustworthy reachability verdict we
+        // can get behind any NAT — no third-party node needed. Passing the
+        // base address lets autonat dial the relay directly on the first probe
+        // without waiting on the (separate) relay-client address book; the
+        // relay must *answer* autonat dial-back requests (see
+        // `signaling/src/relay.rs` — `with_autonat_server`).
+        let has_ip = base.iter().any(|c| matches!(
+            c,
+            libp2p::multiaddr::Protocol::Ip4(_) | libp2p::multiaddr::Protocol::Ip6(_)
+        ));
+        if has_ip {
+            swarm.behaviour_mut().autonat.add_server(peer, Some(base.clone()));
+        } else {
+            tracing::debug!(%base, "autonat server {peer}: no IP in base; relying on address book only");
+            swarm.behaviour_mut().autonat.add_server(peer, None);
         }
     }
 
@@ -597,6 +664,7 @@ pub async fn boot(
         link_direct: Arc::clone(&link_direct),
         link_relay: Arc::clone(&link_relay),
         dialing: Arc::clone(&dialing),
+        nat_public: Arc::clone(&nat_public),
     });
 
     // Fan injected (server-fanout / B-mode) events into the app event stream.
@@ -1122,18 +1190,66 @@ async fn swarm_loop(
                      // (Err — connection stays on the relay; the §A escalation
                      // path remains a backstop once we learn the peer's real
                      // address).
-                     NetEvent::Dcutr(libp2p::dcutr::Event { remote_peer_id, result }) => {
-                         match result {
-                             Ok(_) => tracing::info!(
-                                 %remote_peer_id,
-                                 "[dcutr] hole-punch SUCCEEDED — upgraded relay→direct"
-                             ),
-                             Err(e) => tracing::warn!(
-                                 %remote_peer_id,
-                                 "[dcutr] hole-punch failed: {e} — staying on relay"
-                             ),
-                         }
-                     }
+                      NetEvent::Dcutr(libp2p::dcutr::Event { remote_peer_id, result }) => {
+                          match result {
+                              Ok(_) => tracing::info!(
+                                  %remote_peer_id,
+                                  "[dcutr] hole-punch SUCCEEDED — upgraded relay→direct"
+                              ),
+                              Err(e) => {
+                                  // The connection stays on the relay; the §A
+                                  // escalation path is the backstop.
+                                  // Capture the full failure cause for the
+                                  // log — most useful when a peer on a
+                                  // symmetric NAT pair repeatedly fails and
+                                  // the operator wants to correlate with
+                                  // `scripts/nat-probe` output.
+                                  tracing::warn!(
+                                      %remote_peer_id,
+                                      err = %e,
+                                      reason = ?std::error::Error::source(&e).map(|s| s.to_string()),
+                                      "[dcutr] hole-punch failed — staying on relay"
+                                  );
+                              }
+                          }
+                      }
+                      NetEvent::Autonat(a) => match a {
+                          libp2p::autonat::Event::StatusChanged { old, new } => {
+                              tracing::info!(?old, ?new, "[autonat] NAT status changed");
+                              let is_public = matches!(new, libp2p::autonat::NatStatus::Public(_));
+                              running
+                                  .nat_public
+                                  .store(is_public, std::sync::atomic::Ordering::Relaxed);
+                              let pub_addr = match &new {
+                                  libp2p::autonat::NatStatus::Public(a) => Some(a.clone()),
+                                  _ => None,
+                              };
+                              let _ = ev.send(ChatEvent::NatStatus { public: pub_addr });
+                              // On a Private verdict, the STUN public-IP
+                              // endpoint in the directory is known to be
+                              // un-dialable by peers — log so the operator
+                              // can see *why* a cross-NAT dial is falling
+                              // back to the relay (symmetric NAT / UDP
+                              // ingress blocked / CGNAT are the usual
+                              // suspects; TURN is the recommended fix).
+                              if matches!(new, libp2p::autonat::NatStatus::Private) {
+                                  let stun_ip: Option<String> =
+                                      crate::stun::discover_cached().map(|p| p.ip.to_string());
+                                  tracing::warn!(?stun_ip,
+                                      "[autonat] verdict: PRIVATE — STUN public IP, if any, \
+                                       is likely an ephemeral mapping a peer cannot dial \
+                                       (symmetric NAT / UDP ingress blocked / CGNAT). Relay \
+                                       path is the only reliable route to remote peers; TURN \
+                                       recommended.");
+                              }
+                          }
+                          libp2p::autonat::Event::OutboundProbe(p) => {
+                              tracing::debug!(?p, "[autonat] outbound probe");
+                          }
+                          libp2p::autonat::Event::InboundProbe(p) => {
+                              tracing::debug!(?p, "[autonat] inbound probe (chatx is acting as probe server)");
+                          }
+                      }
                      NetEvent::Mdns(m) => {
                         if let MdnsEvent::Discovered(ips) = m {
                             for (p, addr) in ips {

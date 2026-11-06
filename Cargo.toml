@@ -10,6 +10,7 @@ members = [
     "crates/core",
     "crates/render",
     "apps/bot",
+    "apps/nat-probe",
 ]
 
 [workspace.package]
@@ -33,6 +34,7 @@ libp2p = { version = "0.56", features = [
     "mdns",
     "yamux",
     "identify",
+    "autonat",
     "request-response",
     "json",
     "cbor",
