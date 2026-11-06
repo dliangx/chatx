@@ -232,6 +232,46 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             > 0
     }
 
+    /// Current link state for a DM peer, as a stable token the UI can map to
+    /// its header status dot:
+    ///   - `""`         — no connection and no dial in flight (red = offline)
+    ///   - `"dialing"`  — a dial / hole-punch is in progress (yellow-green)
+    ///   - `"relay"`    — connected via a relay circuit (yellow)
+    ///   - `"direct"`   — connected via a direct transport, QUIC or TCP (green)
+    ///
+    /// Priority: an established link always wins over a concurrent in-flight
+    /// dial, and `direct` wins over `relay` if both ever exist.
+    pub fn peer_link(&self, peer_base58: &str) -> &'static str {
+        let Ok(pid) = peer_base58.parse::<PeerId>() else {
+            return "";
+        };
+        let connected = self
+            .running
+            .connected
+            .lock()
+            .unwrap()
+            .get(&pid)
+            .copied()
+            .unwrap_or(0)
+            > 0;
+        if connected {
+            // Prefer direct over relay when both links exist for the peer.
+            let is_relay = self
+                .running
+                .link_kind
+                .lock()
+                .unwrap()
+                .get(&pid)
+                .copied()
+                == Some(1);
+            return if is_relay { "relay" } else { "direct" };
+        }
+        if self.running.dialing.lock().unwrap().contains(&pid) {
+            return "dialing";
+        }
+        ""
+    }
+
     /// Run one notice-poll round: block (up to ~50 s) on the long-poll, and
     /// for every wake notice received, dial the sender back. Called by a
     /// background thread that the app pumps (see `start_notify_pump`). Returns

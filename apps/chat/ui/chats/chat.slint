@@ -48,6 +48,14 @@ export global ChatSession {
     in property <[MessageData]> messages: [];
     /// True while a message is being sent: the chat shows a spinner over the input.
     in property <bool> send-busy: false;
+    /// Current link state of the counterparty in the open DM chat:
+    ///   ""         offline / not applicable (hide dot)
+    ///   "dialing"  connecting / hole-punching in flight (yellow-green)
+    ///   "direct"   direct QUIC/TCP transport (green)
+    ///   "relay"    connected via a relay circuit (yellow)
+    /// Groups keep this "" (no dot). The chat header draws the dot itself
+    /// based on this value, so `header.slint` stays generic.
+    in property <string> conn: "";
 
     in property <length> scroll-dist: 0px;
     in property <int> scroll-token: 0;
@@ -114,6 +122,27 @@ export component ChatView inherits Rectangle {
 
     Header {
         name: @tr("chat");
+
+        // DM connection status dot (6px / 3px radius), placed in the header's
+        // right zone (no impact on title centering):
+        //   red          "offline"  — no link yet (baseline)
+        //   yellow       "relay"    — connected via a relay circuit
+        //   green        "direct"   — direct QUIC/TCP
+        //   yellow-green "dialing"  — connecting / hole-punch in flight
+        // Groups have no single peer, so this is DM-only.
+        if !AppState.current-chat-is-group:
+        Rectangle {
+            x: 72px;
+            y: (parent.height - 6px) / 2;
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            background:
+                ChatSession.conn == "direct"  ? Theme.success
+              : ChatSession.conn == "relay"   ? Theme.warning
+              : ChatSession.conn == "dialing" ? #9ac457
+              : Theme.danger;
+        }
 
         if AppState.current-chat-key >= 0 && AppState.current-chat-is-group:
 

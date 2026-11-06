@@ -579,6 +579,9 @@ pub fn run_app() {
                     s.set_current_chat_peer_key(k);
                     s.set_current_chat_key(payload);
                     s.set_current_chat_is_group(is_group);
+                    // Seed the header status dot (green/yellow/yellowgreen/red)
+                    // from the live link state of the counterparty.
+                    refresh_chat_conn(&ui);
                 }
             }
             if page == SubPageType::MyNote {
@@ -2879,6 +2882,21 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                     // `self`/client is the owning `Arc` here; debounce so the
                     // UPnP + relay confirmations that fire together result in one
                     // announce.
+                    // Connection-state changes for a DM peer drive the chat
+                    // header dot (green/yellow/yellowgreen/red). Refresh
+                    // whenever any peer (re)connects or disconnects — the
+                    // resolver below is a no-op when the changed peer is not
+                    // the current chat.
+                    if matches!(
+                        evt,
+                        chatx_core::swarm::ChatEvent::Connected(_)
+                            | chatx_core::swarm::ChatEvent::Disconnected(_)
+                    ) {
+                        if let Some(ui) = weak.clone().upgrade() {
+                            refresh_chat_conn(&ui);
+                        }
+                        continue;
+                    }
                     if let chatx_core::swarm::ChatEvent::ExternalAddrConfirmed { address } = &evt {
                         tracing::info!(%address, "pump: external addr confirmed — heartbeat now");
                         let rc = client.clone();
@@ -3176,8 +3194,59 @@ fn chat_set_send_busy(weak: slint::Weak<MainWindow>, busy: bool) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             ui.global::<ChatSession>().set_send_busy(busy);
+            refresh_chat_conn(&ui);
         }
     });
+}
+
+/// Compute the current DM chat's status-dot token from `Client::peer_link`
+/// (combined with `ChatSession.send-busy` for the in-flight state) and push
+/// it to `ChatSession.conn`. Groups have no single peer; they get no dot.
+/// Safe to call from the event loop (already on it when called from
+/// `chat_set_send_busy` / the Connected/Disconnected pump arm / push_sub).
+fn refresh_chat_conn(ui: &MainWindow) {
+    let state = ui.global::<AppState>();
+    if state.get_current_chat_is_group() {
+        ui.global::<ChatSession>().set_conn(String::new().into());
+        return;
+    }
+    let key = state.get_current_chat_key();
+    if key < 0 {
+        ui.global::<ChatSession>().set_conn(String::new().into());
+        return;
+    }
+    let backend = match BACKEND.lock().unwrap().clone() {
+        Some(b) => b,
+        None => return,
+    };
+    let client = match CLIENT.lock().unwrap().clone() {
+        Some(c) => c,
+        None => return,
+    };
+    let peer_id = backend
+        .blocking_read()
+        .chats
+        .iter()
+        .find(|r| r.key == key)
+        .map(|r| r.peer_id.clone())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_default();
+    if peer_id.is_empty() {
+        ui.global::<ChatSession>().set_conn(String::new().into());
+        return;
+    }
+    let busy = ui.global::<ChatSession>().get_send_busy();
+    let link = client.peer_link(&peer_id);
+    let token: &'static str = if busy {
+        "dialing"
+    } else if link.is_empty() {
+        // No established link and no in-flight dial: counterparty not yet
+        // reached (red dot — the baseline "offline" state for a DM).
+        "offline"
+    } else {
+        link
+    };
+    ui.global::<ChatSession>().set_conn(token.into());
 }
 
 /// Finish a chat send: hide the in-flight spinner, and when the send failed
