@@ -12,9 +12,46 @@
 //!   CHATX_RELAY_ADDR=off ...                      # disable
 
 use std::net::IpAddr;
+use std::num::NonZeroU32;
+use std::time::Duration;
 use libp2p::futures::StreamExt as _;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId, SwarmBuilder};
+
+/// The libp2p relay defaults are tuned for low-concurrency public relays and
+/// are far too tight for a *private* chatx relay that has to bridge DM media
+/// (megabytes of image/file/voice) plus the DCUtR hole-punch control stream
+/// for every peer conversation. Out-of-the-box values:
+///   max_circuits = 16, max_circuits_per_peer = 4,
+///   max_circuit_duration = 120s, max_circuit_bytes = 128 KiB,
+///   circuit rate limiters = 30/peer/2min and 60/ip/minute.
+/// Under the client's heavy dial/retry churn those limits trip and the relay
+/// answers `RESOURCE_LIMIT_EXCEEDED`, killing both the media stream and the
+/// hole-punch. Relax them to comfortably fit a small trusted user base while
+/// remaining bounded (this is not a public abuse-prone relay).
+fn relay_config() -> libp2p::relay::Config {
+    let mut cfg = libp2p::relay::Config {
+        max_reservations: 512,
+        max_reservations_per_peer: 8,
+        max_circuits: 512,
+        max_circuits_per_peer: 16,
+        max_circuit_duration: Duration::from_secs(30 * 60),
+        // Advisory budget the relay advertises to clients; raised so large
+        // media frames are not flagged as over-budget upstream.
+        max_circuit_bytes: 1 << 28, // 256 MiB
+        ..libp2p::relay::Config::default()
+    };
+
+    // Replace the tight default circuit rate limiters with generous ones
+    // (600/min per peer and per IP) so bursty dial churn no longer trips them.
+    cfg.circuit_src_rate_limiters.clear();
+    let per = |n: u32| NonZeroU32::new(n).expect("n > 0");
+    cfg = cfg
+        .circuit_src_per_peer(per(600), Duration::from_secs(60))
+        .circuit_src_per_ip(per(600), Duration::from_secs(60));
+
+    cfg
+}
 
 /// Resolve the public host to use in the announced advertise address,
 /// replacing "locally non-dialable" IPs (`0.0.0.0` any, `127.*` loopback,
@@ -127,7 +164,7 @@ pub async fn start(
         .with_tcp(Default::default(), libp2p::noise::Config::new, libp2p::yamux::Config::default)
         .expect("tcp+noise+yamux")
         .with_quic()
-        .with_behaviour(|_k| libp2p::relay::Behaviour::new(peer_id, libp2p::relay::Config::default()))?
+        .with_behaviour(|_k| libp2p::relay::Behaviour::new(peer_id, relay_config()))?
         .build();
 
     // Bind to all interfaces (force `0.0.0.0` when the operator supplied a

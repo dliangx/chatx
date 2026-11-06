@@ -48,6 +48,14 @@ export global ChatSession {
     in property <[MessageData]> messages: [];
     /// True while a message is being sent: the chat shows a spinner over the input.
     in property <bool> send-busy: false;
+    /// Current link state of the counterparty in the open DM chat:
+    ///   ""         offline / not applicable (hide dot)
+    ///   "dialing"  connecting / hole-punching in flight (grey + pulsing)
+    ///   "direct"   direct QUIC/TCP transport (green)
+    ///   "relay"    connected via a relay circuit (yellow)
+    /// Groups keep this "" (no dot). The chat header draws the dot itself
+    /// based on this value, so `header.slint` stays generic.
+    in property <string> conn: "";
 
     in property <length> scroll-dist: 0px;
     in property <int> scroll-token: 0;
@@ -151,6 +159,42 @@ export component ChatView inherits Rectangle {
                 }
             }
         }
+    }
+
+    // DM connection status dot (6px / 3px radius), drawn in the header's right
+    // zone beside the call/add icon, vertically centred on the 48px bar.
+    //   red      "offline"  — not connected yet (baseline)
+    //   yellow   "relay"    — connected via a relay circuit
+    //   green    "direct"   — direct QUIC/TCP transport
+    //   pulsing  "dialing"  — connecting / hole-punch in flight
+    //
+    // `dialing` deliberately uses a **neutral grey + pulse** (opacity toggled
+    // by a 1 Hz Timer) rather than a "success-ish" green/yellow: a peer whose
+    // every candidate address is failing (offline) would otherwise look
+    // "connected" for 5–60s at a time — the "red→green→red on switch chat"
+    // confusion. Grey + motion is the universal "pending / in progress" cue
+    // and is never mistaken for an established link.
+    // DM only; the dot is a top-level absolute element so it does not get
+    // reflowed by the Header (a VerticalLayout) like children do.
+    if !AppState.current-chat-is-group:
+    Rectangle {
+        x: parent.width - 60px;
+        y: 21px;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        in-out property <bool> blink: true; // true = opaque, false = dim
+        Timer {
+            interval: 500ms;
+            running: ChatSession.conn == "dialing";
+            triggered => { blink = !blink; }
+        }
+        opacity: blink ? 1.0 : 0.3;
+        background:
+            ChatSession.conn == "dialing" ? Theme.fg-muted
+          : ChatSession.conn == "direct"  ? Theme.success
+          : ChatSession.conn == "relay"   ? Theme.warning
+          : Theme.danger;
     }
 
     input-bar := ChatInputView {

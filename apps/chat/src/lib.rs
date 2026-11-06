@@ -579,6 +579,9 @@ pub fn run_app() {
                     s.set_current_chat_peer_key(k);
                     s.set_current_chat_key(payload);
                     s.set_current_chat_is_group(is_group);
+                    // Seed the header status dot (green/yellow/grey-pulsing/red)
+                    // from the live link state of the counterparty.
+                    refresh_chat_conn(&ui);
                 }
             }
             if page == SubPageType::MyNote {
@@ -2636,6 +2639,12 @@ fn apply_result(
             // login — no-op after the first thanks to the OnceLock.
             client.start_dm_redeliver();
             start_group_conn_sweeper();
+            // Background sweeper: re-derive the chat status dot every 1.5 s so
+            // a peer that goes stale without a `Disconnected` event (remote
+            // session expiry, failed escalation, etc.) still repaints the dot
+            // from red to green / relay / dialing as state settles. Safe to
+            // call on every login — OnceLock no-ops after the first call.
+            start_conn_dot_sweeper(weak.clone());
             let approved = client
                 .status()
                 .ok()
@@ -2879,6 +2888,25 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                     // `self`/client is the owning `Arc` here; debounce so the
                     // UPnP + relay confirmations that fire together result in one
                     // announce.
+                    // Connection-state changes for a DM peer drive the chat
+                    // header dot (green/yellow/grey-pulsing/red). Refresh
+                    // whenever any peer (re)connects, disconnects, a dial is
+                    // in flight ("dialing" → grey + pulsing), or definitively
+                    // fails (dot drops back to red or an established bucket).
+                    // The `refresh_chat_conn` below is a no-op when the
+                    // changed peer is not the current chat.
+                    if matches!(
+                        evt,
+                        chatx_core::swarm::ChatEvent::Connected(_)
+                            | chatx_core::swarm::ChatEvent::Disconnected(_)
+                            | chatx_core::swarm::ChatEvent::Dialing(_)
+                            | chatx_core::swarm::ChatEvent::DialFailed(_)
+                    ) {
+                        if let Some(ui) = weak.clone().upgrade() {
+                            refresh_chat_conn(&ui);
+                        }
+                        continue;
+                    }
                     if let chatx_core::swarm::ChatEvent::ExternalAddrConfirmed { address } = &evt {
                         tracing::info!(%address, "pump: external addr confirmed — heartbeat now");
                         let rc = client.clone();
@@ -3176,6 +3204,93 @@ fn chat_set_send_busy(weak: slint::Weak<MainWindow>, busy: bool) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             ui.global::<ChatSession>().set_send_busy(busy);
+            refresh_chat_conn(&ui);
+        }
+    });
+}
+
+/// Compute the current DM chat's status-dot token from `Client::peer_link`
+/// (combined with `ChatSession.send-busy` for the in-flight state) and push
+/// it to `ChatSession.conn`. Groups have no single peer; they get no dot.
+/// Safe to call from the event loop (already on it when called from
+/// `chat_set_send_busy` / the Connected/Disconnected pump arm / push_sub).
+fn refresh_chat_conn(ui: &MainWindow) {
+    let state = ui.global::<AppState>();
+    if state.get_current_chat_is_group() {
+        ui.global::<ChatSession>().set_conn(String::new().into());
+        return;
+    }
+    let key = state.get_current_chat_key();
+    if key < 0 {
+        ui.global::<ChatSession>().set_conn(String::new().into());
+        return;
+    }
+    let backend = match BACKEND.lock().unwrap().clone() {
+        Some(b) => b,
+        None => return,
+    };
+    let client = match CLIENT.lock().unwrap().clone() {
+        Some(c) => c,
+        None => return,
+    };
+    let peer_id = backend
+        .blocking_read()
+        .chats
+        .iter()
+        .find(|r| r.key == key)
+        .map(|r| r.peer_id.clone())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_default();
+    if peer_id.is_empty() {
+        ui.global::<ChatSession>().set_conn(String::new().into());
+        return;
+    }
+    // The status dot reflects ONLY the actual link state with this DM peer:
+    //   - ""        → red     (not connected, nothing in flight)
+    //   - "dialing" → grey + pulsing (a dial is in flight — brief transitional state)
+    //   - "relay"   → yellow  (connected via relay circuit)
+    //   - "direct"  → green   (direct QUIC/TCP transport)
+    // We intentionally do NOT gate on `ChatSession.send-busy`: that flag is a
+    // global single value, and using it here would paint one in-flight send's
+    // state onto the dot of every other open DM (the root cause of the
+    // "all DMs look green" bug).
+    let link = client.peer_link(&peer_id);
+    let token: &'static str = if link.is_empty() { "offline" } else { link };
+    ui.global::<ChatSession>().set_conn(token.into());
+}
+
+/// Poll `refresh_chat_conn` on a fixed interval while the app is running.
+///
+/// Why this is needed: the dot is only refreshed on (a) chat switch, (b)
+/// `Connected`/`Disconnected`/`Dialing`/`DialFailed` events, and (c) send
+/// busy toggles. That covers most state changes, but misses two cases:
+///   - The swarm emits no `Disconnected` event when a *remote* peer's
+///     libp2p session silently expires (NAT re-mapping, etc.) — the dot
+///     would stay green forever.
+///   - A re-dial that the app hasn't explicitly requested (e.g. a
+///     `NewExternalAddrOfPeer` escalation) may complete without an
+///     `ev.send(…)` the app is matching on.
+///
+/// A single 1.5 s poll of the *current* chat is cheap: it locks 3 small
+/// `HashMap`s on the same thread and either updates one Slint property (or
+/// not — same value, no repaint), so it is negligible even across dozens of
+/// open chats.
+pub(crate) fn start_conn_dot_sweeper(weak: slint::Weak<MainWindow>) {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+    let rt = runtime().clone();
+    rt.spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(1500));
+        loop {
+            tick.tick().await;
+            let w2 = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w2.upgrade() {
+                    refresh_chat_conn(&ui);
+                }
+            });
         }
     });
 }

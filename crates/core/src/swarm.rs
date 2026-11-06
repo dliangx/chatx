@@ -156,6 +156,15 @@ pub enum ChatEvent {
     },
     Connected(PeerId),
     Disconnected(PeerId),
+    /// A dial for `peer` was just issued. The app can flip the chat status
+    /// dot to "dialing" (grey + pulsing) immediately, instead of waiting for
+    /// the eventual `Connected` / `DialFailed` (which may take seconds).
+    Dialing(PeerId),
+    /// A previously-issued dial for `peer` definitively failed (all
+    /// candidate addrs exhausted, transport error, handshake timeout…). The
+    /// dot should drop out of "dialing" back to `""` (red) / `relay` /
+    /// `direct` as appropriate.
+    DialFailed(PeerId),
     Listening(Multiaddr),
     /// An external (NAT-traversable) address has been confirmed for this
     /// device — e.g. a UPnP-mapped public IP, or a reserved relay-circuit
@@ -317,6 +326,23 @@ pub struct Running {
     pub escalation_last: Arc<Mutex<HashMap<PeerId, u64>>>,
     pub relays: Arc<Mutex<Vec<(PeerId, Multiaddr)>>>,
     pub injected: mpsc::UnboundedSender<ChatEvent>,
+    /// Live direct-transport connections (QUIC/TCP LAN/internet) per peer,
+    /// counted from `ConnectionEstablished`/`ConnectionClosed` events — the
+    /// `endpoint` field on each event is the actual path that connection runs
+    /// over, which is the only unambiguous classifier (libp2p dials many
+    /// addresses in parallel for one peer, so "the address we tried to dial"
+    /// does not say which one carried the traffic). A non-zero count means at
+    /// least one direct link is up → the chat dot is green.
+    pub link_direct: Arc<Mutex<HashMap<PeerId, u32>>>,
+    /// Live relay-circuit connections per peer — same classification source as
+    /// `link_direct`. A non-zero count (with zero direct) means the peer is
+    /// reachable but only via the relay → the chat dot is yellow.
+    pub link_relay: Arc<Mutex<HashMap<PeerId, u32>>>,
+    /// Peers with a dial in flight (a `swarm.dial` issued but not yet
+    /// established or failed). Presence == "connecting / hole-punching in
+    /// progress" (grey + pulsing dot). Added in `Cmd::Connect`, cleared once the
+    /// connection is established or the dial errors out.
+    pub dialing: Arc<Mutex<std::collections::HashSet<PeerId>>>,
 }
 
 /// True if `addr` is a local/loopback endpoint or one of our own advertised
@@ -352,6 +378,20 @@ fn is_own_address(addr: &Multiaddr, running: &Running) -> bool {
 fn is_relayed(addr: &Multiaddr) -> bool {
     addr.iter()
         .any(|c| matches!(c, libp2p::multiaddr::Protocol::P2pCircuit))
+}
+
+/// Classify a [`libp2p::core::connection::ConnectedPoint`] from a swarm event:
+/// `true` means the live transport is a relay circuit, `false` means a direct
+/// transport.
+fn is_endpoint_relayed(endpoint: &libp2p::core::connection::ConnectedPoint) -> bool {
+    use libp2p::core::connection::ConnectedPoint;
+    match endpoint {
+        ConnectedPoint::Dialer { address, .. } => is_relayed(address),
+        ConnectedPoint::Listener {
+            local_addr,
+            send_back_addr,
+        } => is_relayed(local_addr) || is_relayed(send_back_addr),
+    }
 }
 
 pub fn split_relay_addr(full: &Multiaddr) -> Option<(PeerId, Multiaddr)> {
@@ -521,6 +561,9 @@ pub async fn boot(
     let dial_fail_log = Arc::new(Mutex::new(HashMap::new()));
     let escalation_last = Arc::new(Mutex::new(HashMap::new()));
     let relays = Arc::new(Mutex::new(parse_relay_env()));
+    let link_direct: Arc<Mutex<HashMap<PeerId, u32>>> = Arc::new(Mutex::new(HashMap::new()));
+    let link_relay: Arc<Mutex<HashMap<PeerId, u32>>> = Arc::new(Mutex::new(HashMap::new()));
+    let dialing: Arc<Mutex<std::collections::HashSet<PeerId>>> = Arc::new(Mutex::new(std::collections::HashSet::new()));
 
     let me = *swarm.local_peer_id();
     for (peer, base) in relays.lock().unwrap().iter().cloned() {
@@ -548,6 +591,9 @@ pub async fn boot(
         escalation_last: Arc::clone(&escalation_last),
         relays: Arc::clone(&relays),
         injected: injected_tx.clone(),
+        link_direct: Arc::clone(&link_direct),
+        link_relay: Arc::clone(&link_relay),
+        dialing: Arc::clone(&dialing),
     });
 
     // Fan injected (server-fanout / B-mode) events into the app event stream.
@@ -610,7 +656,9 @@ async fn swarm_loop(
                             .unwrap()
                             .remove(&peer.to_base58());
                         swarm.add_peer_address(peer, addr.clone());
+                        running.dialing.lock().unwrap().insert(peer);
                         let _ = swarm.dial(peer);
+                        let _ = ev.send(ChatEvent::Dialing(peer));
                     }
                 }
                 Some(Cmd::SendText {
@@ -884,10 +932,31 @@ async fn swarm_loop(
                         .retain(|a| a != &address);
                     tracing::debug!("[swarm] EXTERNAL ADDR EXPIRED {address}");
                 }
-                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    tracing::debug!("[swarm] CONNECTED to {peer_id}");
-                    *running.connected.lock().unwrap().entry(peer_id).or_insert(0) += 1;
-                    running.dial_backoff.lock().unwrap().remove(&peer_id.to_base58()); // reachable again — clear backoff
+                SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                    tracing::debug!(
+                        "[swarm] CONNECTED to {peer_id} endpoint={endpoint:?}"
+                    );
+                    // Decrement counters on a best-effort basis; classify via
+                    // the live `endpoint` (the only unambiguous source — the
+                    // address we *tried* to dial is not the address we
+                    // *used*).
+                    {
+                        let is_relay = is_endpoint_relayed(&endpoint);
+                        let bucket = if is_relay {
+                            &running.link_relay
+                        } else {
+                            &running.link_direct
+                        };
+                        *running.connected.lock().unwrap().entry(peer_id).or_insert(0) += 1;
+                        *bucket.lock().unwrap().entry(peer_id).or_insert(0) += 1;
+                    tracing::debug!(
+                        "[swarm] {peer_id} link_{kind}={count}",
+                        kind = if is_relay { "relay" } else { "direct" },
+                        count = bucket.lock().unwrap().get(&peer_id).copied().unwrap_or(0)
+                    );
+                    }
+                    running.dial_backoff.lock().unwrap().remove(&peer_id.to_base58());
+                    running.dialing.lock().unwrap().remove(&peer_id);
                     let _ = ev.send(ChatEvent::Connected(peer_id));
                 }
                 SwarmEvent::NewExternalAddrOfPeer { peer_id, address } => {
@@ -928,23 +997,46 @@ async fn swarm_loop(
                         }
                     }
                 }
-                SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                    tracing::debug!("[swarm] DISCONNECTED from {peer_id}");
-                    // Hold the `connected` guard ONCE. Re-locking the same
-                    // std::sync::Mutex while the `if let` guard is still alive
-                    // is a self-deadlock (Mutex is not re-entrant): it used to
-                    // fire here the moment a peer's connection count dropped to
-                    // 0, permanently freezing the whole swarm loop (no more
-                    // heartbeats, dead acceptor) — the root cause of the
-                    // "A can never reconnect to B" bug.
+                SwarmEvent::ConnectionClosed { peer_id, endpoint, .. } => {
+                    tracing::debug!(
+                        "[swarm] DISCONNECTED from {peer_id} endpoint={endpoint:?}"
+                    );
                     {
                         let mut m = running.connected.lock().unwrap();
-                        if let Some(n) = m.get_mut(&peer_id) {
-                            *n = n.saturating_sub(1);
-                            if *n == 0 {
-                                m.remove(&peer_id);
+                        let dropped_all = match m.get_mut(&peer_id) {
+                            Some(n) => {
+                                *n = n.saturating_sub(1);
+                                if *n == 0 {
+                                    m.remove(&peer_id);
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            None => false,
+                        };
+                        drop(m);
+                        if dropped_all {
+                            running.link_direct.lock().unwrap().remove(&peer_id);
+                            running.link_relay.lock().unwrap().remove(&peer_id);
+                            running.dialing.lock().unwrap().remove(&peer_id);
+                        } else {
+                            let is_relay = is_endpoint_relayed(&endpoint);
+                            let bucket = if is_relay {
+                                &running.link_relay
+                            } else {
+                                &running.link_direct
+                            };
+                            let mut b = bucket.lock().unwrap();
+                            if let Some(n) = b.get_mut(&peer_id) {
+                                *n = n.saturating_sub(1);
+                                if *n == 0 {
+                                    b.remove(&peer_id);
+                                }
                             }
                         }
+                        // NOTE: `b` guard is released before `ev.send` to avoid
+                        // holding the lock across a potential blocking send.
                     }
                     let _ = ev.send(ChatEvent::Disconnected(peer_id));
                 }
@@ -971,6 +1063,24 @@ async fn swarm_loop(
                                 .unwrap()
                                 .insert(key.clone(), now);
                             tracing::warn!("[swarm] DIAL FAILED peer={key} err={error:?}");
+                        }
+                        // A dial attempt failed. Clear the "connecting" marker
+                        // ONLY if no established connection to this peer exists
+                        // (otherwise the dot still shows green/yellow from the
+                        // successful path, and a concurrent in-flight dial may
+                        // still be resolving for the same peer).
+                        let cleared = !running
+                            .connected
+                            .lock()
+                            .unwrap()
+                            .contains_key(&peer_id);
+                        if cleared {
+                            running.dialing.lock().unwrap().remove(&peer_id);
+                        }
+                        // Tell the app the dial for this peer is over; the dot
+                        // should drop back out of "dialing" (grey + pulsing).
+                        if cleared {
+                            let _ = ev.send(ChatEvent::DialFailed(peer_id));
                         }
                     }
                 }
