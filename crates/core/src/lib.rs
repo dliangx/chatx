@@ -192,10 +192,19 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let me = self.peer_base58();
         let ok = self.dir().notify(peer_base58, &me);
         if ok {
-            self.wake_last.lock().unwrap().insert(peer_base58.to_string(), now);
-            tracing::info!(peer = peer_base58, "[hole-punch] requested server wake for peer");
+            self.wake_last
+                .lock()
+                .unwrap()
+                .insert(peer_base58.to_string(), now);
+            tracing::info!(
+                peer = peer_base58,
+                "[hole-punch] requested server wake for peer"
+            );
         } else {
-            tracing::debug!(peer = peer_base58, "[hole-punch] notify unsupported or failed; proceeding to relay fallback");
+            tracing::debug!(
+                peer = peer_base58,
+                "[hole-punch] notify unsupported or failed; proceeding to relay fallback"
+            );
         }
         ok
     }
@@ -211,7 +220,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             return;
         }
         if self.peer_connected_str(peer_base58) {
-            tracing::debug!(peer = peer_base58, "[hole-punch] already connected; skipping");
+            tracing::debug!(
+                peer = peer_base58,
+                "[hole-punch] already connected; skipping"
+            );
             return;
         }
         let _ = self.warm_dial_peer(peer_base58);
@@ -232,15 +244,22 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             > 0
     }
 
-    /// Current link state for a DM peer, as a stable token the UI can map to
-    /// its header status dot:
-    ///   - `""`         — no connection and no dial in flight (red = offline)
-    ///   - `"dialing"`  — a dial / hole-punch is in progress (yellow-green)
-    ///   - `"relay"`    — connected via a relay circuit (yellow)
-    ///   - `"direct"`   — connected via a direct transport, QUIC or TCP (green)
+    /// Current link state for a DM peer, as a stable token the UI maps to the
+    /// header status dot:
+    ///   - `""`         — not connected and no dial in flight  → red
+    ///   - `"dialing"`  — a dial / hole-punch in progress      → grey + pulsing
+    ///   - `"relay"`    — connected via a relay circuit        → yellow
+    ///   - `"direct"`   — connected over a direct transport    → green
     ///
-    /// Priority: an established link always wins over a concurrent in-flight
-    /// dial, and `direct` wins over `relay` if both ever exist.
+    /// Once a link is established it beats any in-flight dial. The established
+    /// kind comes from `link_direct` / `link_relay`, incremented and
+    /// decremented on `ConnectionEstablished` / `ConnectionClosed` from the
+    /// connection's `endpoint` (`/p2p-circuit` => relay bucket, otherwise
+    /// direct): a non-zero `link_direct` count means at least
+    /// one live direct transport is up → **direct** (green); otherwise a
+    /// non-zero `link_relay` count means the peer is reachable but only over
+    /// a relay circuit → **relay** (yellow). Both zero (or the peer not in
+    /// `connected`) → fall through to dial state / offline.
     pub fn peer_link(&self, peer_base58: &str) -> &'static str {
         let Ok(pid) = peer_base58.parse::<PeerId>() else {
             return "";
@@ -255,16 +274,32 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .unwrap_or(0)
             > 0;
         if connected {
-            // Prefer direct over relay when both links exist for the peer.
-            let is_relay = self
+            let direct = self
                 .running
-                .link_kind
+                .link_direct
                 .lock()
                 .unwrap()
                 .get(&pid)
                 .copied()
-                == Some(1);
-            return if is_relay { "relay" } else { "direct" };
+                .unwrap_or(0);
+            if direct > 0 {
+                return "direct";
+            }
+            let relay = self
+                .running
+                .link_relay
+                .lock()
+                .unwrap()
+                .get(&pid)
+                .copied()
+                .unwrap_or(0);
+            if relay > 0 {
+                return "relay";
+            }
+            // connected but neither bucket has a record (e.g. a stale count
+            // before the first post-restart event) — conservatively report
+            // relay rather than falsely claiming green.
+            return "relay";
         }
         if self.running.dialing.lock().unwrap().contains(&pid) {
             return "dialing";
@@ -369,7 +404,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             else {
                 // Local row missing (user deleted?) — drop the queue row.
                 let _ = sqlite::queue::give_up(&pool, row.msg_id).await;
-                tracing::debug!(msg_id = row.msg_id, "[redeliver] local row missing — dropped");
+                tracing::debug!(
+                    msg_id = row.msg_id,
+                    "[redeliver] local row missing — dropped"
+                );
                 continue;
             };
             if text.is_empty() {
@@ -397,7 +435,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         }
                     };
                     if attempts >= sqlite::queue::MAX_ATTEMPTS {
-                        let _ = self.store.set_status(row.msg_id, sqlite::STATUS_FAILED).await;
+                        let _ = self
+                            .store
+                            .set_status(row.msg_id, sqlite::STATUS_FAILED)
+                            .await;
                         let _ = sqlite::queue::give_up(&pool, row.msg_id).await;
                         tracing::warn!(
                             msg_id = row.msg_id,
@@ -426,13 +467,15 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let client = self.clone();
         let _ = std::thread::Builder::new()
             .name("chatx-notify-pump".to_string())
-            .spawn(move || loop {
-                let n = client.process_wakes();
-                if n == 0 {
-                    // No notices in this window; the long-poll already blocked
-                    // for the server timeout, which is the natural pacing. No
-                    // additional sleep needed (and one would just delay the
-                    // next punch by a second or two).
+            .spawn(move || {
+                loop {
+                    let n = client.process_wakes();
+                    if n == 0 {
+                        // No notices in this window; the long-poll already blocked
+                        // for the server timeout, which is the natural pacing. No
+                        // additional sleep needed (and one would just delay the
+                        // next punch by a second or two).
+                    }
                 }
             })
             .expect("spawn notify pump thread");
@@ -541,7 +584,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         // within the old 1500ms window. Likewise keep more passes so we cover
         // the window where the peer is still booting and its fresh port hasn't
         // been heartbeated into the directory yet (we re-resolve each pass).
-        const PASSES: usize = 3;
+        const PASSES: usize = 2;
         const PER_ATTEMPT: std::time::Duration = std::time::Duration::from_millis(6000);
         const PASS_GAP: std::time::Duration = std::time::Duration::from_millis(800);
         const POLL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -1042,7 +1085,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 let res = stun::discover();
                 match res {
                     Ok(Some(ip)) => tracing::info!(ip = %ip, "STUN prewarm OK"),
-                    Ok(None) => tracing::debug!("STUN prewarm: no public IP found (NAT blocks UDP / offline)"),
+                    Ok(None) => tracing::debug!(
+                        "STUN prewarm: no public IP found (NAT blocks UDP / offline)"
+                    ),
                     Err(e) => tracing::warn!(%e, "STUN prewarm failed"),
                 }
                 // Trigger one immediate heartbeat so the directory learns our
@@ -1677,9 +1722,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         if rec.endpoints.is_empty() {
             return Err(format!("device {peer_base58} is offline (no endpoints)"));
         }
-        let peer: PeerId = peer_base58
-            .parse()
-            .map_err(|e| format!("bad peer: {e}"))?;
+        let peer: PeerId = peer_base58.parse().map_err(|e| format!("bad peer: {e}"))?;
 
         let mut candidates: Vec<Multiaddr> = Vec::new();
         for endpoint in &rec.endpoints {
@@ -1761,13 +1804,18 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             if let Ok(rec2) = self.dir.resolve_device(peer_base58) {
                 for endpoint in &rec2.endpoints {
-                    let Ok(addr) = endpoint.parse::<Multiaddr>() else { continue };
+                    let Ok(addr) = endpoint.parse::<Multiaddr>() else {
+                        continue;
+                    };
                     if let Some(reason) = unroutable_reason(&addr) {
                         tracing::debug!("[dm] retry: skip unroutable ({reason}): {addr}");
                         continue;
                     }
                     tracing::debug!("[dm] retry (post-wake) -> {addr}");
-                    if let Err(e) = self.running.cmd_tx.send(Cmd::Connect { peer: peer.clone(), addr: addr.clone() }) {
+                    if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
+                        peer: peer.clone(),
+                        addr: addr.clone(),
+                    }) {
                         last_err = format!("cmd channel closed: {e}");
                         continue;
                     }
@@ -1799,13 +1847,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                             last_err = "peer connection dropped before ack".to_string();
                         }
                         Err(_) => {
-                            last_err = format!("no ack from peer within {}s (retry)", timeout.as_secs());
+                            last_err =
+                                format!("no ack from peer within {}s (retry)", timeout.as_secs());
                         }
                     }
                 }
             }
         }
-         Err(format!("failed to deliver to {peer_base58}: {last_err}"))
+        Err(format!("failed to deliver to {peer_base58}: {last_err}"))
     }
 
     /// Send a voice message to `peer_base58` over the DM channel and wait for
@@ -2215,7 +2264,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                             last_err = e.to_string();
                         }
                         Ok(Err(_)) => last_err = "peer connection dropped before ack".to_string(),
-                        Err(_) => last_err = format!("no ack from peer within {}s (retry)", timeout.as_secs()),
+                        Err(_) => {
+                            last_err =
+                                format!("no ack from peer within {}s (retry)", timeout.as_secs())
+                        }
                     }
                 }
             }
@@ -3227,10 +3279,16 @@ fn classify_transport(addr: &Multiaddr) -> &'static str {
     {
         return "relay-circuit";
     }
-    if addr.iter().any(|c| matches!(c, libp2p::multiaddr::Protocol::Udp(_))) {
+    if addr
+        .iter()
+        .any(|c| matches!(c, libp2p::multiaddr::Protocol::Udp(_)))
+    {
         return "direct-quic";
     }
-    if addr.iter().any(|c| matches!(c, libp2p::multiaddr::Protocol::Tcp(_))) {
+    if addr
+        .iter()
+        .any(|c| matches!(c, libp2p::multiaddr::Protocol::Tcp(_)))
+    {
         return "direct-tcp";
     }
     "other"
@@ -3258,10 +3316,7 @@ fn is_routable_public_or_circuit(addr: &str) -> bool {
                 }
             }
             libp2p::multiaddr::Protocol::Ip6(ip) => {
-                if !ip.is_loopback()
-                    && !ip.is_unspecified()
-                    && !ip.is_unicast_link_local()
-                {
+                if !ip.is_loopback() && !ip.is_unspecified() && !ip.is_unicast_link_local() {
                     has_public_ip = true;
                 }
             }
@@ -3276,22 +3331,16 @@ fn unroutable_reason(addr: &Multiaddr) -> Option<&'static str> {
     for comp in addr.iter() {
         match comp {
             libp2p::multiaddr::Protocol::Tcp(0) => saw_tcp0 = true,
-            libp2p::multiaddr::Protocol::Dns(_) | libp2p::multiaddr::Protocol::Dns6(_) => {
-                return Some("dns/mdns name (not directly dialable)");
+            libp2p::multiaddr::Protocol::Ip4(ip) if ip.is_loopback() || ip.is_unspecified() => {
+                return Some("loopback/wildcard ip");
             }
-            libp2p::multiaddr::Protocol::Ip4(ip)
-                if ip.is_loopback()
-                    || ip.is_unspecified()
-                    || ip.is_private()
-                    || ip.is_link_local() =>
-            {
-                return Some("private/loopback ip");
+            libp2p::multiaddr::Protocol::Ip6(ip) if ip.is_loopback() || ip.is_unspecified() => {
+                return Some("loopback/wildcard ip");
             }
-            libp2p::multiaddr::Protocol::Ip6(ip)
-                if ip.is_loopback() || ip.is_unspecified() || ip.is_unicast_link_local() =>
-            {
-                return Some("private/loopback ip");
-            }
+            // Note: we intentionally do NOT drop RFC1918 / link-local IPs here.
+            // Peers on the same LAN only share a private `192.168.x` /
+            // `10.x` / `172.16-31.x` address with each other — stripping it
+            // breaks same-subnet direct connects.
             _ => {}
         }
     }
