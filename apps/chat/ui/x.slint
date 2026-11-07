@@ -29,6 +29,7 @@ export component MiniAppOverlay inherits Rectangle {
     background: #101218;
     clip: true;
 
+    in property <length> safe-area-top: 0px;
     // Plugin canvas: the plugin draws RGBA8 into its own linear memory and
     // commits via `x_frame_commit`; this image shows the last committed frame.
     Image {
@@ -78,7 +79,7 @@ export component MiniAppOverlay inherits Rectangle {
     // Minimize (top-right, left of close): hide the overlay, keep the instance.
     Rectangle {
         x: parent.width - 92px;
-        y: 10px;
+        y: 10px + root.safe-area-top ;
         width: 34px;
         height: 34px;
         border-radius: 17px;
@@ -102,7 +103,7 @@ export component MiniAppOverlay inherits Rectangle {
     // Close (top-right corner): destroy the instance + hide the overlay.
     Rectangle {
         x: parent.width - 48px;
-        y: 10px;
+        y: 10px + root.safe-area-top;
         width: 34px;
         height: 34px;
         border-radius: 17px;
