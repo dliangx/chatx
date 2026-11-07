@@ -37,6 +37,9 @@ export component CameraView inherits Rectangle {
     }
 
     in-out property <bool> bootstrapped: false;
+    /// Top safe-area inset handed over by `main.slint`; the top bar grows and
+    /// its controls shift down by this so they clear the status bar.
+    in property <length> safe-area-top: 0px;
 
     // Fire once per component mount: `running` defaults to true, but the
     // `!root.bootstrapped` gate immediately stops it on the first trigger
@@ -67,12 +70,12 @@ export component CameraView inherits Rectangle {
         x: 0px;
         y: 0px;
         width: parent.width;
-        height: 56px;
+        height: 56px + root.safe-area-top;
         background: #00000055;
 
         Rectangle {
             x: 12px;
-            y: 12px;
+            y: 12px + root.safe-area-top;
             width: 40px;
             height: 40px;
             border-radius: 20px;
@@ -113,7 +116,7 @@ export component CameraView inherits Rectangle {
         // enabled when at least one photo has been captured.
         Rectangle {
             x: parent.width - 52px;
-            y: 12px;
+            y: 12px + root.safe-area-top;
             width: 40px;
             height: 40px;
             border-radius: 20px;

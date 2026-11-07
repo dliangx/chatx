@@ -14,6 +14,8 @@ export component ScanView inherits Rectangle {
     }
 
     in-out property <bool> bootstrapped: false;
+    /// Top safe-area inset handed over by `main.slint`; clears the status bar.
+    in property <length> safe-area-top: 0px;
 
     Timer {
         interval: 16ms;
@@ -50,7 +52,7 @@ export component ScanView inherits Rectangle {
 
     Rectangle {
         x: 16px;
-        y: 28px;
+        y: 28px + root.safe-area-top;
         width: 32px;
         height: 32px;
         border-radius: 16px;
@@ -76,7 +78,7 @@ export component ScanView inherits Rectangle {
 
     Text {
         x: 0px;
-        y: 28px;
+        y: 28px + root.safe-area-top;
         width: parent.width;
         height: 32px;
         text: @tr("Scan");

@@ -48,6 +48,9 @@ export component ImageViewer inherits Rectangle {
 
     in-out property <int> tap-count: 0;
     in-out property <bool> bootstrapped: false;
+    /// Top safe-area inset handed over by `main.slint`; the status-bar-aware
+    /// offset applied to the top chrome (counter + close) so they clear the notch.
+    in property <length> safe-area-top: 0px;
 
     function zmin() -> float {
         return 1.0 / 50.0;
@@ -222,7 +225,7 @@ export component ImageViewer inherits Rectangle {
         if PostDetailState.media.length > 1:
         Text {
             x: 16px;
-            y: 18px;
+            y: 18px + root.safe-area-top;
             width: 140px;
             height: 20px;
             text: (root.index + 1) + " / " + PostDetailState.media.length;
@@ -233,7 +236,7 @@ export component ImageViewer inherits Rectangle {
 
         Rectangle {
             x: parent.width - 56px;
-            y: 8px;
+            y: 8px + root.safe-area-top;
             width: 40px;
             height: 40px;
             border-radius: 20px;

@@ -130,6 +130,10 @@ export component CallView inherits Rectangle {
     height: 100%;
     clip: true;
     background: CallState.minimized ? #00000000 : #0b0e14;
+    /// Top safe-area inset handed over by `main.slint`; the header, the A
+    /// (small) image and the minimized widget all shift down by this value so
+    /// they clear the notch / status bar.
+    in property <length> safe-area-top: 0px;
 
     // Which image each slot shows.
     function _my() -> image {
@@ -197,7 +201,7 @@ export component CallView inherits Rectangle {
     }
     function _miny() -> length {
         if (CallState.min-pos-set) { return CallState.min-y; }
-        return 16px;
+        return 16px + root.safe-area-top;
     }
 
     // ── B : full screen ────────────────────────────────────────────
@@ -238,7 +242,7 @@ export component CallView inherits Rectangle {
     // ── A : small, top-left, tap to swap ───────────────────────────
     Rectangle {
         x: 18px;
-        y: 96px;
+        y: 96px + root.safe-area-top;
         width: 150px;
         height: 94px;
         border-radius: 10px;
@@ -262,7 +266,7 @@ export component CallView inherits Rectangle {
     // ── HEADER ─────────────────────────────────────────────────────
     Rectangle {
         x: 0px;
-        y: 0px;
+        y: root.safe-area-top;
         width: 100%;
         height: 92px;
         visible: !CallState.minimized;
@@ -533,7 +537,7 @@ export component CallView inherits Rectangle {
                             // Fall back to the default top-right corner so
                             // the very first drag still anchors correctly.
                             root.min-origin-x = root.width - 172px - 16px;
-                            root.min-origin-y = 16px;
+                            root.min-origin-y = 16px + root.safe-area-top;
                         }
                     } else if (e.kind == PointerEventKind.move) {
                         if (root.min-drag) {

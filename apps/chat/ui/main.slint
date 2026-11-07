@@ -323,14 +323,18 @@ export component MainWindow inherits Window {
         }
     }
 
-    if AppState.nav-state.global-overlay == GlobalOverlayType.ImageViewer: ImageViewer { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.QrScanner: ScanView { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.Camera: CameraView { }
+    // The full-window overlays render at the window origin, so their top
+    // chrome must clear the status bar itself. We hand them the window's
+    // top safe-area inset (the same value the main content container above
+    // already uses) — Slint keeps the binding live as the inset changes.
+    if AppState.nav-state.global-overlay == GlobalOverlayType.ImageViewer: ImageViewer { safe-area-top: root.safe-area-insets.top; }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.QrScanner: ScanView { safe-area-top: root.safe-area-insets.top; }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.Camera: CameraView { safe-area-top: root.safe-area-insets.top; }
     if AppState.nav-state.global-overlay == GlobalOverlayType.AudioCall
         || AppState.nav-state.global-overlay == GlobalOverlayType.VideoCall
-        || AppState.nav-state.global-overlay == GlobalOverlayType.ScreenShare: CallView { }
+        || AppState.nav-state.global-overlay == GlobalOverlayType.ScreenShare: CallView { safe-area-top: root.safe-area-insets.top; }
     if AppState.nav-state.global-overlay == GlobalOverlayType.QrCode: QrCodeView { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu: AddMenuView { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu: AddMenuView { safe-area-top: root.safe-area-insets.top; }
     if AppState.nav-state.global-overlay == GlobalOverlayType.Error: ErrorView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.MiniApp: MiniAppOverlay { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.Pdf: PdfViewer { }

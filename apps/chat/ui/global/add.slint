@@ -69,6 +69,9 @@ export component AddMenuView inherits Rectangle {
     height: 100%;
     background: transparent;
     clip: true;
+    /// Top safe-area inset handed over by `main.slint`; the menu is offset by
+    /// this so its first row isn't hidden under the status bar / notch.
+    in property <length> safe-area-top: 0px;
 
     function calcx() -> length {
         if AppState.add-menu-type == 1 {
@@ -107,7 +110,7 @@ export component AddMenuView inherits Rectangle {
         width: 176px;
         height: calcHeight() * 44px + 8px;
         x: calcx();
-        y: 56px;
+        y: 56px + root.safe-area-top;
         border-radius: 8px;
         background: Theme.surface;
         drop-shadow-blur: 16px;
