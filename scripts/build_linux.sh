@@ -36,7 +36,7 @@ cd "$ROOT"
 RELEASE="release"
 MUSL=0
 CLEAN=0
-OUT_DIR="$ROOT/target/linux"
+OUT_DIR="$ROOT/build/linux"
 
 while [ $# -gt 0 ]; do
   case "$1" in

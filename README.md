@@ -147,7 +147,7 @@ Mini-programs (document viewers, map & location, later games) run in a WebAssemb
 
 ```sh
 ./scripts/build_osx.sh              # debug build
-./scripts/build_osx.sh --release --dmg   # release, produces target/macos/Chatx.app + Chatx.dmg
+./scripts/build_osx.sh --release --dmg   # release, produces build/macos/Chatx.app + Chatx.dmg
 ```
 
 ### Other platforms

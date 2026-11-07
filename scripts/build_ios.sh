@@ -16,7 +16,7 @@ set -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IOS_DIR="$ROOT/apps/platform/ios"
-DEVELOPER="$ROOT/target/ios-derived"
+DEVELOPER="$ROOT/build/ios/DerivedData"
 
 CLEAN=0
 DEVICE=0
