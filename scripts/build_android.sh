@@ -23,7 +23,7 @@ if [[ "${RELEASE:-1}" == "0" ]]; then MODE="debug"; fi
 TARGET="aarch64-linux-android"
 OUT_DIR="$ROOT/build/android"
 SO_SRC="$ROOT/target/$TARGET/$MODE/libchatx.so"
-SO_STRIPPED="$OUT_DIR/libchatx-stripped-$MODE.so"
+SO_STRIPPED="$ROOT/target/libchatx-stripped-$MODE.so"
 MANIFEST="$ROOT/apps/platform/android/AndroidManifest.xml"
 APK_BASE="$OUT_DIR/base.apk"
 APK_RAW="$OUT_DIR/raw.apk"

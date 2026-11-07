@@ -21,8 +21,6 @@ screen = { path = "../../crates/screen" }
 bridge = { path = "../../crates/bridge" }
 wasmhost = { path = "../../crates/wasmhost" }
 pdf = { path = "../../crates/pdf" }
-# Office document reading (Word/Excel/PowerPoint) — parse-to-blocks reader crate.
-doc = { path = "../../crates/doc" }
 audio = { path = "../../crates/audio" }
 media = { path = "../../crates/media" }
 cpal = "0.16"
@@ -33,6 +31,14 @@ chrono = { workspace = true }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = "3"
+
+# Office document reading (Word/Excel/PowerPoint) — desktop-only. The
+# `doc` crate (betteroffice) is heavy and uses Slint/Skia text/shaping
+# paths that we don't want to ship in the mobile `.so` / `.a`. All mobile
+# callers go through `is_mobile` short-circuits + the OS-file-manager
+# reveal path, so the library never touches the `doc::` API on mobile.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+doc = { path = "../../crates/doc" }
 
 [build-dependencies]
 slint-build = {workspace = true}
