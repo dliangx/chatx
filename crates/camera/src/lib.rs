@@ -9,6 +9,10 @@ pub mod album;
 mod capture_grab;
 pub mod filepick;
 pub mod posts;
+/// Reveal (open in OS file manager / external-app chooser) a local file.
+/// Used when an in-app viewer cannot handle a file — e.g. Office docs on a
+/// mobile build, or a chat file of an unsupported extension.
+pub mod reveal;
 
 #[cfg(any(
     target_os = "windows",

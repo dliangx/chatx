@@ -116,6 +116,60 @@ public func chatx_filepick_cancel() {
     FilePickShim.shared.cancel()
 }
 
+// ── Reveal a local file path to the user (UIActivityViewController chooser).
+//    Called from Rust via `crates/camera/src/reveal.rs` whenever an in-app
+//    viewer cannot handle a file.
+// ──────────────────────────────────────────────
+
+@_cdecl("chatx_open_reveal")
+public func chatx_open_reveal(_ ptr: UnsafeRawPointer?, _ len: Int32) -> Int32 {
+    guard let ptr, len > 0 else { return 1 }
+    let buf = UnsafeBufferPointer(start: ptr.assumingMemoryBound(to: UInt8.self), count: Int(len))
+    let path = String(decoding: buf, as: UTF8.self)
+    guard !path.isEmpty else { return 1 }
+    let url = URL(fileURLWithPath: path)
+    guard FileManager.default.fileExists(atPath: path) else {
+        NSLog("[chatx.reveal] file missing: \(path)")
+        return 1
+    }
+    guard let sc = UIApplication.shared.connectedScenes
+        .compactMap({ $0 as? UIWindowScene })
+        .first(where: { $0.activationState == .foregroundActive })
+        ?? UIApplication.shared.connectedScenes
+        .compactMap({ $0 as? UIWindowScene }).first,
+        let win = sc.windows.first(where: { $0.isKeyWindow }) ?? sc.windows.first,
+        let root = win.rootViewController
+    else {
+        NSLog("[chatx.reveal] no foreground window")
+        return 1
+    }
+    let ac = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    if let pop = ac.popoverPresentationController {
+        let topVC = topViewController(from: root)
+        let bounds = topVC.view.bounds
+        let origin = CGPoint(x: bounds.midX - 50, y: bounds.midY - 50)
+        pop.sourceView = topVC.view
+        pop.sourceRect = CGRect(origin: origin, size: CGSize(width: 100, height: 100))
+    }
+    DispatchQueue.main.async {
+        root.present(ac, animated: true)
+    }
+    return 0
+}
+
+private func topViewController(from vc: UIViewController) -> UIViewController {
+    if let nav = vc as? UINavigationController {
+        return topViewController(from: nav.topViewController ?? vc)
+    }
+    if let tab = vc as? UITabBarController {
+        return topViewController(from: tab.selectedViewController ?? vc)
+    }
+    if let presented = vc.presentedViewController {
+        return topViewController(from: presented)
+    }
+    return vc
+}
+
 #elseif canImport(AppKit)
 
 // ── macOS: NSOpenPanel ─────────────────────────────────────────────────────
@@ -150,6 +204,21 @@ public func chatx_filepick_pick() -> Int32 {
 @_cdecl("chatx_filepick_cancel")
 public func chatx_filepick_cancel() {
     // No active state to clear on the macOS path.
+}
+
+// ── Reveal a local file in the Finder (selected, not opened) ──────────────
+@_cdecl("chatx_open_reveal")
+public func chatx_open_reveal(_ ptr: UnsafeRawPointer?, _ len: Int32) -> Int32 {
+    guard let ptr, len > 0 else { return 1 }
+    let buf = UnsafeBufferPointer(start: ptr.assumingMemoryBound(to: UInt8.self), count: Int(len))
+    let path = String(decoding: buf, as: UTF8.self)
+    guard !path.isEmpty else { return 1 }
+    let url = URL(fileURLWithPath: path)
+    guard FileManager.default.fileExists(atPath: path) else { return 1 }
+    DispatchQueue.main.async {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+    return 0
 }
 
 #endif

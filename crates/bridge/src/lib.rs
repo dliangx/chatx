@@ -108,6 +108,22 @@ pub fn set_file_pick_consumer(cb: Box<dyn Fn(Option<String>) + Send + 'static>) 
 #[cfg(not(target_os = "android"))]
 pub fn set_file_pick_consumer(_cb: Box<dyn Fn(Option<String>) + Send + 'static>) {}
 
+/// Ask the Android shell to reveal (open in system file manager / external-app
+/// chooser) the file at `path`. The shell wraps it in
+/// `Intent.createChooser(ACTION_VIEW)` and grants the receiver read permission
+/// via the {@code com.chatx.fp} FileProvider (or `Uri.fromFile` as a fallback).
+/// Returns `true` if the Java static call was made and returned successfully.
+/// No-op on non-Android targets.
+#[cfg(target_os = "android")]
+pub fn reveal_file(path: &str) -> bool {
+    jni::reveal_file(path)
+}
+#[cfg(not(target_os = "android"))]
+pub fn reveal_file(_path: &str) -> bool {
+    tracing::warn!("[bridge] reveal_file: not an Android target — no-op");
+    false
+}
+
 /// Ask the Android shell to open the system photo picker
 /// (`Intent.ACTION_PICK` with `image/*`). The shell copies the chosen
 /// image(s) to the app's private dir and calls back into Rust via

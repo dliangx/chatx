@@ -683,7 +683,9 @@ pub fn run_app() {
                     return;
                 };
                 if !path.to_lowercase().ends_with(".pdf") {
-                    tracing::warn!("[pdf] ignoring non-PDF selection: {path}");
+                    // Not a PDF: hand off to the OS so the user can open it
+                    // with whatever app they have installed.
+                    let _ = camera::reveal::reveal(&path);
                     return;
                 }
                 let weak = weak_outer.clone();
@@ -803,15 +805,15 @@ pub fn run_app() {
     {
         let w_open = weak.clone();
         state.on_open_doc(move || {
-            // Desktop-only renderer: on mobile the entry point just notices
-            // (no file picker), in the app's language.
-            if let Some(ui) = w_open.upgrade()
-                && ui.global::<AppState>().get_is_mobile()
-            {
-                show_app_notice(w_open.clone(), time::desktop_only_message(), false);
-                return;
-            }
+            // Mobile: still let the user pick a file with the system picker,
+            // then hand the path off to the OS so it can be opened by an
+            // external app (the betteroffice renderer is desktop-only).
+            // Desktop: open the picked file in the in-app viewer.
             let weak_outer = w_open.clone();
+            let mobile = match w_open.upgrade() {
+                Some(ui) => ui.global::<AppState>().get_is_mobile(),
+                None => return,
+            };
             camera::filepick::set_file_sink(move |sel: Option<String>| {
                 let Some(path) = sel else { return };
                 if !doc::is_office_ext(&path) {
@@ -821,9 +823,14 @@ pub fn run_app() {
                 let weak = weak_outer.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
-                    if ui.get_logged_in() {
-                        open_doc_page(&ui, &path);
+                    if !ui.get_logged_in() {
+                        return;
                     }
+                    if mobile {
+                        let _ = camera::reveal::reveal(&path);
+                        return;
+                    }
+                    open_doc_page(&ui, &path);
                 });
             });
             if let Err(e) = camera::filepick::pick_file() {
@@ -3624,11 +3631,6 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
     });
 }
 
-/// Pickable file extensions for chat file sends: docx / xlsx / pptx / pdf only.
-fn chat_file_allowed_exts() -> &'static [&'static str] {
-    &["docx", "xlsx", "pptx", "pdf"]
-}
-
 /// Inbound ceiling for one document on the wire (`FILE_REQ_MAX` = 64 MiB); keep the send just under it so the CBOR framing fits.
 const CHAT_FILE_MAX_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -3669,20 +3671,6 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".to_string());
-    let ext = std::path::Path::new(&src)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    if !chat_file_allowed_exts().contains(&ext.as_str()) {
-        set_chat_status(
-            weak,
-            format!(
-                "Only document files (pdf / docx / xlsx / pptx) can be shared in chat, not “{ext:?}”."
-            ),
-        );
-        return;
-    }
     let client = CLIENT.lock().unwrap().clone();
     let backend = BACKEND.lock().unwrap().clone();
     let (Some(client), Some(backend)) = (client, backend) else {
@@ -3825,7 +3813,11 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
     });
 }
 
-/// Tap a chat file message: PDFs open in the native in-app viewer (crates/pdf, no wasm); other types surface a status hint for now.
+/// Tap a chat file message: PDFs open in the native in-app viewer (crates/pdf,
+/// no wasm); Office docs (docx/xlsx/pptx) open in the betteroffice viewer when
+/// it can render them (desktop); everything else — Office docs on mobile,
+/// legacy Office (.doc/.xls/.ppt), or any other extension — is handed to the
+/// OS file manager / external-app chooser via [`camera::reveal::reveal`].
 fn open_chat_file_from_index(weak: slint::Weak<MainWindow>, idx: i32) {
     let idx = idx as usize;
     let Some(ui) = weak.upgrade() else { return };
@@ -3852,26 +3844,38 @@ fn open_chat_file_from_index(weak: slint::Weak<MainWindow>, idx: i32) {
     }
     if ext == "pdf" {
         open_pdf_page(&ui, &file_path);
-    } else if doc::is_office_ext(&file_path) {
-        // Office documents (Word/Excel/PowerPoint) open in the in-app viewer
-        // (mobile shows the desktop-only notice instead).
-        open_doc_page(&ui, &file_path);
-    } else if matches!(ext.as_str(), "doc" | "xls" | "ppt") {
-        // Legacy binary Office: betteroffice only reads OOXML.
-        show_app_notice(
-            ui.as_weak(),
-            format!(
-                ".{ext} is a legacy Office format — save it as .docx / .xlsx / .pptx to view it in the app."
-            ),
-            false,
-        );
-    } else {
-        show_app_notice(
-            ui.as_weak(),
-            format!("No in-app viewer for .{ext} yet — please open it with a supporting app."),
-            false,
-        );
+        return;
     }
+    if doc::is_office_ext(&file_path) {
+        // Office documents (Word/Excel/PowerPoint): desktop opens in the
+        // in-app viewer; mobile hands off to the OS file manager / external
+        // app chooser since the in-app renderer is desktop-only.
+        let mobile = ui.global::<AppState>().get_is_mobile();
+        if mobile {
+            if camera::reveal::reveal(&file_path) {
+                return;
+            }
+            // Reveal failed (no platform backend available) — keep the
+            // friendly notice rather than a dead end.
+            show_app_notice(weak.clone(), time::desktop_only_message(), false);
+        } else {
+            open_doc_page(&ui, &file_path);
+        }
+        return;
+    }
+    // Not a PDF and not OOXML Office — hand off to the OS file manager.
+    if camera::reveal::reveal(&file_path) {
+        tracing::debug!("[chat-file] revealed .{ext} via OS");
+        return;
+    }
+    show_app_notice(
+        weak.clone(),
+        format!(
+            "No in-app viewer for .{ext} and the system file manager could \
+             not be launched — please open it with a supporting app."
+        ),
+        false,
+    );
 }
 
 /// Open the shared full-screen image viewer on the chat photo at `idx`.

@@ -85,6 +85,91 @@ public final class NativeBridge {
         FilePicker.launch();
     }
 
+    /**
+     * Reveal a file (absolute path on disk) to the user.
+     *
+     * <p>Rust calls this as a JNI static from {@code bridge::jni::reveal_file}
+     * whenever a file cannot be opened by an in-app viewer (mobile docx/
+     * xlsx/pptx, chat files of unsupported extension, …). The file is served
+     * through {@link Fp} as a {@code content://com.chatx.fp/...} URI and
+     * fired as {@code Intent.createChooser(ACTION_VIEW)} so the user picks
+     * a destination app (or the OS file manager) to open it with.
+     *
+     * <p>If the file is not already under the app's private {@code
+     * getFilesDir()/}, we first copy it into that tree — the {@link Fp}
+     * provider can only serve paths inside it, and external apps can't read
+     * arbitrary {@code file://} URIs without us granting permissions.
+     */
+    public static void reveal(String path) {
+        android.app.Activity a = Shell.activity();
+        if (a == null || path == null || path.isEmpty()) {
+            android.util.Log.w("chatx.reveal", "no activity or empty path — bailing");
+            return;
+        }
+        java.io.File base = new java.io.File(a.getFilesDir().getAbsolutePath(), "chatx_picked");
+        if (!base.isDirectory() && !base.mkdirs()) {
+            android.util.Log.w("chatx.reveal", "could not create " + base);
+            return;
+        }
+        java.io.File file = new java.io.File(path);
+        if (!file.isFile()) {
+            android.util.Log.w("chatx.reveal", "file not found: " + path);
+            return;
+        }
+        // If the file is not already under our private tree, copy it in.
+        if (!path.startsWith(base.getAbsolutePath() + java.io.File.separator)) {
+            String name = file.getName();
+            java.io.File dst = new java.io.File(base, name);
+            if (dst.exists()) {
+                dst = new java.io.File(base, String.valueOf(System.currentTimeMillis()) + "_" + name);
+            }
+            java.io.FileInputStream in = null;
+            java.io.FileOutputStream out = null;
+            try {
+                in = new java.io.FileInputStream(file);
+                out = new java.io.FileOutputStream(dst);
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    out.write(buf, 0, n);
+                }
+                file = dst;
+                android.util.Log.i("chatx.reveal", "copied " + path + " -> " + file);
+            } catch (Throwable t) {
+                android.util.Log.e("chatx.reveal", "copy failed: " + t);
+                return;
+            } finally {
+                try { if (in  != null) in.close();  } catch (Throwable ignored) {}
+                try { if (out != null) out.close(); } catch (Throwable ignored) {}
+            }
+        }
+        android.net.Uri contentUri = Fp.uriFor(a.getFilesDir(), file);
+        if (contentUri == null) {
+            android.util.Log.w("chatx.reveal", "uriFor returned null for " + file);
+            return;
+        }
+        String mime = Fp.mimeFor(file.getName());
+        android.content.Intent view = new android.content.Intent(android.content.Intent.ACTION_VIEW)
+                .setDataAndType(contentUri, mime)
+                .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        android.content.Intent chooser =
+                android.content.Intent.createChooser(view, "Open with…");
+        try {
+            a.startActivity(chooser);
+        } catch (Throwable t) {
+            android.util.Log.e("chatx.reveal", "startActivity: " + t);
+            try {
+                android.content.Intent send = new android.content.Intent(android.content.Intent.ACTION_SEND);
+                send.setType(mime);
+                send.putExtra(android.content.Intent.EXTRA_STREAM, contentUri);
+                send.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                a.startActivity(android.content.Intent.createChooser(send, "Share with…"));
+            } catch (Throwable t2) {
+                android.util.Log.e("chatx.reveal", "fallback ACTION_SEND also failed: " + t2);
+            }
+        }
+    }
+
     // ── Photo picker ───────────────────────────────────────────────────────
     //
     // Called from Rust (`bridge::jni::request_photos_pick`), which uses the

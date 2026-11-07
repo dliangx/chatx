@@ -36,5 +36,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- File-sharing provider: NativeBridge.reveal(String) hands a file in
+             getFilesDir() to ACTION_VIEW / a chooser as a content:// URI so
+             an external app can open it without READ_EXTERNAL_STORAGE. -->
+        <provider
+            android:name="com.chatx.Fp"
+            android:authorities="com.chatx.fp"
+            android:grantUriPermissions="true"
+            android:exported="false" />
     </application>
 </manifest>

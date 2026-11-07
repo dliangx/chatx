@@ -24,6 +24,28 @@ mod apple {
         }
     }
 
+    /// Swift ⇄ Rust trampoline. The macOS AppKit branch of `shim/filepick.swift`
+    /// calls this to hand back a `NSOpenPanel` result (`(nil, 0)` on cancel).
+    /// The primary file-pick path on macOS is `osascript` (see `pick_file`),
+    /// but defining the symbol here is required so that linking the shared
+    /// `shim_filepick.o` (which is pulled in to resolve `chatx_open_reveal`
+    /// from `reveal.rs`) does not leave an undefined reference.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn _chatx_rust_filepick_done(data: *const u8, n: i32) {
+        let path = if data.is_null() || n <= 0 {
+            None
+        } else {
+            let buf = unsafe { std::slice::from_raw_parts(data, n as usize) };
+            let s = String::from_utf8_lossy(buf).to_string().trim().to_string();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        };
+        deliver(path);
+    }
+
     pub fn pick_file() -> Result<(), String> {
         let child = std::process::Command::new("osascript")
             .arg("-e")

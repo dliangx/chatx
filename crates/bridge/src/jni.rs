@@ -167,9 +167,58 @@ fn call_native_bridge_int(method: &str, value: i32) -> bool {
     }
 }
 
-/// Ask the Java shell to launch the MediaProjection consent dialog + start
-/// the screen-capture loop. Safe to call from any Rust thread; no-op if the
-/// JVM isn't attached yet.
+/// Call a static `void (String)` method on the cached `NativeBridge` class.
+/// Returns `true` on success. Used for things like `reveal(String path)`.
+fn call_native_bridge_string(method: &str, value: &str) -> bool {
+    let bridged = match BRIDGE_CLASS.get() {
+        Some(c) => c,
+        None => {
+            tracing::warn!("[bridge] {method}: NativeBridge class not yet cached — bailing");
+            return false;
+        }
+    };
+    let vm = match VM.get() {
+        Some(v) => v,
+        None => {
+            tracing::warn!("[bridge] {method}: no JVM handle cached yet; skipping");
+            return false;
+        }
+    };
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("[bridge] {method}: attach current thread failed: {e}");
+            return false;
+        }
+    };
+    let arg = match env.new_string(value) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("[bridge] {method}: new_string failed: {e}");
+            return false;
+        }
+    };
+    match env.call_static_method::<_, _, _>(bridged, method, "(Ljava/lang/String;)V", &[(&arg).into()]) {
+        Ok(_) => {
+            // `startActivity` and `createChooser` on the Java side usually
+            // swallow their own throwables (we wrapped them in `try/catch`),
+            // but if an exception is still pending here — e.g. the activity
+            // was already gone — clear it so a follow-up JNI call on this
+            // thread doesn't abort.
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+            }
+            true
+        }
+        Err(e) => {
+            tracing::warn!("[bridge] {method}: Java static call failed: {e}");
+            false
+        }
+    }
+}
+
+/// Ask the Java shell to (start | stop) an in-app screen capture.
 pub fn request_screen_share_start() {
     call_native_bridge_void("startScreenShare");
 }
@@ -207,7 +256,7 @@ pub fn request_file_pick() {
 }
 
 /// Ask the Java shell to open the system photo picker
-/// (`ACTION_PICK` with `image/*`). On success the shell copies the chosen
+/// (`Intent.ACTION_PICK` with `image/*`). On success the shell copies the chosen
 /// image(s) to the app's private dir and calls back into Rust via
 /// [`Java_com_chatx_NativeBridge_photosPicked`] with the newline-joined
 /// absolute paths ("`"` on cancel).
@@ -215,6 +264,13 @@ pub fn request_file_pick() {
 /// No-op if there is no live activity.
 pub fn request_photos_pick(max: u32) {
     _ = call_native_bridge_int("openPhotosPicker", max as i32);
+}
+
+/// Ask the Java shell to reveal an absolute-paths file in the system file
+/// picker / external-app chooser. No-op if not a valid path or the JVM is
+/// not attached.
+pub fn reveal_file(path: &str) -> bool {
+    call_native_bridge_string("reveal", path)
 }
 
 #[unsafe(no_mangle)]

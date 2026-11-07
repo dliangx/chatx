@@ -25,7 +25,6 @@ struct L10n {
     h_ago: &'static str,
     d_ago: &'static str,
     y_ago: &'static str,
-    /// App notice: Office documents render desktop-only.
     desktop_only: &'static str,
 }
 
