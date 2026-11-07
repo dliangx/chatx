@@ -337,6 +337,6 @@ export component MainWindow inherits Window {
     if AppState.nav-state.global-overlay == GlobalOverlayType.AddMenu: AddMenuView { safe-area-top: root.safe-area-insets.top; }
     if AppState.nav-state.global-overlay == GlobalOverlayType.Error: ErrorView { }
     if AppState.nav-state.global-overlay == GlobalOverlayType.MiniApp: MiniAppOverlay { }
-    if AppState.nav-state.global-overlay == GlobalOverlayType.Pdf: PdfViewer { }
+    if AppState.nav-state.global-overlay == GlobalOverlayType.Pdf: PdfViewer { safe-area-top: root.safe-area-insets.top; }
     if AppState.nav-state.global-overlay == GlobalOverlayType.Doc: DocViewer { }
 }

@@ -67,6 +67,10 @@ export component PdfViewer inherits Rectangle {
     height: 100%;
     background: PdfHost.minimized ? #00000000 : #101218;
     clip: true;
+    /// Top safe-area inset handed over by `main.slint`; the top chrome
+    /// (mode / counter / minimize / close + the dock pill) shifts down by this
+    /// so it clears the notch / status bar.
+    in property <length> safe-area-top: 0px;
 
     // Committed frame scaled to fill the window; rendered at the window's exact device px, so `fill` is 1:1 (no upscaling).
     Rectangle {
@@ -134,7 +138,7 @@ export component PdfViewer inherits Rectangle {
     Rectangle {
         visible: PdfHost.page-count > 0 && !PdfHost.minimized;
         x: (parent.width - 34px) / 2;
-        y: 10px;
+        y: 10px + root.safe-area-top;
         width: 34px;
         height: 34px;
         border-radius: 17px;
@@ -161,7 +165,7 @@ export component PdfViewer inherits Rectangle {
     Text {
         visible: PdfHost.page-count > 0 && !PdfHost.minimized;
         x: (parent.width + 34px) / 2 + 12px;
-        y: 10px;
+        y: 10px + root.safe-area-top;
         width: 64px;
         height: 34px;
         vertical-alignment: center;
@@ -174,7 +178,7 @@ export component PdfViewer inherits Rectangle {
     Rectangle {
         visible: !PdfHost.minimized;
         x: parent.width - 92px;
-        y: 10px;
+        y: 10px + root.safe-area-top;
         width: 34px;
         height: 34px;
         border-radius: 17px;
@@ -201,7 +205,7 @@ export component PdfViewer inherits Rectangle {
     Rectangle {
         visible: !PdfHost.minimized;
         x: parent.width - 48px;
-        y: 10px;
+        y: 10px + root.safe-area-top;
         width: 34px;
         height: 34px;
         border-radius: 17px;
@@ -226,6 +230,6 @@ export component PdfViewer inherits Rectangle {
 
     PdfDock {
         x: parent.width - 90px;
-        y: 10px;
+        y: 10px + root.safe-area-top;
     }
 }
