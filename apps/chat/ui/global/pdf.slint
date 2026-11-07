@@ -137,7 +137,7 @@ export component PdfViewer inherits Rectangle {
     // View-mode toggle (top-centre).
     Rectangle {
         visible: PdfHost.page-count > 0 && !PdfHost.minimized;
-        x: (parent.width - 34px) / 2;
+        x: 14px;
         y: 10px + root.safe-area-top;
         width: 34px;
         height: 34px;
@@ -161,18 +161,18 @@ export component PdfViewer inherits Rectangle {
         }
     }
 
-    // Page counter "n/m", on the same row, right of the mode pill.
-    Text {
-        visible: PdfHost.page-count > 0 && !PdfHost.minimized;
-        x: (parent.width + 34px) / 2 + 12px;
-        y: 10px + root.safe-area-top;
-        width: 64px;
-        height: 34px;
-        vertical-alignment: center;
-        text: PdfHost.page-count > 0 ? "{PdfHost.page}/{PdfHost.page-count}" : "";
-        font-size: 12px;
-        color: rgba(255, 255, 255, 0.85);
-    }
+    // // Page counter "n/m", on the same row, right of the mode pill.
+    // Text {
+    //     visible: PdfHost.page-count > 0 && !PdfHost.minimized;
+    //     x: parent.width / 2 - 20px;
+    //     y: 10px + root.safe-area-top;
+    //     width: 64px;
+    //     height: 34px;
+    //     vertical-alignment: center;
+    //     text: PdfHost.page-count > 0 ? "{PdfHost.page}/{PdfHost.page-count}" : "";
+    //     font-size: 12px;
+    //     color: rgba(0, 0, 0, 0.85);
+    // }
 
     // Minimize (top-right, left of close): hide the page, keep the viewer mounted.
     Rectangle {
