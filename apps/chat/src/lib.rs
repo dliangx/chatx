@@ -1107,6 +1107,35 @@ pub fn run_app() {
             if !uid.is_empty() {
                 clear_passphrase(&uid);
             }
+            // Reset the auth-screen state so a previous session's status
+            // ("logged in:…"/error text) and busy flag don't leak into the
+            // fresh sign-in screen after logout. Re-derive the username lock
+            // + mode from the keystore, exactly like app start-up: while a
+            // local account exists the user must sign in as that user — the
+            // only way to switch accounts is Sign up → Delete all data.
+            st.set_auth_message(SharedString::new());
+            st.set_auth_busy(false);
+            {
+                let existing_uid =
+                    match chatx_core::account::Keystore::load(&keystore_path(&profile())).map(
+                        |ks| ks.user_id,
+                    ).ok() {
+                        Some(u) => Some(u),
+                        None => None,
+                    };
+                match existing_uid {
+                    Some(uid) => {
+                        st.set_auth_register(false);
+                        st.set_auth_uid_locked(true);
+                        st.set_user_id(SharedString::from(uid));
+                    }
+                    None => {
+                        st.set_auth_register(true);
+                        st.set_auth_uid_locked(false);
+                        st.set_user_id(SharedString::new());
+                    }
+                }
+            }
             clear_sub_history(&st);
             st.set_chats(slint::ModelRc::new(slint::VecModel::from(Vec::<
                 ConversationRow,
@@ -2570,6 +2599,7 @@ fn apply_result(
                             });
                         }
                         Err(err) => {
+                            tracing::warn!("[data] load failed for {me}: {err}");
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(ui) = weak.upgrade() {
                                     ui.global::<AppState>().set_data_status(SharedString::from(

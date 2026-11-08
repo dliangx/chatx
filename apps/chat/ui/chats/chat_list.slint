@@ -23,7 +23,7 @@ export component ChatListView inherits Rectangle {
         y: 0px;
     }
 
-    if root.rows.length == 0 && !root.searching:
+    if root.rows.length == 0 && !root.searching && root.status == "":
     Text {
         y: 180px;
         width: parent.width;
