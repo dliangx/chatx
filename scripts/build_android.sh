@@ -40,12 +40,11 @@ APKSIGNER="$BT/apksigner"
 echo "──────── chatx Android packaging ($MODE) ────────"
 
 # ── 2. cargo build ─────────────────────────────────────────────────────────
-if [[ ! -x "$SO_SRC" || "${REBUILD:-0}" == "1" ]]; then
-  echo "▶ cargo build -p chatx --target $TARGET --$MODE"
-  cargo build -p chatx --target "$TARGET" --"$MODE"
-else
-  echo "✓ found $SO_SRC (rebuild with REBUILD=1)"
-fi
+# Always invoke cargo — it's incremental and a no-op when nothing changed.
+# (The old `[[ -x $SO_SRC ]]` shortcut shipped stale .so's whenever sources
+# were edited after the first successful build.)
+echo "▶ cargo build -p chatx --target $TARGET --$MODE"
+cargo build -p chatx --target "$TARGET" --"$MODE"
 
 # ── 3. strip ───────────────────────────────────────────────────────────────
 echo "▶ llvm-strip"
