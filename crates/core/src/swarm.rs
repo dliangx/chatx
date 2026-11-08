@@ -473,6 +473,16 @@ pub const MAX_DIALS_PER_TICK: usize = 64;
 pub const DIAL_BACKOFF_BASE_MS: u64 = 10_000;
 pub const DIAL_BACKOFF_MAX_MS: u64 = 300_000;
 pub const FAIL_LOG_REPEAT_MS: u64 = 60_000;
+// DM-specific reconnection backoff. The group-dial backoff above (base 10s) is
+// deliberate for chatty fan-out, but for a pair of actively-interacting users a
+// 10s no-retry window is user-visible, so reconnection of a dropped DM peer
+// uses a smaller base / cap (exponential: 2s, 4s, 8s, ... capped at 60s).
+// `DIAL_BACKOFF_DUR` is the per-attempt window a single dial must outlive: it
+// covers libp2p's internal multi-addr failover (~5s) so an in-flight dial isn't
+// abandoned before its handshake lands (was 6000ms inline, now a shared const).
+pub const DM_RECONNECT_BASE_MS: u64 = 2_000;
+pub const DM_RECONNECT_MAX_MS: u64 = 60_000;
+pub const DIAL_BACKOFF_DUR: std::time::Duration = std::time::Duration::from_secs(6);
 
 pub type EventRx = mpsc::UnboundedReceiver<ChatEvent>;
 

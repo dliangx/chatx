@@ -301,6 +301,89 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             > 0
     }
 
+    /// Whether dialing `peer` right now should be suppressed by the DM
+    /// reconnection backoff. Uses a smaller base/cap than the group-dial
+    /// backoff ([`sw::DM_RECONNECT_BASE_MS`]) because for two users who are
+    /// actively chatting a 10s no-retry window is user-visible.
+    fn dm_reconnect_suppressed(&self, peer_b58: &str) -> bool {
+        let (last, fails) = match self
+            .running
+            .dial_backoff
+            .lock()
+            .unwrap()
+            .get(peer_b58)
+            .copied()
+        {
+            Some(v) => v,
+            None => return false,
+        };
+        let elapsed = crate::message::now_ms().saturating_sub(last);
+        let delay = sw::DM_RECONNECT_BASE_MS.saturating_mul(1u64 << fails.min(5));
+        elapsed < delay.min(sw::DM_RECONNECT_MAX_MS)
+    }
+
+    /// After a DM peer's last live connection drops, proactively try to
+    /// re-establish the link in the background so the pair recovers WITHOUT
+    /// one of them having to send a fresh message or receive a server wake.
+    ///
+    /// Scope: only fires for DM peers (we have a DM conversation with this peer)
+    /// AND only when we actually have a pending (undelivered) message to them.
+    /// This avoids fighting `disconnect_from_group` for offline group members —
+    /// group recovery is owned by the group tick loop / wake pump / §A
+    /// escalation, none of which care about pending DMs.
+    ///
+    /// Bounded by the DM dial-backoff ([`Self::dm_reconnect_suppressed`]) so a
+    /// dead/offline peer isn't re-dialed on every flap, and the actual dialing
+    /// is offloaded to a background thread (mirrors the chat app's
+    /// `load_chat_messages` warm-dial site) because `warm_dial_peer` blocks for
+    /// up to ~12s of dial windows and this is called from the async event pump.
+    ///
+    /// No-op when: the peer is still connected (the swarm event guarantees we
+    /// only get here on the last-connection close, but guard anyway for races),
+    /// the backoff window hasn't elapsed, or we have no pending DM for them.
+    pub async fn reconnect_dm_peer(self: &Arc<Self>, peer_b58: &str) {
+        if peer_b58 == self.peer_base58() {
+            return;
+        }
+        if self.peer_connected_str(peer_b58) {
+            return; // a link is still up (or a dial in flight) — don't pile on
+        }
+        if self.dm_reconnect_suppressed(peer_b58) {
+            return;
+        }
+        // Only reconnect a DM partner that actually has pending messages. This
+        // is the user-visible "message stuck" case; it also naturally excludes
+        // pure group members (no DM) from fighting an explicit
+        // `disconnect_from_group`.
+        let Some(pool) = self.store.pool() else {
+            return;
+        };
+        match sqlite::queue::pending_count_for_peer(&pool, peer_b58).await {
+            Ok(n) if n > 0 => {}
+            Ok(_) => {
+                tracing::debug!(peer = peer_b58, "[dm] disconnected — no pending DMs, skipping proactive reconnect");
+                return;
+            }
+            Err(e) => {
+                tracing::debug!(peer = peer_b58, "[dm] pending_count query failed: {e}");
+                return;
+            }
+        }
+        self.dial_attempted(peer_b58);
+        let client = self.clone();
+        let peer = peer_b58.to_string();
+        if let Err(e) = std::thread::Builder::new()
+            .name("chatx-dm-reconnect".into())
+            .spawn(move || {
+                let _ = client.warm_dial_peer(&peer);
+            })
+        {
+            tracing::warn!(peer = peer_b58, "[dm] reconnect spawn failed: {e}");
+        } else {
+            tracing::debug!(peer = peer_b58, "[dm] peer dropped — background reconnect started");
+        }
+    }
+
     /// Current link state for a DM peer, as a stable token the UI maps to the
     /// header status dot:
     ///   - `""`         — not connected and no dial in flight  → red
@@ -368,7 +451,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// for every wake notice received, dial the sender back. Called by a
     /// background thread that the app pumps (see `start_notify_pump`). Returns
     /// the number of peers dialed in this round.
-    pub fn process_wakes(&self) -> u32 {
+    pub fn process_wakes(self: &Arc<Self>) -> u32 {
         let me = self.peer_base58();
         let notices = self.dir().poll_notices(&me);
         let mut dialed = 0u32;
@@ -376,9 +459,27 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             if n.from == me {
                 continue;
             }
+            let peer = n.from.clone();
             tracing::info!(from = %n.from, at = n.at, "[hole-punch] received wake — dialing back");
-            self.dial_peer_by_id(&n.from);
-            dialed += 1;
+            // `dial_peer_by_id` → `warm_dial_peer` blocks (up to ~12s of dial
+            // windows) on the calling thread. This loop runs on the notify
+            // thread whose long-poll just blocked ~50s, so doing the dial here
+            // would hold that thread and, worse, a burst of wakes would dial
+            // sequentially (3 notices × 12s = 36s). Run each dial on its own
+            // background thread (mirrors the chat app's load_chat_messages
+            // warm_dial site) so the pump keeps polling promptly. Best-effort:
+            // a thread-spawn failure just means that peer waits for a redelivery
+            // tick or the sender's next attempt — the wake itself was consumed.
+            let client = self.clone();
+            let log_peer = peer.clone();
+            match std::thread::Builder::new()
+                .name("chatx-wake-dial".into())
+                .spawn(move || {
+                    client.dial_peer_by_id(&peer);
+                }) {
+                Ok(_) => dialed += 1,
+                Err(e) => tracing::warn!(%log_peer, "[hole-punch] wake-dial spawn failed: {e}"),
+            }
         }
         dialed
     }
@@ -652,7 +753,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         // the window where the peer is still booting and its fresh port hasn't
         // been heartbeated into the directory yet (we re-resolve each pass).
         const PASSES: usize = 2;
-        const PER_ATTEMPT: std::time::Duration = std::time::Duration::from_millis(6000);
+        let per_attempt = sw::DIAL_BACKOFF_DUR;
         const PASS_GAP: std::time::Duration = std::time::Duration::from_millis(800);
         const POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -704,7 +805,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     continue;
                 }
                 tracing::debug!("[dm] warm_dial {peer_base58} -> {addr}");
-                let deadline = std::time::Instant::now() + PER_ATTEMPT;
+                let deadline = std::time::Instant::now() + per_attempt;
                 while std::time::Instant::now() < deadline {
                     if self.peer_connected(&pid) {
                         tracing::debug!("[dm] warm_dial {peer_base58} connected via {addr}");
@@ -1800,7 +1901,27 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         peer_base58: &str,
         text: &str,
     ) -> anyhow::Result<bool> {
-        match self.try_send_dm_once(peer_base58, text, msg_id as u64).await {
+        // Fast path: a live connection is already up → send and wait for the
+        // peer's ack WITHOUT dialing. Saves the entire dial sequence (up to
+        // ~6s × N candidate addresses) for the common case where the peer is
+        // still reachable over the existing transport.
+        //
+        // On any miss (no link yet, or the in-flight Send timed out / the peer
+        // dropped us) fall through to the dialing `try_send_dm_once` path, which
+        // owns round-1 (fresh endpoints) + round-2 (wake + retry). This is safe
+        // against the theoretical double-deliver from a fastpath Send that made
+        // it over but lost its ACK: the receiver dedups redeliveries by
+        // `client_id` (see `process_event`'s inbound dedup), so a duplicate is
+        // dropped, not stored twice. Recovering here (dial now) is also faster
+        // than deferring to the 1.5s redelivery tick.
+        let outcome = match self
+            .send_dm_fastpath(peer_base58, text, msg_id as u64)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(_) => self.try_send_dm_once(peer_base58, text, msg_id as u64).await,
+        };
+        match outcome {
             Ok(()) => {
                 if let Some(pool) = self.store.pool() {
                     let _ = self.store.set_status(msg_id, sqlite::STATUS_SENT).await;
@@ -1828,6 +1949,73 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let (chat, msg_id) = self.queue_dm_text(peer_base58, text).await?;
         self.deliver_dm(msg_id, peer_base58, text).await?;
         Ok(chat)
+    }
+
+    /// Fast path: if a live connection to `peer` is already established (green
+    /// or yellow dot — see `peer_link`), send the DM and wait for the peer's
+    /// ack WITHOUT any dialing. Saves the entire dial sequence (up to ~6s per
+    /// candidate address × N candidates) for the common case where the peer is
+    /// still reachable over the existing transport.
+    ///
+    /// Returns `Ok(())` on peer ack. Any `Err` — no link yet (the `"NO_PATH"`
+    /// sentinel), a failed in-flight Send, a dropped connection, or an ack
+    /// timeout — is indistinguishable to the caller: [`Self::deliver_dm`] falls
+    /// through to the dialing [`Self::try_send_dm_once`] path in every case,
+    /// which owns round-1 (fresh endpoints) + round-2 (wake + retry). Safe
+    /// against a lost-ACK double-deliver because the receiver dedups by
+    /// `client_id`.
+    async fn send_dm_fastpath(
+        &self,
+        peer_base58: &str,
+        text: &str,
+        client_id: u64,
+    ) -> Result<(), String> {
+        let Ok(pid) = peer_base58.parse::<PeerId>() else {
+            return Err("NO_PATH".into());
+        };
+        if self
+            .running
+            .connected
+            .lock()
+            .unwrap()
+            .get(&pid)
+            .copied()
+            .unwrap_or(0)
+            == 0
+        {
+            return Err("NO_PATH".into());
+        }
+        let from = self.peer_base58();
+        let e2e = self.e2e_public().to_string();
+        let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+        let text_owned = text.to_string();
+        if let Err(e) = self
+            .running
+            .cmd_tx
+            .send(swarm::Cmd::SendText {
+                peer: pid,
+                from,
+                e2e,
+                text: text_owned,
+                ack_tx: Some(tx),
+                client_id: Some(client_id),
+            })
+        {
+            // Command channel closed (swarm runtime gone). Return an error; the
+            // caller falls through to the dialing path, which will fail fast
+            // here too (no runtime) and hand off to the redelivery loop.
+            return Err(format!("cmd channel closed: {e}"));
+        }
+        let timeout = std::time::Duration::from_secs(8);
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(()))) => {
+                tracing::debug!(peer = peer_base58, "[dm] fastpath delivered (no dial)");
+                Ok(())
+            }
+            Ok(Ok(Err(e))) => Err(e.to_string()),
+            Ok(Err(_)) => Err("peer connection dropped before ack".into()),
+            Err(_) => Err(format!("no ack from peer within {}s", timeout.as_secs())),
+        }
     }
 
     /// Live dial attempt (round 1 = all endpoints, round 2 = wake + retry).

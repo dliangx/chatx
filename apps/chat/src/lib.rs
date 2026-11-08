@@ -2746,6 +2746,17 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                             | chatx_core::swarm::ChatEvent::Dialing(_)
                             | chatx_core::swarm::ChatEvent::DialFailed(_)
                     ) {
+                        // A DM peer's last live connection just dropped — proactively
+                        // re-dial in the background so the pair recovers WITHOUT
+                        // one of them having to send a fresh message or await a
+                        // server wake. Offloaded to a worker thread, bounded by the
+                        // DM dial-backoff, and a no-op when a link is still up or a
+                        // dial is already in flight (so it never double-dials the
+                        // §A / wake / group tick paths).
+                        if let chatx_core::swarm::ChatEvent::Disconnected(peer) = &evt {
+                            let b58 = peer.to_base58();
+                            client.reconnect_dm_peer(&b58).await;
+                        }
                         if let Some(ui) = weak.clone().upgrade() {
                             refresh_chat_conn(&ui);
                         }

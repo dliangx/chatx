@@ -142,6 +142,19 @@ pub async fn all_pending_ids(pool: &Pool) -> anyhow::Result<Vec<i64>> {
         .map_err(Into::into)
 }
 
+/// Number of undelivered DMs pending to a specific peer, regardless of when
+/// they become due. Used to decide whether a dropped peer's reconnect is worth
+/// proactively pursuing (a peer with no pending DMs is not one we're waiting
+/// on, and re-dialing a disconnected group member would fight explicit
+/// `disconnect_from_group` / `stop()` semantics).
+pub async fn pending_count_for_peer(pool: &Pool, peer_base58: &str) -> anyhow::Result<u32> {
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dm_send_queue WHERE peer_base58 = ?1")
+        .bind(peer_base58)
+        .fetch_one(pool)
+        .await?;
+    Ok(n as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
