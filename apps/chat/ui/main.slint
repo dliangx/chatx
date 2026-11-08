@@ -54,7 +54,6 @@ import { AddMenuView } from "global/add.slint";
 export component MainWindow inherits Window {
 
     in property <bool> logged-in: false;
-    in-out property <bool> pop-state: true;
 
     function select_tab(i: int) {
         AppState.nav-state.active-tab = i;
@@ -272,7 +271,7 @@ export component MainWindow inherits Window {
                 }
             }
         }
-        if root.logged-in && !AppState.device-approved && pop-state:
+        if root.logged-in && !AppState.device-approved :
         Rectangle {
             x: 0px;
             y: 0px;
@@ -315,7 +314,6 @@ export component MainWindow inherits Window {
                     width: parent.width;
                     height: parent.height;
                     clicked => {
-                        root.pop-state = false;
                         AppState.push-sub(SubPageType.MyDevices, 0);
                     }
                 }

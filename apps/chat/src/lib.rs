@@ -1095,7 +1095,14 @@ pub fn run_app() {
 
     let w = weak.clone();
     ui.global::<AppState>().on_logout(move || {
-        *CLIENT.lock().unwrap() = None;
+        // Stop the previous account's background loops (presence heartbeat,
+        // wake long-poll, DM redelivery) before we clear the global. Each
+        // `Client` owns its own stop flag + start latches, so this tears down
+        // only this account's loops; a next login on a fresh `Client` starts
+        // its own.
+        if let Some(old) = CLIENT.lock().unwrap().take() {
+            old.stop();
+        }
         *POOL.lock().unwrap() = None;
         *BACKEND.lock().unwrap() = None;
         set_current_me("");
@@ -2462,14 +2469,11 @@ fn apply_result(
             let peer = client.peer_base58().to_string();
             let client = Arc::new(client);
             client.heartbeat();
+            // Each Client has per-instance one-shot latches, so re-calling on
+            // the same instance is a no-op; a fresh instance (new login)
+            // starts its own loops.
             client.start_presence_loop();
-            // Long-poll the directory for wake notices (TCP hole-punch
-            // coordination). Safe to call on every login — no-op after the
-            // first one thanks to the client-side cooldown.
             client.start_notify_pump();
-            // DM offline redelivery: re-push any text DMs that failed to
-            // deliver while the peer was offline. Safe to call on every
-            // login — no-op after the first thanks to the OnceLock.
             client.start_dm_redeliver();
             start_group_conn_sweeper();
             // Background sweeper: re-derive the chat status dot every 1.5 s so
@@ -2485,6 +2489,12 @@ fn apply_result(
                 .unwrap_or(false);
             tracing::debug!("[login] device status approved={approved}");
             DEVICE_APPROVED.with(|c| c.set(approved));
+            // If another client is already active (e.g. the startup
+            // auto-login), stop its background loops first so we don't run two
+            // sets of presence/notify/redeliver loops (double heartbeats).
+            if let Some(old) = CLIENT.lock().unwrap().take() {
+                old.stop();
+            }
             *CLIENT.lock().unwrap() = Some(client);
             set_current_me(&user_id);
 

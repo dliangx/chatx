@@ -39,6 +39,58 @@ pub struct Client<D: DirectoryClient + ?Sized> {
     /// rate-limit wake requests to ~1 per 30 s, bounding server load from a
     /// flaky peer.
     wake_last: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    /// Set by `stop()` so this account's background loops (presence heartbeat,
+    /// notify long-poll, DM redelivery) exit on their next tick. Per-instance
+    /// (shared by every `Arc` clone via `Arc`), so logging out of one account
+    /// tears down only its loops; a newly logged-in account starts fresh.
+    /// `started` latches keep each of the three loops single per instance
+    /// (replaces the old process-wide `OnceLock`, which blocked the next
+    /// account from starting its own loops).
+    loops: Arc<LoopsCtl>,
+}
+
+/// Per-`Client` shutdown + single-start control for the three background
+/// loops. `stopped` is raised by [`Client::stop`]; each `started*` is a
+/// one-shot guard so re-calling the matching `start_*` on the *same* account
+/// is a no-op, while a *different* (newly logged-in) `Client` gets its own
+/// fresh `LoopsCtl` and can therefore start its own loops.
+#[derive(Debug)]
+struct LoopsCtl {
+    stopped: std::sync::atomic::AtomicBool,
+    presence_started: std::sync::atomic::AtomicBool,
+    notify_started: std::sync::atomic::AtomicBool,
+    redeliver_started: std::sync::atomic::AtomicBool,
+}
+
+impl LoopsCtl {
+    fn new() -> Self {
+        use std::sync::atomic::AtomicBool;
+        Self {
+            stopped: AtomicBool::new(false),
+            presence_started: AtomicBool::new(false),
+            notify_started: AtomicBool::new(false),
+            redeliver_started: AtomicBool::new(false),
+        }
+    }
+    fn stopped(&self) -> bool {
+        self
+            .stopped
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn stop(&self) {
+        self
+            .stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn try_start(&self, latch: &std::sync::atomic::AtomicBool) -> bool {
+        latch.compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_ok()
+    }
 }
 
 #[derive(Debug)]
@@ -101,6 +153,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             groups: RwLock::new(groups),
             groups_dir,
             wake_last: std::sync::Mutex::new(std::collections::HashMap::new()),
+            loops: Arc::new(LoopsCtl::new()),
         };
 
         client.reconnect_groups();
@@ -330,25 +383,23 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         dialed
     }
 
-    /// Start a background thread that long-polls the directory for wake
-    /// notices and dials the sender back on arrival. Safe to call multiple
-    /// times — only the first call spawns the thread.
-    /// Start the DM redelivery loop: a tokio task that scans
-    /// `dm_send_queue` for due rows (~1.5 s cadence) and reuses
-    /// [`Self::try_send_dm_once`] to push them. Bumps the row's attempt
-    /// counter on failure (or marks the message row `failed` when the 12
-    /// attempt budget is exhausted), and removes the row on success.
+    /// Start the DM redelivery loop: a tokio task (on a dedicated thread with
+    /// its own `current_thread` runtime) that scans `dm_send_queue` for due
+    /// rows (~1.5 s cadence) and reuses [`Self::try_send_dm_once`] to push
+    /// them. Bumps the row's attempt counter on failure (or marks the message
+    /// row `failed` when the 12 attempt budget is exhausted), and removes the
+    /// row on success.
     ///
-    /// Safe to call multiple times — only the first call spawns.
+    /// The thread runs because the login flow invokes this from the Slint UI
+    /// thread, which has no ambient tokio context (so `Handle::current()`
+    /// would panic); a self-contained runtime also keeps pacing independent of
+    /// the app's runtime.
     ///
-    /// Runs on a **dedicated thread with its own `current_thread` tokio
-    /// runtime** (mirrors `start_presence_loop`): the login flow invokes
-    /// this from the Slint UI thread, which has no ambient tokio context, so
-    /// `Handle::current()` would panic. A self-contained runtime also means
-    /// the redelivery loop keeps pacing independently of the app's runtime.
+    /// Idempotent per `Client` instance (per-instance latch); the loop exits
+    /// on its next tick after `stop()` is called, so a new login on a
+    /// different `Client` can start its own loop.
     pub fn start_dm_redeliver(self: &Arc<Self>) {
-        static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        if STARTED.set(()).is_err() {
+        if !self.loops.try_start(&self.loops.redeliver_started) {
             return;
         }
         let client = self.clone();
@@ -366,6 +417,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     // offline and the local row is still SENDING).
                     loop {
                         tick.tick().await;
+                        if client.is_stopped() {
+                            break;
+                        }
                         client.redeliver_due(None).await;
                     }
                 });
@@ -463,9 +517,15 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
     }
 
+    /// Background thread that long-polls the directory for wake
+    /// notices and dials the sender back on arrival. Safe to call multiple
+    /// times — only the first call spawns.
+    ///
+    /// Idempotent per `Client` instance; the loop exits on the next
+    /// long-poll return after `stop()` is called (so up to one server
+    /// timeout ≈50s of latency in the worst case).
     pub fn start_notify_pump(self: &Arc<Self>) {
-        static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        if STARTED.set(()).is_err() {
+        if !self.loops.try_start(&self.loops.notify_started) {
             return;
         }
         let client = self.clone();
@@ -479,6 +539,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         // for the server timeout, which is the natural pacing. No
                         // additional sleep needed (and one would just delay the
                         // next punch by a second or two).
+                    }
+                    if client.is_stopped() {
+                        break;
                     }
                 }
             })
@@ -1071,9 +1134,26 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
     }
 
+    /// Signal this account's background loops to exit. Idempotent and safe to
+    /// call from any thread. Used on logout / user switch so a previous
+    /// account's presence heartbeat, wake long-poll and DM redelivery no
+    /// longer announce. Each `Client` owns its own flag, so a freshly
+    /// logged-in account is unaffected and starts its own loops fresh.
+    pub fn stop(&self) {
+        self.loops.stop();
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.loops.stopped()
+    }
+
+    /// Start the presence-heartbeat thread. Idempotent per `Client` instance
+    /// (the per-instance latch means re-calling this on the same account is a
+    /// no-op); the thread exits on the next 15 s tick after `stop()` is
+    /// called. A different `Client` (a new login) has its own latch and
+    /// therefore starts its own thread.
     pub fn start_presence_loop(self: &Arc<Self>) {
-        static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        if STARTED.set(()).is_err() {
+        if !self.loops.try_start(&self.loops.presence_started) {
             return;
         }
         let client = self.clone();
@@ -1095,8 +1175,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     Err(e) => tracing::warn!(%e, "STUN prewarm failed"),
                 }
                 // Trigger one immediate heartbeat so the directory learns our
-                // new endpoints without waiting the 15 s tick.
-                prewarm.heartbeat();
+                // new endpoints without waiting the 15 s tick. Skipped if the
+                // account logged out before prewarm finished.
+                if !prewarm.is_stopped() {
+                    prewarm.heartbeat();
+                }
             })
             .expect("spawn stun prewarm thread");
 
@@ -1107,6 +1190,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 loop {
                     tick = tick.wrapping_add(1);
                     std::thread::sleep(std::time::Duration::from_secs(15));
+                    if client.is_stopped() {
+                        break;
+                    }
                     client.heartbeat();
                 }
             })
