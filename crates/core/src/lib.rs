@@ -1109,6 +1109,36 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok(att)
     }
 
+    /// Delete a `Revoked` device record from the directory so it can escape
+    /// what is otherwise a dead state (the state machine forbids
+    /// `Revoked → Approved` and `Revoked → Pending`; only a fresh record via
+    /// deletion re-enters the lifecycle).
+    ///
+    /// - If `target_peer` is the **current** device (the row the user taps
+    ///   Reset on in their own account's device list), also re-register it
+    ///   immediately: `refresh_directory_auto` re-derives the status from the
+    ///   post-deletion directory state — root (only device) → auto-`Approved`,
+    ///   or a freshly-`Pending` member another approved device can now Approve.
+    /// - If it is a **sibling** device we also own, we can only delete its
+    ///   record (we don't hold its keypair to re-register it); the sibling
+    ///   re-registers on its own next launch.
+    ///
+    /// Returns the peer id that was removed.
+    pub async fn reset_device(&self, target_peer: &str) -> anyhow::Result<String> {
+        let deleted = self.dir.delete_device(target_peer)?;
+        if !deleted {
+            anyhow::bail!("no device record found for {target_peer} to reset");
+        }
+        let me = self.device.peer_base58().to_string();
+        if target_peer == me {
+            // Re-register our own device. `refresh_directory_auto` reads the
+            // directory after deletion to decide root vs. member, so the old
+            // `Revoked` record's absence is the whole point.
+            self.refresh_directory_auto("member").await?;
+        }
+        Ok(target_peer.to_string())
+    }
+
     fn sign_attestation_for_resolve(
         &self,
         target_peer: &str,

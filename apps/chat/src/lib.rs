@@ -1161,7 +1161,7 @@ pub fn run_app() {
             st.set_my_devices(slint::ModelRc::new(slint::VecModel::from(
                 Vec::<MyDevice>::new(),
             )));
-            st.set_device_approved(true);
+            st.set_device_status(1);
             st.set_notice_text(SharedString::new());
             st.set_data_status(SharedString::new());
             reset_local_search(&w);
@@ -1433,6 +1433,12 @@ pub fn run_app() {
         let w = weak.clone();
         ui.global::<AppState>().on_revoke_device(move |peer| {
             revoke_device(w.clone(), peer.to_string());
+        });
+    }
+    {
+        let w = weak.clone();
+        ui.global::<AppState>().on_reset_device(move |peer| {
+            reset_device(w.clone(), peer.to_string());
         });
     }
 
@@ -7359,28 +7365,42 @@ fn refresh_devices(weak: slint::Weak<MainWindow>) {
     let list: Vec<MyDevice> = client
         .my_devices()
         .into_iter()
-        .map(|d| MyDevice {
-            peer_id: SharedString::from(d.peer_id.clone()),
-            label: SharedString::from(if d.label.is_empty() {
-                d.peer_id.clone()
-            } else {
-                d.label
-            }),
-            online: now - d.seen as i64 <= chatx_core::signal::ONLINE_TTL_MS as i64,
-            approved: d.status == chatx_core::account::DeviceStatus::Approved,
-            self_device: d.peer_id == me_peer,
+        .map(|d| {
+            let status = match d.status {
+                chatx_core::account::DeviceStatus::Pending => 0,
+                chatx_core::account::DeviceStatus::Approved => 1,
+                chatx_core::account::DeviceStatus::Revoked => 2,
+            };
+            MyDevice {
+                peer_id: SharedString::from(d.peer_id.clone()),
+                label: SharedString::from(if d.label.is_empty() {
+                    d.peer_id.clone()
+                } else {
+                    d.label
+                }),
+                online: now - d.seen as i64 <= chatx_core::signal::ONLINE_TTL_MS as i64,
+                status,
+                self_device: d.peer_id == me_peer,
+            }
         })
         .collect();
 
-    let approved = list
+    // The currently-logged-in device's status (0=Pending/1=Approved/2=Revoked),
+    // defaulting to Pending if the list has no row for us (e.g. a transient
+    // directory lookup miss). Drives both `device-status` and the banner text.
+    let my_status = list
         .iter()
         .find(|d| d.peer_id.to_string() == me_peer)
-        .map(|d| d.approved)
-        .unwrap_or(false);
+        .map(|d| d.status)
+        .unwrap_or(0);
+    let approved = my_status == 1;
+    let revoked = my_status == 2;
     DEVICE_APPROVED.with(|c| c.set(approved));
 
     let notice = if approved {
         String::new()
+    } else if revoked {
+        "This device was revoked · reset it below to re-register".to_string()
     } else {
         "Device pending approval · have an approved device approve it to send/receive".to_string()
     };
@@ -7389,7 +7409,7 @@ fn refresh_devices(weak: slint::Weak<MainWindow>) {
         if let Some(ui) = weak.upgrade() {
             let st = ui.global::<AppState>();
             st.set_my_devices(slint::ModelRc::new(slint::VecModel::from(list)));
-            st.set_device_approved(approved);
+            st.set_device_status(my_status);
             st.set_notice_text(SharedString::from(notice));
         }
     });
@@ -7437,6 +7457,32 @@ fn revoke_device(weak: slint::Weak<MainWindow>, peer: String) {
             show_app_error(weak, format!("Failed to revoke: {e}"));
         }
     }
+}
+
+fn reset_device(weak: slint::Weak<MainWindow>, peer: String) {
+    let client = CLIENT.lock().unwrap().clone();
+    let Some(client) = client else {
+        return;
+    };
+    // Re-registration (`refresh_directory_auto`) needs the app runtime (STUN
+    // prewarm + relay discovery). Dispatch it off the UI thread and refresh the
+    // device list once it resolves.
+    runtime().spawn(async move {
+        let result = client.reset_device(&peer).await;
+        slint::invoke_from_event_loop(move || {
+            match result {
+                Ok(_) => {
+                    tracing::debug!("[reset] device {peer} record reset");
+                    refresh_devices(weak.clone());
+                    show_app_notice(weak, "Device record reset".to_string(), true);
+                }
+                Err(e) => {
+                    tracing::warn!("[reset] device {peer} failed: {e}");
+                    show_app_error(weak, format!("Failed to reset: {e}"));
+                }
+            }
+        });
+    });
 }
 
 fn require_approved(weak: slint::Weak<MainWindow>) -> bool {

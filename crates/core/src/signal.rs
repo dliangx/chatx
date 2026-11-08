@@ -144,7 +144,16 @@ pub trait DirectoryClient: Sync + Send {
         anyhow::bail!("directory does not support server-fanout key slots")
     }
 
-    fn delete_group_key_slot(&self, _group_id: &str, _peer_id: &str) -> anyhow::Result<bool> {
+    /// Delete a device record from the directory. `Ok(true)` if it existed
+    /// and was removed; `Ok(false)` if it wasn't found. Used by the UI's
+    /// "Reset" button on a `Revoked` device so the peer can re-register
+    /// (next login → `refresh_directory_auto` → root/first-device approval
+    /// flow, or a fresh Pending state the other devices can Approve).
+    fn delete_device(&self, _peer_id: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    fn delete_group_key_slot(&self, group_id: &str, peer_id: &str) -> anyhow::Result<bool> {
         Ok(false)
     }
 
@@ -487,6 +496,11 @@ impl DirectoryClient for InMemoryDirectory {
             .collect()
     }
 
+    fn delete_device(&self, peer_id: &str) -> anyhow::Result<bool> {
+        let removed = self.devices.lock().unwrap().remove(peer_id).is_some();
+        Ok(removed)
+    }
+
     fn upsert_group(&self, g: &crate::group::GroupPublic) {
         self.groups
             .lock()
@@ -763,6 +777,22 @@ impl DirectoryClient for HttpDirectory {
             .map_err(|e| anyhow::anyhow!("directory: {e}"))?;
         resp.into_json()
             .map_err(|e| anyhow::anyhow!("resolve device failed: {e}"))
+    }
+
+    fn delete_device(&self, peer_id: &str) -> anyhow::Result<bool> {
+        let url = format!("{}/v1/devices/{peer_id}", self.base);
+        match http_client().request("DELETE", &url).call() {
+            Ok(_) => Ok(true),
+            Err(ureq::Error::Status(code, _)) => {
+                // 404 → the record no longer exists; treat as a successful no-op.
+                if code == 404 {
+                    Ok(false)
+                } else {
+                    Err(anyhow::anyhow!("delete device: HTTP {code}"))
+                }
+            }
+            Err(e) => Err(anyhow::anyhow!("delete device failed: {e}")),
+        }
     }
 
     fn resolve_user(&self, user_id: &str) -> anyhow::Result<UserRecord> {

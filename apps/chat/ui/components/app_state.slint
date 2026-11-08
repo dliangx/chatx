@@ -123,7 +123,8 @@ export struct MyDevice {
     peer_id: string,
     label: string,
     online: bool,
-    approved: bool,
+    // 0 = Pending, 1 = Approved, 2 = Revoked (maps to chatx_core DeviceStatus)
+    status: int,
     self_device: bool,
 }
 
@@ -201,12 +202,16 @@ export global AppState {
     in property <int> font-size: 16;
     in property <string> theme: "light";
 
-    // Device approval
-    in property <bool> device-approved: true;
+    // Device approval. `device-status` is the CURRENTLY-logged-in device's
+    // status (0 = Pending, 1 = Approved, 2 = Revoked — same encoding as
+    // `MyDevice.status`). Derived from `my-devices` in Rust; the UI tests
+    // `device-status == 0/2` for the banner instead of two separate bools.
+    in property <int> device-status: 1;
     in property <[MyDevice]> my-devices: [];
     callback refresh-devices();
     callback approve-device(string);
     callback revoke-device(string);
+    callback reset-device(string);
 
     // Top notification banner (server-publishable). Empty string hides the banner.
     in property <string> notice-text: "";
