@@ -59,6 +59,50 @@ pub fn topic_to_group_id(topic: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+type AckWaker = oneshot::Sender<anyhow::Result<()>>;
+type AckTable = std::collections::HashMap<u64, AckWaker>;
+type AckPeers = std::collections::HashMap<PeerId, std::collections::HashSet<u64>>;
+
+/// Insert an in-flight ack waiter keyed by `id` for `peer`. Caller already
+/// holds both locks; this just keeps the two maps in sync.
+fn ack_register(table: &mut AckTable, peers: &mut AckPeers, peer: PeerId, id: u64, tx: AckWaker) {
+    table.insert(id, tx);
+    peers.entry(peer).or_default().insert(id);
+}
+
+/// Remove a waiter by `id` on the success path. The caller resolves on the
+/// response path (the receiver acking) where the peer is not needed. The
+/// peer-index entry is left in place here and pruned lazily by
+/// `ack_fail_peer`; the id is gone from `table` (the authoritative map) so a
+/// stale index entry can never double-fire.
+fn ack_remove(table: &mut AckTable, id: u64) -> Option<AckWaker> {
+    table.remove(&id)
+}
+
+/// Fail every waiter addressed to `peer` in one sweep (transport teardown).
+/// O(k) in the number of in-flight sends for that single peer — the whole
+/// point of the peer index: previously the caller scanned the entire `table`
+/// (O(total in-flight)) on every `OutboundFailure` event. Also prunes the
+/// peer's index set in the same pass. `reason` is the human-readable why
+/// (already formatted with the libp2p `error: Debug`) that every waiter in
+/// the fan-out sees.
+fn ack_fail_peer(
+    table: &mut AckTable,
+    peers: &mut AckPeers,
+    peer: PeerId,
+    reason: String,
+) -> u32 {
+    let ids = peers.remove(&peer).unwrap_or_default();
+    let mut n = 0u32;
+    for id in ids {
+        if let Some(tx) = table.remove(&id) {
+            let _ = tx.send(Err(anyhow::anyhow!("{reason}")));
+            n += 1;
+        }
+    }
+    n
+}
+
 #[derive(NetworkBehaviour)]
 #[behaviour(prelude = "libp2p::swarm::derive_prelude")]
 pub struct Net {
@@ -345,7 +389,16 @@ pub struct Running {
     pub cmd_tx: mpsc::UnboundedSender<Cmd>,
     pub listen_addrs: Arc<Mutex<Vec<Multiaddr>>>,
     pub my_peer_id: PeerId,
-    pub pending_acks: Arc<Mutex<HashMap<u64, (PeerId, oneshot::Sender<anyhow::Result<()>>)>>>,
+    pub     pending_acks: Arc<Mutex<HashMap<u64, oneshot::Sender<anyhow::Result<()>>>>>,
+    /// Index on `pending_acks` keyed by `PeerId` → request ids in flight.
+    /// `OutboundFailure { peer }` needs to fail *every* waiter addressed to
+    /// that peer in one sweep. Without this index we would scan the whole
+    /// ack map on every transport failure (O(total-in-flight) per event);
+    /// with the index the sweep is O(k) where k is the number of in-flight
+    /// sends on *that* peer — usually 1. Insert/remove must keep both maps in
+    /// sync; see the `SendText`/`SendVoice`/... cmd handlers and the matching
+    /// `Response`/`OutboundFailure` arms below.
+    pub pending_ack_peers: Arc<Mutex<HashMap<PeerId, std::collections::HashSet<u64>>>>,
     /// Inbound photo channels awaiting the app's "ack after persist" reply.
     /// Keyed by inbound `ImageRequest::id` -> `(sender, channel, received_at)`.
     /// The channel is kept (not acked on receipt) so the app can send the
@@ -636,6 +689,8 @@ pub async fn boot(
     let (injected_tx, injected_rx) = mpsc::unbounded_channel();
     let listen_addrs: Arc<Mutex<Vec<Multiaddr>>> = Arc::new(Mutex::new(Vec::new()));
     let pending_acks = Arc::new(Mutex::new(HashMap::new()));
+    let pending_ack_peers: Arc<Mutex<HashMap<PeerId, std::collections::HashSet<u64>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let pending_inbound_image:
         Arc<Mutex<HashMap<u64, (PeerId, ResponseChannel<ImageAck>, std::time::Instant)>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -690,6 +745,7 @@ pub async fn boot(
         listen_addrs: Arc::clone(&listen_addrs),
         my_peer_id: my_peer,
         pending_acks: Arc::clone(&pending_acks),
+        pending_ack_peers: Arc::clone(&pending_ack_peers),
         pending_inbound_image: Arc::clone(&pending_inbound_image),
         pending_blobs: Arc::clone(&pending_blobs),
         pool: pool.clone(),
@@ -728,6 +784,7 @@ async fn swarm_loop(
     running: Arc<Running>,
 ) {
     let pending_acks = running.pending_acks.clone();
+    let pending_ack_peers = running.pending_ack_peers.clone();
     let pending_blobs = running.pending_blobs.clone();
     loop {
         tokio::select! {
@@ -819,10 +876,9 @@ async fn swarm_loop(
                     // stable sender-local id used for receiver-side dedup.
                     let id: u64 = rand::random();
                     if let Some(tx) = ack_tx {
-                        pending_acks
-                            .lock()
-                            .unwrap()
-                            .insert(id, (peer, tx));
+                        let mut t = pending_acks.lock().unwrap();
+                        let mut p = pending_ack_peers.lock().unwrap();
+                        ack_register(&mut t, &mut p, peer, id, tx);
                     }
                     let req = ChatRequest {
                         id,
@@ -901,10 +957,9 @@ async fn swarm_loop(
                 }) => {
                     let id: u64 = rand::random();
                     if let Some(tx) = ack_tx {
-                        pending_acks
-                            .lock()
-                            .unwrap()
-                            .insert(id, (peer, tx));
+                        let mut t = pending_acks.lock().unwrap();
+                        let mut p = pending_ack_peers.lock().unwrap();
+                        ack_register(&mut t, &mut p, peer, id, tx);
                     }
                     // Binary (CBOR) channel: `data` is the raw s16le PCM and
                     // `cbor4ii` serializes it as a compact byte-string — no
@@ -927,10 +982,9 @@ async fn swarm_loop(
                 }) => {
                     let id: u64 = rand::random();
                     if let Some(tx) = ack_tx {
-                        pending_acks
-                            .lock()
-                            .unwrap()
-                            .insert(id, (peer, tx));
+                        let mut t = pending_acks.lock().unwrap();
+                        let mut p = pending_ack_peers.lock().unwrap();
+                        ack_register(&mut t, &mut p, peer, id, tx);
                     }
                     tracing::debug!(
                         "[swarm] IMAGE OUTBOUND peer={peer} id={} {} bytes",
@@ -969,10 +1023,9 @@ async fn swarm_loop(
                 }) => {
                     let id: u64 = rand::random();
                     if let Some(tx) = ack_tx {
-                        pending_acks
-                            .lock()
-                            .unwrap()
-                            .insert(id, (peer, tx));
+                        let mut t = pending_acks.lock().unwrap();
+                        let mut p = pending_ack_peers.lock().unwrap();
+                        ack_register(&mut t, &mut p, peer, id, tx);
                     }
                     tracing::debug!(
                         "[swarm] FILE OUTBOUND peer={peer} id={} {} bytes name={name}",
@@ -1378,9 +1431,7 @@ async fn swarm_loop(
                             }
                             RrMessage::Response { response, .. } => {
                                 // Peer acked this request — resolve its waiter (if any).
-                                if let Some((_peer, tx)) =
-                                    pending_acks.lock().unwrap().remove(&response.id)
-                                {
+                                if let Some(tx) = ack_remove(&mut pending_acks.lock().unwrap(), response.id) {
                                     tracing::debug!("[swarm] ACKED id={}", response.id);
                                     let _ = tx.send(Ok(()));
                                 }
@@ -1393,18 +1444,18 @@ async fn swarm_loop(
                             RrEvent::OutboundFailure { peer, error, .. } => {
                                 tracing::warn!("[swarm] SEND FAILED peer={peer} err={error:?}");
                                 // Fail every in-flight waiter addressed to this peer.
-                                let mut m = pending_acks.lock().unwrap();
-                                let ids: Vec<u64> = m
-                                    .iter()
-                                    .filter(|(_, (p, _))| *p == peer)
-                                    .map(|(id, _)| *id)
-                                    .collect();
-                                for id in ids {
-                                    if let Some((_p, tx)) = m.remove(&id) {
-                                        let _ = tx.send(Err(anyhow::anyhow!(
-                                            "send to {peer} failed: {error:?}"
-                                        )));
-                                    }
+                                let mut t = pending_acks.lock().unwrap();
+                                let mut p = pending_ack_peers.lock().unwrap();
+                                let n = ack_fail_peer(
+                                    &mut t,
+                                    &mut p,
+                                    peer,
+                                    format!("send to {peer} failed: {error:?}"),
+                                );
+                                drop(p);
+                                drop(t);
+                                if n > 0 {
+                                    tracing::debug!(%n, "[swarm] failed {n} chat waiter(s) for {peer}");
                                 }
                                 // Also fail any in-flight blob waiters for this peer.
                                 let mut mb = running.pending_blobs.lock().unwrap();
@@ -1453,28 +1504,24 @@ async fn swarm_loop(
                             }
                             RrMessage::Response { response, .. } => {
                                 tracing::debug!("[swarm] VOICE ACKED id={}", response.id);
-                                if let Some((_peer, tx)) =
-                                    pending_acks.lock().unwrap().remove(&response.id)
-                                {
+                                if let Some(tx) = ack_remove(&mut pending_acks.lock().unwrap(), response.id) {
                                     let _ = tx.send(Ok(()));
                                 }
                             }
                         },
                         RrEvent::OutboundFailure { peer, error, .. } => {
                             tracing::warn!("[swarm] VOICE OUTBOUND FAILED peer={peer} err={error:?}");
-                            let mut m = pending_acks.lock().unwrap();
-                            let ids: Vec<u64> = m
-                                .iter()
-                                .filter(|(_, (p, _))| *p == peer)
-                                .map(|(id, _)| *id)
-                                .collect();
-                            for id in ids {
-                                if let Some((_p, tx)) = m.remove(&id) {
-                                    let _ = tx.send(Err(anyhow::anyhow!(
-                                        "send voice to {peer} failed: {error:?}"
-                                    )));
-                                }
-                            }
+                            let mut t = pending_acks.lock().unwrap();
+                            let mut p = pending_ack_peers.lock().unwrap();
+                            let n = ack_fail_peer(
+                                &mut t,
+                                &mut p,
+                                peer,
+                                format!("send voice to {peer} failed: {error:?}"),
+                            );
+                            drop(p);
+                            drop(t);
+                            tracing::debug!(%n, "[swarm] failed {n} voice waiter(s) for {peer}");
                         }
                         _ => {}
                     },
@@ -1516,28 +1563,24 @@ async fn swarm_loop(
                             }
                             RrMessage::Response { response, .. } => {
                                 tracing::debug!("[swarm] IMAGE ACKED id={}", response.id);
-                                if let Some((_peer, tx)) =
-                                    pending_acks.lock().unwrap().remove(&response.id)
-                                {
+                                if let Some(tx) = ack_remove(&mut pending_acks.lock().unwrap(), response.id) {
                                     let _ = tx.send(Ok(()));
                                 }
                             }
                         },
                         RrEvent::OutboundFailure { peer, error, .. } => {
                             tracing::warn!("[swarm] IMAGE OUTBOUND FAILED peer={peer} err={error:?}");
-                            let mut m = pending_acks.lock().unwrap();
-                            let ids: Vec<u64> = m
-                                .iter()
-                                .filter(|(_, (p, _))| *p == peer)
-                                .map(|(id, _)| *id)
-                                .collect();
-                            for id in ids {
-                                if let Some((_p, tx)) = m.remove(&id) {
-                                    let _ = tx.send(Err(anyhow::anyhow!(
-                                        "send image to {peer} failed: {error:?}"
-                                    )));
-                                }
-                            }
+                            let mut t = pending_acks.lock().unwrap();
+                            let mut p = pending_ack_peers.lock().unwrap();
+                            let n = ack_fail_peer(
+                                &mut t,
+                                &mut p,
+                                peer,
+                                format!("send image to {peer} failed: {error:?}"),
+                            );
+                            drop(p);
+                            drop(t);
+                            tracing::debug!(%n, "[swarm] failed {n} image waiter(s) for {peer}");
                         }
                         _ => {}
                     },
@@ -1561,28 +1604,24 @@ async fn swarm_loop(
                             }
                             RrMessage::Response { response, .. } => {
                                 tracing::debug!("[swarm] FILE ACKED id={}", response.id);
-                                if let Some((_peer, tx)) =
-                                    pending_acks.lock().unwrap().remove(&response.id)
-                                {
+                                if let Some(tx) = ack_remove(&mut pending_acks.lock().unwrap(), response.id) {
                                     let _ = tx.send(Ok(()));
                                 }
                             }
                         },
                         RrEvent::OutboundFailure { peer, error, .. } => {
                             tracing::warn!("[swarm] FILE OUTBOUND FAILED peer={peer} err={error:?}");
-                            let mut m = pending_acks.lock().unwrap();
-                            let ids: Vec<u64> = m
-                                .iter()
-                                .filter(|(_, (p, _))| *p == peer)
-                                .map(|(id, _)| *id)
-                                .collect();
-                            for id in ids {
-                                if let Some((_p, tx)) = m.remove(&id) {
-                                    let _ = tx.send(Err(anyhow::anyhow!(
-                                        "send file to {peer} failed: {error:?}"
-                                    )));
-                                }
-                            }
+                            let mut t = pending_acks.lock().unwrap();
+                            let mut p = pending_ack_peers.lock().unwrap();
+                            let n = ack_fail_peer(
+                                &mut t,
+                                &mut p,
+                                peer,
+                                format!("send file to {peer} failed: {error:?}"),
+                            );
+                            drop(p);
+                            drop(t);
+                            tracing::debug!(%n, "[swarm] failed {n} file waiter(s) for {peer}");
                         }
                         _ => {}
                     },
