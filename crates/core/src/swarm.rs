@@ -65,6 +65,17 @@ pub struct Net {
     pub mdns: Mdns,
     pub upnp: Upnp,
     pub relay: libp2p::relay::client::Behaviour,
+    /// `identify` exchanges observed local and external addresses with every
+    /// connected peer on both the direct and relay transports. Critical for
+    /// (a) the §A escalation path (`NewExternalAddrOfPeer` events fire when
+    /// a peer advertises a new direct address) and (b) DCUtR, which needs to
+    /// learn the peer's *observed public address* before it can coordinate
+    /// a simultaneous QUIC open. Without `identify`, a peer on the other side
+    /// of a NAT has no way for us to learn its public endpoint, so the
+    /// relay→direct promotion paths can only fire once a heartbeat re-announce
+    /// lands in the directory — which is why the chat app falls back to the
+    /// relay and stays there.
+    pub identify: libp2p::identify::Behaviour,
     /// DCUtR — coordinates relay→direct hole-punching. Once the relay
     /// circuit is up, `/libp2p/dcutr` runs over it: peers exchange observed
     /// public addresses (CONNECT) and clock offsets (SYNC), then dial each
@@ -587,10 +598,17 @@ pub async fn boot(
         .with_behaviour(move |k, relay| {
             let my_peer = libp2p::PeerId::from_public_key(&k.public());
             let autonat = libp2p::autonat::Behaviour::new(my_peer, autonat_cfg);
+            let identify = libp2p::identify::Behaviour::new(
+                libp2p::identify::Config::new(
+                    "chatx/0.1".into(),
+                    k.public(),
+                ),
+            );
             Net {
             mdns,
             upnp: Upnp::default(),
             relay,
+            identify,
             dcutr: libp2p::dcutr::Behaviour::new(my_peer),
             autonat,
             chat,
@@ -1226,6 +1244,15 @@ async fn swarm_loop(
                     // listener. This surfaces as `ExternalAddrConfirmed` above
                     // (libp2p-swarm aggregates it), so nothing extra to do here.
                     NetEvent::Upnp(_) => {}
+                    // Identify results: address-exchange outcomes. The peer's
+                    // observed listen/external addresses have already been
+                    // folded into our address book by libp2p-swarm (this drives
+                    // the `NewExternalAddrOfPeer` events handled above), so we
+                    // only log here — the §A / DCUtR paths react to the
+                    // address-book changes directly.
+                    NetEvent::Identify(i) => {
+                        tracing::debug!(?i, "[identify] exchange result");
+                    }
                     // Ping success/failure only drives the ping handler's
                     // own connection-drop logic (keep_alive + max_failures);
                     // we don't inspect it here.

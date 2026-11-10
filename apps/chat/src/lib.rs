@@ -2481,6 +2481,7 @@ fn apply_result(
             client.start_presence_loop();
             client.start_notify_pump();
             client.start_dm_redeliver();
+            client.start_upgrade_loop();
             start_group_conn_sweeper();
             // Background sweeper: re-derive the chat status dot every 1.5 s so
             // a peer that goes stale without a `Disconnected` event (remote

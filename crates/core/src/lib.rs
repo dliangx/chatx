@@ -60,6 +60,7 @@ struct LoopsCtl {
     presence_started: std::sync::atomic::AtomicBool,
     notify_started: std::sync::atomic::AtomicBool,
     redeliver_started: std::sync::atomic::AtomicBool,
+    upgrade_started: std::sync::atomic::AtomicBool,
 }
 
 impl LoopsCtl {
@@ -70,6 +71,7 @@ impl LoopsCtl {
             presence_started: AtomicBool::new(false),
             notify_started: AtomicBool::new(false),
             redeliver_started: AtomicBool::new(false),
+            upgrade_started: AtomicBool::new(false),
         }
     }
     fn stopped(&self) -> bool {
@@ -445,6 +447,118 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             return "dialing";
         }
         ""
+    }
+
+    /// Peers currently reachable **only** via a relay circuit: present in
+    /// `link_relay` with a live count, but with zero direct links. These are
+    /// the candidates for relay→direct promotion that [`Self::maybe_upgrade_relays`]
+    /// re-dials (after the §A / DCUtR paths did not already succeed).
+    fn relay_only_peers(&self) -> Vec<PeerId> {
+        let relay = self.running.link_relay.lock().unwrap();
+        let direct = self.running.link_direct.lock().unwrap();
+        relay
+            .iter()
+            .filter(|(peer, n)| **n > 0 && direct.get(peer).copied().unwrap_or(0) == 0)
+            .map(|(peer, _)| *peer)
+            .collect()
+    }
+
+    /// Relay→direct upgrade round: for every peer currently connected only
+    /// through a relay, re-issue a dial on the peer's **direct** (non-circuit)
+    /// endpoints so libp2p re-contends the transport and — if a NAT mapping has
+    /// now opened — promotes the link off the relay. Bounded per peer by a
+    /// 30 s cooldown shared with the §A escalation path (`escalation_last`), so
+    /// a peer we can't reach directly is not hammered on every 10 s tick.
+    ///
+    /// This is the proactive counterpart to the reactive paths that already
+    /// exist: DCUtR (fires when `identify` learns a new public address over the
+    /// circuit) and the §A `NewExternalAddrOfPeer` re-dial. Those only fire on
+    /// *new* address information; this poller covers the case where we already
+    /// have a direct candidate that simply failed before and may succeed now.
+    fn maybe_upgrade_relays(&self) {
+        let candidates = self.relay_only_peers();
+        if candidates.is_empty() {
+            return;
+        }
+        const COOLDOWN_MS: u64 = 30_000;
+        let now = crate::message::now_ms();
+        let last = self.running.escalation_last.lock().unwrap();
+        let due: Vec<PeerId> = candidates
+            .into_iter()
+            .filter(|peer| {
+                last.get(peer).map(|t| now.saturating_sub(*t) >= COOLDOWN_MS).unwrap_or(true)
+            })
+            .collect();
+        drop(last);
+        for peer in due {
+            // Record the attempt (shared cooldown with §A) and clear the backoff
+            // so the dial is actually attempted rather than suppressed.
+            {
+                let mut last = self.running.escalation_last.lock().unwrap();
+                last.insert(peer, now);
+            }
+            self.running.dial_backoff.lock().unwrap().remove(&peer.to_base58());
+            // Re-resolve to get the freshest endpoint set, keep only direct
+            // (non-`/p2p-circuit`) candidates, and fan them out in parallel.
+            let Ok(rec) = self.dir.resolve_device(&peer.to_base58()) else {
+                continue;
+            };
+            let mut direct: Vec<Multiaddr> = Vec::new();
+            for endpoint in &rec.endpoints {
+                let Ok(addr) = endpoint.parse::<Multiaddr>() else {
+                    continue;
+                };
+                // Keep only direct (non-circuit) candidates — that is exactly
+                // the transport we are trying to promote to.
+                if addr
+                    .iter()
+                    .any(|c| matches!(c, libp2p::multiaddr::Protocol::P2pCircuit))
+                {
+                    continue;
+                }
+                if unroutable_reason(&addr).is_some() {
+                    continue;
+                }
+                if !direct.iter().any(|a| a == &addr) {
+                    direct.push(addr);
+                }
+            }
+            if direct.is_empty() {
+                // No (re-)learnable direct candidate — there is nothing to
+                // promote to. The relay link stays; the next tick will try again.
+                continue;
+            }
+            tracing::info!(%peer, n = direct.len(), "[upgrade] relay→direct re-dial");
+            if self
+                .running
+                .cmd_tx
+                .send(Cmd::Dial { peer, addrs: direct })
+                .is_ok()
+            {
+                self.dial_attempted(&peer.to_base58());
+            }
+        }
+    }
+
+    /// Periodic relay→direct upgrade poller. Idempotent per `Client` (latched
+    /// like the other background loops); exits on the next tick after `stop()`.
+    /// Ticks every 10 s and calls [`Self::maybe_upgrade_relays`].
+    pub fn start_upgrade_loop(self: &Arc<Self>) {
+        if !self.loops.try_start(&self.loops.upgrade_started) {
+            return;
+        }
+        let client = self.clone();
+        let _ = std::thread::Builder::new()
+            .name("chatx-upgrade".to_string())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                let stopped = client.is_stopped();
+                client.maybe_upgrade_relays();
+                if stopped {
+                    break;
+                }
+            })
+            .expect("spawn upgrade thread");
     }
 
     /// Run one notice-poll round: block (up to ~50 s) on the long-poll, and
