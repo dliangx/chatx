@@ -3005,6 +3005,23 @@ fn send_chat_voice(
                 None
             }
         };
+        // 2. Optimistic: persist the row NOW (before the wire send) so the
+        //    bubble is visible immediately with a "sending" badge, not behind a
+        //    spinner. Sender MUST be our own peer id: the UI derives `is_self`
+        //    from `sender == me`, and the registry keys badge state by row `t`.
+        let Some(local_path) = local_path else {
+            cs_set_send_status(weak3, "Could not save that voice clip.".to_string());
+            return;
+        };
+        let row_t = c
+            .persist_voice(&chat_id, &me, &local_path, duration_ms)
+            .await;
+        tracing::debug!(
+            "[voice] optimistic persist chat={chat_id} t={row_t} ({} bytes)",
+            data.len()
+        );
+        crate::chat::note_media_sending(&chat_id, row_t);
+        load_chat_messages(weak2.clone(), key);
         let mut last_err = if my_peers.is_empty() {
             "Cannot determine peer".to_string()
         } else {
@@ -3021,14 +3038,11 @@ fn send_chat_voice(
             {
                 Ok(()) => {
                     tracing::debug!("[voice] sent -> {cand}");
-                    if let Some(p) = local_path.as_ref() {
-                        // Sender MUST be our own peer id (mirrors the text
-                        // path, which stores the local peer for outbound DMs):
-                        // the UI derives `is_self` from `sender == me`, so
-                        // recording `cand` (the receiver) would paint our own
-                        // voice bubble on the "other" side.
-                        c.persist_voice(&chat_id, &me, p, duration_ms).await;
-                    }
+                    crate::chat::set_media_state(
+                        &chat_id,
+                        row_t,
+                        crate::chat::SEND_STATE_SENT,
+                    );
                     sent_to = Some(cand.clone());
                     break 'outer;
                 }
@@ -3041,6 +3055,12 @@ fn send_chat_voice(
         let sent = sent_to.is_some();
         if sent {
             touch_chat_activity(&chat_id);
+        } else {
+            crate::chat::set_media_state(
+                &chat_id,
+                row_t,
+                crate::chat::SEND_STATE_FAILED,
+            );
         }
         let msg = if !sent {
             if last_err.trim().is_empty() {
@@ -3051,10 +3071,10 @@ fn send_chat_voice(
         } else {
             String::new()
         };
-        cs_set_send_status(weak3, msg);
-        if sent {
-            load_chat_messages(weak2, key);
+        if !msg.is_empty() {
+            cs_set_send_status(weak3, msg);
         }
+        load_chat_messages(weak2, key);
     });
 }
 
@@ -3433,7 +3453,7 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
             "[chat-image] optimistic persist chat={chat_id} t={row_t} ({} bytes)",
             bytes.len()
         );
-        crate::chat::note_image_sending(&chat_id, row_t);
+        crate::chat::note_media_sending(&chat_id, row_t);
         load_chat_messages(weak2.clone(), key);
         let mut last_err = if my_peers.is_empty() {
             "Cannot determine peer".to_string()
@@ -3451,7 +3471,7 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
                 Ok(_) => {
                     // The only ack we wait on is the peer's, now sent only AFTER
                     // it durably persists the image; reaching here = "sent".
-                    crate::chat::set_image_state(&chat_id, row_t, crate::chat::SEND_STATE_SENT);
+                    crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_SENT);
                     sent = true;
                     tracing::debug!("[chat-image] sent -> {cand}");
                     break 'outer;
@@ -3465,7 +3485,7 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
         if sent {
             touch_chat_activity(&chat_id);
         } else {
-            crate::chat::set_image_state(
+            crate::chat::set_media_state(
                 &chat_id,
                 row_t,
                 crate::chat::SEND_STATE_FAILED,
@@ -3627,6 +3647,18 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
                 return;
             }
         };
+        // 2. Optimistic: persist the row NOW (before the wire send) so the
+        //    bubble is visible immediately with a "sending" badge, not behind a
+        //    spinner (mirrors the image path).
+        let row_t = c
+            .persist_file(&chat_id, &me, &name, &local_path)
+            .await;
+        tracing::debug!(
+            "[chat-file] optimistic persist chat={chat_id} t={row_t} ({} bytes)",
+            bytes.len()
+        );
+        crate::chat::note_media_sending(&chat_id, row_t);
+        load_chat_messages(weak2.clone(), key);
         let mut last_err = if my_peers.is_empty() {
             "Cannot determine peer".to_string()
         } else {
@@ -3639,7 +3671,11 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
             }
             match c.send_file_cmd(cand, name.clone(), bytes.clone()).await {
                 Ok(_) => {
-                    c.persist_file(&chat_id, &me, &name, &local_path).await;
+                    crate::chat::set_media_state(
+                        &chat_id,
+                        row_t,
+                        crate::chat::SEND_STATE_SENT,
+                    );
                     sent = true;
                     tracing::debug!("[chat-file] sent -> {cand}");
                     break 'outer;
@@ -3660,10 +3696,10 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
         } else {
             last_err
         };
-        set_chat_status(weak3, msg.clone());
-        if sent {
-            load_chat_messages(weak2, key);
+        if !msg.is_empty() {
+            set_chat_status(weak3, msg);
         }
+        load_chat_messages(weak2, key);
     });
 }
 
@@ -4611,17 +4647,24 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                     let rows_above = (n.saturating_sub(1).saturating_sub(i)) as f32;
                     let top = PAD + rows_above * GAP + older_sum;
                     let mut md = to_message_data(m, scale, top);
-                    // Stamp the per-row send badge onto self image rows from the
-                    // in-flight registry. A self image NOT in the registry is a
-                    // settled/delivered row -> "sent"; anything in the registry
-                    // (sending / failed) overrides that. Incoming (non-self)
-                    // image rows leave `send_state` at 0 = no badge.
+                    // Stamp the per-row send badge onto self media rows (image /
+                    // voice / file) from the in-flight registry. A self media row
+                    // NOT in the registry is a settled/delivered row -> "sent";
+                    // anything in the registry (sending / failed) overrides that.
+                    // Incoming (non-self) media rows leave `send_state` at 0 =
+                    // no badge.
                     if let Some(src) = rows.get(i) {
-                        if let chatx_core::store::Kind::Image { .. } = &src.kind {
+                        let is_media = matches!(
+                            &src.kind,
+                            chatx_core::store::Kind::Image { .. }
+                                | chatx_core::store::Kind::Voice { .. }
+                                | chatx_core::store::Kind::File { .. }
+                        );
+                        if is_media {
                             let is_self = src.sender == me_peer || src.sender == me;
                             if is_self {
                                 md.send_state =
-                                    match crate::chat::image_state(&chat_id, src.t as i64) {
+                                    match crate::chat::media_state(&chat_id, src.t as i64) {
                                         crate::chat::SEND_STATE_NONE
                                         | crate::chat::SEND_STATE_SENT => {
                                             crate::chat::SEND_STATE_SENT

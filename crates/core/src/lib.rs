@@ -2209,8 +2209,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// Send a voice message to `peer_base58` over the DM channel and wait for
     /// the peer's ack. The clip itself is NOT persisted by core — the caller
     /// is expected to have already written the s16le bytes to a local path and
-    /// will call [`Self::persist_voice`] after a successful ack (mirroring
-    /// `send_dm` + `store.push`).
+    /// to record the row OPTIMISTICALLY via [`Self::persist_voice`] BEFORE the
+    /// wire send (mirroring the image path's `persist_image`), so the bubble
+    /// appears immediately with a send badge.
     pub async fn send_voice_cmd(
         &self,
         peer_base58: &str,
@@ -2289,15 +2290,16 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     /// Record a voice message in the chat store (after the clip is on disk).
+    /// Returns the row's timestamp id so the caller can tag an optimistic
+    /// send badge (mirrors `persist_image`).
     pub async fn persist_voice(
         &self,
         chat_id: &str,
         sender: &str,
         local_path: &str,
         duration_ms: u64,
-    ) {
-        let _ = self
-            .store
+    ) -> i64 {
+        self.store
             .push(
                 chat_id,
                 sender,
@@ -2308,7 +2310,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     duration_ms,
                 },
             )
-            .await;
+            .await
     }
 
     /// Record a photo in the chat store (after the image is on disk). Returns
@@ -2327,9 +2329,17 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .await
     }
 
-    pub async fn persist_file(&self, chat_id: &str, sender: &str, name: &str, local_path: &str) {
-        let _ = self
-            .store
+    /// Record a file message in the chat store (after the file is on disk).
+    /// Returns the row's timestamp id so the caller can tag an optimistic
+    /// send badge (mirrors `persist_image`).
+    pub async fn persist_file(
+        &self,
+        chat_id: &str,
+        sender: &str,
+        name: &str,
+        local_path: &str,
+    ) -> i64 {
+        self.store
             .push(
                 chat_id,
                 sender,
@@ -2340,7 +2350,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     name: name.to_string(),
                 },
             )
-            .await;
+            .await
     }
 
     pub async fn send_image_cmd(&self, peer_base58: &str, data: Vec<u8>) -> anyhow::Result<()> {
@@ -2421,7 +2431,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok(())
     }
 
-    /// Send a document file (pdf/docx/xlsx/pptx) to `peer_base58` over the DM channel and wait for the peer's ack; the caller writes `data` locally first and calls [`Self::persist_file`] after ack (mirrors `send_image_cmd` + `persist_image`).
+    /// Send a document file (pdf/docx/xlsx/pptx) to `peer_base58` over the DM channel and wait for the peer's ack; the caller writes `data` locally first and records the row OPTIMISTICALLY via [`Self::persist_file`] BEFORE the wire send (mirrors `persist_image`), so the bubble appears immediately with a send badge.
     pub async fn send_file_cmd(
         &self,
         peer_base58: &str,
