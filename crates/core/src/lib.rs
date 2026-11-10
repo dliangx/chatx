@@ -542,7 +542,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
     /// Periodic relay→direct upgrade poller. Idempotent per `Client` (latched
     /// like the other background loops); exits on the next tick after `stop()`.
-    /// Ticks every 10 s and calls [`Self::maybe_upgrade_relays`].
+    /// Ticks every 10 s and calls [`Self::maybe_upgrade_relays`] (relay→direct
+    /// promotion) plus [`Self::reserve_relays`].
     pub fn start_upgrade_loop(self: &Arc<Self>) {
         if !self.loops.try_start(&self.loops.upgrade_started) {
             return;
@@ -554,6 +555,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 std::thread::sleep(std::time::Duration::from_secs(10));
                 let stopped = client.is_stopped();
                 client.maybe_upgrade_relays();
+                // Re-seat the relay circuit if it lapsed (relay server restart,
+                // reservation TTL expiry, tunnel drop). No-op in steady state —
+                // `reserve_relays` returns immediately when a `/p2p-circuit`
+                // listener is up — so this is an O(listeners) check plus the
+                // occasional `Cmd::ReserveRelay` when one is genuinely missing.
+                // Without this, a dropped reservation silently loses the
+                // guaranteed path until the next `reconnect_groups`.
+                client.reserve_relays();
                 if stopped {
                     break;
                 }
