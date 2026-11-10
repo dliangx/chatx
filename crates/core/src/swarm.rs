@@ -226,6 +226,16 @@ pub enum Cmd {
         peer: PeerId,
         addr: Multiaddr,
     },
+    /// Register every candidate address for a peer and issue a single
+    /// `swarm.dial(peer)`; libp2p then dials the candidates **in parallel**
+    /// (multi-addr failover) and reports `ConnectionEstablished` for whichever
+    /// one wins. Used by the DM send path so the worst case is one dial+send
+    /// window (~6 + 8 s) instead of N×(dial+send) windows as when callers
+    /// used to issue `Connect` + `SendText` per candidate address.
+    Dial {
+        peer: PeerId,
+        addrs: Vec<Multiaddr>,
+    },
     SendText {
         peer: PeerId,
         from: String,
@@ -737,6 +747,41 @@ async fn swarm_loop(
                             .unwrap()
                             .remove(&peer.to_base58());
                         swarm.add_peer_address(peer, addr.clone());
+                        running.dialing.lock().unwrap().insert(peer);
+                        let _ = swarm.dial(peer);
+                        let _ = ev.send(ChatEvent::Dialing(peer));
+                    }
+                }
+                Some(Cmd::Dial { peer, addrs }) => {
+                        if peer == *swarm.local_peer_id() {
+                            tracing::debug!("[swarm] DIAL SKIPPED self peer={peer} ({} addrs)", addrs.len());
+                    } else {
+                        // Filter out our own listen / sibling addresses so a
+                        // stale directory entry never produces a self-dial.
+                        let foreign: Vec<Multiaddr> = addrs
+                            .into_iter()
+                            .filter(|a| !is_own_address(a, &running))
+                            .collect();
+                        if foreign.is_empty() {
+                            tracing::warn!(
+                                %peer,
+                                "[swarm] DIAL all candidates self/loopback; skipping"
+                            );
+                            continue;
+                        }
+                        tracing::debug!(
+                            %peer,
+                            n = foreign.len(),
+                            "[swarm] DIAL fan-out (parallel)"
+                        );
+                        running
+                            .dial_backoff
+                            .lock()
+                            .unwrap()
+                            .remove(&peer.to_base58());
+                        for a in &foreign {
+                            swarm.add_peer_address(peer, a.clone());
+                        }
                         running.dialing.lock().unwrap().insert(peer);
                         let _ = swarm.dial(peer);
                         let _ = ev.send(ChatEvent::Dialing(peer));

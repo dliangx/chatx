@@ -2048,6 +2048,50 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
     }
 
+    /// Dial `peer` with every candidate address **in parallel** (libp2p's
+    /// multi-addr failover) and await up to `wait` for the connection to come
+    /// up. Returns `true` when at least one link is established. Used by
+    /// `try_send_dm_once` round 1 / 2 in place of the old serial
+    /// `Connect` + `SendText` loop, which blocked for up to N×(dial+send)
+    /// windows.
+    ///
+    /// The wait is a polling loop on the `connected` map (cheap: a single
+    /// mutex read per 50 ms); libp2p's actual dial fan-out is already
+    /// running independently on the swarm's own task.
+    async fn dial_and_wait(
+        &self,
+        peer: &PeerId,
+        addrs: Vec<Multiaddr>,
+        wait: std::time::Duration,
+    ) -> bool {
+        if self.peer_connected(peer) {
+            return true;
+        }
+        if addrs.is_empty() {
+            return false;
+        }
+        if let Err(e) = self.running.cmd_tx.send(Cmd::Dial {
+            peer: *peer,
+            addrs,
+        }) {
+            tracing::warn!(%peer, err = %e, "[dm] Cmd::Dial dropped (channel closed)");
+            return false;
+        }
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            if self.peer_connected(peer) {
+                return true;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return self.peer_connected(peer);
+            }
+            let remaining = deadline - now;
+            let poll = std::time::Duration::from_millis(50).min(remaining);
+            tokio::time::sleep(poll).await;
+        }
+    }
+
     /// Live dial attempt (round 1 = all endpoints, round 2 = wake + retry).
     /// Returns `Ok(())` on peer ack or `Err(last_err_description)`. Does NOT
     /// touch the local message row or queue — that's the caller's job so
@@ -2092,65 +2136,47 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
         let from = self.peer_base58();
         let e2e = self.e2e_public().to_string();
-        let timeout = std::time::Duration::from_secs(8);
+        let send_timeout = std::time::Duration::from_secs(8);
+        let dial_wait = sw::DIAL_BACKOFF_DUR;
 
-        // Round 1: try every dialable endpoint. Track the last error for
-        // diagnostics.
         let mut last_err = String::new();
-        for addr in &candidates {
-            tracing::debug!("[dm] attempting send -> {addr}");
-            if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
-                peer: peer.clone(),
-                addr: addr.clone(),
-            }) {
-                last_err = format!("cmd channel closed: {e}");
-                continue;
-            }
-            let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
-            let sent_cmd = self.running.cmd_tx.send(Cmd::SendText {
-                peer: peer.clone(),
-                from: from.clone(),
-                e2e: e2e.clone(),
-                text: text.to_string(),
-                ack_tx: Some(tx),
-                client_id: Some(client_id),
-            });
-            if let Err(e) = sent_cmd {
-                last_err = format!("cmd channel closed: {e}");
-                continue;
-            }
-            match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(Ok(()))) => {
+
+        // Round 1: fan out every candidate address in parallel (`Cmd::Dial` →
+        // `swarm.add_peer_address` × N + one `swarm.dial(peer)`), wait up to
+        // `dial_wait` for any one to come up, then issue a single
+        // `Cmd::SendText` and wait once for the ack. Worst case is one
+        // (dial + send) window (~14 s) regardless of how many candidate
+        // endpoints the directory knows — contrast with the old per-address
+        // Connect+SendText loop, which blocked for N×(dial+send) windows.
+        if self.dial_and_wait(&peer, candidates.clone(), dial_wait).await {
+            match self.send_with_ack(&peer, &from, &e2e, text, client_id, send_timeout).await {
+                Ok(()) => {
                     tracing::info!(
-                        path = classify_transport(addr),
-                        "[dm] send delivered via {addr}"
+                        n = candidates.len(),
+                        "[dm] send delivered (parallel fan-out)"
                     );
                     return Ok(());
                 }
-                Ok(Ok(Err(e))) => {
-                    tracing::warn!("[dm] send to {addr} failed: {e}");
-                    last_err = e.to_string();
-                }
-                Ok(Err(_)) => {
-                    last_err = "peer connection dropped before ack".to_string();
-                }
-                Err(_) => {
-                    tracing::warn!("[dm] no ack from {addr} within {timeout:?}");
-                    last_err = format!(
-                        "no ack from peer within {timeout_secs}s",
-                        timeout_secs = timeout.as_secs()
-                    );
+                Err(e) => {
+                    last_err = e;
                 }
             }
+        } else {
+            last_err = format!(
+                "no candidate dial connected to {peer_base58} within {} s ({} candidates)",
+                dial_wait.as_secs(),
+                candidates.len()
+            );
         }
 
         // Round 2: hole-punch. Ask the directory to poke the peer, wait a
-        // short window for it to be woken and dial us back, then retry with
-        // a fresh endpoint list. Without this the message is lost because
-        // libp2p request-response doesn't buffer in-flight messages.
+        // short window for it to be woken and dial us back, then re-resolve
+        // the candidates and fan out again. Without this the message is lost
+        // because libp2p request-response doesn't buffer in-flight messages.
         if self.wake_peer(peer_base58) {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             if let Ok(rec2) = self.dir.resolve_device(peer_base58) {
+                let mut fresh: Vec<Multiaddr> = Vec::new();
                 for endpoint in &rec2.endpoints {
                     let Ok(addr) = endpoint.parse::<Multiaddr>() else {
                         continue;
@@ -2159,51 +2185,72 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         tracing::debug!("[dm] retry: skip unroutable ({reason}): {addr}");
                         continue;
                     }
-                    tracing::debug!("[dm] retry (post-wake) -> {addr}");
-                    if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
-                        peer: peer.clone(),
-                        addr: addr.clone(),
-                    }) {
-                        last_err = format!("cmd channel closed: {e}");
-                        continue;
-                    }
-                    let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
-                    let sent_cmd = self.running.cmd_tx.send(Cmd::SendText {
-                        peer: peer.clone(),
-                        from: from.clone(),
-                        e2e: e2e.clone(),
-                        text: text.to_string(),
-                        ack_tx: Some(tx),
-                        client_id: Some(client_id),
-                    });
-                    if let Err(e) = sent_cmd {
-                        last_err = format!("cmd channel closed: {e}");
-                        continue;
-                    }
-                    match tokio::time::timeout(timeout, rx).await {
-                        Ok(Ok(Ok(()))) => {
-                            tracing::info!(
-                                path = classify_transport(&addr),
-                                "[dm] retry delivered via {addr}"
-                            );
-                            return Ok(());
-                        }
-                        Ok(Ok(Err(e))) => {
-                            tracing::warn!("[dm] retry send to {addr} failed: {e}");
-                            last_err = e.to_string();
-                        }
-                        Ok(Err(_)) => {
-                            last_err = "peer connection dropped before ack".to_string();
-                        }
-                        Err(_) => {
-                            last_err =
-                                format!("no ack from peer within {}s (retry)", timeout.as_secs());
-                        }
+                    if !fresh.iter().any(|a| a == &addr) {
+                        fresh.push(addr);
                     }
                 }
+                if fresh.is_empty() {
+                    last_err = format!(
+                        "no dialable endpoints after wake for {peer_base58}"
+                    );
+                } else if self.dial_and_wait(&peer, fresh, dial_wait).await {
+                    match self
+                        .send_with_ack(&peer, &from, &e2e, text, client_id, send_timeout)
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!("[dm] retry delivered (post-wake fan-out)");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            last_err = e;
+                        }
+                    }
+                } else {
+                    last_err = format!(
+                        "post-wake dial did not connect to {peer_base58} within {} s",
+                        dial_wait.as_secs()
+                    );
+                }
+            } else {
+                last_err = format!("cannot re-resolve {peer_base58} after wake");
             }
         }
         Err(format!("failed to deliver to {peer_base58}: {last_err}"))
+    }
+
+    /// Issue a single `Cmd::SendText` on a (presumed) live connection to
+    /// `peer` and await up to `timeout` for the receiver's ack. Returns
+    /// `Ok(())` on peer ack.
+    async fn send_with_ack(
+        &self,
+        peer: &PeerId,
+        from: &str,
+        e2e: &str,
+        text: &str,
+        client_id: u64,
+        timeout: std::time::Duration,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+        if let Err(e) = self.running.cmd_tx.send(Cmd::SendText {
+            peer: *peer,
+            from: from.to_string(),
+            e2e: e2e.to_string(),
+            text: text.to_string(),
+            ack_tx: Some(tx),
+            client_id: Some(client_id),
+        }) {
+            return Err(format!("cmd channel closed: {e}"));
+        }
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(e.to_string()),
+            Ok(Err(_)) => Err("peer connection dropped before ack".into()),
+            Err(_) => Err(format!(
+                "no ack from peer within {}s",
+                timeout.as_secs()
+            )),
+        }
     }
 
     /// Send a voice message to `peer_base58` over the DM channel and wait for
