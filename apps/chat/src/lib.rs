@@ -8699,6 +8699,15 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
             "[chat] open_conversation: eventloop cb publish_chat_rows done, calling load_chat_messages"
         );
         load_chat_messages(ui.as_weak(), new_key);
+        // Keep `current-chat-key` + group-ness in sync (this entry navigates
+        // directly from profile, bypassing the Slint `push-sub` callback that
+        // sets them). Without this, `refresh_chat_conn` reads a stale key and
+        // paints the header dot from the *previous* chat (or red) until the
+        // user re-clicks the row. Mirror `on_push_sub`(SubPageType::ChatRoom).
+        state.set_current_chat_peer_key(chat_key_to_contact_key(new_key));
+        state.set_current_chat_key(new_key);
+        state.set_current_chat_is_group(false);
+        refresh_chat_conn(&ui);
         tracing::debug!(
             "[chat] open_conversation: eventloop cb load_chat_messages spawned, calling push_sub_history"
         );
