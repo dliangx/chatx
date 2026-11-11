@@ -1875,6 +1875,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         self.dir.list_users(self.device.peer_base58())
     }
 
+    pub fn list_user_devices(&self, user_id: &str) -> Vec<DeviceRecord> {
+        self.dir.list_devices(user_id)
+    }
+
     pub fn my_devices(&self) -> Vec<DeviceRecord> {
         self.dir.list_devices(self.account.user_id())
     }
@@ -3173,14 +3177,33 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok(g)
     }
 
-    pub fn add_member(&self, group_id: &str, info: MemberInfo) -> anyhow::Result<()> {
+    pub fn add_member(self: &Arc<Self>, group_id: &str, info: MemberInfo) -> anyhow::Result<()> {
+        self.add_members(group_id, vec![info])
+    }
+
+    /// Add one or several members at once and publish/announce the group key
+    /// **once** (not once per member). Multi-device users arrive here as one
+    /// call with several `MemberInfo`s sharing the same account keys; this
+    /// avoids N broadcast rounds of `publish_group_key` plus N redundant
+    /// `Dial` attempts on the swarm loop when the app fans out a contact's
+    /// approved devices.
+    pub fn add_members(
+        self: &Arc<Self>,
+        group_id: &str,
+        infos: Vec<MemberInfo>,
+    ) -> anyhow::Result<()> {
+        if infos.is_empty() {
+            return Ok(());
+        }
         let mut g = self
             .groups
             .write()
             .get_mut(group_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
-        g.set_member(info.clone());
+        for m in &infos {
+            g.set_member(m.clone());
+        }
         self.save_group(&g)?;
         let mode = g.mode;
         drop(g);
@@ -3191,11 +3214,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?
                 .secret();
             let me = self.peer_base58();
-            if !info.peer_id.is_empty() && info.peer_id != me {
+            let my_e2e = self.e2e_public().to_string();
+            for info in &infos {
+                if info.peer_id.is_empty() || info.peer_id == me {
+                    continue;
+                }
                 let bundle = group::seal_secret(&self.account, &info.e2e_public, &secret)
                     .map_err(|e| anyhow::anyhow!("seal key: {e}"))?;
                 let sealed = crate::account::b64(&bundle);
-                let my_e2e = self.e2e_public().to_string();
                 self.dir
                     .put_group_key_slot(group_id, &info.peer_id, &my_e2e, &sealed)?;
             }
@@ -3209,13 +3235,13 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 group_id: group_id.into(),
             })
             .map_err(|e| anyhow::anyhow!("GroupSubscribe cmd failed: {e}"))?;
-        if !info.peer_id.is_empty() && info.peer_id != self.peer_base58() {
+        if infos.iter().any(|i| !i.peer_id.is_empty() && i.peer_id != self.peer_base58()) {
             self.publish_group_key(group_id)?;
         }
         Ok(())
     }
 
-    pub fn rotate_group(&self, group_id: &str) -> anyhow::Result<group::Group> {
+    pub fn rotate_group(self: &Arc<Self>, group_id: &str) -> anyhow::Result<group::Group> {
         let mut g = self
             .groups
             .read()
@@ -3524,55 +3550,247 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         Ok(pubinfo)
     }
 
-    pub fn publish_group_key(&self, group_id: &str) -> anyhow::Result<usize> {
+    /// Publish the group key to every other member. Spawned onto a
+    /// background thread (like `start_dm_redeliver`) because every known
+    /// caller (create_group_flow, add_members, rotate_group) is sync and runs
+    /// on the Slint/UI thread or a bare thread where `Handle::current()` may
+    /// not exist. Takes `self: &Arc<Self>` so we can move an `Arc` clone into
+    /// the worker; callers that already hold the client in an `Arc`
+    /// (the app's `CLIENT: Mutex<Option<Arc<Client<Directory>>>) pay no
+    /// extra cost (the clone is just a ref-count bump — all the
+    /// `Arc<D>`/`Arc<Running>`/`Arc<Store>` internals are shared).
+    ///
+    /// The old implementation was strictly fire-and-forget: it enqueued
+    /// `Cmd::Dial` and then `Cmd::GroupKeyDirect` back-to-back into the same
+    /// mpsc, and the swarm handler called `send_request` *before* the dial
+    /// had completed — the request was dropped by libp2p and the invite never
+    /// arrived at any device that wasn't already connected (the "one client
+    /// of the same user misses the group" symptom). This new path
+    /// (`deliver_group_key_all` → `deliver_group_key`) dials, awaits the link,
+    /// then awaits the peer's `ChatResponse`, and retries a second round after
+    /// asking the directory to wake the peer if round 1 missed.
+    pub fn publish_group_key(self: &Arc<Self>, group_id: &str) -> anyhow::Result<usize> {
         let g = self
             .get_group(group_id)
             .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
         let me = self.peer_base58();
-        let my_e2e = self.e2e_public().to_string();
+        let members = g
+            .member_ids()
+            .into_iter()
+            .filter(|p| p != &me)
+            .collect::<Vec<_>>();
+        if members.is_empty() {
+            return Ok(0);
+        }
+        let client = Arc::clone(self);
+        let gid_owned = group_id.to_string();
+        let members_owned = members.clone();
+        let thread_name = format!("chatx-group-key-{gid_owned}");
+        std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build group-key delivery runtime");
+                let n = rt
+                    .block_on(client.deliver_group_key_all(&gid_owned, &members_owned))
+                    .unwrap_or(0);
+                let total = members_owned.len();
+                if n < total {
+                    tracing::warn!(
+                        group = %gid_owned,
+                        delivered = n,
+                        attempted = total,
+                        "group-key publish: some members did not ack"
+                    );
+                }
+            })
+            .expect("spawn group-key delivery thread");
+        Ok(members.len())
+    }
+
+    /// Async version: deliver `group_id`'s key to every member in `members`
+    /// (skipping self; caller filters), in parallel. Each delivery is
+    /// idempotent on the receiver — `apply_inbound::GroupKey` derives the
+    /// `Group` from `resolve_group` + `open_secret`, both pure of prior
+    /// state — so a redelivery of the same bundle to the same peer is
+    /// harmless.
+    pub async fn deliver_group_key_all(
+        &self,
+        group_id: &str,
+        members: &[String],
+    ) -> anyhow::Result<usize> {
+        let g = self
+            .get_group(group_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        let me = self.peer_base58();
         let secret = g.secret();
-        let mut sent = 0;
-        for peer in g.member_ids() {
-            if peer == me {
+        // Pre-compute the sealed bundle per member synchronously (it's fast
+        // and pure — X25519+AES-GCM); the async work is dial+ack only.
+        let mut jobs: Vec<(PeerId, String)> = Vec::new();
+        for peer in members {
+            if peer == &me {
                 continue;
             }
-            let their_e2e = match g.member(&peer) {
+            let their_e2e = match g.member(peer) {
                 Some(mi) => mi.e2e_public.clone(),
                 None => continue,
             };
-            let bundle = group::seal_secret(self.account(), &their_e2e, &secret)
-                .map_err(|e| anyhow::anyhow!("seal key: {e}"))?;
+            let bundle =
+                group::seal_secret(self.account(), &their_e2e, &secret)
+                    .map_err(|e| anyhow::anyhow!("seal key: {e}"))?;
             let sealed = crate::account::b64(&bundle);
             let pid = match peer.parse::<PeerId>() {
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            if let Ok(rec) = self.dir.resolve_device(&peer) {
-                if let Some(endpoint) = rec.endpoints.first() {
-                    if let Ok(addr) = endpoint.parse::<Multiaddr>() {
-                        let _ = self.running.cmd_tx.send(Cmd::Connect {
-                            peer: pid.clone(),
-                            addr,
-                        });
-                    }
-                }
-            }
-            if self
-                .running
-                .cmd_tx
-                .send(Cmd::GroupKeyDirect {
-                    peer: pid,
-                    from: me.clone(),
-                    e2e: my_e2e.clone(),
-                    group_id: group_id.into(),
-                    sealed,
-                })
-                .is_ok()
-            {
-                sent += 1;
+            jobs.push((pid, sealed));
+        }
+        // Sequential delivery per member. We're inside a dedicated worker
+        // runtime thread (not the app's main runtime), so awaiting is safe
+        // and cheap. Worst case per peer is ~(dial + send) ≈ 14 s; a fresh
+        // group has 2–15 members, so the user-visible latency of the whole
+        // publish is bounded by ~15 × 14 s. In practice most members are
+        // already connected (the app dialed them at login) and land in the
+        // 8 s fast-path. If you later want parallel delivery, swap the loop
+        // for `futures::join_all` (the crate is not yet a workspace dep).
+        let mut delivered = 0usize;
+        for (pid, sealed) in jobs {
+            let peer_b58 = pid.to_string();
+            if self.deliver_group_key(group_id, &peer_b58, pid, sealed).await? {
+                delivered += 1;
             }
         }
-        Ok(sent)
+        Ok(delivered)
+    }
+
+    /// Deliver `group`'s key to one `peer`, awaiting dial + ACK. Mirrors
+    /// `try_send_dm_once`: round 1 = parallel dial of every candidate address
+    /// (or the live link when already connected), round 2 = wake + retry via
+    /// the directory. A failed delivery is logged but not fatal — the caller
+    /// can retry on the next rotate/refresh, and the receiver is idempotent,
+    /// so a redelivery is safe.
+    async fn deliver_group_key(
+        &self,
+        group_id: &str,
+        peer_base58: &str,
+        peer: PeerId,
+        sealed: String,
+    ) -> anyhow::Result<bool> {
+        let from = self.peer_base58();
+        let e2e = self.e2e_public().to_string();
+        let send_timeout = std::time::Duration::from_secs(8);
+        let dial_wait = sw::DIAL_BACKOFF_DUR;
+
+        if !self.peer_connected(&peer) {
+            let rec = match self.dir.resolve_device(peer_base58) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        peer = peer_base58,
+                        group = group_id,
+                        "group-key deliver: device not in directory: {e}"
+                    );
+                    return Ok(false);
+                }
+            };
+            let mut addrs = Vec::new();
+            for ep in &rec.endpoints {
+                let Ok(addr) = ep.parse::<Multiaddr>() else {
+                    continue;
+                };
+                if let Some(reason) = unroutable_reason(&addr) {
+                    tracing::debug!(peer = peer_base58, skip = %reason, "group-key deliver");
+                    continue;
+                }
+                if !addrs.iter().any(|a| a == &addr) {
+                    addrs.push(addr);
+                }
+            }
+            if addrs.is_empty() {
+                tracing::warn!(peer = peer_base58, "group-key deliver: no dialable endpoint");
+                return Ok(false);
+            }
+            if !self.dial_and_wait(&peer, addrs, dial_wait).await {
+                tracing::warn!(
+                    peer = peer_base58,
+                    group = group_id,
+                    "group-key deliver: dial did not connect in {}s",
+                    dial_wait.as_secs()
+                );
+                // Round 2: ask the directory to wake the peer, re-resolve, retry.
+                if self.wake_peer(peer_base58) {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    if let Ok(rec2) = self.dir.resolve_device(peer_base58) {
+                        let mut fresh = Vec::new();
+                        for ep in &rec2.endpoints {
+                            let Ok(addr) = ep.parse::<Multiaddr>() else {
+                                continue;
+                            };
+                            if unroutable_reason(&addr).is_some() {
+                                continue;
+                            }
+                            if !fresh.iter().any(|a| a == &addr) {
+                                fresh.push(addr);
+                            }
+                        }
+                        if !fresh.is_empty() && self.dial_and_wait(&peer, fresh, dial_wait).await {
+                            // fall through to send-with-ack below
+                        } else {
+                            tracing::warn!(
+                                peer = peer_base58,
+                                group = group_id,
+                                "group-key deliver: post-wake dial did not connect"
+                            );
+                            return Ok(false);
+                        }
+                    } else {
+                        tracing::warn!(
+                            peer = peer_base58,
+                            group = group_id,
+                            "group-key deliver: cannot re-resolve after wake"
+                        );
+                        return Ok(false);
+                    }
+                } else {
+                    return Ok(false);
+                }
+            }
+        }
+        // Link is established (or was): send the key on the request/response
+        // channel and await the peer's ACK before declaring it delivered.
+        let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+        if let Err(e) = self.running.cmd_tx.send(Cmd::GroupKeyDirect {
+            peer,
+            from,
+            e2e,
+            group_id: group_id.to_string(),
+            sealed,
+            ack_tx: Some(tx),
+        }) {
+            tracing::warn!(peer = peer_base58, group = group_id, "cmd channel closed: {e}");
+            return Ok(false);
+        }
+        match tokio::time::timeout(send_timeout, rx).await {
+            Ok(Ok(Ok(()))) => {
+                tracing::info!(peer = peer_base58, group = group_id, "group key delivered (ack)");
+                Ok(true)
+            }
+            Ok(Ok(Err(e))) => {
+                tracing::warn!(peer = peer_base58, group = group_id, ack_err = %e, "group key not acked");
+                Ok(false)
+            }
+            Ok(Err(_)) => {
+                // The waiter was dropped (e.g. peer disconnected before ack).
+                tracing::warn!(peer = peer_base58, group = group_id, "group key: peer dropped before ack");
+                Ok(false)
+            }
+            Err(_) => {
+                tracing::warn!(peer = peer_base58, group = group_id, "group key: no ack within {}s", send_timeout.as_secs());
+                Ok(false)
+            }
+        }
     }
 
     fn p2p_all_peers_offline(&self, group_id: &str) -> bool {
@@ -3924,13 +4142,33 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         Some(chat)
                     }
                     _ => {
-                        if let Ok(Some(r)) = self.apply_inbound(&req).await {
-                            match r {
+                        match self.apply_inbound(&req).await {
+                            Ok(Some(r)) => match r {
                                 InboundGroup::Key { group_id } => Some(group_id),
                                 InboundGroup::Message { group_id, .. } => Some(group_id),
+                            },
+                            Ok(None) => None,
+                            // The swarm already sent the ACK to the sender before
+                            // we got here (`swarm.rs:1437` — `send_response` fires
+                            // on receipt, not on successful apply). So if apply
+                            // fails, the sender's console shows "delivered" while
+                            // this device never creates the group row / never
+                            // subscribes to the gossip topic — exactly the "I'm a
+                            // member, I got the key, but I can't see messages"
+                            // symptom users report for multi-device group joins.
+                            // Log the full error so operators can distinguish
+                            // transient (directory 404 / resolve_group timeout
+                            // while the owner's announce is still propagating)
+                            // from permanent (corrupt bundle, missing e2e key).
+                            Err(e) => {
+                                tracing::warn!(
+                                    kind = ?req.kind,
+                                    group_id = %req.group_id.as_deref().unwrap_or("<none>"),
+                                    error = %e,
+                                    "apply_inbound failed — sender already ACKed"
+                                );
+                                None
                             }
-                        } else {
-                            None
                         }
                     }
                 }

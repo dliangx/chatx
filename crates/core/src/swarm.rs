@@ -360,6 +360,13 @@ pub enum Cmd {
         e2e: String,
         group_id: String,
         sealed: String,
+        /// Optional ack waiter. When set, the `Response` for our request id
+        /// resolves this on the libp2p request/response channel (same mechanism
+        /// as `Cmd::SendText`). Needed so the group-key inviter can wait for
+        /// the recipient to actually receive the invite — the pre-fix
+        /// fire-and-forget race against `Cmd::Dial` meant a device that hadn't
+        /// finished dialing yet silently lost the invite.
+        ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
     },
     GroupSubscribe {
         group_id: String,
@@ -636,6 +643,13 @@ pub async fn boot(
         // this check) — disable the connected-peer path so we don't turn
         // every DM into an auto-nat dial-back request.
         use_connected: false,
+        // We have exactly one probe server (the relay). The default
+        // `throttle_server_period` (90s) is longer than `retry_interval` (30s),
+        // so after every successful probe the sole server sits in the
+        // throttled list for the whole retry window and the next two probes
+        // report `OutboundProbeError::NoServer`. Keep the throttle well below
+        // `retry_interval` so the relay is always eligible when we probe.
+        throttle_server_period: std::time::Duration::from_secs(10),
         ..libp2p::autonat::Config::default()
     };
     let mut swarm = SwarmBuilder::with_existing_identity(device.keypair())
@@ -1046,8 +1060,14 @@ async fn swarm_loop(
                     e2e,
                     group_id,
                     sealed,
+                    ack_tx,
                 }) => {
                     let id: u64 = rand::random();
+                    if let Some(tx) = ack_tx {
+                        let mut t = pending_acks.lock().unwrap();
+                        let mut p = pending_ack_peers.lock().unwrap();
+                        ack_register(&mut t, &mut p, peer, id, tx);
+                    }
                     let req = ChatRequest {
                         id,
                         from,
@@ -1087,6 +1107,19 @@ async fn swarm_loop(
                     swarm.add_peer_address(relay_peer, relay_addr.clone());
                     if let Err(e) = swarm.listen_on(circuit.clone()) {
                         tracing::warn!(%relay_peer, %circuit, "reserve relay: {e}");
+                    }
+                    // Also register as an AutoNAT probe server.  Without this,
+                    // relays discovered via `discover_relays()` (directory
+                    // lookup) are never added to the AutoNAT server list, so
+                    // every probe fires and gets `NoServer`.
+                    let has_ip = relay_addr.iter().any(|c| matches!(
+                        c,
+                        libp2p::multiaddr::Protocol::Ip4(_) | libp2p::multiaddr::Protocol::Ip6(_)
+                    ));
+                    if has_ip {
+                        swarm.behaviour_mut().autonat.add_server(relay_peer, Some(relay_addr));
+                    } else {
+                        swarm.behaviour_mut().autonat.add_server(relay_peer, None);
                     }
                 }
                 Some(Cmd::Disconnect { peer }) => {

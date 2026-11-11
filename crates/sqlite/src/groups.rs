@@ -33,7 +33,7 @@ pub async fn create(pool: &Pool, id: i64, name: &str, owner_id: i64, avatar_path
     {
         sqlx::query(
             "INSERT INTO groups (id, name, avatar_path, owner_id, created_at, member_count, last_sync_seq)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, 0)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0)
              ON CONFLICT(id) DO UPDATE SET name = ?2, owner_id = ?4",
         )
         .bind(id)
@@ -43,7 +43,6 @@ pub async fn create(pool: &Pool, id: i64, name: &str, owner_id: i64, avatar_path
         .bind(now)
         .execute(trans.as_mut())
         .await?;
-        upsert_member(trans.as_mut(), id, &format!("{owner_id}"), ROLE_OWNER).await?;
     }
     trans.commit().await?;
     Ok(())
@@ -292,8 +291,15 @@ mod tests {
         create(&pool, 1, "Test Group", 100, None).await.unwrap();
         let g = get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(g.owner_id, 100);
+        assert_eq!(g.member_count, 0, "create no longer seeds a member row");
+
+        // Owner is added as a member explicitly (all other callers do this too).
+        add_member(&pool, 1, "me-peer", ROLE_OWNER).await.unwrap();
+        let g = get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(g.member_count, 1, "creator is the initial owner member");
-        assert!(is_member(&pool, 1, "100").await.unwrap());
+        assert!(is_member(&pool, 1, "me-peer").await.unwrap());
+        // The owner's integer id must NOT leak in as a bogus peer_id.
+        assert!(!is_member(&pool, 1, "100").await.unwrap());
 
         add_member(&pool, 1, "alice", ROLE_MEMBER).await.unwrap();
         add_member(&pool, 1, "bob", ROLE_ADMIN).await.unwrap();

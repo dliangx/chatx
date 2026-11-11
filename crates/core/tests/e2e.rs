@@ -207,6 +207,7 @@ async fn member_receives_group_key_and_msg() {
     let (alice_c, _) = Client::bootstrap_in(base.path(), "mow", "alice", "p", dir_a.clone())
         .await
         .unwrap();
+    let alice_c = std::sync::Arc::new(alice_c);
     let (bob_c, _) = Client::bootstrap_in(base.path(), "memb", "bob", "p", dir_b.clone())
         .await
         .unwrap();
@@ -395,6 +396,7 @@ async fn client_group_flow() {
     let (c1b, _) = Client::bootstrap_in(base.path(), "gowner", "alice", "pass", dir1.clone())
         .await
         .expect("bootstrap owner again");
+    let c1b = std::sync::Arc::new(c1b);
     let g2 = c1b
         .get_group(gid)
         .expect("same group should be loaded after restart");
@@ -591,6 +593,7 @@ async fn group_messages_flow_over_gossipsub() {
     let (alice, _) = Client::bootstrap_in(base.path(), "fa", "alice", "p", dir_a.clone())
         .await
         .expect("bootstrap alice");
+    let alice = std::sync::Arc::new(alice);
 
     let (mut bob, _) = Client::bootstrap_in(base.path(), "fb", "bob", "p", dir_b.clone())
         .await
@@ -701,6 +704,7 @@ async fn add_member_receives_group_key() {
     let (alice, _) = Client::bootstrap_in(base.path(), "am-a", "alice", "p", dir_a.clone())
         .await
         .expect("bootstrap alice");
+    let alice = std::sync::Arc::new(alice);
     let (bob, _) = Client::bootstrap_in(base.path(), "am-b", "bob", "p", dir_b.clone())
         .await
         .expect("bootstrap bob");
@@ -988,6 +992,7 @@ async fn server_group_key_rotation_redistributes() {
     let (alice, _) = Client::bootstrap_in(base.path(), "sr-a", "alice", "p", dir_a.clone())
         .await
         .expect("bootstrap alice");
+    let alice = std::sync::Arc::new(alice);
     let (bob, _) = Client::bootstrap_in(base.path(), "sr-b", "bob", "p", dir_b.clone())
         .await
         .expect("bootstrap bob");

@@ -6112,6 +6112,11 @@ fn add_group_candidate(weak: slint::Weak<MainWindow>, peer: String) {
     let me_peer = client_peer();
     let rt = runtime();
     rt.spawn(async move {
+        // Fan out to **every approved device** of the contact — the same
+        // `resolve → list_user_devices → filter(Approved)` dance
+        // `create_group_flow` and `add_group_member` use. If we only added
+        // the device that `resolve_user_registered` happened to pick, the
+        // contact's other clients would never learn about the group.
         let ur = match client.resolve_user_registered(&username) {
             Ok(ur) => ur,
             Err(e) => {
@@ -6124,8 +6129,13 @@ fn add_group_candidate(weak: slint::Weak<MainWindow>, peer: String) {
                 return;
             }
         };
-        let member_peer = ur.device.peer_id.clone();
-        if member_peer == me_peer {
+        let devices = client
+            .list_user_devices(&ur.user.user_id)
+            .into_iter()
+            .filter(|d| d.status == chatx_core::account::DeviceStatus::Approved)
+            .filter(|d| !d.peer_id.is_empty() && d.peer_id != me_peer)
+            .collect::<Vec<_>>();
+        if devices.is_empty() {
             let _ = slint::invoke_from_event_loop(move || {
                 show_app_notice(
                     weak.clone(),
@@ -6135,14 +6145,18 @@ fn add_group_candidate(weak: slint::Weak<MainWindow>, peer: String) {
             });
             return;
         }
-        let info = MemberInfo {
-            peer_id: ur.device.peer_id.clone(),
-            sign_pk: ur.user.sign_pk.clone(),
-            e2e_public: ur.user.e2e_public.clone(),
-        };
-        if let Err(e) = client.add_member(&chat_id, info) {
+        let member_pids: Vec<String> = devices.iter().map(|d| d.peer_id.clone()).collect();
+        let infos: Vec<MemberInfo> = devices
+            .into_iter()
+            .map(|d| MemberInfo {
+                peer_id: d.peer_id,
+                sign_pk: ur.user.sign_pk.clone(),
+                e2e_public: ur.user.e2e_public.clone(),
+            })
+            .collect();
+        if let Err(e) = client.add_members(&chat_id, infos) {
             let _ = slint::invoke_from_event_loop(move || {
-                show_app_error(weak.clone(), format!("add_member failed: {e}"));
+                show_app_error(weak.clone(), format!("add_members failed: {e}"));
             });
             return;
         }
@@ -6150,11 +6164,11 @@ fn add_group_candidate(weak: slint::Weak<MainWindow>, peer: String) {
             .strip_prefix("grp-")
             .and_then(|n| n.parse::<i64>().ok())
         {
-            if !member_peer.is_empty() {
+            for pid in &member_pids {
                 let _ = sqlite::groups::add_member(
                     &pool,
                     num,
-                    &member_peer,
+                    pid,
                     sqlite::groups::ROLE_MEMBER,
                 )
                 .await;
@@ -6469,44 +6483,66 @@ fn add_group_member(weak: slint::Weak<MainWindow>, key: i32) {
     rt.spawn(async move {
         let mut added = 0usize;
         let mut failed = 0usize;
+        // Resolve the user's *account* (sign_pk / e2e keys), then enumerate
+        // every APPROVED device of that user and add them all in one
+        // `client.add_members` call. A group invite is per-libp2p-peer: under
+        // the hood `publish_group_key` fans the sealed g_secret out to one
+        // `Cmd::GroupKeyDirect` per member. If we only added the device that
+        // `resolve_user_registered` happened to pick, the user's other clients
+        // would never learn about the group. Mirrors the fan-out in
+        // `create_group_flow`.
+        let my_peer = client.peer_base58();
+        let mut pending: Vec<MemberInfo> = Vec::new();
+        let mut pending_device_ids: Vec<String> = Vec::new();
         for username in &usernames {
-            // Resolve first to learn the peer id, then skip if already a member
-            // (the picker shows existing members so they're visible, but the
-            // confirm step must not re-add them).
             let ur = match client.resolve_user_registered(username) {
                 Ok(ur) => ur,
                 Err(e) => {
                     tracing::warn!("[add_group_member] resolve_user({username}) failed: {e}");
+                    failed += 1;
                     continue;
                 }
             };
-            let member_peer = ur.device.peer_id.clone();
-            if existing_peers.iter().any(|p| p == &member_peer) {
-                continue;
-            }
-            let info = MemberInfo {
-                peer_id: ur.device.peer_id.clone(),
-                sign_pk: ur.user.sign_pk.clone(),
-                e2e_public: ur.user.e2e_public.clone(),
-            };
-            if let Err(e) = client.add_member(&chat_id, info) {
-                tracing::warn!("[add_group_member] add_member({username}) failed: {e}");
+            let devices = client
+                .list_user_devices(&ur.user.user_id)
+                .into_iter()
+                .filter(|d| d.status == chatx_core::account::DeviceStatus::Approved)
+                .filter(|d| !d.peer_id.is_empty() && d.peer_id != my_peer)
+                .filter(|d| !existing_peers.iter().any(|p| p == &d.peer_id))
+                .collect::<Vec<_>>();
+            if devices.is_empty() {
+                tracing::warn!("[add_group_member] user {username} has no new APPROVED devices to add");
                 failed += 1;
                 continue;
             }
-            added += 1;
-            if let Some(num) = chat_id
-                .strip_prefix("grp-")
-                .and_then(|n| n.parse::<i64>().ok())
-            {
-                if !member_peer.is_empty() {
-                    let _ = sqlite::groups::add_member(
-                        &pool,
-                        num,
-                        &member_peer,
-                        sqlite::groups::ROLE_MEMBER,
-                    )
-                    .await;
+            for d in devices {
+                pending.push(MemberInfo {
+                    peer_id: d.peer_id.clone(),
+                    sign_pk: ur.user.sign_pk.clone(),
+                    e2e_public: ur.user.e2e_public.clone(),
+                });
+                pending_device_ids.push(d.peer_id);
+            }
+        }
+        if !pending.is_empty() {
+            if let Err(e) = client.add_members(&chat_id, pending) {
+                tracing::warn!("[add_group_member] add_members failed: {e}");
+                failed += pending_device_ids.len();
+            } else {
+                added = pending_device_ids.len();
+                if let Some(num) = chat_id
+                    .strip_prefix("grp-")
+                    .and_then(|n| n.parse::<i64>().ok())
+                {
+                    for pid in &pending_device_ids {
+                        let _ = sqlite::groups::add_member(
+                            &pool,
+                            num,
+                            pid,
+                            sqlite::groups::ROLE_MEMBER,
+                        )
+                        .await;
+                    }
                 }
             }
         }
@@ -6571,18 +6607,33 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
     let my_peer: String = client.peer_base58();
 
     for username in usernames {
-        match client.resolve_user_registered(&username) {
-            Ok(ur) => {
-                members.push(MemberInfo {
-                    peer_id: ur.device.peer_id.clone(),
-                    sign_pk: ur.user.sign_pk.clone(),
-                    e2e_public: ur.user.e2e_public.clone(),
-                });
-            }
+        let user = match client.resolve_user(&username).map(|ur| ur.user) {
+            Ok(u) => u,
             Err(e) => {
                 tracing::warn!("[create_group_flow] resolve_user({username}) failed: {e}");
                 failed.push(format!("{username}({e})"));
+                continue;
             }
+        };
+        let devices = client
+            .list_user_devices(&user.user_id)
+            .into_iter()
+            .filter(|d| d.status == chatx_core::account::DeviceStatus::Approved)
+            .collect::<Vec<_>>();
+        if devices.is_empty() {
+            tracing::warn!("[create_group_flow] user {username} has no APPROVED devices, skipping");
+            failed.push(format!("{username}(no approved device)"));
+            continue;
+        }
+        for d in devices {
+            if members.iter().any(|m| m.peer_id == d.peer_id) || d.peer_id == my_peer {
+                continue;
+            }
+            members.push(MemberInfo {
+                peer_id: d.peer_id.clone(),
+                sign_pk: user.sign_pk.clone(),
+                e2e_public: user.e2e_public.clone(),
+            });
         }
     }
     if members.is_empty() && !failed.is_empty() {
@@ -6618,6 +6669,11 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
     );
     let title = format!("Group ({})", members.len());
     let use_b = should_use_server_fanout(members.len());
+    // Snapshot every member's device peer_id (owner + all selected users'
+    // devices) so it can be persisted to the local `group_members` table.
+    let member_peer_ids: Vec<String> = std::iter::once(my_peer.clone())
+        .chain(members.iter().map(|m| m.peer_id.clone()))
+        .collect();
     let create_ok = if use_b {
         client.create_server_group(&group_id, members).map(|_| ())
     } else {
@@ -6646,7 +6702,19 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
             // pin flag (used by the ChatSetting "rename"/"pin" features).
             {
                 let me_username = client.user_id().to_string();
-                let me_peer2 = my_peer.clone();
+                // Owner (my peer) gets ROLE_OWNER; every other device peer_id
+                // (all selected users' approved devices) gets ROLE_MEMBER.
+                let roles: Vec<(String, i64)> = member_peer_ids
+                    .into_iter()
+                    .map(|p| {
+                        let role = if p == my_peer {
+                            sqlite::groups::ROLE_OWNER
+                        } else {
+                            sqlite::groups::ROLE_MEMBER
+                        };
+                        (p, role)
+                    })
+                    .collect();
                 let pool = POOL.lock().unwrap().clone();
                 if let Some(pool) = pool {
                     let rt = runtime();
@@ -6658,7 +6726,8 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
                             Ok(Some(u)) => u.id,
                             _ => 0,
                         };
-                        crate::data::persist_group(&pool, &g_id, &title2, me_id, &me_peer2).await;
+                        crate::data::persist_group(&pool, &g_id, &title2, me_id, &roles)
+                            .await;
                     });
                 }
             }
@@ -6667,6 +6736,14 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
                 if let Some(ui) = w.upgrade() {
                     let state = ui.global::<AppState>();
                     state.set_current_chat_key(new_key);
+                    // `create_group_flow` opened a *group*, but `push_sub_history`
+                    // below only mutates the nav model and does NOT fire the
+                    // `on_push_sub` callback (lib.rs:563) — so nothing else sets
+                    // `current_chat_is_group` for a freshly-created group. Without
+                    // this, the 1.5s `refresh_chat_conn` poll takes the *DM* dot
+                    // branch for the group (empty peer_id + no `dm:` username) and
+                    // spams "no peer_id and no dm:username in chat_id=grp-...".
+                    state.set_current_chat_is_group(true);
                     state.set_group_status(SharedString::new());
                     publish_to_views(&state, backend.clone());
                     load_chat_messages(ui.as_weak(), new_key);

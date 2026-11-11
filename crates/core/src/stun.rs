@@ -28,7 +28,7 @@
 //! * Cache is process-wide for ~120 s so the 15 s heartbeat loop and the
 //!   startup prewarm share one result.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
 /// STUN magic cookie (RFC 5389 §5.1).
@@ -266,32 +266,60 @@ fn probe_socket(sock: &std::net::UdpSocket, start_index: usize) -> Option<ProbeR
 
 /// Force-probe a single STUN server, bypassing the cache. Exposed for tests.
 fn probe_one(sock: &std::net::UdpSocket, server: &str) -> anyhow::Result<Option<ProbeResult>> {
-    let addr: SocketAddr = server
-        .parse()
-        .map_err(|e| anyhow::anyhow!("bad STUN server {server}: {e}"))?;
+    // STUN servers are hostnames (e.g. `stun.l.google.com:19302`), so resolve
+    // them with `ToSocketAddrs` instead of `SocketAddr::parse` — the latter
+    // only accepts literal IP:port and rejects every default entry.
+    // A host name can resolve to several addresses (e.g. `stun.l.google.com`
+    // often returns AAAA + A). Our socket is `AF_INET`-only (`0.0.0.0:0`), so
+    // an IPv6 address from the resolver is unusable here: `send_to` fails with
+    // `InvalidArgument` (os error 22) — the socket/address family mismatch.
+    // Try the addresses in order until one matches the socket family AND the
+    // peer replies; a family mismatch on one address must NOT be treated as
+    // the end of the server's fallback chain (that used to mask the working
+    // IPv4 sibling and report "no fingerprint" even though the host answered).
+    let addrs: Vec<SocketAddr> = server
+        .to_socket_addrs()
+        .map_err(|e| anyhow::anyhow!("bad STUN server {server}: {e}"))?
+        .collect();
+    if addrs.is_empty() {
+        anyhow::bail!("bad STUN server {server}: no addresses");
+    }
 
     // 20-byte STUN header: 2-bit message class + 14-bit message length.
     let mut header = [0u8; 20];
-    let txn: [u8; 12] = rand::random();
     header[0..2].copy_from_slice(&TYPE_BINDING_REQUEST.to_be_bytes());
     header[2..4].copy_from_slice(&0u16.to_be_bytes()); // message length (no attrs)
     header[4..8].copy_from_slice(&MAGIC.to_be_bytes());
-    header[8..20].copy_from_slice(&txn);
 
-    sock.send_to(&header, addr)
-        .map_err(|e| anyhow::anyhow!("STUN send to {server}: {e}"))?;
+    for addr in addrs {
+        // Every attempt gets its own 12-byte STUN nonce (RFC 5389 §5): the
+        // Binding Response echoes it back so we can verify the reply is ours.
+        // A nonce reused across attempts would let the kernel deliver a stale
+        // reply to the wrong sender.
+        let txn: [u8; 12] = rand::random();
+        let mut pkt = header;
+        pkt[8..20].copy_from_slice(&txn);
 
-    let mut buf = vec![0u8; 1024];
-    let (n, _from) = match sock.recv_from(&mut buf) {
-        Ok(v) => v,
-        // No answer within timeout — not fatal, try the next server.
-        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
-        Err(e) => return Err(anyhow::anyhow!("STUN recv from {server}: {e}")),
-    };
-    buf.truncate(n);
-
-    Some(parse_response(&buf, &txn))
-        .ok_or_else(|| anyhow::anyhow!("STUN response from {server} missing MAPPED-ADDRESS"))
+        match sock.send_to(&pkt, addr) {
+            // IPv6 address offered to an AF_INET socket (or vice versa) —
+            // just skip this address and try the next one.
+            Err(ref e) if e.raw_os_error() == Some(22) => continue,
+            Err(e) => return Err(anyhow::anyhow!("STUN send to {server} {addr}: {e}")),
+            Ok(_) => {}
+        }
+        let mut buf = vec![0u8; 1024];
+        match sock.recv_from(&mut buf) {
+            Ok((n, _from)) => {
+                buf.truncate(n);
+                return Some(parse_response(&buf, &txn))
+                    .ok_or_else(|| anyhow::anyhow!("STUN response from {server} {addr} missing MAPPED-ADDRESS"));
+            }
+            // No answer within timeout — try the next address/server.
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(anyhow::anyhow!("STUN recv from {server} {addr}: {e}")),
+        }
+    }
+    Ok(None)
 }
 
 /// Run the dual-socket / two-server fingerprint. `start_a` / `start_b`

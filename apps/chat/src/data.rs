@@ -812,22 +812,26 @@ pub async fn group_display_name(pool: &SqlitePool, chat_id: &str) -> Option<Stri
     (!name.is_empty()).then_some(name)
 }
 
+/// Persist a group row plus its members into the local SQLite store.
+/// `members` is a list of `(peer_id, role)` tuples — pass **every** member
+/// (owner + selected users' devices), not just the current user.
 pub async fn persist_group(
     pool: &SqlitePool,
     chat_id: &str,
     name: &str,
     owner_user_id: i64,
-    peer_id: &str,
+    members: &[(String, i64)],
 ) -> Option<i64> {
     let num = chat_id.strip_prefix("grp-")?.parse::<i64>().ok()?;
-    // `groups.create` upserts on id and adds me as the owner member.
+    // `groups.create` upserts the group row on id.
     if let Err(e) = sqlite::groups::create(pool, num, name, owner_user_id, None).await {
         tracing::warn!("[persist_group] groups.create({num}) failed: {e}");
     }
-    if !peer_id.is_empty() {
-        if let Err(e) =
-            sqlite::groups::add_member(pool, num, peer_id, sqlite::groups::ROLE_OWNER).await
-        {
+    for (peer_id, role) in members {
+        if peer_id.is_empty() {
+            continue;
+        }
+        if let Err(e) = sqlite::groups::add_member(pool, num, peer_id, *role).await {
             tracing::warn!("[persist_group] groups.add_member({num}) failed: {e}");
         }
     }

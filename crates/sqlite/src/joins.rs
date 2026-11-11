@@ -562,6 +562,9 @@ mod tests {
 
         // Group conversation
         groups::create(&pool, 10, "Squad", 1, None).await.unwrap();
+        groups::add_member(&pool, 10, "me-peer", groups::ROLE_OWNER)
+            .await
+            .unwrap();
         groups::add_member(&pool, 10, "peer-b", groups::ROLE_MEMBER)
             .await
             .unwrap();
