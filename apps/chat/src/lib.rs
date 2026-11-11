@@ -2815,8 +2815,8 @@ async fn handle_inbound_voice(
         tracing::warn!("[voice] inbound: no client yet, dropping");
         return;
     };
-    let me = client.peer_base58();
-    let chat_id = dm_chat_id(&me, peer_base58);
+    let username = client.resolve_peer_username(peer_base58);
+    let chat_id = dm_chat_id(&username);
     match record::write_voice_clip(rate, ch, &data) {
         Ok(path) => {
             let path_str = path.to_string_lossy().into_owned();
@@ -2852,8 +2852,8 @@ async fn handle_inbound_image(
         tracing::warn!("[chat-image] inbound: no client yet, dropping");
         return;
     };
-    let me = client.peer_base58();
-    let chat_id = dm_chat_id(&me, peer_base58);
+    let username = client.resolve_peer_username(peer_base58);
+    let chat_id = dm_chat_id(&username);
     // `data` is the original image bytes, sent raw over the wire (no
     // lossless-compression envelope — both peers treat a photo as an opaque
     // HD byte blob; see the `chat` module header for the design decision).
@@ -2896,8 +2896,8 @@ async fn handle_inbound_file(
         tracing::warn!("[chat-file] inbound: no client yet, dropping");
         return;
     };
-    let me = client.peer_base58();
-    let chat_id = dm_chat_id(&me, peer_base58);
+    let username = client.resolve_peer_username(peer_base58);
+    let chat_id = dm_chat_id(&username);
     match image::store_file_bytes(&name, &data).await {
         Ok(path) => {
             let path_str = path.to_string_lossy().into_owned();
@@ -2957,20 +2957,11 @@ fn send_chat_voice(
             .unwrap_or_default()
     };
     let me = client.peer_base58();
-    let my_peers: Vec<String> = {
-        let mut v: Vec<String> = Vec::new();
-        if !row_peer.is_empty() && row_peer != me {
-            v.push(row_peer.clone());
-        }
-        if chat_id.contains('|') {
-            for part in chat_id.split('|') {
-                if !part.is_empty() && part != me && !v.iter().any(|x| x == part) {
-                    v.push(part.to_string());
-                }
-            }
-        }
-        v
-    };
+    // Fan out to every approved device of the DM peer (see dm_target_devices
+    // for the doc). Voice clip is a few hundred KB so blasting it to all of
+    // the user's devices is acceptable bandwidth-wise; the first device that
+    // acks is enough to flip the bubble to "sent".
+    let my_peers: Vec<String> = dm_target_devices(&row_peer);
     let rt = runtime();
     let weak2 = weak.clone();
     let c = client.clone();
@@ -3028,8 +3019,14 @@ fn send_chat_voice(
         } else {
             String::new()
         };
-        let mut sent_to: Option<String> = None;
-        'outer: for cand in &my_peers {
+        // Fan out the clip to EVERY approved device of the target user (see
+        // `dm_target_devices`). The user may have B+C clients open, and each
+        // should see the voice message — do NOT stop at the first success.
+        // The bubble flips to SENT when at least one device acks (we can't
+        // realistically wait for all of the user's devices for a voice
+        // clip); FAILED only when every device is unreachable.
+        let mut any_ok = false;
+        for cand in &my_peers {
             if cand == &me {
                 continue;
             }
@@ -3038,14 +3035,8 @@ fn send_chat_voice(
                 .await
             {
                 Ok(()) => {
-                    tracing::debug!("[voice] sent -> {cand}");
-                    crate::chat::set_media_state(
-                        &chat_id,
-                        row_t,
-                        crate::chat::SEND_STATE_SENT,
-                    );
-                    sent_to = Some(cand.clone());
-                    break 'outer;
+                    tracing::debug!("[voice] fanout ok -> {cand}");
+                    any_ok = true;
                 }
                 Err(e) => {
                     tracing::warn!("[voice] peer={cand} failed: {e}");
@@ -3053,8 +3044,12 @@ fn send_chat_voice(
                 }
             }
         }
-        let sent = sent_to.is_some();
-        if sent {
+        if any_ok {
+            crate::chat::set_media_state(
+                &chat_id,
+                row_t,
+                crate::chat::SEND_STATE_SENT,
+            );
             touch_chat_activity(&chat_id);
         } else {
             crate::chat::set_media_state(
@@ -3063,7 +3058,7 @@ fn send_chat_voice(
                 crate::chat::SEND_STATE_FAILED,
             );
         }
-        let msg = if !sent {
+        let msg = if !any_ok {
             if last_err.trim().is_empty() {
                 "Peer is offline".to_string()
             } else {
@@ -3115,30 +3110,96 @@ fn refresh_chat_conn(ui: &MainWindow) {
         Some(c) => c,
         None => return,
     };
-    let peer_id = backend
+    let row = backend
         .blocking_read()
         .chats
         .iter()
         .find(|r| r.key == key)
-        .map(|r| r.peer_id.clone())
-        .filter(|p| !p.is_empty())
-        .unwrap_or_default();
-    if peer_id.is_empty() {
+        .cloned();
+    let Some(row) = row else {
+        ui.global::<ChatSession>().set_conn(String::new().into());
+        return;
+    };
+    let peer_id = row.peer_id.clone();
+    // Fall back to the DM username (encoded in the chat id as
+    // `dm:<username>`) when the row's peer_id is empty — the inbound path
+    // materializes the chat row without a dial target, so the status-dot
+    // check must use the username to fan out to the directory device list.
+    let username_opt = if peer_id.is_empty() {
+        row.chat_id
+            .strip_prefix("dm:")
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+    if peer_id.is_empty() && username_opt.is_none() {
+        tracing::debug!("[conn] dot: no peer_id and no dm:username in chat_id={}", row.chat_id);
         ui.global::<ChatSession>().set_conn(String::new().into());
         return;
     }
-    // The status dot reflects ONLY the actual link state with this DM peer:
-    //   - ""        → red     (not connected, nothing in flight)
-    //   - "dialing" → grey + pulsing (a dial is in flight — brief transitional state)
-    //   - "relay"   → yellow  (connected via relay circuit)
-    //   - "direct"  → green   (direct QUIC/TCP transport)
-    // We intentionally do NOT gate on `ChatSession.send-busy`: that flag is a
-    // global single value, and using it here would paint one in-flight send's
-    // state onto the dot of every other open DM (the root cause of the
-    // "all DMs look green" bug).
-    let link = client.peer_link(&peer_id);
-    let token: &'static str = if link.is_empty() { "offline" } else { link };
-    ui.global::<ChatSession>().set_conn(token.into());
+    // STATUS DOT — authoritative source of truth: the **local connection
+    // table** (`running.connected`), not the contact's SQL-picked dial
+    // target nor the directory list.
+    //
+    // Why: the SQL join (joins.rs chat_list) picks one most-recently-seen
+    // device under `last_seen DESC, device_id ASC`, but the *actual* live
+    // link to a multi-device user may be a different one of their devices
+    // (e.g. we dialed B but the relay circuit is actually on C). The local
+    // `connected` table (swarm.rs) is the only thing that knows "I have a
+    // live link to this base58 right now" — and that's the dot's job.
+    //
+    // Strategy: intersect the candidate set (row.peer_id ∪ username's
+    // directory devices) with the linked_peers / dialing lists. The best
+    // class (direct green > relay yellow > dialing grey > offline red)
+    // wins.
+    let linked: std::collections::HashMap<String, &'static str> = client
+        .linked_peers()
+        .into_iter()
+        .collect();
+    let dialing: std::collections::HashSet<String> = client.dialing_peers().into_iter().collect();
+
+    let candidates: Vec<String> = if let Some(uname) = &username_opt {
+        let mut v = client.dm_devices_of_username(uname);
+        v.retain(|d| !d.is_empty());
+        // Seed with the row's peer_id so a row carrying a specific dial
+        // target is always checked first.
+        if !peer_id.is_empty() && !v.iter().any(|d| d == &peer_id) {
+            v.insert(0, peer_id.clone());
+        }
+        v
+    } else {
+        // No username (legacy / fallback) — only the row's peer_id.
+        vec![peer_id]
+    };
+
+    fn rank(t: &str) -> u8 {
+        match t {
+            "direct" => 3,
+            "relay" => 2,
+            "dialing" => 1,
+            _ => 0,
+        }
+    }
+    let mut best: &'static str = "offline";
+    for dev in &candidates {
+        // Prefer an established link (direct/relay); fall back to dialing.
+        let cls = linked
+            .get(dev)
+            .copied()
+            .or_else(|| dialing.contains(dev).then_some("dialing"));
+        if let Some(c) = cls {
+            if c != "dialing" && rank(c) > rank(best) {
+                best = c;
+            } else if c == "dialing" && rank(best) == 0 {
+                best = "dialing";
+            }
+        }
+        if best == "direct" {
+            break;
+        }
+    }
+    ui.global::<ChatSession>().set_conn(SharedString::from(best));
 }
 
 /// Poll `refresh_chat_conn` on a fixed interval while the app is running.
@@ -3370,27 +3431,14 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
     };
     let is_group = chat_id.starts_with("grp-");
     let me = client.peer_base58();
-    let my_peers: Vec<String> = {
-        let row_peer: String = backend
-            .blocking_read()
-            .chats
-            .iter()
-            .find(|r| r.key == key)
-            .map(|r| r.peer_id.clone())
-            .unwrap_or_default();
-        let mut v: Vec<String> = Vec::new();
-        if !row_peer.is_empty() && row_peer != me {
-            v.push(row_peer);
-        }
-        if chat_id.contains('|') {
-            for part in chat_id.split('|') {
-                if !part.is_empty() && part != me && !v.iter().any(|x| x == part) {
-                    v.push(part.to_string());
-                }
-            }
-        }
-        v
-    };
+    let row_peer: String = backend
+        .blocking_read()
+        .chats
+        .iter()
+        .find(|r| r.key == key)
+        .map(|r| r.peer_id.clone())
+        .unwrap_or_default();
+    let my_peers: Vec<String> = dm_target_devices(&row_peer);
     let src_ext = std::path::Path::new(&src)
         .extension()
         .and_then(|e| e.to_str())
@@ -3461,21 +3509,21 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
         } else {
             String::new()
         };
-        // 3. Wire payload = the ORIGINAL (HD) bytes, sent raw.
+        // 3. Wire payload = the ORIGINAL (HD) bytes, sent raw. Fan out to
+        //    EVERY approved device of the target user (B+C clients) — do NOT
+        //    stop at the first success. The bubble flips to SENT when at
+        //    least one device acks (after it durably persists the image);
+        //    FAILED only when every device is unreachable.
         let wire = bytes;
-        let mut sent = false;
-        'outer: for cand in &my_peers {
+        let mut any_ok = false;
+        for cand in &my_peers {
             if cand == &me {
                 continue;
             }
             match c.send_image_cmd(cand, wire.clone()).await {
                 Ok(_) => {
-                    // The only ack we wait on is the peer's, now sent only AFTER
-                    // it durably persists the image; reaching here = "sent".
-                    crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_SENT);
-                    sent = true;
-                    tracing::debug!("[chat-image] sent -> {cand}");
-                    break 'outer;
+                    any_ok = true;
+                    tracing::debug!("[chat-image] fanout ok -> {cand}");
                 }
                 Err(e) => {
                     tracing::warn!("[chat-image] peer={cand} failed: {e}");
@@ -3483,7 +3531,8 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
                 }
             }
         }
-        if sent {
+        if any_ok {
+            crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_SENT);
             touch_chat_activity(&chat_id);
         } else {
             crate::chat::set_media_state(
@@ -3492,7 +3541,7 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
                 crate::chat::SEND_STATE_FAILED,
             );
         }
-        let msg = if sent {
+        let msg = if any_ok {
             String::new()
         } else if last_err.trim().is_empty() {
             "Peer is offline".to_string()
@@ -3564,27 +3613,14 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
         ui.global::<ChatSession>().set_send_busy(true);
     }
     let me = client.peer_base58();
-    let my_peers: Vec<String> = {
-        let row_peer: String = backend
-            .blocking_read()
-            .chats
-            .iter()
-            .find(|r| r.key == key)
-            .map(|r| r.peer_id.clone())
-            .unwrap_or_default();
-        let mut v: Vec<String> = Vec::new();
-        if !row_peer.is_empty() && row_peer != me {
-            v.push(row_peer);
-        }
-        if chat_id.contains('|') {
-            for part in chat_id.split('|') {
-                if !part.is_empty() && part != me && !v.iter().any(|x| x == part) {
-                    v.push(part.to_string());
-                }
-            }
-        }
-        v
-    };
+    let row_peer: String = backend
+        .blocking_read()
+        .chats
+        .iter()
+        .find(|r| r.key == key)
+        .map(|r| r.peer_id.clone())
+        .unwrap_or_default();
+    let my_peers: Vec<String> = dm_target_devices(&row_peer);
     let meta = match std::fs::metadata(&src) {
         Ok(m) => m,
         Err(e) => {
@@ -3665,21 +3701,19 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
         } else {
             String::new()
         };
-        let mut sent = false;
-        'outer: for cand in &my_peers {
+        // Fan out the file to EVERY approved device of the target user (see
+        // `dm_target_devices`); do NOT stop at the first success. The bubble
+        // flips to SENT when at least one device acks (after durable persist);
+        // FAILED only when every device is unreachable.
+        let mut any_ok = false;
+        for cand in &my_peers {
             if cand == &me {
                 continue;
             }
             match c.send_file_cmd(cand, name.clone(), bytes.clone()).await {
                 Ok(_) => {
-                    crate::chat::set_media_state(
-                        &chat_id,
-                        row_t,
-                        crate::chat::SEND_STATE_SENT,
-                    );
-                    sent = true;
-                    tracing::debug!("[chat-file] sent -> {cand}");
-                    break 'outer;
+                    any_ok = true;
+                    tracing::debug!("[chat-file] fanout ok -> {cand}");
                 }
                 Err(e) => {
                     tracing::warn!("[chat-file] peer={cand} failed: {e}");
@@ -3687,10 +3721,21 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
                 }
             }
         }
-        if sent {
+        if any_ok {
+            crate::chat::set_media_state(
+                &chat_id,
+                row_t,
+                crate::chat::SEND_STATE_SENT,
+            );
             touch_chat_activity(&chat_id);
+        } else {
+            crate::chat::set_media_state(
+                &chat_id,
+                row_t,
+                crate::chat::SEND_STATE_FAILED,
+            );
         }
-        let msg = if sent {
+        let msg = if any_ok {
             String::new()
         } else if last_err.trim().is_empty() {
             "Peer is offline".to_string()
@@ -4230,11 +4275,6 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
                     for (chat_id, row_peer, time_ms) in dms {
                         let pb = if !row_peer.is_empty() && row_peer != me_peer {
                             Some(row_peer)
-                        } else if chat_id.contains('|') {
-                            chat_id
-                                .split('|')
-                                .find(|p| !p.is_empty() && *p != me_peer)
-                                .map(|s| s.to_string())
                         } else {
                             None
                         };
@@ -4255,7 +4295,6 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
                             }
                             None => {}
                         }
-                        let _ = sqlite::conversations::set_peer_id(&pool, conv_id, &pb).await;
                         if time_ms > 0 {
                             let _ =
                                 sqlite::conversations::ensure_time(&pool, conv_id, time_ms).await;
@@ -4803,9 +4842,10 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
             return;
         }
 
-        // Phase 1 — stage the message (single local SENDING row + redelivery
-        // queue entry) keyed to the primary candidate, then refresh the chat
-        // so the "发送中" bubble appears IMMEDIATELY, before any network I/O.
+        // Phase 1 — stage the message: one local SENDING row + a redelivery
+        // queue entry per **device** of the target user, so a friend with
+        // B+C clients receives it on both. Refresh the chat so the "发送中"
+        // bubble appears IMMEDIATELY, before any network I/O.
         let primary: String = me_peers
             .iter()
             .find(|p| **p != my_peer)
@@ -4834,22 +4874,38 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
             load_chat_messages(weak2.clone(), key);
         }
 
-        // Phase 2 — attempt live delivery to the queued peer right now. On
-        // ack the row flips SENDING→SENT (refresh once); otherwise it stays
-        // SENDING and the `start_dm_redeliver` task retries in the background.
-        // Neither outcome is a terminal failure — the bubble is on screen.
-        tracing::debug!("[send] dm trying peer={primary}");
-        match client.deliver_dm(msg_id, &primary, &body).await {
-            Ok(true) => {
-                tracing::debug!("[send] dm ok -> {primary}");
-                load_chat_messages(weak2, key);
+        // Phase 2 — attempt live delivery to **every** device of the target
+        // user. `queue_dm_text` already enumerated them (resolved from the
+        // primary peer's username); we deliver to the same set. The message
+        // row flips SENDING→SENT only once the last device acks (or is given
+        // up on), driven in `deliver_dm` / `redeliver_due`.
+        let username = client.resolve_peer_username(&primary);
+        let targets: Vec<String> = {
+            let ds = client.dm_devices_of_username(&username);
+            if ds.is_empty() {
+                vec![primary.clone()]
+            } else {
+                ds
             }
-            Ok(false) => {
-                tracing::info!("[send] dm to {primary} not deliverable now — queued for redelivery");
+        };
+        let mut any_ok = false;
+        for dev in &targets {
+            tracing::debug!("[send] dm trying peer={dev}");
+            match client.deliver_dm(msg_id, dev, &body).await {
+                Ok(true) => {
+                    any_ok = true;
+                    tracing::debug!("[send] dm ok -> {dev}");
+                }
+                Ok(false) => {
+                    tracing::info!("[send] dm to {dev} not deliverable now — queued for redelivery");
+                }
+                Err(e) => {
+                    tracing::warn!("[send] dm to {dev} failed: {e} — will retry");
+                }
             }
-            Err(e) => {
-                tracing::warn!("[send] dm to {primary} failed: {e} — will retry");
-            }
+        }
+        if any_ok {
+            load_chat_messages(weak2, key);
         }
     });
 }
@@ -6174,6 +6230,42 @@ fn client_peer() -> String {
         .as_ref()
         .map(|c| c.peer_base58())
         .unwrap_or_default()
+}
+
+/// Resolve the DM peer's full **device fan-out list** for `row_peer` (a
+/// base58 the caller already knows). If the directory lists devices under
+/// that peer's username, return them (excluding our own); otherwise fall
+/// back to the single known base58. Empty when neither is available.
+///
+/// Used by the voice/image/file send paths so that a DM from friend A to
+/// friend alice (devices B+C) lands on BOTH of alice's clients. The
+/// "first success stops the loop" semantics the media sends use is
+/// unchanged: we iterate in order, and the first device that acks is
+/// enough to flip the bubble from "sending" to "sent" — the media is a
+/// single blob and the other devices of the same user are typically either
+/// the same device (same OS window) or will pick it up on their next
+/// redelivery round from the queue row.
+fn dm_target_devices(row_peer: &str) -> Vec<String> {
+    if row_peer.is_empty() {
+        return Vec::new();
+    }
+    let fallback = row_peer.to_string();
+    let binding = CLIENT.lock().unwrap();
+    let Some(client) = binding.as_ref() else {
+        return vec![fallback];
+    };
+    let username = client.resolve_peer_username(row_peer);
+    let mut devices = client.dm_devices_of_username(&username);
+    // Always seed the known peer at the front. The directory's device list
+    // may be stale or out-of-sync with the actual libp2p peer we have a live
+    // link to (e.g. we connected to device C while the directory still
+    // points the chat row at B, or the directory is briefly empty on
+    // first-launch). Seeding `row_peer` keeps it first in the fan-out —
+    // the send paths will try it before iterating the rest of the user's
+    // devices, and the status-dot check will find it connected.
+    devices.retain(|d| *d != fallback);
+    devices.insert(0, fallback);
+    devices
 }
 
 /// Pin / unpin chat `key` and republish the (reordered) chat list.
@@ -8596,7 +8688,7 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
         "[chat] open_conversation: +{}ms grabbed BACKEND",
         t0.elapsed().as_millis()
     );
-    let (Some(client), Some(backend)) = (client, backend) else {
+    let (Some(_client), Some(backend)) = (client, backend) else {
         show_app_error(weak, format!("Not signed in or backend not ready"));
         return;
     };
@@ -8623,17 +8715,13 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
         return;
     }
     let peer_id = c.peer_id;
-    let title = c.name;
+    let username = if c.name.is_empty() { peer_id.clone() } else { c.name.clone() };
+    let title = username.clone();
     tracing::debug!(
-        "[chat] open_conversation: +{}ms peer_id={peer_id}",
+        "[chat] open_conversation: +{}ms peer_id={peer_id} username={username}",
         t0.elapsed().as_millis()
     );
-    let me_peer = client.peer_base58();
-    tracing::debug!(
-        "[chat] open_conversation: +{}ms self peer={me_peer}",
-        t0.elapsed().as_millis()
-    );
-    let chat_id = dm_chat_id(&me_peer, &peer_id);
+    let chat_id = dm_chat_id(&username);
     tracing::debug!(
         "[chat] open_conversation: +{}ms chat_id={chat_id}",
         t0.elapsed().as_millis()
@@ -8755,11 +8843,13 @@ fn send_dm_to_contact(weak: slint::Weak<MainWindow>, key: i32, body: String) -> 
     if c.peer_id.is_empty() || body.trim().is_empty() {
         return None;
     }
-    let me_peer = match CLIENT.lock().unwrap().as_ref() {
-        Some(client) => client.peer_base58(),
+    match CLIENT.lock().unwrap().as_ref() {
+        Some(_client) => {}
         None => return None,
-    };
-    let chat_id = dm_chat_id(&me_peer, &c.peer_id);
+    }
+    let username = if c.name.is_empty() { c.peer_id.clone() } else { c.name.clone() };
+    let title = if c.name.is_empty() { c.peer_id.clone() } else { c.name.clone() };
+    let chat_id = dm_chat_id(&username);
     let chat_key = {
         let existing = backend
             .blocking_read()
@@ -8773,7 +8863,7 @@ fn send_dm_to_contact(weak: slint::Weak<MainWindow>, key: i32, body: String) -> 
                 let mut g = backend.blocking_write();
                 g.append_chat(
                     chat_id,
-                    c.name.clone(),
+                    title,
                     false,
                     c.peer_id.clone(),
                     c.image.clone(),

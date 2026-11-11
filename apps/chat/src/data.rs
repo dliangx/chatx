@@ -840,7 +840,6 @@ pub async fn persist_group(
                 &sqlite::conversations::ConversationPatch {
                     type_: Some(1),
                     name: Some(chat_id.to_string()),
-                    peer_id: None,
                     avatar_path: None,
                 },
             )
@@ -857,7 +856,6 @@ pub async fn persist_group(
                 &sqlite::conversations::ConversationPatch {
                     type_: Some(1),
                     name: Some(chat_id.to_string()),
-                    peer_id: None,
                     avatar_path: None,
                 },
             )
@@ -1045,7 +1043,9 @@ mod tests {
 
         // The sender side already pushed a message into the shared store:
         // `insert_row` ensures the conversation exists in sqlite.
-        let dm = chatx_core::store::dm_chat_id(me, "them-peer");
+        // DM ids are keyed by the peer's *username*; `them-peer` is just
+        // the base58 dial id, the username is the stable key.
+        let dm = chatx_core::store::dm_chat_id("them");
         let _ = sqlite::messages::insert_row(
             &pool,
             &sqlite::MsgRow {

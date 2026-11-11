@@ -74,23 +74,30 @@ pub async fn due(pool: &Pool, limit: u32) -> anyhow::Result<Vec<Row>> {
     .map_err(Into::into)
 }
 
-/// Bump the attempt counter and refresh the retry cooldown.
+/// Bump the attempt counter and refresh the retry cooldown for a specific
+/// (msg, device) pair. Per-device attempt budgets are tracked independently
+/// so a flaky device does not starve a fast one and vice versa.
 ///
 /// Returns the attempt count AFTER this bump. When it reaches
-/// [`MAX_ATTEMPTS`] the caller is expected to call [`give_up`] and mark the
-/// local message row failed.
-pub async fn bump(pool: &Pool, msg_id: i64) -> anyhow::Result<i64> {
+/// [`MAX_ATTEMPTS`] the caller is expected to call [`give_up_pair`] and
+/// (optionally, if no other devices remain for this message) mark the local
+/// message row failed.
+pub async fn bump(pool: &Pool, msg_id: i64, peer_base58: &str) -> anyhow::Result<i64> {
     let delay = {
-        let (a,): (i64,) = sqlx::query_as("SELECT attempts FROM dm_send_queue WHERE msg_id = ?1")
-            .bind(msg_id)
-            .fetch_one(pool)
-            .await?;
+        let (a,): (i64,) =
+            sqlx::query_as("SELECT attempts FROM dm_send_queue WHERE msg_id = ?1 AND peer_base58 = ?2")
+                .bind(msg_id)
+                .bind(peer_base58)
+                .fetch_one(pool)
+                .await?;
         next_delay_ms(a)
     };
     let n = sqlx::query(
-        "UPDATE dm_send_queue SET attempts = attempts + 1, next_try_ms = ?2 WHERE msg_id = ?1",
+        "UPDATE dm_send_queue SET attempts = attempts + 1, next_try_ms = ?3
+          WHERE msg_id = ?1 AND peer_base58 = ?2",
     )
     .bind(msg_id)
+    .bind(peer_base58)
     .bind(now_ms() + delay)
     .execute(pool)
     .await?;
@@ -98,21 +105,49 @@ pub async fn bump(pool: &Pool, msg_id: i64) -> anyhow::Result<i64> {
         return Ok(MAX_ATTEMPTS); // already removed — treat as exhausted
     }
     let (a,): (i64,) =
-        sqlx::query_as("SELECT attempts FROM dm_send_queue WHERE msg_id = ?1")
+        sqlx::query_as("SELECT attempts FROM dm_send_queue WHERE msg_id = ?1 AND peer_base58 = ?2")
             .bind(msg_id)
+            .bind(peer_base58)
             .fetch_one(pool)
             .await?;
     Ok(a)
 }
 
-/// Drop the row after the budget is exhausted. The caller flips the local
-/// message row to `status = 4 (failed)`.
+/// Drop ONE (msg, device) pair from the queue after that device has either
+/// acked (delivered) or exhausted its attempt budget. Other devices for the
+/// same message are untouched and keep their own redelivery schedule.
+pub async fn give_up_pair(pool: &Pool, msg_id: i64, peer_base58: &str) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM dm_send_queue WHERE msg_id = ?1 AND peer_base58 = ?2")
+        .bind(msg_id)
+        .bind(peer_base58)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Drop ALL queue rows for a message. Used when the local `messages` row
+/// itself is being removed or when a caller knows no device will ever get
+/// this message (e.g. budget exhausted on every device at once).
 pub async fn give_up(pool: &Pool, msg_id: i64) -> anyhow::Result<()> {
     sqlx::query("DELETE FROM dm_send_queue WHERE msg_id = ?1")
         .bind(msg_id)
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// The set of (msg_id, peer_base58) pairs still pending delivery for a given
+/// message id. Empty when the message is fully delivered (or has been
+/// given up on every device).
+pub async fn pending_peers_for_msg(
+    pool: &Pool,
+    msg_id: i64,
+) -> anyhow::Result<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as("SELECT peer_base58 FROM dm_send_queue WHERE msg_id = ?1")
+        .bind(msg_id)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(|(p,)| p).collect())
 }
 
 /// Due rows for a specific peer only (used by the Connected-event handler
@@ -177,14 +212,46 @@ mod tests {
         assert!(next_delay_ms(0) < next_delay_ms(3));
         assert_eq!(next_delay_ms(99), next_delay_ms(6));
 
-        // Bumping eventually exhausts.
+        // Bumping eventually exhausts (per (msg, device) pair).
         let mut attempts = 0i64;
         for _ in 0..MAX_ATTEMPTS {
-            attempts = bump(&p, 1).await.unwrap();
+            attempts = bump(&p, 1, "peerA").await.unwrap();
         }
         assert_eq!(attempts, MAX_ATTEMPTS);
         give_up(&p, 1).await.unwrap();
         assert!(due(&p, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn per_device_retry_is_independent() {
+        let p = pool().await;
+        // One message delivered to two devices: each has its own queue row.
+        enqueue(&p, 1, "B", "dm:alice").await.unwrap();
+        enqueue(&p, 1, "C", "dm:alice").await.unwrap();
+        assert_eq!(due(&p, 10).await.unwrap().len(), 2);
+
+        // Bumping B must NOT move C's row forward (per-pair independence).
+        // We query the table directly because `bump` pushes the bumped pair's
+        // `next_try_ms` into the future (so `due` hides it).
+        let a = bump(&p, 1, "B").await.unwrap();
+        assert_eq!(a, 1);
+        let after: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT peer_base58, attempts
+               FROM dm_send_queue WHERE msg_id = 1 ORDER BY peer_base58",
+        )
+        .fetch_all(&p)
+        .await
+        .unwrap();
+        assert_eq!(after, vec![("B".into(), 1), ("C".into(), 0)]);
+
+        // Giving up B removes ONLY B's row; C's pair keeps its own schedule.
+        give_up_pair(&p, 1, "B").await.unwrap();
+        let remaining = pending_peers_for_msg(&p, 1).await.unwrap();
+        assert_eq!(remaining, vec!["C".to_string()]);
+
+        // All pending now → the caller flips the local message row to SENT.
+        give_up_pair(&p, 1, "C").await.unwrap();
+        assert!(pending_peers_for_msg(&p, 1).await.unwrap().is_empty());
     }
 
     #[tokio::test]

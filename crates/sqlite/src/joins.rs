@@ -16,8 +16,10 @@ pub struct ConversationListItem {
     pub is_pinned: bool,
     pub is_muted: bool,
     pub draft: Option<String>,
-    // DM remote peer id (base58) — canonical "who to send to" once the chat
-    // id no longer encodes the peer pair.
+    /// DM remote peer's libp2p id (base58) — the canonical "who to dial" id,
+    /// resolved on the fly from the most-recently-seen device of the peer
+    /// (user identified by the peer's username). `None` for groups or when
+    /// the peer has no known device yet.
     pub peer_id: Option<String>,
     // profile join (users)
     pub peer_username: Option<String>,
@@ -29,6 +31,11 @@ pub struct ConversationListItem {
 
 /// Chat list for the current user, ordered for the UI:
 /// pinned first, then by last activity.
+///
+/// DM conversations are keyed by the peer's username (`name = dm:<username>`),
+/// so the peer's profile (and dial id) is resolved by that username: the user
+/// is looked up in `users` by username, and the most-recently-seen device of
+/// that user supplies the base58 peer id. Groups keep joining `groups` by id.
 pub async fn chat_list(
     pool: &Pool,
     me: &str,
@@ -48,17 +55,23 @@ pub async fn chat_list(
             c.is_pinned  AS is_pinned,
             c.is_muted   AS is_muted,
             c.draft      AS draft,
-            c.peer_id    AS peer_id,
+            (
+              SELECT d.peer_id
+                FROM devices d
+                JOIN users du ON du.id = d.user_id
+               WHERE du.username = SUBSTR(c.name, 4)
+               ORDER BY COALESCE(d.last_seen, -1) DESC, d.device_id ASC
+               LIMIT 1
+            ) AS peer_id,
             u.username   AS peer_username,
             u.nickname   AS peer_nickname,
             g.owner_id   AS group_owner_id,
             g.member_count AS member_count
-         FROM conversations c
-         LEFT JOIN devices d ON d.peer_id = c.peer_id
-         LEFT JOIN users u ON u.id = d.user_id
-         LEFT JOIN groups g ON g.id = c.id
-         ORDER BY c.is_pinned DESC, COALESCE(c.last_message_time, 0) DESC
-         LIMIT ?1",
+          FROM conversations c
+          LEFT JOIN users u ON u.username = SUBSTR(c.name, 4) AND c.name LIKE 'dm:%'
+          LEFT JOIN groups g ON g.id = c.id
+          ORDER BY c.is_pinned DESC, COALESCE(c.last_message_time, 0) DESC
+          LIMIT ?1",
     )
     .bind(limit as i64)
     .fetch_all(pool)
@@ -507,7 +520,8 @@ mod tests {
     async fn chat_list_resolves_dm_profile_and_group() {
         let pool = open_memory().await.unwrap();
 
-        // DM conversation resolves peer profile via devices.peer_id -> users.
+        // DM conversation resolves peer profile via the peer's username (in
+        // `name = dm:bea`) -> users -> devices for the dial peer id.
         users::upsert(
             &pool,
             2,
@@ -536,8 +550,7 @@ mod tests {
             2,
             &ConversationPatch {
                 type_: Some(0),
-                name: None,
-                peer_id: Some("12D3KooWBea".into()),
+                name: Some("dm:bea".into()),
                 avatar_path: None,
             },
         )
@@ -558,7 +571,6 @@ mod tests {
             &ConversationPatch {
                 type_: Some(1),
                 name: Some("Squad".into()),
-                peer_id: None,
                 avatar_path: None,
             },
         )
@@ -600,7 +612,6 @@ mod tests {
             &ConversationPatch {
                 type_: Some(0),
                 name: None,
-                peer_id: None,
                 avatar_path: None,
             },
         )
@@ -735,7 +746,6 @@ mod tests {
             &ConversationPatch {
                 type_: Some(0),
                 name: None,
-                peer_id: None,
                 avatar_path: None,
             },
         )

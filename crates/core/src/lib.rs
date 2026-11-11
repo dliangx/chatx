@@ -449,6 +449,72 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         ""
     }
 
+    /// Every peer we currently have a **live** link with (established
+    /// connection in `running.connected`), with the best transport class
+    /// we're using to reach them (`"direct" > "relay"`). Each peer is listed
+    /// exactly once; the `peer_link(peer)` call handles that classification
+    /// from the same state source, so this is the single source of truth
+    /// for the status dot.
+    ///
+    /// Callers (e.g. `refresh_chat_conn`) intersect this list with their
+    /// candidate set (the contact's device list) — a peer in this list AND
+    /// in the candidate set must be a live link to a device of that user.
+    pub fn linked_peers(&self) -> Vec<(String, &'static str)> {
+        let connected = self.running.connected.lock().unwrap();
+        let mut out = Vec::with_capacity(connected.len());
+        for (p, n) in connected.iter() {
+            if *n == 0 {
+                continue; // stale count; the link itself is gone
+            }
+            let b58 = p.to_base58();
+            let cls = if self
+                .running
+                .link_direct
+                .lock()
+                .unwrap()
+                .get(p)
+                .copied()
+                .unwrap_or(0)
+                > 0
+            {
+                "direct"
+            } else if self
+                .running
+                .link_relay
+                .lock()
+                .unwrap()
+                .get(p)
+                .copied()
+                .unwrap_or(0)
+                > 0
+            {
+                "relay"
+            } else {
+                // connected but no direct/relay accounting — conservative
+                // relay (the peer is at least reachable via non-direct).
+                "relay"
+            };
+            out.push((b58, cls));
+        }
+        out
+    }
+
+    /// Every peer currently in the dialing set (`running.dialing`), as
+    /// base58 strings. "Dialing" (grey) is a transient in-flight state and
+    /// the status dot treats it as *lower* priority than any established
+    /// link, so the caller can use this as a per-peer fallback signal
+    /// after the linked list.
+    pub fn dialing_peers(&self) -> Vec<String> {
+        self
+            .running
+            .dialing
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|p| p.to_base58())
+            .collect()
+    }
+
     /// Peers currently reachable **only** via a relay circuit: present in
     /// `link_relay` with a live count, but with zero direct links. These are
     /// the candidates for relay→direct promotion that [`Self::maybe_upgrade_relays`]
@@ -693,7 +759,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 continue;
             };
             if text.is_empty() {
-                let _ = sqlite::queue::give_up(&pool, row.msg_id).await;
+                // Local message row has no text yet (shouldn't happen post-
+                // insert, but if it does, the row for this device is useless —
+                // drop it. Other devices of the same user keep their own
+                // redelivery schedule.
+                let _ = sqlite::queue::give_up_pair(&pool, row.msg_id, &row.peer_base58).await;
                 continue;
             }
             tracing::info!(
@@ -704,29 +774,59 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             );
             match self.try_send_dm_once(&row.peer_base58, &text, row.msg_id as u64).await {
                 Ok(()) => {
-                    let _ = self.store.set_status(row.msg_id, sqlite::STATUS_SENT).await;
-                    let _ = sqlite::queue::give_up(&pool, row.msg_id).await; // drop from queue
-                    tracing::info!(msg_id = row.msg_id, peer = %row.peer_base58, "[redeliver] DELIVERED");
+                    let _ =
+                        sqlite::queue::give_up_pair(&pool, row.msg_id, &row.peer_base58).await;
+                    // Flip the message row to SENT only when every device
+                    // for this message is done (acked or given up on).
+                    let remaining = sqlite::queue::pending_peers_for_msg(&pool, row.msg_id)
+                        .await
+                        .unwrap_or_default();
+                    if remaining.is_empty() {
+                        let _ = self.store.set_status(row.msg_id, sqlite::STATUS_SENT).await;
+                        tracing::info!(
+                            msg_id = row.msg_id,
+                            peer = %row.peer_base58,
+                            "[redeliver] DELIVERED — row → SENT (all devices done)"
+                        );
+                    } else {
+                        tracing::info!(
+                            msg_id = row.msg_id,
+                            peer = %row.peer_base58,
+                            still_pending = remaining.len(),
+                            "[redeliver] DELIVERED on this device, others still pending"
+                        );
+                    }
                 }
                 Err(why) => {
-                    let attempts = match sqlite::queue::bump(&pool, row.msg_id).await {
-                        Ok(a) => a,
-                        Err(e) => {
-                            tracing::warn!("[redeliver] bump failed: {e}");
-                            continue;
-                        }
-                    };
+                    let attempts =
+                        match sqlite::queue::bump(&pool, row.msg_id, &row.peer_base58).await {
+                            Ok(a) => a,
+                            Err(e) => {
+                                tracing::warn!("[redeliver] bump failed: {e}");
+                                continue;
+                            }
+                        };
                     if attempts >= sqlite::queue::MAX_ATTEMPTS {
-                        let _ = self
-                            .store
-                            .set_status(row.msg_id, sqlite::STATUS_FAILED)
-                            .await;
-                        let _ = sqlite::queue::give_up(&pool, row.msg_id).await;
+                        let _ =
+                            sqlite::queue::give_up_pair(&pool, row.msg_id, &row.peer_base58).await;
+                        // Mark FAILED only when every device for this message
+                        // is exhausted — otherwise leave it SENDING so the
+                        // remaining devices can still land.
+                        let remaining = sqlite::queue::pending_peers_for_msg(&pool, row.msg_id)
+                            .await
+                            .unwrap_or_default();
+                        if remaining.is_empty() {
+                            let _ = self
+                                .store
+                                .set_status(row.msg_id, sqlite::STATUS_FAILED)
+                                .await;
+                        }
                         tracing::warn!(
                             msg_id = row.msg_id,
                             peer = %row.peer_base58,
                             attempts,
-                            "[redeliver] giving up — marked FAILED (reason: {why})"
+                            still_pending = remaining.len(),
+                            "[redeliver] giving up on this device (reason: {why})"
                         );
                     } else {
                         tracing::debug!(
@@ -2025,29 +2125,104 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// Returns `Ok((chat_id, msg_id))`. The local-row insert is the contract
     /// (the UI relies on the row existing right after this returns), so a db
     /// failure here is a hard error; the enqueue is best-effort on top.
+    /// Resolve a peer's base58 id to its username (the stable key for DM
+    /// conversations). Falls back to the raw base58 when the directory has
+    /// no record, which still yields one row per *device* rather than per
+    /// message — a known, acceptable degradation for peers that never
+    /// announced a username.
+    ///
+    /// The directory stores (user_id -> devices). We know the peer's
+    /// base58 device id but not their user id; `resolve_device` returns the
+    /// device record carrying `user_id`. The account's `user_id` string is
+    /// the username (a 1:1 account id); the local `users` table keeps the
+    /// pretty display value under `users.username`, but the directory's
+    /// `user_id` is the canonical stable key used across the wire.
+    pub fn resolve_peer_username(&self, peer_base58: &str) -> String {
+        match self.dir.resolve_device(peer_base58) {
+            Ok(dev) if !dev.user_id.is_empty() => dev.user_id,
+            _ => peer_base58.to_string(),
+        }
+    }
+
+    /// Enumerate every **approved device** the user `username` currently has
+    /// registered in the directory. This is the fan-out list for a DM from
+    /// the current user to that person: each entry is the dial target for
+    /// one of the recipient's clients. The current user's own base58 is
+    /// excluded (we never deliver a DM to ourselves) and empty ids are
+    /// dropped.
+    ///
+    /// NOTE: uses the directory HTTP endpoint, which may be briefly empty.
+    /// Callers that need the authoritative local device list (e.g. the DM
+    /// status dot) should enumerate via the local SQLite `devices` table
+    /// instead — the app layer has direct access to the pool and can do so
+    /// without going through the directory.
+    pub fn dm_devices_of_username(&self, username: &str) -> Vec<String> {
+        if username.is_empty() {
+            return Vec::new();
+        }
+        let me = self.peer_base58();
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for d in self.dir.list_devices(username) {
+            if !d.peer_id.is_empty() && d.peer_id != me && seen.insert(d.peer_id.clone()) {
+                out.push(d.peer_id);
+            }
+        }
+        out
+    }
+
+    /// Stage a text DM for delivery to **every approved device** of the
+    /// target user, and return the (chat_id, msg_id) pair so the caller can
+    /// immediately drive the live-delivery phase.
+    ///
+    /// The local `messages` row is single (one row per logical DM); only the
+    /// redelivery queue is per-(message, device): each device of the target
+    /// user gets its own retry budget.
+    ///
+    /// `peer_base58` is the base58 id the caller already knows — typically
+    /// the contact's primary device. When the user's full device list isn't
+    /// reachable through the directory (e.g. user not yet announced), we
+    /// fall back to enqueuing for that single known device.
     pub async fn queue_dm_text(
         &self,
         peer_base58: &str,
         text: &str,
     ) -> anyhow::Result<(String, i64)> {
-        let chat = store::dm_chat_id(&self.peer_base58(), peer_base58);
+        let username = self.resolve_peer_username(peer_base58);
+        let chat = store::dm_chat_id(&username);
+        let devices = {
+            let ds = self.dm_devices_of_username(&username);
+            if ds.is_empty() {
+                vec![peer_base58.to_string()]
+            } else {
+                ds
+            }
+        };
         let msg_id = self.store.insert_mine_sending(&chat, text).await?;
         if let Some(pool) = self.store.pool() {
-            let _ = sqlite::queue::enqueue(&pool, msg_id, peer_base58, &chat).await;
+            for dev in &devices {
+                let _ = sqlite::queue::enqueue(&pool, msg_id, dev, &chat).await;
+            }
         }
-        tracing::debug!("[dm] queued peer={peer_base58} msg_id={msg_id} chat={chat}");
+        tracing::debug!(
+            "[dm] queued peer={peer_base58} username={username} devices={} msg_id={msg_id} chat={chat}",
+            devices.len()
+        );
         Ok((chat, msg_id))
     }
 
-    /// Attempt to deliver an already-queued text DM right now (the "live"
-    /// path): try every dialable endpoint, then wake-and-retry. On ack the
-    /// local row flips `SENDING`→`SENT` and the redelivery queue row is
-    /// dropped. On failure the row stays `SENDING` and the
-    /// `start_dm_redeliver` task owns the backoff.
+    /// Attempt live delivery of an already-queued text DM to **one** device
+    /// of the target user. Returns `Ok(true)` on ack (the (msg, device)
+    /// pair is dropped from the redelivery queue), `Ok(false)` on failure
+    /// (this device stays queued; the redelivery task owns its backoff).
     ///
-    /// Returns `Ok(true)` when the peer acked this attempt, `Ok(false)` when
-    /// it didn't (queued for retry). A directory/db-level error that prevented
-    /// even attempting a dial is returned as `Err`.
+    /// Delivery to a user's other devices is the caller's responsibility —
+    /// invoke this once per device in the fan-out list.
+    ///
+    /// When a device is successfully delivered, the local `messages` row
+    /// flips to `SENT` only if **no other** devices for this message are
+    /// still pending — otherwise it stays `SENDING` until every device has
+    /// acked or been given up on (driven by `redeliver_due`).
     pub async fn deliver_dm(
         &self,
         msg_id: i64,
@@ -2077,10 +2252,28 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         match outcome {
             Ok(()) => {
                 if let Some(pool) = self.store.pool() {
-                    let _ = self.store.set_status(msg_id, sqlite::STATUS_SENT).await;
-                    let _ = sqlite::queue::give_up(&pool, msg_id).await; // drop queue row
+                    let _ =
+                        sqlite::queue::give_up_pair(&pool, msg_id, peer_base58).await; // drop this device's queue row
+                    // Only mark the local message row SENT once every device
+                    // for this message has acked (or been given up on). If any
+                    // other device is still pending, leave the row as SENDING
+                    // so the UI keeps showing a "sending" badge until the last
+                    // device lands.
+                    let still_pending = sqlite::queue::pending_peers_for_msg(&pool, msg_id)
+                        .await
+                        .unwrap_or_default();
+                    if still_pending.is_empty() {
+                        let _ = self.store.set_status(msg_id, sqlite::STATUS_SENT).await;
+                        tracing::info!("[dm] all devices acked — row → SENT (msg={msg_id})");
+                    } else {
+                        tracing::debug!(
+                            "[dm] device acked peer={peer_base58}; {} device(s) still pending",
+                            still_pending.len()
+                        );
+                    }
+                } else {
+                    tracing::debug!("[dm] delivered peer={peer_base58} (no sql pool)");
                 }
-                tracing::debug!("[dm] delivered peer={peer_base58}");
                 Ok(true)
             }
             Err(why) => {
@@ -2098,9 +2291,47 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// let the user retry" semantics: `send_dm` is only used for
     /// `Kind::Text` rows and the `dm_send_queue` table is only populated with
     /// text rows.
+    /// Send a text DM in one shot to **every approved device** of the target
+    /// user (the username is resolved from `peer_base58` when the directory
+    /// knows it, otherwise the raw base58 is used as the fallback recipient).
+    ///
+    /// Returns the chat id (`dm:<username>`). Individual devices that failed
+    /// a live attempt are left in the redelivery queue — their retry is
+    /// owned by `start_dm_redeliver` / `redeliver_due`.
+    ///
+    /// **Text only** — media (voice/image/file) has a separate "fail and let
+    /// the user retry" path per device.
     pub async fn send_dm(&self, peer_base58: &str, text: &str) -> anyhow::Result<String> {
         let (chat, msg_id) = self.queue_dm_text(peer_base58, text).await?;
-        self.deliver_dm(msg_id, peer_base58, text).await?;
+        let username = self.resolve_peer_username(peer_base58);
+        let devices = {
+            let ds = self.dm_devices_of_username(&username);
+            if ds.is_empty() {
+                vec![peer_base58.to_string()]
+            } else {
+                ds
+            }
+        };
+        let mut any_ok = false;
+        for dev in &devices {
+            match self.deliver_dm(msg_id, dev, text).await {
+                Ok(true) => {
+                    any_ok = true;
+                }
+                Ok(false) => {
+                    // Live attempt missed — the device is still queued;
+                    // redelivery task owns its backoff.
+                }
+                Err(e) => {
+                    tracing::warn!("[dm] deliver_dm({dev}) failed: {e}");
+                }
+            }
+        }
+        if !any_ok {
+            tracing::debug!(
+                "[dm] no device acked on the live pass ({devices:?}); redelivery task owns it"
+            );
+        }
         Ok(chat)
     }
 
@@ -3658,7 +3889,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         // never sees the same message twice. `None` means the
                         // sender is legacy or it's a control frame (friend
                         // request) — those are never deduplicated here.
-                        let chat = store::dm_chat_id(&self.peer_base58(), &peer_b58);
+                        let chat = store::dm_chat_id(&self.resolve_peer_username(&peer_b58));
                         if let (Some(cid), Some(pool)) = (req.client_id, self.store.pool()) {
                             let fresh = match sqlite::inbound_seen::mark(&pool, cid as i64, &peer_b58).await {
                                 Ok(f) => f,

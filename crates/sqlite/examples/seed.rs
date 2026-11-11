@@ -155,7 +155,8 @@ async fn seed(pool: &Pool, me: &str) -> anyhow::Result<()> {
     for i in 0..CONTACT_COUNT {
         let id = CONTACT_BASE + i;
         let peer_id = format!("12D3KooW{:08x}", i);
-        let route_key = format!("dm:{id}");
+        let username = format!("user{id}");
+        let route_key = format!("dm:{username}");
         let msg_count = 2 + (i % 3) as usize;
         seed_dm(
             pool,
@@ -185,7 +186,6 @@ async fn seed(pool: &Pool, me: &str) -> anyhow::Result<()> {
             &ConversationPatch {
                 type_: Some(1),
                 name: Some(name.into()),
-                peer_id: None,
                 avatar_path: None,
             },
         )
@@ -251,7 +251,6 @@ async fn seed_dm(
         &ConversationPatch {
             type_: Some(0),
             name: Some(route_key.into()),
-            peer_id: Some(peer_id.into()),
             avatar_path: None,
         },
     )

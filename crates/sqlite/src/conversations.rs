@@ -12,7 +12,6 @@ pub struct Conversation {
     pub id: i64,
     pub type_: i64,
     pub name: Option<String>,
-    pub peer_id: Option<String>,
     pub avatar_path: Option<String>,
     pub last_message_id: Option<i64>,
     pub last_message_preview: Option<String>,
@@ -29,25 +28,22 @@ pub struct Conversation {
 pub struct ConversationPatch {
     pub type_: Option<i64>,
     pub name: Option<String>,
-    pub peer_id: Option<String>,
     pub avatar_path: Option<String>,
 }
 
 pub async fn upsert(pool: &Pool, id: i64, patch: &ConversationPatch) -> anyhow::Result<Conversation> {
     let t = patch.type_.unwrap_or(0);
     sqlx::query(
-        "INSERT INTO conversations (id, type, name, peer_id, avatar_path)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(id) DO UPDATE SET
-            type        = COALESCE(?2, type),
-            name        = COALESCE(?3, name),
-            peer_id     = COALESCE(?4, peer_id),
-            avatar_path = COALESCE(?5, avatar_path)",
+        "INSERT INTO conversations (id, type, name, avatar_path)
+          VALUES (?1, ?2, ?3, ?4)
+          ON CONFLICT(id) DO UPDATE SET
+             type        = COALESCE(?2, type),
+             name        = COALESCE(?3, name),
+             avatar_path = COALESCE(?4, avatar_path)",
     )
     .bind(id)
     .bind(t)
     .bind(&patch.name)
-    .bind(patch.peer_id.as_deref())
     .bind(&patch.avatar_path)
     .execute(pool)
     .await?;
@@ -57,9 +53,9 @@ pub async fn upsert(pool: &Pool, id: i64, patch: &ConversationPatch) -> anyhow::
 
 pub async fn get(pool: &Pool, id: i64) -> anyhow::Result<Option<Conversation>> {
     let row = sqlx::query_as::<_, Conversation>(
-        "SELECT id, type AS type_, name, peer_id, avatar_path, last_message_id, last_message_preview,
+        "SELECT id, type AS type_, name, avatar_path, last_message_id, last_message_preview,
                 last_message_time, unread_count, is_pinned, is_muted, draft, last_sync_seq, last_read_seq
-         FROM conversations WHERE id = ?1",
+          FROM conversations WHERE id = ?1",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -80,14 +76,20 @@ pub async fn resolve_id(pool: &Pool, chat_id: &str) -> anyhow::Result<Option<i64
 }
 
 /// Conversation type implied by a text chat id. core names group ids `grp-…`
-/// whereas DM ids are `c<hash>` (or the legacy `a|b` pair) and never start
-/// with `grp-`, so the prefix is the authoritative DM/group signal.
+/// whereas DM ids are `dm:<peer_username>` and never start with `grp-`, so
+/// the prefix is the authoritative DM/group signal.
 pub fn type_for_chat_id(chat_id: &str) -> i64 {
     if chat_id.starts_with("grp-") {
         ConversationType::Group as i64
     } else {
         ConversationType::Dm as i64
     }
+}
+
+/// Extract the peer's username a DM chat id (`dm:<username>`) was keyed by.
+/// Returns `None` for non-DM ids (groups, legacy rows, empty values).
+pub fn peer_username_from_chat_id(chat_id: &str) -> Option<&str> {
+    chat_id.strip_prefix("dm:").filter(|s| !s.is_empty())
 }
 
 /// Find-or-create a conversation keyed by its text `name`, with the type
@@ -126,16 +128,6 @@ pub async fn ensure_time(pool: &Pool, id: i64, ts: i64) -> anyhow::Result<()> {
     .bind(ts)
     .execute(pool)
     .await?;
-    Ok(())
-}
-
-/// Record the DM peer's identity (libp2p PeerId / username) if not already set.
-pub async fn set_peer_id(pool: &Pool, id: i64, peer_id: &str) -> anyhow::Result<()> {
-    sqlx::query("UPDATE conversations SET peer_id = COALESCE(peer_id, ?2) WHERE id = ?1")
-        .bind(id)
-        .bind(peer_id)
-        .execute(pool)
-        .await?;
     Ok(())
 }
 
@@ -221,10 +213,10 @@ pub async fn set_last_sync_seq(pool: &Pool, id: i64, seq: i64) -> anyhow::Result
 
 pub async fn list_all(pool: &Pool) -> anyhow::Result<Vec<Conversation>> {
     let rows = sqlx::query_as::<_, Conversation>(
-        "SELECT id, type AS type_, name, peer_id, avatar_path, last_message_id, last_message_preview,
+        "SELECT id, type AS type_, name, avatar_path, last_message_id, last_message_preview,
                 last_message_time, unread_count, is_pinned, is_muted, draft, last_sync_seq, last_read_seq
-         FROM conversations
-         ORDER BY is_pinned DESC, last_message_time DESC",
+          FROM conversations
+          ORDER BY is_pinned DESC, last_message_time DESC",
     )
     .fetch_all(pool)
     .await?;
@@ -249,11 +241,11 @@ mod tests {
         let pool = open_memory().await.unwrap();
         let base = now_ms();
 
-        let a = upsert(&pool, 1, &ConversationPatch { type_: Some(0), name: Some("a".into()), peer_id: None, avatar_path: None }).await.unwrap();
+        let a = upsert(&pool, 1, &ConversationPatch { type_: Some(0), name: Some("dm:alice".into()), avatar_path: None }).await.unwrap();
         assert_eq!(a.type_, 0);
-        assert_eq!(a.name.as_deref(), Some("a"));
+        assert_eq!(a.name.as_deref(), Some("dm:alice"));
 
-        let _ = upsert(&pool, 2, &ConversationPatch { type_: Some(1), name: Some("Team".into()), peer_id: None, avatar_path: None }).await.unwrap();
+        let _ = upsert(&pool, 2, &ConversationPatch { type_: Some(1), name: Some("Team".into()), avatar_path: None }).await.unwrap();
 
         touch_last_message(&pool, 1, Some(1001), "hello", base + 10, 1).await.unwrap();
         touch_last_message(&pool, 1, Some(1002), "world", base + 20, 1).await.unwrap();

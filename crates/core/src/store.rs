@@ -1,5 +1,4 @@
 use crate::message::now_ms;
-use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use sqlite::messages::{NewMessage, MSG_TYPE_TEXT, STATUS_SENDING};
 
@@ -36,34 +35,21 @@ impl StoredMsg {
     }
 }
 
-    pub fn dm_chat_id(peer_a: &str, peer_b: &str) -> String {
-    let (x, y) = if peer_a <= peer_b {
-        (peer_a, peer_b)
-    } else {
-        (peer_b, peer_a)
-    };
-    hash_chat_id(&[x, y])
-}
-
-pub fn hash_chat_id(parts: &[&str]) -> String {
-    let mut acc: Vec<u8> = Vec::new();
-    parts.iter().for_each(|s| {
-        acc.extend_from_slice(s.as_bytes());
-        acc.push(b'|');
-    });
-    let digest = Sha256::digest(&acc);
-    format!("c{}", hex(&digest[..8]))
-}
-
-
-fn hex(bytes: &[u8]) -> String {
-    const CHARS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(CHARS[(b >> 4) as usize] as char);
-        out.push(CHARS[(b & 0x0f) as usize] as char);
-    }
-    out
+/// Build a DM chat id from the peer's username.
+///
+/// DM conversations are keyed by the *person* (username), not by a
+/// device PeerId, so that all of a peer's devices collapse into one
+/// conversation in the chat list. The per-device libp2p id that p2p
+/// features (calls / share / DM dial) still need is resolved on demand
+/// from `contacts` / `devices`, not derived from the chat id.
+///
+/// The fallback caller path (no username resolvable from the directory,
+/// e.g. peer never announced itself or directory not running) may pass
+/// the peer's base58 here and get a `dm:<base58>` id that still keys one
+/// row per *person's specific base58*, not per message. That's the best
+/// we can do without a known username.
+pub fn dm_chat_id(peer_username: &str) -> String {
+    format!("dm:{peer_username}")
 }
 
 #[derive(Debug)]
@@ -333,18 +319,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dm_id_is_symmetric() {
-        let a = "QmAAA";
-        let b = "QmBBB";
-        assert_eq!(dm_chat_id(a, b), dm_chat_id(b, a));
-        assert_ne!(dm_chat_id(a, b), b);
+    fn dm_id_keys_by_username() {
+        // DM ids are keyed by the peer's username so that a single
+        // conversation row covers every device of that user.
+        let a = dm_chat_id("alice");
+        assert_eq!(a, "dm:alice");
+        assert_ne!(dm_chat_id("alice"), dm_chat_id("bob"));
     }
 
     #[tokio::test]
     async fn push_persists_and_roundtrips() {
         let db = sqlite::open_memory().await.unwrap();
         let store = Store::with_sql(db.clone(), "QmMe");
-        let chat = dm_chat_id("QmMe", "QmOther");
+        let chat = dm_chat_id("alice");
 
         let _ = store.push(&chat, "QmMe", "hi", false, Kind::Text).await;
         let _ = store.push(&chat, "QmOther", "yo", true, Kind::Text).await;
@@ -371,7 +358,7 @@ mod tests {
     #[tokio::test]
     async fn hydrate_paging_order_deterministic() {
         let db = sqlite::open_memory().await.unwrap();
-        let chat = dm_chat_id("QmMe", "QmOther");
+        let chat = dm_chat_id("alice");
         for (i, txt) in ["old", "mid", "new"].into_iter().enumerate() {
             sqlite::messages::insert_row(
                 &db,

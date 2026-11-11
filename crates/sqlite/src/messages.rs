@@ -142,10 +142,10 @@ pub async fn insert(pool: &Pool, m: &NewMessage) -> anyhow::Result<i64> {
 pub async fn insert_row(pool: &Pool, m: &MsgRow) -> anyhow::Result<()> {
     let conversation_id = conversations::ensure_dm(pool, &m.chat_id).await?;
     let sender_user_id = crate::devices::ensure_user_by_peer(pool, &m.sender).await?;
-    // A message from the peer reveals the DM's peer identity.
-    if !m.mine {
-        conversations::set_peer_id(pool, conversation_id, &m.sender).await?;
-    }
+    // DM conversations are keyed by the peer's username in `name` (set by the
+    // caller's chat id, `dm:<username>`), so there is no per-conversation peer
+    // id column to stamp here. The sender's device binding (peer -> user) is
+    // kept for display and p2p dialing.
     let (msg_type, media_path, media_duration) = match (m.media_kind, m.media_path.as_deref()) {
         (MediaKind::Voice, Some(p)) if !p.is_empty() => (
             MSG_TYPE_VOICE,
@@ -446,7 +446,6 @@ mod tests {
             &crate::conversations::ConversationPatch {
                 type_: Some(1),
                 name: Some("g".into()),
-                peer_id: None,
                 avatar_path: None,
             },
         )
