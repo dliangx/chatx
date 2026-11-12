@@ -4,25 +4,34 @@
 //! so remote peers can dial us. Behind a NAT that's a private LAN IP, so
 //! cross-NAT peers cannot reach us. STUN lets the client learn its own
 //! **public** IP (the one the NAT presents to the outside world) and prepend
-//! a `/ip4/<public>/tcp/<listen_port>` endpoint (see
+//! a `/ip4/<public>/tcp/<listen_port>` (or `/ip6/...`) endpoint (see
 //! [`crate::Client::endpoints_with_egress`]).
 //!
-//! Fingerprint design note:
+//! Dual-stack: a separate dual-socket probe runs **per IP family** — one pair
+//! of independent sockets hits two different STUN servers over IPv4, another
+//! pair does the same over IPv6 (the v6 sockets are dual-stack, so a server
+//! with only an A record still answers and its IPv4-mapped reply is folded
+//! back into the v4 profile). `discover()` therefore returns **one
+//! `NatProfile` per family** (v4 + v6) instead of a single mixed one; multi-
+//! homed hosts no longer collapse their v4 + v6 fingerprints into an
+//! `Unknown` verdict.
+//!
+//! Fingerprint design note (per family):
 //! * A *single* STUN answer only tells you the public IP — it does not
 //!   distinguish endpoint-independent mapping (EIM: full / restricted cone)
 //!   from endpoint-dependent mapping (EDM: symmetric NAT), which is exactly
 //!   the axis where hole-punching success diverges.
-//! * Fingerprint we use: open two **independent** local UDP sockets and send
-//!   a STUN binding to two **different** STUN servers. Read the mapped
-//!   source port reported by each server.
+//! * Fingerprint we use: two **independent** local UDP sockets, each probing
+//!   the STUN servers in order; take the first success per socket. Read the
+//!   mapped source port reported by each.
 //!   - both same port  + same IP -> `EIM`
 //!   - different ports  + same IP -> `EDM`
-//!   - different IPs, or only one answered -> `Unknown` (multi-homed / CGNAT /
-//!     transient network asymmetry — treat conservatively)
+//!   - different IPs, or only one answered -> `Unknown` (multi-homed within
+//!     one family / CGNAT / transient asymmetry — treat conservatively)
 //! * Port-restricted NAT is still EIM (the mapping is not endpoint-dependent;
 //!   only the *filter* is peer-dependent), which is correct for our use.
 //!
-//! Design notes (unchanged from the IP-only version):
+//! Design notes:
 //! * Uses `std::net::UdpSocket` with a hard timeout — blocking, callers must
 //!   run on a `spawn_blocking` / presence thread.
 //! * Cache is process-wide for ~120 s so the 15 s heartbeat loop and the
@@ -65,8 +74,7 @@ const STUN_SERVERS: &[&str] = &[
 /// the operator's own STUN server (co-located with the directory/relay) is
 /// reachable — so we probe it first and only fall back to the public list if
 /// it fails.
-static CUSTOM_SERVERS: std::sync::Mutex<Vec<String>> =
-    std::sync::Mutex::new(Vec::new());
+static CUSTOM_SERVERS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// Register `servers` (as `host:port`) as the preferred STUN endpoints,
 /// taking priority over the built-in public list. Called automatically by
@@ -76,7 +84,10 @@ static CUSTOM_SERVERS: std::sync::Mutex<Vec<String>> =
 /// the preference and reverts to the built-in public list.
 pub fn set_custom_servers(servers: Vec<String>) {
     let mut s = CUSTOM_SERVERS.lock().unwrap();
-    *s = servers.into_iter().filter(|a| !a.trim().is_empty()).collect();
+    *s = servers
+        .into_iter()
+        .filter(|a| !a.trim().is_empty())
+        .collect();
 }
 
 /// Resolve the ordered probe list: operator-discovered servers first, then the
@@ -150,10 +161,11 @@ impl std::fmt::Display for ProbeResult {
     }
 }
 
-/// A cached snapshot: fingerprint + expiry.
-#[derive(Debug, Clone, Copy)]
+/// A cached snapshot: fingerprints (one per address family that probed
+/// cleanly) + expiry.
+#[derive(Debug, Clone)]
 struct Cached {
-    profile: NatProfile,
+    profiles: Vec<NatProfile>,
     expires_at: std::time::Instant,
 }
 
@@ -218,68 +230,102 @@ fn fingerprint(ip_a: IpAddr, port_a: u16, ip_b: IpAddr, port_b: u16) -> (IpAddr,
 /// `PER_SERVER_TIMEOUT * 2` in the worst case (two independent probes).
 /// Call from a background thread or `tokio::task::spawn_blocking`, never
 /// from a tokio worker or from the UI event loop path.
-pub fn discover() -> anyhow::Result<Option<NatProfile>> {
+pub fn discover() -> anyhow::Result<Vec<NatProfile>> {
     // Fast path: fresh cache.
     {
         let cache = CACHE.lock().unwrap();
         if let Some(c) = &cache.value {
-            if c.expires_at > std::time::Instant::now() {
-                return Ok(Some(c.profile));
+            if c.expires_at > std::time::Instant::now() && !c.profiles.is_empty() {
+                return Ok(c.profiles.clone());
             }
         }
     }
 
-    // Slow path: two independent sockets -> two servers. We open the sockets
-    // *before* picking which servers so port allocation is as close to
-    // simultaneous as the OS gives us (NATs that are genuinely EIM still
-    // produce the same mapped port in this case; NATs that are EDM produce
-    // different ones independent of timing).
+    // Slow path: two independent dual-stack sockets -> two servers, per IP
+    // address family. We open the sockets *before* picking which servers so
+    // port allocation is as close to simultaneous as the OS gives us (NATs
+    // that are genuinely EIM still produce the same mapped port in this
+    // case; NATs that are EDM produce different ones independent of
+    // timing).
     let servers = effective_servers();
-    let sock_a = bind_socket()?;
-    let sock_b = bind_socket()?;
-    let result = probe_pair(&sock_a, 0, &sock_b, 1, &servers);
-
-    match result {
-        Some(profile) => {
-            let mut cache = CACHE.lock().unwrap();
-            cache.value = Some(Cached {
-                profile,
-                expires_at: std::time::Instant::now() + cache.ttl,
-            });
-            tracing::info!(%profile, "STUN probe: NAT fingerprint resolved");
-            Ok(Some(profile))
-        }
-        None => {
-            // Every probe failed — fall back to a stale cache if we have
-            // one, so a momentary STUN outage doesn't wipe out our
-            // reachability claim.
-            let cache = CACHE.lock().unwrap();
-            if let Some(c) = &cache.value {
-                tracing::warn!(profile = %c.profile, "all STUN servers unreachable; using stale fingerprint");
-                Ok(Some(c.profile))
-            } else {
-                Ok(None)
+    let mut out: Vec<NatProfile> = Vec::new();
+    for family in [Family::V4, Family::V6] {
+        let sock_a = match bind_socket(family) {
+            Ok(s) => s,
+            Err(e) => {
+                // Host has no interface of this family (or the v4 fallback
+                // failed too) — skip the family cleanly, don't abort the
+                // other one.
+                tracing::debug!(?family, %e, "STUN probe: skipping family (cannot bind)");
+                continue;
             }
+        };
+        let sock_b = match bind_socket(family) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(?family, %e, "STUN probe: skipping family (second socket cannot bind)");
+                continue;
+            }
+        };
+        if let Some(profile) = probe_pair(&sock_a, 0, &sock_b, 1, &servers) {
+            out.push(profile);
         }
+    }
+
+    if out.is_empty() {
+        // All probes failed — fall back to a stale cache if we have one,
+        // so a momentary STUN outage doesn't wipe out our reachability
+        // claim (or our mixed-family profile, e.g. v4 fresh + v6 stale).
+        let cache = CACHE.lock().unwrap();
+        if let Some(c) = &cache.value {
+            let stale = c.profiles.clone();
+            tracing::warn!(profiles = ?stale, "all STUN servers unreachable; using stale fingerprint(s)");
+            Ok(stale)
+        } else {
+            Ok(Vec::new())
+        }
+    } else {
+        let mut cache = CACHE.lock().unwrap();
+        cache.value = Some(Cached {
+            profiles: out.clone(),
+            expires_at: std::time::Instant::now() + cache.ttl,
+        });
+        tracing::info!(?out, "STUN probe: NAT fingerprint(s) resolved");
+        Ok(out)
     }
 }
 
-/// Non-blocking cached lookup: returns the most recent NAP
-/// (fresh or stale), without doing any network I/O. Use on hot paths —
-/// call `discover()` from a background thread to populate the cache first.
-pub fn discover_cached() -> Option<NatProfile> {
-    let cache = CACHE.lock().unwrap();
-    cache.value.map(|c| c.profile)
+#[derive(Debug, Clone, Copy)]
+enum Family {
+    V4,
+    V6,
 }
 
-/// Bind a UDP socket to a random local port. We do this per-probe (two
-/// sockets for two servers) because the EIM/EDM comparison *relies on* the
-/// two local sockets having independent local ports AND on the NAT
+/// Non-blocking cached lookup: returns the most recent NAT fingerprint(s)
+/// (fresh or stale), without doing any network I/O. Use on hot paths — call
+/// `discover()` from a background thread to populate the cache first.
+pub fn discover_cached() -> Option<Vec<NatProfile>> {
+    let cache = CACHE.lock().unwrap();
+    cache.value.as_ref().map(|c| c.profiles.clone())
+}
+
+/// Bind a UDP socket to a random local port. We do this per-probe
+/// (two sockets for two servers) because the EIM/EDM comparison *relies on*
+/// the two local sockets having independent local ports AND on the NAT
 /// observing both, per RFC 5389 / RFC 6580 §2 semantics.
-fn bind_socket() -> anyhow::Result<std::net::UdpSocket> {
-    let sock = std::net::UdpSocket::bind("0.0.0.0:0")
-        .or_else(|_| std::net::UdpSocket::bind("[::]:0"))
-        .map_err(|e| anyhow::anyhow!("bind STUN socket: {e}"))?;
+///
+/// `family` picks the socket:
+/// * [`Family::V4`] — `0.0.0.0:0`, v4-only (matches an A-only reply).
+/// * [`Family::V6`] — `[::]:0`, dual-stack on Linux/FreeBSD (the default)
+///   and single-stack v6 only on macOS/BSD (where `IPV6_V6ONLY` defaults
+///   true). Either way, replies are folded into `IpAddr` per family —
+///   a v4-mapped reply on a dual-stack socket is reported as v4.
+fn bind_socket(family: Family) -> anyhow::Result<std::net::UdpSocket> {
+    let sock = match family {
+        Family::V4 => std::net::UdpSocket::bind("0.0.0.0:0"),
+        Family::V6 => std::net::UdpSocket::bind("[::]:0"),
+    }
+    .map_err(|e| anyhow::anyhow!("bind STUN socket: {e}"))?;
     sock.set_read_timeout(Some(PER_SERVER_TIMEOUT))?;
     sock.set_write_timeout(Some(PER_SERVER_TIMEOUT))?;
     Ok(sock)
@@ -316,13 +362,17 @@ fn probe_one(sock: &std::net::UdpSocket, server: &str) -> anyhow::Result<Option<
     // them with `ToSocketAddrs` instead of `SocketAddr::parse` — the latter
     // only accepts literal IP:port and rejects every default entry.
     // A host name can resolve to several addresses (e.g. `stun.l.google.com`
-    // often returns AAAA + A). Our socket is `AF_INET`-only (`0.0.0.0:0`), so
-    // an IPv6 address from the resolver is unusable here: `send_to` fails with
-    // `InvalidArgument` (os error 22) — the socket/address family mismatch.
-    // Try the addresses in order until one matches the socket family AND the
-    // peer replies; a family mismatch on one address must NOT be treated as
-    // the end of the server's fallback chain (that used to mask the working
-    // IPv4 sibling and report "no fingerprint" even though the host answered).
+    // often returns AAAA + A). The caller's socket is family-specific (`stun.rs`
+    // probes v4 and v6 as *separate* socket pairs), so an address of the wrong
+    // family makes `send_to` fail with `InvalidArgument` (os error 22) — skip
+    // it and try the next address; a family mismatch must NOT terminate the
+    // server's fallback chain (that used to mask the working sibling record
+    // and report "no fingerprint" even though the host answered).
+    //
+    // Note: a dual-stack v6 socket receives v4-mapped replies fine — the
+    // resolved family of `addr` only gates the *send*; the STUN
+    // MAPPED-ADDRESS we parse back is whatever the server saw, so the
+    // caller's per-family fold keeps profiles from collapsing into one.
     let addrs: Vec<SocketAddr> = server
         .to_socket_addrs()
         .map_err(|e| anyhow::anyhow!("bad STUN server {server}: {e}"))?
@@ -357,8 +407,9 @@ fn probe_one(sock: &std::net::UdpSocket, server: &str) -> anyhow::Result<Option<
         match sock.recv_from(&mut buf) {
             Ok((n, _from)) => {
                 buf.truncate(n);
-                return Some(parse_response(&buf, &txn))
-                    .ok_or_else(|| anyhow::anyhow!("STUN response from {server} {addr} missing MAPPED-ADDRESS"));
+                return Some(parse_response(&buf, &txn)).ok_or_else(|| {
+                    anyhow::anyhow!("STUN response from {server} {addr} missing MAPPED-ADDRESS")
+                });
             }
             // No answer within timeout — try the next address/server.
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
@@ -493,9 +544,9 @@ fn plain_mapped(p: &[u8]) -> Option<ProbeResult> {
 /// byte AND did not XOR the port, making it incompatible with real-world
 /// STUN servers (stun.l.google.com, stun.cloudflare.com, etc.).
 fn xor_mapped(p: &[u8]) -> Option<ProbeResult> {
-    let family = p[1];  // F is at byte 1, NOT byte 0 (byte 0 is reserved)
+    let family = p[1]; // F is at byte 1, NOT byte 0 (byte 0 is reserved)
     let port_raw = u16::from_be_bytes([p[2], p[3]]);
-    let port = port_raw ^ ((MAGIC >> 16) as u16);  // RFC 5389: XOR with magic high 16
+    let port = port_raw ^ ((MAGIC >> 16) as u16); // RFC 5389: XOR with magic high 16
 
     if family == 0x01 && p.len() >= 8 {
         let ip = u32::from_be_bytes([p[4], p[5], p[6], p[7]]) ^ MAGIC;
@@ -626,18 +677,17 @@ mod tests {
         assert_eq!(ip, ip_a); // first IP wins as the reported one
     }
 
-    /// Live probe: if network is available this returns Some, otherwise None
-    /// or an error — both are acceptable in CI. We assert only the type and
-    /// that a value is well-formed, never which mapping it is.
+    /// Live probe: if network is available this returns one or more profiles
+    /// (v4 + v6), otherwise an empty list — both are acceptable in CI. We
+    /// assert only the type and that each value is well-formed, never which
+    /// mapping it is.
     #[test]
     fn live_probe_shape() {
-        match discover() {
-            Ok(Some(profile)) => {
+        if let Ok(profiles) = discover() {
+            for profile in &profiles {
                 let _ = format!("{profile}");
                 let _ = profile.is_stable_public();
             }
-            Ok(None) => {}
-            Err(_) => {}
         }
     }
 }

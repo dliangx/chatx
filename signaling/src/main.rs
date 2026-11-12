@@ -452,7 +452,12 @@ async fn health() -> ApiResult {
 
 /// List the advertised relay addresses so a client can discover a NAT
 /// traversal relay without an operator-supplied `CHATX_RELAYS`. Each entry is a
-/// full multiaddr of the form `/ip4/<host>/tcp/<port>/p2p/<relay_peer_id>`.
+/// full multiaddr of the form
+/// `/ip{4,6}/<host>/tcp/<port>/p2p/<relay_peer_id>` or
+/// `/ip{4,6}/<host>/udp/<port>/quic-v1/p2p/<relay_peer_id>`.
+///
+/// When the operator set `CHATX_RELAY_ADVERTISE` to a v6 address, an IPv6
+/// pair (tcp + quic) is also added for v6-only clients.
 async fn list_relays(State(app): State<App>) -> ApiResult {
     let relays = app.relays.lock().await.clone();
     let out: Vec<chatx_core::signal::RelayInfo> =
@@ -904,15 +909,17 @@ async fn main() {
             .expect("CHATX_RELAY_ADDR must be host:port or `off`");
         let relays = relays.clone();
         tokio::spawn(async move {
-            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<String>();
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Vec<String>>();
             let serve = tokio::spawn(relay::start(relay_addr, ready_tx));
             // Await the ready notification *and* run the serve task; publish the
-            // advertise address for the clients' `GET /v1/relays`.
+            // advertise addresses (v4 and/or v6) for the clients' `GET /v1/relays`.
             let advertise = ready_rx.await;
             match advertise {
-                Ok(addr) => {
-                    relays.lock().await.push(addr.clone());
-                    tracing::info!(%addr, "relay advertised via GET /v1/relays");
+                Ok(addrs) => {
+                    for a in &addrs {
+                        tracing::info!(%a, "relay advertised via GET /v1/relays");
+                    }
+                    relays.lock().await.extend(addrs);
                 }
                 Err(e) => tracing::warn!(%e, "relay ready channel closed before announcing"),
             }
@@ -1018,9 +1025,8 @@ mod http_tests {
     /// not hang forever.
     #[test]
     fn wake_notice_roundtrip() {
-        use chatx_core::signal::{DirectoryClient, HttpDirectory, Notice};
+        use chatx_core::signal::{DirectoryClient, HttpDirectory};
         let server = Server::start();
-        let dir = HttpDirectory::new(server.base.clone());
 
         // B starts a long-poll for "peer-B" in a background thread.
         let poll_dir = HttpDirectory::new(server.base.clone());

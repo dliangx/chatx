@@ -64,7 +64,7 @@ fn relay_config() -> libp2p::relay::Config {
     cfg
 }
 
-/// Resolve the public host to use in the announced advertise address,
+/// Resolve the public hosts to use in the announced advertise addresses,
 /// replacing "locally non-dialable" IPs (`0.0.0.0` any, `127.*` loopback,
 /// private-LAN 10/172.16-31/192.168) that are meaningless to a client on
 /// **another network**.
@@ -76,70 +76,106 @@ fn relay_config() -> libp2p::relay::Config {
 ///
 /// Resolution priority:
 /// 1. `$advertise_env=<public-host:port>` (explicit operator config, most reliable)
-/// 2. Egress probe (`UdpSocket::connect` to read the local IP) — yields the
-///    public IP when running on a bare public line, but still a private IP
-///    behind a cloud VPC or NAT
-/// 3. Fall back to the original address (with a warn) — at least passes localhost self-test
+/// 2. Egress probe (v4 → 1.1.1.1, v6 → `2001:4860:4860::8888`) — yields the
+///    public IP of each family when running on a bare public line, but still
+///    a private IP behind a cloud VPC or NAT
 ///
-/// Returns `None` when no public host can be determined; the caller keeps
-/// the listen address as-is (and a warn is emitted above).
-pub async fn resolve_public_host(advertise_env: &str) -> Option<IpAddr> {
+/// Returns a de-duplicated list of (v4, v6) public IPs in that order, empty
+/// when no public host could be determined for a family (a warn is emitted above).
+pub async fn resolve_public_hosts(advertise_env: &str) -> (Option<IpAddr>, Option<IpAddr>) {
     if let Ok(spec) = std::env::var(advertise_env) {
         let s = spec.trim().to_ascii_lowercase();
-        if s.is_empty() {
-            return None;
-        }
-        let host = spec
-            .split_once(':')
-            .map(|(h, _)| h.to_string())
-            .unwrap_or(spec.to_string());
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            tracing::info!(%ip, env = advertise_env, "advertise IP from operator env");
-            return Some(ip);
-        }
-        if let Ok(addrs) = tokio::net::lookup_host(&host).await
-        {
-            // Prefer the first IPv4, otherwise fall back to the first address.
-            let mut any = None;
-            for a in addrs {
-                if a.ip().is_ipv4() {
-                    any = Some(a.ip());
-                    break;
-                }
-                if any.is_none() {
-                    any = Some(a.ip());
+        if !s.is_empty() {
+            let host = spec
+                .split_once(':')
+                .map(|(h, _)| h.to_string())
+                .unwrap_or(spec.to_string());
+            if let Ok(ip) = host.parse::<IpAddr>() {
+                tracing::info!(%ip, env = advertise_env, "advertise IP from operator env");
+                return match ip {
+                    IpAddr::V4(_) => (Some(ip), None),
+                    IpAddr::V6(_) => (None, Some(ip)),
+                };
+            }
+            let addrs: Vec<_> = tokio::net::lookup_host(&host).await.ok().map(|it| it.collect()).unwrap_or_default();
+            let mut picked: [Option<IpAddr>; 2] = [None; 2];
+            for a in addrs.iter() {
+                let slot = match a.ip() {
+                    IpAddr::V4(_) => 0usize,
+                    IpAddr::V6(_) => 1,
+                };
+                if picked[slot].is_none() {
+                    picked[slot] = Some(a.ip());
                 }
             }
-            if let Some(ip) = any {
-                tracing::info!(%ip, %host, env = advertise_env, "advertise IP resolved via DNS");
-                return Some(ip);
+            if picked[0].is_some() || picked[1].is_some() {
+                for p in picked.iter().flatten() {
+                    tracing::info!(%p, %host, env = advertise_env, "advertise IP resolved via DNS");
+                }
+                return (picked[0], picked[1]);
             }
+            tracing::warn!(host, env = advertise_env, "advertise host not resolvable; falling back to egress probe");
         }
-        tracing::warn!(host, env = advertise_env, "advertise host not resolvable; falling back to egress probe");
     }
+    (probe_egress_v4().await, probe_egress_v6().await)
+}
 
-    // Egress probe: UDP connect to 8.8.8.8 and read the local source IP.
-    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if sock.connect("8.8.8.8:53").is_ok() {
-            if let Ok(local) = sock.local_addr() {
-                if is_public_ip(local.ip()) {
-                    tracing::info!(%local, "advertise IP inferred from egress probe");
-                    return Some(local.ip());
-                }
-                tracing::warn!(
-                    %local,
-                    "egress probe returned a private IP — the service is behind NAT \
-                     and cannot be reached by cross-network peers; set the \
-                     corresponding advertise env var to the public IP"
-                );
-            }
+/// Egress probe for IPv4: UDP `connect` to 1.1.1.1 and read the local source IP.
+async fn probe_egress_v4() -> Option<IpAddr> {
+    let out = tokio::task::spawn_blocking(|| {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        sock.connect("1.1.1.1:53").ok()?;
+        let local = sock.local_addr().ok()?;
+        Some(local.ip())
+    })
+    .await
+    .ok()
+    .flatten();
+    match out {
+        Some(ip) if is_public_ip(ip) => {
+            tracing::info!(%ip, "advertise IPv4 inferred from egress probe");
+            Some(ip)
         }
+        Some(ip) => {
+            tracing::warn!(
+                %ip,
+                "egress probe returned a private IPv4 — the service is behind NAT \
+                 and cannot be reached by cross-network peers; set the \
+                 corresponding advertise env var to the public IP"
+            );
+            None
+        }
+        None => None,
     }
-    tracing::warn!(
-        "no public host known for the service; advertise address will be \
-         non-routable. Set the corresponding advertise env var to <public-host:port>"
-    );
-    None
+}
+
+/// Egress probe for IPv6: UDP `connect` to `2001:4860:4860::8888` (Google DNS)
+/// and read the local source IP.
+async fn probe_egress_v6() -> Option<IpAddr> {
+    let out = tokio::task::spawn_blocking(|| {
+        let sock = std::net::UdpSocket::bind("[::]:0").ok()?;
+        sock.connect("[2001:4860:4860::8888]:53").ok()?;
+        let local = sock.local_addr().ok()?;
+        Some(local.ip())
+    })
+    .await
+    .ok()
+    .flatten();
+    match out {
+        Some(ip) if is_public_ip(ip) => {
+            tracing::info!(%ip, "advertise IPv6 inferred from egress probe");
+            Some(ip)
+        }
+        Some(ip) => {
+            tracing::warn!(
+                %ip,
+                "egress probe returned a non-public IPv6 — set the \
+                 corresponding advertise env var to the public address"
+            );
+            None
+        }
+        None => None,
+    }
 }
 
 fn is_public_ip(ip: IpAddr) -> bool {
@@ -150,30 +186,34 @@ fn is_public_ip(ip: IpAddr) -> bool {
                 && !v4.is_private()
                 && !v4.is_link_local()
         }
-        // IPv6: keep only addresses that are not loopback / unspecified / link-local.
+        // IPv6: keep only addresses that are not loopback / unspecified /
+        // link-local / ULA (fc00::/7) / site-local (fec0::/10).
         IpAddr::V6(v6) => {
-            !v6.is_loopback() && !v6.is_unspecified() && !v6.is_unicast_link_local()
+            !v6.is_loopback()
+                && !v6.is_unspecified()
+                && !v6.is_unicast_link_local()
+                && !v6.is_unique_local()
         }
     }
 }
 
 /// Start the circuit-relay server. When the relay is listening (first
-/// `NewListenAddr` event fires) the fully-qualified advertise multiaddr
-/// (e.g. `/ip4/1.2.3.4/tcp/1883/p2p/12D3Koo...`) is sent via `ready_tx`.
+/// `NewListenAddr` event fires) the list of advertise multiaddrs (v4 + v6
+/// when both are configured; v4-only otherwise) is sent via `ready_tx`.
 /// The function blocks until the relay exits.
 pub async fn start(
     addr: std::net::SocketAddr,
-    ready_tx: tokio::sync::oneshot::Sender<String>,
+    ready_tx: tokio::sync::oneshot::Sender<Vec<String>>,
 ) -> anyhow::Result<()> {
     let keypair = libp2p::identity::Keypair::generate_ed25519();
     let peer_id: PeerId = keypair.public().to_peer_id();
     tracing::info!(%peer_id, "relay peer id");
 
-    // Public host used in the advertise multiaddr that clients dial. This
+    // Public hosts used in the advertise multiaddrs that clients dial. This
     // is resolved before the listen loop so we can replace the listen
     // address's IP (which is `0.0.0.0` / private by default) with something
-    // routable. `None` ⇒ announce the address as-is (with a warn above).
-    let public_host = resolve_public_host("CHATX_RELAY_ADVERTISE").await;
+    // routable. `None` for a family ⇒ announce without it (warn above).
+    let (public_v4, public_v6) = resolve_public_hosts("CHATX_RELAY_ADVERTISE").await;
 
     // AutoNAT server config — this side is *only* answering inbound probes,
     // so the client-side knobs (boot_delay, retry_interval) are irrelevant to
@@ -201,44 +241,59 @@ pub async fn start(
         })?
         .build();
 
-    // Bind to all interfaces (force `0.0.0.0` when the operator supplied a
-    // specific bind IP so the relay is reachable from outside), but advertise
-    // with the public host instead — the listen address the OS reports is
-    // meaningless for remote peers.
-    let listen_ip = if addr.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
-        || is_public_ip(addr.ip())
-    {
-        addr.ip()
-    } else {
-        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
-    };
-    let tcp: Multiaddr = format!("/ip4/{}/tcp/{}", listen_ip, addr.port())
-        .parse()
-        .map_err(|e| anyhow::anyhow!("parse listen addr: {e}"))?;
-    swarm.listen_on(tcp.clone()).map_err(|e| anyhow::anyhow!("listen {tcp}: {e}"))?;
-    let udp: Multiaddr = format!("/ip4/{}/udp/{}/quic-v1", listen_ip, addr.port())
-        .parse()
-        .map_err(|e| anyhow::anyhow!("parse listen addr: {e}"))?;
-    swarm.listen_on(udp.clone()).map_err(|e| anyhow::anyhow!("listen quic {udp}: {e}"))?;
+    // Bind the relay to the families the operator's advertise config
+    // (or the egress probe) reported. v4 is always kept as a fallback (it is
+    // what most clients can reach anyway); v6 is added when the operator's
+    // `CHATX_RELAY_ADVERTISE` resolves to an IPv6 address.
+    //
+    // The listen multiaddrs use `0.0.0.0` / `[::]` so the OS picks the
+    // right interface; only the *advertisements* (which clients dial) carry
+    // the public IP(s).
+    let port = addr.port();
+    // v4 is always bound — it is the fallback most clients can reach. v6 is
+    // bound only when the operator's advertise config (or the egress probe)
+    // actually resolved to an IPv6 address; binding `[::]` on hosts without
+    // IPv6 just produces a noisy warn, so we skip it in that case.
+    let wants_v4 = true;
+    let wants_v6 = public_v6.is_some();
+    let mut listens: Vec<String> = Vec::new();
+    if wants_v4 {
+        listens.push(format!("/ip4/0.0.0.0/tcp/{port}"));
+        listens.push(format!("/ip4/0.0.0.0/udp/{port}/quic-v1"));
+    }
+    if wants_v6 {
+        listens.push(format!("/ip6/::/tcp/{port}"));
+        listens.push(format!("/ip6/::/udp/{port}/quic-v1"));
+    }
+    for spec in &listens {
+        let m = spec.parse::<Multiaddr>().map_err(|e| anyhow::anyhow!("parse {spec}: {e}"))?;
+        if let Err(e) = swarm.listen_on(m) {
+            tracing::warn!(%spec, %e, "listen skipped (family not available?); continuing");
+        }
+    }
 
     // CRITICAL for reservation: the relay v2 server must include the client's
-    // observed address in the reservation success response. It sources that list
-    // from `swarm.external_addresses` (see `libp2p::relay::Behaviour` →
-    // `AcceptReservationReq { addrs: self.external_addresses … }`). When we only
-    // listen on `0.0.0.0`/private addrs and never register an external address,
-    // that list is empty, the client sees `NoAddressesInReservation`, and it
-    // drops the circuit listener — so no `/p2p-circuit` endpoint ever surfaces.
-    // Register the public base for both transports so the handshake completes.
-    if let Some(host) = public_host {
-        let pub_tcp = format!("/ip4/{host}/tcp/{}", addr.port());
-        let pub_udp = format!("/ip4/{host}/udp/{}/quic-v1", addr.port());
-        for s in [pub_tcp, pub_udp] {
-            if let Ok(m) = s.parse::<Multiaddr>() {
+    // observed address in the reservation success response. It sources that
+    // list from `swarm.external_addresses` (see `libp2p::relay::Behaviour` →
+    // `AcceptReservationReq { addrs: self.external_addresses … }`). When we
+    // only listen on `0.0.0.0`/private addrs and never register an external
+    // address, that list is empty, the client sees
+    // `NoAddressesInReservation`, and it drops the circuit listener — so no
+    // `/p2p-circuit` endpoint ever surfaces.
+    // Register each public family (v4 and/or v6) for both transports so the
+    // handshake completes for whichever address the client actually dialed.
+    let mut registered = false;
+    for (family, host) in [("ip4", public_v4), ("ip6", public_v6)] {
+        let Some(host) = host else { continue };
+        for spec in [format!("{family}/{host}/tcp/{port}"), format!("{family}/{host}/udp/{port}/quic-v1")] {
+            if let Ok(m) = spec.parse::<Multiaddr>() {
                 swarm.add_external_address(m.clone());
                 tracing::info!(%m, "relay registered external address");
+                registered = true;
             }
         }
-    } else {
+    }
+    if !registered {
         tracing::warn!(
             "no public host — relay reservation responses will carry no address \
              and clients will fail with NoAddressesInReservation. Set \
@@ -249,12 +304,14 @@ pub async fn start(
     let mut announced = Some(ready_tx);
     loop {
         match swarm.next().await {
-            Some(SwarmEvent::NewListenAddr { address, .. }) if announced.is_some() => {
-                let base = with_public_host(base(&address), addr.port(), public_host);
-                let advertise = format!("{base}/p2p/{peer_id}");
-                tracing::info!(%advertise, "relay ready — advertise address computed");
-                // Notify the HTTP layer; ignore error if receiver dropped.
-                let _ = announced.take().map(|tx| tx.send(advertise));
+            Some(SwarmEvent::NewListenAddr { .. }) if announced.is_some() => {
+                let addresses = advertise_addresses(port, public_v4, public_v6, &peer_id);
+                for a in &addresses {
+                    tracing::info!(%a, "relay ready — advertise address computed");
+                }
+                if let Some(ready_tx) = announced.take() {
+                    let _ = ready_tx.send(addresses);
+                }
             }
             Some(SwarmEvent::NewListenAddr { address, .. }) => {
                 tracing::debug!(%address, "relay additional listen addr");
@@ -290,39 +347,29 @@ pub async fn start(
     Ok(())
 }
 
-/// Replace the listen address's IP with `public_host` (when given), keeping
-/// whatever transport component the swarm reported (`/tcp/` or `/udp/...`).
-/// Returns the base unchanged when there is no public host to substitute.
-fn with_public_host(base: Multiaddr, _port: u16, public_host: Option<IpAddr>) -> Multiaddr {
-    let Some(host) = public_host else {
-        return base;
-    };
-    // Find the transport segment so we rebuild the right form.
-    let is_udp = base.iter().any(|c| matches!(
-        c,
-        libp2p::multiaddr::Protocol::Udp(_)
-    ));
-    let port: u16 = base.iter().find_map(|c| match c {
-        libp2p::multiaddr::Protocol::Tcp(p) => Some(p),
-        libp2p::multiaddr::Protocol::Udp(p) => Some(p),
-        _ => None,
-    })
-    .unwrap_or(_port);
-    if is_udp {
-        format!("/ip4/{host}/udp/{port}/quic-v1").parse().unwrap_or(base)
-    } else {
-        format!("/ip4/{host}/tcp/{port}").parse().unwrap_or(base)
+/// Build the full advertise multiaddr list for a running relay: one entry
+/// per (family × transport), each of the form
+///
+///   /ip4/<host>/tcp/<port>/p2p/<peer_id>
+///   /ip4/<host>/udp/<port>/quic-v1/p2p/<peer_id>
+///
+/// (with the `/ip6/...` counterpart when `public_v6` is `Some`). The order
+/// is deterministic: v4-tcp, v4-udp, v6-tcp, v6-udp — so the first entry in
+/// the list is always the family the client is most likely to be able to dial.
+fn advertise_addresses(
+    port: u16,
+    public_v4: Option<IpAddr>,
+    public_v6: Option<IpAddr>,
+    peer_id: &PeerId,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(host) = public_v4 {
+        out.push(format!("/ip4/{host}/tcp/{port}/p2p/{peer_id}"));
+        out.push(format!("/ip4/{host}/udp/{port}/quic-v1/p2p/{peer_id}"));
     }
-}
-
-/// Strip trailing `/p2p/...` components so we only have the dial-able base.
-fn base(addr: &Multiaddr) -> Multiaddr {
-    let mut out = Multiaddr::empty();
-    for p in addr.iter() {
-        if matches!(p, libp2p::multiaddr::Protocol::P2p(_)) {
-            break;
-        }
-        out.push(p);
+    if let Some(host) = public_v6 {
+        out.push(format!("/ip6/{host}/tcp/{port}/p2p/{peer_id}"));
+        out.push(format!("/ip6/{host}/udp/{port}/quic-v1/p2p/{peer_id}"));
     }
     out
 }
@@ -331,32 +378,45 @@ fn base(addr: &Multiaddr) -> Multiaddr {
 mod tests {
     use super::*;
 
-    #[test]
-    fn tcp_advertise_uses_public_host() {
-        let listen: Multiaddr = "/ip4/0.0.0.0/tcp/1883".parse().unwrap();
-        let pub_ip: IpAddr = "139.159.201.87".parse().unwrap();
-        let advertised = format!(
-            "{}",
-            with_public_host(base(&listen), 1883, Some(pub_ip))
-        );
-        assert_eq!(advertised, "/ip4/139.159.201.87/tcp/1883");
+    fn peer() -> PeerId {
+        libp2p::identity::Keypair::generate_ed25519().public().to_peer_id()
     }
 
     #[test]
-    fn udp_advertise_uses_public_host() {
-        let listen: Multiaddr = "/ip4/0.0.0.0/udp/1883/quic-v1".parse().unwrap();
-        let pub_ip: IpAddr = "139.159.201.87".parse().unwrap();
-        let advertised = format!(
-            "{}",
-            with_public_host(base(&listen), 1883, Some(pub_ip))
-        );
-        assert_eq!(advertised, "/ip4/139.159.201.87/udp/1883/quic-v1");
+    fn v4_only_yields_two_entries() {
+        let pub4: IpAddr = "139.159.201.87".parse().unwrap();
+        let p = peer();
+        let addrs = advertise_addresses(1883, Some(pub4), None, &p);
+        assert_eq!(addrs.len(), 2);
+        assert_eq!(addrs[0], format!("/ip4/{pub4}/tcp/1883/p2p/{p}"));
+        assert_eq!(addrs[1], format!("/ip4/{pub4}/udp/1883/quic-v1/p2p/{p}"));
     }
 
     #[test]
-    fn no_public_host_keeps_original() {
-        let listen: Multiaddr = "/ip4/192.168.5.13/tcp/1883".parse().unwrap();
-        let advertised = format!("{}", with_public_host(base(&listen), 1883, None));
-        assert_eq!(advertised, "/ip4/192.168.5.13/tcp/1883");
+    fn v6_only_yields_two_entries() {
+        let pub6: IpAddr = "2001:db8::1".parse().unwrap();
+        let p = peer();
+        let addrs = advertise_addresses(1883, None, Some(pub6), &p);
+        assert_eq!(addrs.len(), 2);
+        assert_eq!(addrs[0], format!("/ip6/{pub6}/tcp/1883/p2p/{p}"));
+        assert_eq!(addrs[1], format!("/ip6/{pub6}/udp/1883/quic-v1/p2p/{p}"));
+    }
+
+    #[test]
+    fn dual_stack_yields_four_entries_v4_first() {
+        let pub4: IpAddr = "139.159.201.87".parse().unwrap();
+        let pub6: IpAddr = "2001:db8::1".parse().unwrap();
+        let p = peer();
+        let addrs = advertise_addresses(1883, Some(pub4), Some(pub6), &p);
+        assert_eq!(addrs.len(), 4);
+        assert!(addrs[0].starts_with("/ip4/"));
+        assert!(addrs[2].starts_with("/ip6/"));
+    }
+
+    #[test]
+    fn no_public_hosts_yields_empty_list() {
+        let p = peer();
+        let addrs = advertise_addresses(1883, None, None, &p);
+        assert!(addrs.is_empty());
     }
 }

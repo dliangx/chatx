@@ -1472,8 +1472,12 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 .is_ok()
             {
                 let stun_state = match stun::discover_cached() {
-                    Some(p) => format!("STUN {p}"),
-                    None => {
+                    Some(profiles) if !profiles.is_empty() => profiles
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" | "),
+                    _ => {
                         "STUN miss (outbound UDP blocked / offline / prewarm not done)".to_string()
                     }
                 };
@@ -1556,10 +1560,13 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .spawn(move || {
                 let res = stun::discover();
                 match res {
-                    Ok(Some(profile)) => {
-                        tracing::info!(profile = %profile, "STUN prewarm OK (NAT fingerprint)")
+                    Ok(profiles) if !profiles.is_empty() => {
+                        tracing::info!(
+                            profiles = ?profiles,
+                            "STUN prewarm OK (NAT fingerprint(s))"
+                        )
                     }
-                    Ok(None) => tracing::debug!(
+                    Ok(_) => tracing::debug!(
                         "STUN prewarm: no fingerprint (outbound UDP blocked / offline)"
                     ),
                     Err(e) => tracing::warn!(%e, "STUN prewarm failed"),
@@ -1595,8 +1602,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// Layers, in order of preference by libp2p's dialer:
     ///   1. `listen_addrs` (UPnP-mapped, relay-circuit, or other
     ///      `ExternalAddrConfirmed` entries) — already public and dialable.
-    ///   2. STUN `NatProfile` public IP + our real TCP/UDP listen ports —
-    ///      only included when the fingerprint is **not EDM** (symmetric).
+    ///   2. Per-family STUN `NatProfile` public IP + our real TCP/UDP listen
+    ///      ports — one candidate per address family (IPv4 and IPv6), only
+    ///      included when that family's fingerprint is **not EDM** (symmetric).
     ///      On EDM, the STUN-mapped port is the probe socket's port, not
     ///      our listen port, and destination-specific mappings mean the
     ///      advertised address would mislead dialers (the dialer would hit a
@@ -1608,45 +1616,76 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// [`Self::start_presence_loop`]. `endpoints()` returns the `base` (see
     /// above) without doing any network I/O.
     fn endpoints_with_egress(&self) -> Vec<String> {
-        let base = self.endpoints();
-        let nat_profile = stun::discover_cached();
+        let mut base = self.endpoints();
+        let profiles = stun::discover_cached().unwrap_or_default();
 
-        if let Some(profile) = nat_profile {
-            let is_edm = profile.mapping == crate::stun::Mapping::Edm;
-            if !is_edm {
+        // Pull the local listen ports straight off the Multiaddrs so we can
+        // synthesize one public candidate per family against the *same* port
+        // the corresponding stack is actually bound to (the dialer tries v4
+        // and v6 independently; either one hitting a live listener is enough).
+        let (tcp_port, udp_port) = {
+            let addrs = self.running.listen_addrs.lock().unwrap();
+            let mut t = None;
+            let mut u = None;
+            for m in addrs.iter() {
+                for c in m.iter() {
+                    if let libp2p::multiaddr::Protocol::Tcp(n) = c {
+                        if n != 0 {
+                            t = Some(n);
+                        }
+                    } else if let libp2p::multiaddr::Protocol::Udp(n) = c {
+                        if n != 0 {
+                            u = Some(n);
+                        }
+                    }
+                }
+            }
+            (t, u)
+        };
+
+        if !profiles.is_empty() {
+            if tcp_port.is_none() && udp_port.is_none() {
+                tracing::warn!(
+                    profiles = ?profiles,
+                    "STUN public IP(s) known but no listening port known yet; \
+                     advertising local endpoints only"
+                );
+            }
+            for profile in &profiles {
+                let is_edm = profile.mapping == crate::stun::Mapping::Edm;
+                if is_edm {
+                    tracing::debug!(
+                        profile = %profile,
+                        "EDM (symmetric NAT) fingerprint — skipping the STUN public \
+                         candidate (it would advertise the STUN probe socket's \
+                         mapped port, not our listen port). Relying on UPnP / \
+                         relay-mapped addresses in `listen_addrs`, which are the \
+                         only trustworthy public candidates on this host. TURN is \
+                         the recommended path for this link."
+                    );
+                    continue;
+                }
                 let ip_proto = match profile.ip {
                     std::net::IpAddr::V4(_) => "ip4",
                     std::net::IpAddr::V6(_) => "ip6",
                 };
                 let public_ip = profile.ip;
-                let tcp_port = base.iter().find_map(|a| tcp_port_of(a));
-                let udp_port = base.iter().find_map(|a| udp_port_of(a));
-                if tcp_port.is_some() || udp_port.is_some() {
-                    let mut list = base;
-                    if let Some(port) = udp_port {
-                        list.push(format!("/{ip_proto}/{public_ip}/udp/{port}/quic-v1"));
+                if let Some(port) = udp_port {
+                    let cand = format!("/{ip_proto}/{public_ip}/udp/{port}/quic-v1");
+                    if !base.iter().any(|a| a == &cand) {
+                        base.push(cand);
                     }
-                    if let Some(port) = tcp_port {
-                        list.push(format!("/{ip_proto}/{public_ip}/tcp/{port}"));
-                    }
-                    return list;
                 }
-                tracing::warn!(
-                    profile = %profile,
-                    "STUN public IP {public_ip} known but no listening port known yet; \
-                     advertising local endpoints only"
-                );
-            } else {
-                tracing::debug!(
-                    profile = %profile,
-                    "EDM (symmetric NAT) fingerprint — skipping the STUN public \
-                     candidate (it would advertise the STUN probe socket's \
-                     mapped port, not our listen port). Relying on UPnP / \
-                     relay-mapped addresses in `listen_addrs`, which are the \
-                     only trustworthy public candidates on this host. TURN is \
-                     the recommended path for this link."
-                );
+                if let Some(port) = tcp_port {
+                    let cand = format!("/{ip_proto}/{public_ip}/tcp/{port}");
+                    if !base.iter().any(|a| a == &cand) {
+                        base.push(cand);
+                    }
+                }
             }
+            // Re-order: base listeners first, appended candidates after.
+            // The dialer will try them in parallel; no need to re-sort.
+            return base;
         }
 
         // Fallback / same-subnet: the legacy LAN egress endpoint.
@@ -2301,11 +2340,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             Ok(()) => {
                 if let Some(pool) = self.store.pool() {
                     let _ = sqlite::queue::give_up_pair(&pool, msg_id, peer_base58).await; // drop this device's queue row
-                    // Only mark the local message row SENT once every device
-                    // for this message has acked (or been given up on). If any
-                    // other device is still pending, leave the row as SENDING
-                    // so the UI keeps showing a "sending" badge until the last
-                    // device lands.
+                                                                                           // Only mark the local message row SENT once every device
+                                                                                           // for this message has acked (or been given up on). If any
+                                                                                           // other device is still pending, leave the row as SENDING
+                                                                                           // so the UI keeps showing a "sending" badge until the last
+                                                                                           // device lands.
                     let still_pending = sqlite::queue::pending_peers_for_msg(&pool, msg_id)
                         .await
                         .unwrap_or_default();
@@ -4337,22 +4376,6 @@ fn tcp_port_of(addr: &str) -> Option<u16> {
         .and_then(|a| {
             a.iter().find_map(|c| {
                 if let libp2p::multiaddr::Protocol::Tcp(p) = c {
-                    Some(p)
-                } else {
-                    None
-                }
-            })
-        })
-        .filter(|p| *p != 0)
-}
-
-fn udp_port_of(addr: &str) -> Option<u16> {
-    addr.parse::<Multiaddr>()
-        .ok()
-        .as_ref()
-        .and_then(|a| {
-            a.iter().find_map(|c| {
-                if let libp2p::multiaddr::Protocol::Udp(p) = c {
                     Some(p)
                 } else {
                     None

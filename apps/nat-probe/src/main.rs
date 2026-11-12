@@ -1,8 +1,9 @@
 //! `chatx-nat-probe` — one-shot NAT diagnostic for this host.
 //!
 //! What it reports:
-//!   1. NAT fingerprint (EIM / EDM / Unknown) + public IP — via the dual-socket
-//!      STUN probe from `chatx_core::stun`.
+//!   1. Per-family NAT fingerprint (EIM / EDM / Unknown) + public IP — via the
+//!      dual-socket STUN probe from `chatx_core::stun` (one for IPv4, one
+//!      for IPv6, when both address families are present).
 //!   2. UDP egress reachability (needed by STUN, QUIC, and any direct punch).
 //!   3. Listening sockets (informational — the real ports are logged by the
 //!      app at startup).
@@ -28,26 +29,33 @@ async fn main() -> anyhow::Result<()> {
     println!("=== chatx-nat-probe ===");
     println!();
 
-    // 1. STUN fingerprint.
-    println!("[1] STUN fingerprint (dual-socket x two-server)");
-    let profile = tokio::task::spawn_blocking(|| chatx_core::stun::discover())
+    // 1. STUN fingerprint (per address family).
+    println!("[1] STUN fingerprint (dual-socket x two-server, per family)");
+    let profiles = tokio::task::spawn_blocking(|| chatx_core::stun::discover())
         .await
         .map_err(|e| anyhow::anyhow!("STUN task panicked: {e}"))?;
-    let (p, note) = match profile {
-        Ok(Some(p)) => (Some(p), "ok"),
-        Ok(None) => {
-            println!("  no public IP (UDP egress blocked / offline / not yet reachable)");
-            (None, "none")
-        }
+    let profiles = match profiles {
+        Ok(p) => p,
         Err(e) => {
             println!("  STUN error: {e}");
-            (None, "err")
+            Vec::new()
         }
     };
-    if let Some(ref p) = p {
-        println!("  public IP   : {}", p.ip);
-        println!("  mapping     : {}", p.mapping);
-        println!("  stable-public: {}", p.is_stable_public());
+    let note: &str = if profiles.is_empty() {
+        println!("  no public IP (UDP egress blocked / offline / not yet reachable)");
+        "none"
+    } else {
+        "ok"
+    };
+    if profiles.is_empty() {
+        // No profiles — keep going with the rest of the report.
+    } else {
+        for p in &profiles {
+            println!("  public IP   : {}", p.ip);
+            println!("  mapping     : {}", p.mapping);
+            println!("  stable-public: {}", p.is_stable_public());
+            println!();
+        }
     }
 
     // 2. UDP egress.
@@ -96,12 +104,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 5. Matrix position.
+    // 5. Matrix position (per family).
     println!();
-    println!("[5] Hole-punch success matrix (from OUR side)");
-    match p {
-        Some(prof) => print_matrix(prof),
-        None => println!("  not enough info — run with network access; or set CHATX_RELAYS and try the relay path."),
+    println!("[5] Hole-punch success matrix (from OUR side, per family)");
+    if profiles.is_empty() {
+        println!("  not enough info — run with network access; or set CHATX_RELAYS and try the relay path.");
+    } else {
+        for prof in profiles {
+            print_matrix(prof);
+            println!();
+        }
     }
 
     println!();

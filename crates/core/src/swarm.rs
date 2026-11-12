@@ -697,6 +697,23 @@ pub async fn boot(
     swarm
         .listen_on(udp0)
         .map_err(|e| anyhow::anyhow!("listen quic: {e}"))?;
+    // IPv6 — best-effort: many LAN hosts (especially behind CGNAT) have no
+    // outbound IPv6 and the kernel refuses the bind with
+    // `AddressFamilyNotSupported` or `AddressNotAvailable`. On such hosts we
+    // stay v4-only and the STUN fingerprint will also report no v6 profile;
+    // on dual-stack hosts this yields both an `/ip6/::` listener in
+    // `listen_addrs` (and thereby a v6 endpoint in the directory) and a STUN
+    // IPv6 profile.
+    let tcp6: Multiaddr = "/ip6/::/tcp/0".parse().unwrap();
+    match swarm.listen_on(tcp6) {
+        Ok(_) => tracing::debug!("[swarm] ipv6 listener bound (tcp)"),
+        Err(e) => tracing::debug!("[swarm] ipv6 tcp listener unavailable: {e}"),
+    }
+    let udp6: Multiaddr = "/ip6/::/udp/0/quic-v1".parse().unwrap();
+    match swarm.listen_on(udp6) {
+        Ok(_) => tracing::debug!("[swarm] ipv6 listener bound (quic)"),
+        Err(e) => tracing::debug!("[swarm] ipv6 quic listener unavailable: {e}"),
+    }
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel();
@@ -1400,16 +1417,16 @@ async fn swarm_loop(
                               // back to the relay (symmetric NAT / UDP
                               // ingress blocked / CGNAT are the usual
                               // suspects; TURN is the recommended fix).
-                              if matches!(new, libp2p::autonat::NatStatus::Private) {
-                                  let stun_ip: Option<String> =
-                                      crate::stun::discover_cached().map(|p| p.ip.to_string());
-                                  tracing::warn!(?stun_ip,
-                                      "[autonat] verdict: PRIVATE — STUN public IP, if any, \
-                                       is likely an ephemeral mapping a peer cannot dial \
-                                       (symmetric NAT / UDP ingress blocked / CGNAT). Relay \
-                                       path is the only reliable route to remote peers; TURN \
-                                       recommended.");
-                              }
+                               if matches!(new, libp2p::autonat::NatStatus::Private) {
+                                   let stun_ip: Option<Vec<String>> =
+                                       crate::stun::discover_cached().map(|p| p.iter().map(|x| x.ip.to_string()).collect());
+                                   tracing::warn!(?stun_ip,
+                                       "[autonat] verdict: PRIVATE — STUN public IP(s), if any, \
+                                        are likely an ephemeral mapping a peer cannot dial \
+                                        (symmetric NAT / UDP ingress blocked / CGNAT). Relay \
+                                        path is the only reliable route to remote peers; TURN \
+                                        recommended.");
+                               }
                           }
                           libp2p::autonat::Event::OutboundProbe(p) => {
                               tracing::debug!(?p, "[autonat] outbound probe");
