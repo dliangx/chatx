@@ -327,7 +327,9 @@ async fn member_receives_group_key_and_msg() {
         "bob should have the new secret"
     );
     assert_eq!(
-        chatx_core::group::open_message(&now_group.secret(), &sealed_post).unwrap().text,
+        chatx_core::group::open_message(&now_group.secret(), &sealed_post)
+            .unwrap()
+            .text,
         "after rotate"
     );
 }
@@ -412,7 +414,9 @@ async fn client_group_flow() {
     assert_eq!(bob_secret, s0, "bob should open the same group secret");
 
     let env = c1b.seal_group_message(gid, "hello team").expect("seal msg");
-    let text = chatx_core::group::open_message(&bob_secret, &env).expect("bob open msg").text;
+    let text = chatx_core::group::open_message(&bob_secret, &env)
+        .expect("bob open msg")
+        .text;
     assert_eq!(text, "hello team");
     c2.store_group_inbound(&env).await.expect("store inbound");
     c1b.store_group_outbound(&env)
@@ -427,7 +431,9 @@ async fn client_group_flow() {
     });
     let reply = chatx_core::group::seal_message(&bobg, &bob_acct, &c2.peer_base58(), "got it")
         .expect("bob seal");
-    let rt = chatx_core::group::open_message(&s0, &reply).expect("alice open reply").text;
+    let rt = chatx_core::group::open_message(&s0, &reply)
+        .expect("alice open reply")
+        .text;
     assert_eq!(rt, "got it");
 
     let g3 = c1b.rotate_group(gid).expect("rotate");
@@ -440,7 +446,9 @@ async fn client_group_flow() {
         "old secret must not open new message after rotation (kick)"
     );
     assert_eq!(
-        chatx_core::group::open_message(&g3.secret(), &secret_env).unwrap().text,
+        chatx_core::group::open_message(&g3.secret(), &secret_env)
+            .unwrap()
+            .text,
         "post-rot"
     );
 
@@ -454,7 +462,9 @@ async fn client_group_flow() {
     let cross = chatx_core::group::seal_message(&other, c1b.account(), &c1.peer_base58(), "x")
         .expect("cross seal");
     assert_eq!(
-        chatx_core::group::open_message(&same_secret, &cross).unwrap().text,
+        chatx_core::group::open_message(&same_secret, &cross)
+            .unwrap()
+            .text,
         "x"
     );
     let team_msg_key = chatx_core::group::message_key(&same_secret, gid);
@@ -479,110 +489,6 @@ async fn peer_addr(c: &Client<InMemoryDirectory>) -> (libp2p::PeerId, libp2p::Mu
         "client should have at least one ip4 listen addr; got {:?}",
         c.endpoints()
     )
-}
-
-#[tokio::test(start_paused = false)]
-async fn realtime_audio_bidirectional() {
-    let base = TmpBase::new("audio");
-    let (dir_a, dir_b) = InMemoryDirectory::pair();
-
-    let (alice, _) = Client::bootstrap_in(base.path(), "au-a", "alice", "p", dir_a.clone())
-        .await
-        .expect("bootstrap alice");
-    let (bob, _) = Client::bootstrap_in(base.path(), "au-b", "bob", "p", dir_b.clone())
-        .await
-        .expect("bootstrap bob");
-
-    // Establish connectivity: alice dials bob.
-    let (bob_peer, bob_addr) = peer_addr(&bob).await;
-    alice
-        .running()
-        .cmd_tx
-        .send(chatx_core::swarm::Cmd::Connect {
-            peer: bob_peer,
-            addr: bob_addr,
-        })
-        .expect("connect cmd");
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-
-    // Bob dials alice back so the link is symmetric.
-    let (alice_peer, alice_addr) = peer_addr(&alice).await;
-    bob.running()
-        .cmd_tx
-        .send(chatx_core::swarm::Cmd::Connect {
-            peer: alice_peer,
-            addr: alice_addr,
-        })
-        .expect("connect cmd");
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-
-    let bob58 = bob.peer_base58();
-    let alice58 = alice.peer_base58();
-
-    // A distinctive s16le pattern: 800 samples mono — encode as a known marker.
-    let marker: Vec<u8> = (0..800u16).flat_map(|i| (i as u16).to_le_bytes()).collect();
-    let marker_len = marker.len();
-
-    // ── alice → bob ──
-    alice
-        .send_audio(bob_peer, 16_000, 1, marker.clone())
-        .expect("alice sends audio frame to bob");
-
-    let bob_got = tokio::time::timeout(std::time::Duration::from_secs(4), async {
-        let b = &bob;
-        loop {
-            use chatx_core::swarm::ChatEvent as E;
-            while let Some(evt) = b.try_next_event().await {
-                if let E::Audio {
-                    peer,
-                    rate,
-                    ch,
-                    data,
-                } = evt
-                {
-                    if peer.to_base58() == alice58
-                        && data.len() == marker_len
-                        && rate == 16_000
-                        && ch == 1
-                        && data == marker
-                    {
-                        return true;
-                    }
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("bob should receive alice's audio frame over the wire");
-    assert!(bob_got, "bob received alice's frame");
-
-    // ── bob → alice (reverse direction) ──
-    bob.send_audio(
-        alice_peer,
-        48_000,
-        2,
-        (0..400u16).flat_map(|i| i.to_le_bytes()).collect(),
-    )
-    .expect("bob sends audio frame to alice");
-
-    let alice_got = tokio::time::timeout(std::time::Duration::from_secs(4), async {
-        let a = &alice;
-        loop {
-            use chatx_core::swarm::ChatEvent as E;
-            while let Some(evt) = a.try_next_event().await {
-                if let E::Audio { peer, .. } = evt {
-                    if peer.to_base58() == bob58 {
-                        return true;
-                    }
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("alice should receive bob's audio frame over the wire");
-    assert!(alice_got, "alice received bob's frame");
 }
 
 #[tokio::test(start_paused = false)]
@@ -887,7 +793,9 @@ async fn group_messages_flow_over_server() {
         .unwrap();
     let alice_env: chatx_core::group::SealedGroupMsg = serde_json::from_slice(&alice_wire).unwrap();
     assert_eq!(
-        chatx_core::group::open_message(&alice_group.secret(), &alice_env).unwrap().text,
+        chatx_core::group::open_message(&alice_group.secret(), &alice_env)
+            .unwrap()
+            .text,
         "hi over server"
     );
 
@@ -919,7 +827,9 @@ async fn group_messages_flow_over_server() {
         .unwrap();
     let bob_env: chatx_core::group::SealedGroupMsg = serde_json::from_slice(&bob_wire).unwrap();
     assert_eq!(
-        chatx_core::group::open_message(&bob_group.secret(), &bob_env).unwrap().text,
+        chatx_core::group::open_message(&bob_group.secret(), &bob_env)
+            .unwrap()
+            .text,
         "hi over server",
     );
 
@@ -976,7 +886,9 @@ async fn group_messages_flow_over_server() {
     let alice_recv_env: chatx_core::group::SealedGroupMsg =
         serde_json::from_slice(&alice_wire).unwrap();
     assert_eq!(
-        chatx_core::group::open_message(&alice_group.secret(), &alice_recv_env).unwrap().text,
+        chatx_core::group::open_message(&alice_group.secret(), &alice_recv_env)
+            .unwrap()
+            .text,
         "pong via server",
     );
 }

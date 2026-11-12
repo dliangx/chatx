@@ -3291,15 +3291,45 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 .secret();
             let me = self.peer_base58();
             let my_e2e = self.e2e_public().to_string();
+            let mut any_err = String::new();
             for info in &infos {
                 if info.peer_id.is_empty() || info.peer_id == me {
                     continue;
                 }
-                let bundle = group::seal_secret(&self.account, &info.e2e_public, &secret)
-                    .map_err(|e| anyhow::anyhow!("seal key: {e}"))?;
+                // Per-member isolation: one bad member must not drop the rest.
+                let bundle = match group::seal_secret(&self.account, &info.e2e_public, &secret) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(
+                            peer = %info.peer_id,
+                            group = group_id,
+                            err = %e,
+                            "add_members: seal failed for one member; continuing"
+                        );
+                        if any_err.is_empty() {
+                            any_err = format!("member {}: seal — {e}", info.peer_id);
+                        }
+                        continue;
+                    }
+                };
                 let sealed = crate::account::b64(&bundle);
-                self.dir
-                    .put_group_key_slot(group_id, &info.peer_id, &my_e2e, &sealed)?;
+                if let Err(e) =
+                    self.dir
+                        .put_group_key_slot(group_id, &info.peer_id, &my_e2e, &sealed)
+                {
+                    tracing::warn!(
+                        peer = %info.peer_id,
+                        group = group_id,
+                        err = %e,
+                        "add_members: key slot write failed for one member; continuing"
+                    );
+                    if any_err.is_empty() {
+                        any_err = format!("member {}: slot — {e}", info.peer_id);
+                    }
+                }
+            }
+            if !any_err.is_empty() {
+                tracing::warn!(group = group_id, "add_members completed with per-member errors: {any_err}");
             }
             self.announce_group(group_id)?;
             return Ok(());
@@ -3335,19 +3365,46 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
         if mode == group::GroupMode::Server {
             let members = g.members.clone();
+            let mut any_err = String::new();
             for (peer, mi) in members.iter() {
                 if peer.as_str() == me.as_str() {
                     continue;
                 }
-                let bundle = group::seal_secret(&self.account, &mi.e2e_public, &secret)
-                    .map_err(|e| anyhow::anyhow!("re-seal key for {peer}: {e}"))?;
+                // Per-member isolation: one bad member must not abort rotation
+                // for the rest.
+                let bundle = match group::seal_secret(&self.account, &mi.e2e_public, &secret) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(
+                            peer = %peer,
+                            group = group_id,
+                            err = %e,
+                            "rotate_group: re-seal failed for one member; continuing"
+                        );
+                        if any_err.is_empty() {
+                            any_err = format!("member {}: seal — {e}", peer);
+                        }
+                        continue;
+                    }
+                };
                 let sealed = crate::account::b64(&bundle);
-                self.dir
-                    .put_group_key_slot(group_id, peer, &my_e2e, &sealed)
-                    .map_err(|e| anyhow::anyhow!("put rotated key slot {peer}: {e}"))?;
+                if let Err(e) = self.dir.put_group_key_slot(group_id, peer, &my_e2e, &sealed) {
+                    tracing::warn!(
+                        peer = %peer,
+                        group = group_id,
+                        err = %e,
+                        "rotate_group: key slot write failed for one member; continuing"
+                    );
+                    if any_err.is_empty() {
+                        any_err = format!("member {}: slot — {e}", peer);
+                    }
+                }
             }
             self.save_group(&g)?;
             self.announce_group(group_id)?;
+            if !any_err.is_empty() {
+                tracing::warn!(group = group_id, "rotate_group completed with per-member errors: {any_err}");
+            }
             return Ok(g);
         }
         self.save_group(&g)?;
@@ -3707,6 +3764,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let secret = g.secret();
         // Pre-compute the sealed bundle per member synchronously (it's fast
         // and pure — X25519+AES-GCM); the async work is dial+ack only.
+        // A single member's seal failure (e.g. a bad e2e key) must NOT abort
+        // the whole batch — isolate it and keep going. This is the
+        // "user bob has two approved devices B and C" case: even if sealing
+        // one of them hiccups, the other still has to receive the key.
         let mut jobs: Vec<(PeerId, String)> = Vec::new();
         for peer in members {
             if peer == &me {
@@ -3716,8 +3777,18 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 Some(mi) => mi.e2e_public.clone(),
                 None => continue,
             };
-            let bundle = group::seal_secret(self.account(), &their_e2e, &secret)
-                .map_err(|e| anyhow::anyhow!("seal key: {e}"))?;
+            let bundle = match group::seal_secret(self.account(), &their_e2e, &secret) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        peer = %peer,
+                        group = group_id,
+                        err = %e,
+                        "group-key deliver: seal failed for one member; continuing with the rest"
+                    );
+                    continue;
+                }
+            };
             let sealed = crate::account::b64(&bundle);
             let pid = match peer.parse::<PeerId>() {
                 Ok(p) => p,
@@ -3725,23 +3796,45 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             };
             jobs.push((pid, sealed));
         }
-        // Sequential delivery per member. We're inside a dedicated worker
-        // runtime thread (not the app's main runtime), so awaiting is safe
-        // and cheap. Worst case per peer is ~(dial + send) ≈ 14 s; a fresh
-        // group has 2–15 members, so the user-visible latency of the whole
-        // publish is bounded by ~15 × 14 s. In practice most members are
-        // already connected (the app dialed them at login) and land in the
-        // 8 s fast-path. If you later want parallel delivery, swap the loop
-        // for `futures::join_all` (the crate is not yet a workspace dep).
+        // Deliver to EVERY member. We're inside a dedicated worker runtime
+        // thread (not the app's main runtime), so awaiting is safe and cheap.
+        // The critical property: one peer's dial/ack failure MUST NOT stop the
+        // other peers from receiving the key. `deliver_group_key` returns
+        // `Ok(false)` (dial timeout / no endpoint / no ack) rather than `Err`,
+        // but we still handle both arms — a single bad peer is routed to a
+        // retry round while the healthy ones proceed immediately. The receiver
+        // is idempotent (`apply_inbound::GroupKey` rebuilds the `Group` from
+        // the directory + bundle), so a second redelivery round is harmless.
+        let mut remaining: Vec<(PeerId, String)> = jobs;
         let mut delivered = 0usize;
-        for (pid, sealed) in jobs {
-            let peer_b58 = pid.to_string();
-            if self
-                .deliver_group_key(group_id, &peer_b58, pid, sealed)
-                .await?
-            {
-                delivered += 1;
+        for _attempt in 0..2 {
+            if remaining.is_empty() {
+                break;
             }
+            let mut still: Vec<(PeerId, String)> = Vec::new();
+            for (pid, sealed) in remaining {
+                let peer_b58 = pid.to_string();
+                match self
+                    .deliver_group_key(group_id, &peer_b58, pid, sealed.clone())
+                    .await
+                {
+                    Ok(true) => delivered += 1,
+                    Ok(false) | Err(_) => still.push((pid, sealed)),
+                }
+            }
+            remaining = still;
+            if !remaining.is_empty() && _attempt == 0 {
+                // Brief settle window before the retry round — the straggler is
+                // usually finishing its link handshake on round 1.
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+        for (pid, _) in &remaining {
+            tracing::warn!(
+                peer = %pid,
+                group = group_id,
+                "group-key deliver: peer did not ack even after a retry round"
+            );
         }
         Ok(delivered)
     }
@@ -4028,20 +4121,49 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             e2e_public: self.e2e_public().to_string(),
         });
         let secret = g.secret();
+        let my_e2e = self.e2e_public().to_string();
+        let mut last_err: Option<String> = None;
         for m in members {
             if m.peer_id == me_peer {
                 continue;
             }
-            let bundle = group::seal_secret(&self.account, &m.e2e_public, &secret)
-                .map_err(|e| anyhow::anyhow!("seal key for {}: {e}", m.peer_id))?;
-            let sealed = crate::account::b64(&bundle);
-            let my_e2e = self.e2e_public().to_string();
-            self.dir
-                .put_group_key_slot(&group_id, &m.peer_id, &my_e2e, &sealed)?;
-            g.set_member(m);
+            // Per-member isolation: a single bad member (bad e2e key, transient
+            // directory failure) must not abort the whole group creation —
+            // every other approved device still has to get its key slot.
+            match group::seal_secret(&self.account, &m.e2e_public, &secret) {
+                Ok(bundle) => {
+                    let sealed = crate::account::b64(&bundle);
+                    if let Err(e) =
+                        self.dir
+                            .put_group_key_slot(&group_id, &m.peer_id, &my_e2e, &sealed)
+                    {
+                        tracing::warn!(
+                            peer = %m.peer_id,
+                            group = %group_id,
+                            err = %e,
+                            "create_server_group: key slot write failed for one member; continuing"
+                        );
+                        last_err = Some(format!("member {}: {e}", m.peer_id));
+                    }
+                    g.set_member(m);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        peer = %m.peer_id,
+                        group = %group_id,
+                        err = %e,
+                        "create_server_group: seal failed for one member; continuing"
+                    );
+                    last_err = Some(format!("member {}: {e}", m.peer_id));
+                    g.set_member(m);
+                }
+            }
         }
         self.save_group(&g)?;
         self.announce_group(&group_id)?;
+        if let Some(err) = last_err {
+            tracing::warn!(group = %group_id, "create_server_group completed with per-member errors: {err}");
+        }
         Ok(g)
     }
 
