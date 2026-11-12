@@ -7279,17 +7279,64 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
             frame = frame.with_profile(p);
         }
         let frame = frame.encode().unwrap_or_default();
-        if let Err(e) = client.send_friendq(&peer_id, &frame).await {
+
+        // Fan the request out to EVERY approved device the target user holds,
+        // mirroring the DM path (`dm_devices_of_username` + per-delivery
+        // delivery loop). A multi-device user — bob on a laptop and a phone —
+        // must see the request on both, so whichever client they next open
+        // is where they accept. One device's failure must NOT block the
+        // others; we succeed if at least one device acks.
+        let username_key = if !username.is_empty() {
+            username.clone()
+        } else {
+            client.resolve_peer_username(&peer_id)
+        };
+        let targets: Vec<String> = {
+            let ds = client.dm_devices_of_username(&username_key);
+            if ds.is_empty() {
+                vec![peer_id.clone()]
+            } else {
+                ds
+            }
+        };
+        let mut any_ok = false;
+        let mut first_err = String::new();
+        for dev in &targets {
+            tracing::debug!("[friendq] trying peer={dev} (targets={})", targets.len());
+            match client.send_friendq(dev, &frame).await {
+                Ok(()) => {
+                    any_ok = true;
+                    tracing::info!("[friendq] inquired -> {dev}");
+                }
+                Err(e) => {
+                    tracing::warn!("[friendq] to {dev} failed: {e} — continuing to next device");
+                    if first_err.is_empty() {
+                        first_err = e.to_string();
+                    }
+                }
+            }
+        }
+        if !any_ok {
+            let msg = if targets.len() > 1 {
+                format!(
+                    "Send failed on {} of {} device(s): {}",
+                    targets.len(),
+                    targets.len(),
+                    first_err
+                )
+            } else {
+                format!("Send failed: {first_err}")
+            };
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    ui.global::<AppState>()
-                        .set_add_status(SharedString::from(format!("Send failed: {e}")));
+                    ui.global::<AppState>().set_add_status(SharedString::from(msg));
                 }
             });
             return;
         }
-        // Persist now that delivery succeeded; note carries the username for
-        // later rendering even if it is never resolved locally.
+        // Persist now that delivery to at least one device succeeded; the note
+        // carries the username for later rendering even if it is never
+        // resolved locally.
         let _ = sqlite::social::frq_upsert(&pool, &me_peer, &peer_id, Some(&username)).await;
         {
             let mut g = backend.write().await;

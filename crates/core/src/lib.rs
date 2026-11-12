@@ -2996,6 +2996,43 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .parse()
             .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
 
+        let from = self.peer_base58();
+        let e2e = self.e2e_public().to_string();
+        let timeout = std::time::Duration::from_secs(8);
+        let mut last_err = String::new();
+
+        // Fast path: if we already have a live link to this peer, send over
+        // it directly — do NOT re-dial every advertised address. Each
+        // `Cmd::Connect` triggers a full parallel fan-out dial; reusing the
+        // existing connection is faster and avoids a burst of redundant
+        // dials when the peer is already reachable (the common case after
+        // login / a prior DM).
+        if self.peer_connected(&peer) {
+            let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+            if let Err(e) = self.running.cmd_tx.send(Cmd::SendText {
+                peer,
+                from: from.clone(),
+                e2e: e2e.clone(),
+                text: frame.to_string(),
+                ack_tx: Some(tx),
+                client_id: None,
+            }) {
+                anyhow::bail!("cmd channel closed: {e}");
+            }
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(Ok(()))) => {
+                    tracing::info!("[friendq] delivered (live link)");
+                    return Ok(());
+                }
+                _ => {
+                    tracing::warn!(
+                        "[friendq] live-link path failed; falling back to dial fan-out"
+                    );
+                    last_err = "live-link path failed; trying dial fan-out".to_string();
+                }
+            }
+        }
+
         let mut candidates: Vec<Multiaddr> = Vec::new();
         for endpoint in &rec.endpoints {
             let Ok(addr) = endpoint.parse::<Multiaddr>() else {
@@ -3010,11 +3047,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         if candidates.is_empty() {
             anyhow::bail!("device {peer_base58} has no dialable endpoint");
         }
-
-        let from = self.peer_base58();
-        let e2e = self.e2e_public().to_string();
-        let timeout = std::time::Duration::from_secs(8);
-        let mut last_err = String::new();
 
         // Round 1: try every dialable endpoint. Track the last error for
         // diagnostics. (Same shape as `send_dm` Round 1.)
