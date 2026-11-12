@@ -23,15 +23,15 @@ use image::{
     ChatMsg, RENDERER, RenderedMsg, ensure_renderer, load_avatar_path_capped, load_image_cached,
     make_avatar, make_preview_image, qr_image, render_msg, to_message_data,
 };
+pub mod doc_viewer;
 pub mod pdfrs;
 pub mod xhost;
-pub mod doc_viewer;
 // Desktop-only Office viewer glue re-exported so the slint callbacks below keep
 // calling it with the familiar short names. On mobile the re-export is a
 // no-op for the `doc::`-typed helpers (they are `#[cfg]`'d out of the module).
-use doc_viewer::{doc_pages_clear, is_office_ext, xl_sheets_clear};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use doc_viewer::{doc_page_get, open_doc_page, xl_sheet_get, xl_slint_rows};
+use doc_viewer::{doc_pages_clear, is_office_ext, xl_sheets_clear};
 
 use process::{group_conn_enter, start_group_conn_sweeper, touch_chat_activity};
 use time::{fmt_profile_date, fmt_time, set_lang as set_time_lang, time_label};
@@ -1124,9 +1124,10 @@ pub fn run_app() {
             st.set_auth_busy(false);
             {
                 let existing_uid =
-                    match chatx_core::account::Keystore::load(&keystore_path(&profile())).map(
-                        |ks| ks.user_id,
-                    ).ok() {
+                    match chatx_core::account::Keystore::load(&keystore_path(&profile()))
+                        .map(|ks| ks.user_id)
+                        .ok()
+                    {
                         Some(u) => Some(u),
                         None => None,
                     };
@@ -3045,18 +3046,10 @@ fn send_chat_voice(
             }
         }
         if any_ok {
-            crate::chat::set_media_state(
-                &chat_id,
-                row_t,
-                crate::chat::SEND_STATE_SENT,
-            );
+            crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_SENT);
             touch_chat_activity(&chat_id);
         } else {
-            crate::chat::set_media_state(
-                &chat_id,
-                row_t,
-                crate::chat::SEND_STATE_FAILED,
-            );
+            crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_FAILED);
         }
         let msg = if !any_ok {
             if last_err.trim().is_empty() {
@@ -3134,7 +3127,10 @@ fn refresh_chat_conn(ui: &MainWindow) {
         None
     };
     if peer_id.is_empty() && username_opt.is_none() {
-        tracing::debug!("[conn] dot: no peer_id and no dm:username in chat_id={}", row.chat_id);
+        tracing::debug!(
+            "[conn] dot: no peer_id and no dm:username in chat_id={}",
+            row.chat_id
+        );
         ui.global::<ChatSession>().set_conn(String::new().into());
         return;
     }
@@ -3153,10 +3149,8 @@ fn refresh_chat_conn(ui: &MainWindow) {
     // directory devices) with the linked_peers / dialing lists. The best
     // class (direct green > relay yellow > dialing grey > offline red)
     // wins.
-    let linked: std::collections::HashMap<String, &'static str> = client
-        .linked_peers()
-        .into_iter()
-        .collect();
+    let linked: std::collections::HashMap<String, &'static str> =
+        client.linked_peers().into_iter().collect();
     let dialing: std::collections::HashSet<String> = client.dialing_peers().into_iter().collect();
 
     let candidates: Vec<String> = if let Some(uname) = &username_opt {
@@ -3199,7 +3193,8 @@ fn refresh_chat_conn(ui: &MainWindow) {
             break;
         }
     }
-    ui.global::<ChatSession>().set_conn(SharedString::from(best));
+    ui.global::<ChatSession>()
+        .set_conn(SharedString::from(best));
 }
 
 /// Poll `refresh_chat_conn` on a fixed interval while the app is running.
@@ -3535,11 +3530,7 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
             crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_SENT);
             touch_chat_activity(&chat_id);
         } else {
-            crate::chat::set_media_state(
-                &chat_id,
-                row_t,
-                crate::chat::SEND_STATE_FAILED,
-            );
+            crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_FAILED);
         }
         let msg = if any_ok {
             String::new()
@@ -3687,9 +3678,7 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
         // 2. Optimistic: persist the row NOW (before the wire send) so the
         //    bubble is visible immediately with a "sending" badge, not behind a
         //    spinner (mirrors the image path).
-        let row_t = c
-            .persist_file(&chat_id, &me, &name, &local_path)
-            .await;
+        let row_t = c.persist_file(&chat_id, &me, &name, &local_path).await;
         tracing::debug!(
             "[chat-file] optimistic persist chat={chat_id} t={row_t} ({} bytes)",
             bytes.len()
@@ -3722,18 +3711,10 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
             }
         }
         if any_ok {
-            crate::chat::set_media_state(
-                &chat_id,
-                row_t,
-                crate::chat::SEND_STATE_SENT,
-            );
+            crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_SENT);
             touch_chat_activity(&chat_id);
         } else {
-            crate::chat::set_media_state(
-                &chat_id,
-                row_t,
-                crate::chat::SEND_STATE_FAILED,
-            );
+            crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_FAILED);
         }
         let msg = if any_ok {
             String::new()
@@ -4897,7 +4878,9 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                     tracing::debug!("[send] dm ok -> {dev}");
                 }
                 Ok(false) => {
-                    tracing::info!("[send] dm to {dev} not deliverable now — queued for redelivery");
+                    tracing::info!(
+                        "[send] dm to {dev} not deliverable now — queued for redelivery"
+                    );
                 }
                 Err(e) => {
                     tracing::warn!("[send] dm to {dev} failed: {e} — will retry");
@@ -6165,13 +6148,8 @@ fn add_group_candidate(weak: slint::Weak<MainWindow>, peer: String) {
             .and_then(|n| n.parse::<i64>().ok())
         {
             for pid in &member_pids {
-                let _ = sqlite::groups::add_member(
-                    &pool,
-                    num,
-                    pid,
-                    sqlite::groups::ROLE_MEMBER,
-                )
-                .await;
+                let _ =
+                    sqlite::groups::add_member(&pool, num, pid, sqlite::groups::ROLE_MEMBER).await;
             }
         }
         let _ = slint::invoke_from_event_loop(move || {
@@ -6511,7 +6489,9 @@ fn add_group_member(weak: slint::Weak<MainWindow>, key: i32) {
                 .filter(|d| !existing_peers.iter().any(|p| p == &d.peer_id))
                 .collect::<Vec<_>>();
             if devices.is_empty() {
-                tracing::warn!("[add_group_member] user {username} has no new APPROVED devices to add");
+                tracing::warn!(
+                    "[add_group_member] user {username} has no new APPROVED devices to add"
+                );
                 failed += 1;
                 continue;
             }
@@ -6726,8 +6706,7 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
                             Ok(Some(u)) => u.id,
                             _ => 0,
                         };
-                        crate::data::persist_group(&pool, &g_id, &title2, me_id, &roles)
-                            .await;
+                        crate::data::persist_group(&pool, &g_id, &title2, me_id, &roles).await;
                     });
                 }
             }
@@ -7682,19 +7661,17 @@ fn reset_device(weak: slint::Weak<MainWindow>, peer: String) {
     // device list once it resolves.
     runtime().spawn(async move {
         let result = client.reset_device(&peer).await;
-        slint::invoke_from_event_loop(move || {
-            match result {
-                Ok(_) => {
-                    tracing::debug!("[reset] device {peer} record reset");
-                    refresh_devices(weak.clone());
-                    show_app_notice(weak, "Device record reset".to_string(), true);
-                }
-                Err(e) => {
-                    tracing::warn!("[reset] device {peer} failed: {e}");
-                    show_app_error(weak, format!("Failed to reset: {e}"));
-                }
+        match result {
+            Ok(_) => {
+                tracing::debug!("[reset] device {peer} record reset");
+                refresh_devices(weak.clone());
+                show_app_notice(weak, "Device record reset".to_string(), true);
             }
-        });
+            Err(e) => {
+                tracing::warn!("[reset] device {peer} failed: {e}");
+                show_app_error(weak, format!("Failed to reset: {e}"));
+            }
+        }
     });
 }
 
@@ -8792,7 +8769,11 @@ fn open_conversation_with_contact(weak: slint::Weak<MainWindow>, key: i32) {
         return;
     }
     let peer_id = c.peer_id;
-    let username = if c.name.is_empty() { peer_id.clone() } else { c.name.clone() };
+    let username = if c.name.is_empty() {
+        peer_id.clone()
+    } else {
+        c.name.clone()
+    };
     let title = username.clone();
     tracing::debug!(
         "[chat] open_conversation: +{}ms peer_id={peer_id} username={username}",
@@ -8924,8 +8905,16 @@ fn send_dm_to_contact(weak: slint::Weak<MainWindow>, key: i32, body: String) -> 
         Some(_client) => {}
         None => return None,
     }
-    let username = if c.name.is_empty() { c.peer_id.clone() } else { c.name.clone() };
-    let title = if c.name.is_empty() { c.peer_id.clone() } else { c.name.clone() };
+    let username = if c.name.is_empty() {
+        c.peer_id.clone()
+    } else {
+        c.name.clone()
+    };
+    let title = if c.name.is_empty() {
+        c.peer_id.clone()
+    } else {
+        c.name.clone()
+    };
     let chat_id = dm_chat_id(&username);
     let chat_key = {
         let existing = backend
@@ -8938,13 +8927,7 @@ fn send_dm_to_contact(weak: slint::Weak<MainWindow>, key: i32, body: String) -> 
             Some(k) => k,
             None => {
                 let mut g = backend.blocking_write();
-                g.append_chat(
-                    chat_id,
-                    title,
-                    false,
-                    c.peer_id.clone(),
-                    c.image.clone(),
-                )
+                g.append_chat(chat_id, title, false, c.peer_id.clone(), c.image.clone())
             }
         }
     };

@@ -460,6 +460,30 @@ async fn list_relays(State(app): State<App>) -> ApiResult {
     Ok(ok_json(&out))
 }
 
+/// List the advertised STUN server(s) so a client on a network where the
+/// public STUN providers are UDP-blocked can learn its NAT fingerprint
+/// (public IP + EIM/EDM) from the operator's own infra instead. Each entry
+/// is a plain `host:port`. Returns `[]` (not an error) when no STUN server
+/// is configured, so clients degrade to the built-in public list.
+///
+/// The STUN process (`chatx-stun`) is **separate**; this endpoint just
+/// echoes the dialable address the operator chose via
+/// `CHATX_STUN_ADVERTISE=<host:port>` (falling back to `CHATX_STUN_ADDR`).
+/// Keep both binaries configured with the same value so the advertised
+/// address and the actual bound socket agree.
+async fn list_stun() -> ApiResult {
+    let out: Vec<chatx_core::signal::StunInfo> = std::env::var("CHATX_STUN_ADVERTISE")
+        .or_else(|_| std::env::var("CHATX_STUN_ADDR"))
+        .ok()
+        .filter(|s| {
+            let t = s.trim();
+            !(t.is_empty() || t.eq_ignore_ascii_case("off"))
+        })
+        .map(|addr| vec![chatx_core::signal::StunInfo { addr: addr.trim().to_string() }])
+        .unwrap_or_default();
+    Ok(ok_json(&out))
+}
+
 /// `POST /v1/notify?peer_id=<target_peer_id>` — body: `{"from": "<my_peer>"}`.
 /// Ask the server to wake up `target_peer_id` immediately. Used as the first
 /// step of TCP hole-punching: A can't reach B through direct dials, so A asks
@@ -780,6 +804,7 @@ pub(crate) fn make_router(app: App) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/relays", get(list_relays))
+        .route("/v1/stun", get(list_stun))
         .route("/v1/notify", post(notify_peer))
         .route("/v1/notifications", get(poll_notices))
         .route("/v1/users", get(list_users))

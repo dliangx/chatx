@@ -69,8 +69,13 @@ fn relay_config() -> libp2p::relay::Config {
 /// private-LAN 10/172.16-31/192.168) that are meaningless to a client on
 /// **another network**.
 ///
+/// `advertise_env` is the name of the environment variable the operator sets
+/// to pin the public host (e.g. `CHATX_RELAY_ADVERTISE` for the relay,
+/// `CHATX_STUN_ADVERTISE` for the STUN server) — the logic is identical for
+/// both, only the knob name differs.
+///
 /// Resolution priority:
-/// 1. `CHATX_RELAY_ADVERTISE=<public-host:port>` (explicit operator config, most reliable)
+/// 1. `$advertise_env=<public-host:port>` (explicit operator config, most reliable)
 /// 2. Egress probe (`UdpSocket::connect` to read the local IP) — yields the
 ///    public IP when running on a bare public line, but still a private IP
 ///    behind a cloud VPC or NAT
@@ -78,8 +83,8 @@ fn relay_config() -> libp2p::relay::Config {
 ///
 /// Returns `None` when no public host can be determined; the caller keeps
 /// the listen address as-is (and a warn is emitted above).
-async fn resolve_public_host() -> Option<IpAddr> {
-    if let Ok(spec) = std::env::var("CHATX_RELAY_ADVERTISE") {
+pub async fn resolve_public_host(advertise_env: &str) -> Option<IpAddr> {
+    if let Ok(spec) = std::env::var(advertise_env) {
         let s = spec.trim().to_ascii_lowercase();
         if s.is_empty() {
             return None;
@@ -89,7 +94,7 @@ async fn resolve_public_host() -> Option<IpAddr> {
             .map(|(h, _)| h.to_string())
             .unwrap_or(spec.to_string());
         if let Ok(ip) = host.parse::<IpAddr>() {
-            tracing::info!(%ip, "relay advertise IP from CHATX_RELAY_ADVERTISE");
+            tracing::info!(%ip, env = advertise_env, "advertise IP from operator env");
             return Some(ip);
         }
         if let Ok(addrs) = tokio::net::lookup_host(&host).await
@@ -106,11 +111,11 @@ async fn resolve_public_host() -> Option<IpAddr> {
                 }
             }
             if let Some(ip) = any {
-                tracing::info!(%ip, %host, "relay advertise IP resolved via DNS from CHATX_RELAY_ADVERTISE");
+                tracing::info!(%ip, %host, env = advertise_env, "advertise IP resolved via DNS");
                 return Some(ip);
             }
         }
-        tracing::warn!(host, "CHATX_RELAY_ADVERTISE not resolvable; falling back to egress probe");
+        tracing::warn!(host, env = advertise_env, "advertise host not resolvable; falling back to egress probe");
     }
 
     // Egress probe: UDP connect to 8.8.8.8 and read the local source IP.
@@ -118,21 +123,21 @@ async fn resolve_public_host() -> Option<IpAddr> {
         if sock.connect("8.8.8.8:53").is_ok() {
             if let Ok(local) = sock.local_addr() {
                 if is_public_ip(local.ip()) {
-                    tracing::info!(%local, "relay advertise IP inferred from egress probe");
+                    tracing::info!(%local, "advertise IP inferred from egress probe");
                     return Some(local.ip());
                 }
                 tracing::warn!(
                     %local,
-                    "egress probe returned a private IP — the relay is behind NAT \
-                     and cannot be reached by cross-network peers; set \
-                     CHATX_RELAY_ADVERTISE to the public IP"
+                    "egress probe returned a private IP — the service is behind NAT \
+                     and cannot be reached by cross-network peers; set the \
+                     corresponding advertise env var to the public IP"
                 );
             }
         }
     }
     tracing::warn!(
-        "no public host known for the relay; advertise address will be \
-         non-routable. Set CHATX_RELAY_ADVERTISE=<public-host:port>"
+        "no public host known for the service; advertise address will be \
+         non-routable. Set the corresponding advertise env var to <public-host:port>"
     );
     None
 }
@@ -168,7 +173,7 @@ pub async fn start(
     // is resolved before the listen loop so we can replace the listen
     // address's IP (which is `0.0.0.0` / private by default) with something
     // routable. `None` ⇒ announce the address as-is (with a warn above).
-    let public_host = resolve_public_host().await;
+    let public_host = resolve_public_host("CHATX_RELAY_ADVERTISE").await;
 
     // AutoNAT server config — this side is *only* answering inbound probes,
     // so the client-side knobs (boot_delay, retry_interval) are irrelevant to

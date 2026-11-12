@@ -61,6 +61,18 @@ pub struct RelayInfo {
     pub addr: String,
 }
 
+/// A built-in STUN server advertisement returned by `GET /v1/stun`. The
+/// signaling server can host a STUN binding responder (RFC 5389) so clients on
+/// a restricted network — where public STUN providers like `stun.l.google.com`
+/// are blocked — still learn their NAT fingerprint (public IP + EIM/EDM) from
+/// the operator's own infra.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StunInfo {
+    /// `host:port` (e.g. `103.12.34.56:3478`) — the address a client sends a
+    /// STUN Binding request to.
+    pub addr: String,
+}
+
 /// A "peer X wants to reach me" wake notice, delivered by the directory to
 /// coordinate simultaneous TCP dials (hole punching). A client long-polls
 /// `/v1/notifications` and receives a `[Notice, ...]` payload within ~45 s.
@@ -153,7 +165,7 @@ pub trait DirectoryClient: Sync + Send {
         Ok(false)
     }
 
-    fn delete_group_key_slot(&self, group_id: &str, peer_id: &str) -> anyhow::Result<bool> {
+    fn delete_group_key_slot(&self, _group_id: &str, _peer_id: &str) -> anyhow::Result<bool> {
         Ok(false)
     }
 
@@ -194,6 +206,14 @@ pub trait DirectoryClient: Sync + Send {
     /// Empty when the directory has no relays configured or the endpoint is
     /// not supported (older servers).
     fn list_relays(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Discover an operator-hosted STUN server from the directory
+    /// (`GET /v1/stun`). Returns `host:port` strings. Empty when the directory
+    /// hosts no STUN server or the endpoint is unsupported (older servers) —
+    /// callers then fall back to the built-in public STUN list.
+    fn list_stun(&self) -> Vec<String> {
         Vec::new()
     }
 
@@ -710,6 +730,25 @@ impl DirectoryClient for HttpDirectory {
                 .collect(),
             Err(e) => {
                 tracing::debug!("[dir] list_relays failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    fn list_stun(&self) -> Vec<String> {
+        let url = format!("{}/v1/stun", self.base);
+        match http_client().request("GET", &url).call() {
+            Ok(resp) => resp
+                .into_json::<Vec<StunInfo>>()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| s.addr)
+                .collect(),
+            Err(e) => {
+                // Older servers without a STUN endpoint return 404 — that is
+                // expected and not an error worth surfacing; the client simply
+                // keeps its built-in public STUN list.
+                tracing::debug!("[dir] list_stun failed or unsupported: {e}");
                 Vec::new()
             }
         }

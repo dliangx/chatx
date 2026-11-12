@@ -75,23 +75,21 @@ impl LoopsCtl {
         }
     }
     fn stopped(&self) -> bool {
-        self
-            .stopped
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn stop(&self) {
-        self
-            .stopped
+        self.stopped
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     fn try_start(&self, latch: &std::sync::atomic::AtomicBool) -> bool {
-        latch.compare_exchange(
-            false,
-            true,
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-        )
-        .is_ok()
+        latch
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
     }
 }
 
@@ -210,6 +208,22 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
         drop(existing);
         self.reserve_relays();
+    }
+
+    /// Ask the directory for an operator-hosted STUN server (`GET /v1/stun`)
+    /// and stash it in `stun::set_custom_servers` so the prewarm/fingerprint
+    /// probe preferentially hits a STUN server reachable over the operator's
+    /// network — this is useful on restricted networks where public STUN
+    /// providers like `stun.l.google.com` are blocked on UDP. Fire-and-forget:
+    /// a directory without a STUN endpoint simply returns an empty list (404
+    /// on the endpoint) and we continue using the built-in public list.
+    pub async fn discover_stun(&self) {
+        let list = self.dir().list_stun();
+        if list.is_empty() {
+            return;
+        }
+        crate::stun::set_custom_servers(list.clone());
+        tracing::info!(servers = ?list, "[dir] discovered STUN server from directory");
     }
 
     pub fn reconnect_groups(&self) {
@@ -363,7 +377,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         match sqlite::queue::pending_count_for_peer(&pool, peer_b58).await {
             Ok(n) if n > 0 => {}
             Ok(_) => {
-                tracing::debug!(peer = peer_b58, "[dm] disconnected — no pending DMs, skipping proactive reconnect");
+                tracing::debug!(
+                    peer = peer_b58,
+                    "[dm] disconnected — no pending DMs, skipping proactive reconnect"
+                );
                 return;
             }
             Err(e) => {
@@ -382,7 +399,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         {
             tracing::warn!(peer = peer_b58, "[dm] reconnect spawn failed: {e}");
         } else {
-            tracing::debug!(peer = peer_b58, "[dm] peer dropped — background reconnect started");
+            tracing::debug!(
+                peer = peer_b58,
+                "[dm] peer dropped — background reconnect started"
+            );
         }
     }
 
@@ -505,8 +525,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// link, so the caller can use this as a per-peer fallback signal
     /// after the linked list.
     pub fn dialing_peers(&self) -> Vec<String> {
-        self
-            .running
+        self.running
             .dialing
             .lock()
             .unwrap()
@@ -552,7 +571,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let due: Vec<PeerId> = candidates
             .into_iter()
             .filter(|peer| {
-                last.get(peer).map(|t| now.saturating_sub(*t) >= COOLDOWN_MS).unwrap_or(true)
+                last.get(peer)
+                    .map(|t| now.saturating_sub(*t) >= COOLDOWN_MS)
+                    .unwrap_or(true)
             })
             .collect();
         drop(last);
@@ -563,7 +584,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 let mut last = self.running.escalation_last.lock().unwrap();
                 last.insert(peer, now);
             }
-            self.running.dial_backoff.lock().unwrap().remove(&peer.to_base58());
+            self.running
+                .dial_backoff
+                .lock()
+                .unwrap()
+                .remove(&peer.to_base58());
             // Re-resolve to get the freshest endpoint set, keep only direct
             // (non-`/p2p-circuit`) candidates, and fan them out in parallel.
             let Ok(rec) = self.dir.resolve_device(&peer.to_base58()) else {
@@ -598,7 +623,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             if self
                 .running
                 .cmd_tx
-                .send(Cmd::Dial { peer, addrs: direct })
+                .send(Cmd::Dial {
+                    peer,
+                    addrs: direct,
+                })
                 .is_ok()
             {
                 self.dial_attempted(&peer.to_base58());
@@ -617,20 +645,22 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let client = self.clone();
         let _ = std::thread::Builder::new()
             .name("chatx-upgrade".to_string())
-            .spawn(move || loop {
-                std::thread::sleep(std::time::Duration::from_secs(10));
-                let stopped = client.is_stopped();
-                client.maybe_upgrade_relays();
-                // Re-seat the relay circuit if it lapsed (relay server restart,
-                // reservation TTL expiry, tunnel drop). No-op in steady state —
-                // `reserve_relays` returns immediately when a `/p2p-circuit`
-                // listener is up — so this is an O(listeners) check plus the
-                // occasional `Cmd::ReserveRelay` when one is genuinely missing.
-                // Without this, a dropped reservation silently loses the
-                // guaranteed path until the next `reconnect_groups`.
-                client.reserve_relays();
-                if stopped {
-                    break;
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    let stopped = client.is_stopped();
+                    client.maybe_upgrade_relays();
+                    // Re-seat the relay circuit if it lapsed (relay server restart,
+                    // reservation TTL expiry, tunnel drop). No-op in steady state —
+                    // `reserve_relays` returns immediately when a `/p2p-circuit`
+                    // listener is up — so this is an O(listeners) check plus the
+                    // occasional `Cmd::ReserveRelay` when one is genuinely missing.
+                    // Without this, a dropped reservation silently loses the
+                    // guaranteed path until the next `reconnect_groups`.
+                    client.reserve_relays();
+                    if stopped {
+                        break;
+                    }
                 }
             })
             .expect("spawn upgrade thread");
@@ -772,10 +802,12 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 attempt = row.attempts,
                 "[redeliver] retrying offline DM"
             );
-            match self.try_send_dm_once(&row.peer_base58, &text, row.msg_id as u64).await {
+            match self
+                .try_send_dm_once(&row.peer_base58, &text, row.msg_id as u64)
+                .await
+            {
                 Ok(()) => {
-                    let _ =
-                        sqlite::queue::give_up_pair(&pool, row.msg_id, &row.peer_base58).await;
+                    let _ = sqlite::queue::give_up_pair(&pool, row.msg_id, &row.peer_base58).await;
                     // Flip the message row to SENT only when every device
                     // for this message is done (acked or given up on).
                     let remaining = sqlite::queue::pending_peers_for_msg(&pool, row.msg_id)
@@ -1441,7 +1473,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             {
                 let stun_state = match stun::discover_cached() {
                     Some(p) => format!("STUN {p}"),
-                    None => "STUN miss (outbound UDP blocked / offline / prewarm not done)".to_string(),
+                    None => {
+                        "STUN miss (outbound UDP blocked / offline / prewarm not done)".to_string()
+                    }
                 };
                 tracing::warn!(
                     endpoints = %ep.join(","),
@@ -1522,7 +1556,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .spawn(move || {
                 let res = stun::discover();
                 match res {
-                    Ok(Some(profile)) => tracing::info!(profile = %profile, "STUN prewarm OK (NAT fingerprint)"),
+                    Ok(Some(profile)) => {
+                        tracing::info!(profile = %profile, "STUN prewarm OK (NAT fingerprint)")
+                    }
                     Ok(None) => tracing::debug!(
                         "STUN prewarm: no fingerprint (outbound UDP blocked / offline)"
                     ),
@@ -1771,6 +1807,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         // so the freshly-announced endpoints already include a relay-circuit
         // address (the only NAT-traversal fallback when direct dial fails).
         self.discover_relays().await;
+        // Same idea for STUN: pull the operator's own STUN server (if any) so
+        // the prewarm probe (spawned by `start_presence_loop` after this
+        // returns) can prefer it over the built-in public list — critical on
+        // restricted networks where public STUN hosts are not UDP-reachable.
+        self.discover_stun().await;
         let my = self.device.peer_base58();
         if let Ok(existing) = self.dir.resolve_device(&my) {
             if existing.user_id == self.account.user_id() {
@@ -2251,13 +2292,15 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .await
         {
             Ok(()) => Ok(()),
-            Err(_) => self.try_send_dm_once(peer_base58, text, msg_id as u64).await,
+            Err(_) => {
+                self.try_send_dm_once(peer_base58, text, msg_id as u64)
+                    .await
+            }
         };
         match outcome {
             Ok(()) => {
                 if let Some(pool) = self.store.pool() {
-                    let _ =
-                        sqlite::queue::give_up_pair(&pool, msg_id, peer_base58).await; // drop this device's queue row
+                    let _ = sqlite::queue::give_up_pair(&pool, msg_id, peer_base58).await; // drop this device's queue row
                     // Only mark the local message row SENT once every device
                     // for this message has acked (or been given up on). If any
                     // other device is still pending, leave the row as SENDING
@@ -2377,18 +2420,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let e2e = self.e2e_public().to_string();
         let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
         let text_owned = text.to_string();
-        if let Err(e) = self
-            .running
-            .cmd_tx
-            .send(swarm::Cmd::SendText {
-                peer: pid,
-                from,
-                e2e,
-                text: text_owned,
-                ack_tx: Some(tx),
-                client_id: Some(client_id),
-            })
-        {
+        if let Err(e) = self.running.cmd_tx.send(swarm::Cmd::SendText {
+            peer: pid,
+            from,
+            e2e,
+            text: text_owned,
+            ack_tx: Some(tx),
+            client_id: Some(client_id),
+        }) {
             // Command channel closed (swarm runtime gone). Return an error; the
             // caller falls through to the dialing path, which will fail fast
             // here too (no runtime) and hand off to the redelivery loop.
@@ -2428,10 +2467,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         if addrs.is_empty() {
             return false;
         }
-        if let Err(e) = self.running.cmd_tx.send(Cmd::Dial {
-            peer: *peer,
-            addrs,
-        }) {
+        if let Err(e) = self.running.cmd_tx.send(Cmd::Dial { peer: *peer, addrs }) {
             tracing::warn!(%peer, err = %e, "[dm] Cmd::Dial dropped (channel closed)");
             return false;
         }
@@ -2497,7 +2533,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let send_timeout = std::time::Duration::from_secs(8);
         let dial_wait = sw::DIAL_BACKOFF_DUR;
 
-        let mut last_err = String::new();
+        let mut last_err: String;
 
         // Round 1: fan out every candidate address in parallel (`Cmd::Dial` →
         // `swarm.add_peer_address` × N + one `swarm.dial(peer)`), wait up to
@@ -2506,8 +2542,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         // (dial + send) window (~14 s) regardless of how many candidate
         // endpoints the directory knows — contrast with the old per-address
         // Connect+SendText loop, which blocked for N×(dial+send) windows.
-        if self.dial_and_wait(&peer, candidates.clone(), dial_wait).await {
-            match self.send_with_ack(&peer, &from, &e2e, text, client_id, send_timeout).await {
+        if self
+            .dial_and_wait(&peer, candidates.clone(), dial_wait)
+            .await
+        {
+            match self
+                .send_with_ack(&peer, &from, &e2e, text, client_id, send_timeout)
+                .await
+            {
                 Ok(()) => {
                     tracing::info!(
                         n = candidates.len(),
@@ -2526,7 +2568,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 candidates.len()
             );
         }
-
+        tracing::info!(last_err);
         // Round 2: hole-punch. Ask the directory to poke the peer, wait a
         // short window for it to be woken and dial us back, then re-resolve
         // the candidates and fan out again. Without this the message is lost
@@ -2548,9 +2590,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     }
                 }
                 if fresh.is_empty() {
-                    last_err = format!(
-                        "no dialable endpoints after wake for {peer_base58}"
-                    );
+                    last_err = format!("no dialable endpoints after wake for {peer_base58}");
                 } else if self.dial_and_wait(&peer, fresh, dial_wait).await {
                     match self
                         .send_with_ack(&peer, &from, &e2e, text, client_id, send_timeout)
@@ -2604,10 +2644,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             Ok(Ok(Ok(()))) => Ok(()),
             Ok(Ok(Err(e))) => Err(e.to_string()),
             Ok(Err(_)) => Err("peer connection dropped before ack".into()),
-            Err(_) => Err(format!(
-                "no ack from peer within {}s",
-                timeout.as_secs()
-            )),
+            Err(_) => Err(format!("no ack from peer within {}s", timeout.as_secs())),
         }
     }
 
@@ -3235,7 +3272,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 group_id: group_id.into(),
             })
             .map_err(|e| anyhow::anyhow!("GroupSubscribe cmd failed: {e}"))?;
-        if infos.iter().any(|i| !i.peer_id.is_empty() && i.peer_id != self.peer_base58()) {
+        if infos
+            .iter()
+            .any(|i| !i.peer_id.is_empty() && i.peer_id != self.peer_base58())
+        {
             self.publish_group_key(group_id)?;
         }
         Ok(())
@@ -3637,9 +3677,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 Some(mi) => mi.e2e_public.clone(),
                 None => continue,
             };
-            let bundle =
-                group::seal_secret(self.account(), &their_e2e, &secret)
-                    .map_err(|e| anyhow::anyhow!("seal key: {e}"))?;
+            let bundle = group::seal_secret(self.account(), &their_e2e, &secret)
+                .map_err(|e| anyhow::anyhow!("seal key: {e}"))?;
             let sealed = crate::account::b64(&bundle);
             let pid = match peer.parse::<PeerId>() {
                 Ok(p) => p,
@@ -3658,7 +3697,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let mut delivered = 0usize;
         for (pid, sealed) in jobs {
             let peer_b58 = pid.to_string();
-            if self.deliver_group_key(group_id, &peer_b58, pid, sealed).await? {
+            if self
+                .deliver_group_key(group_id, &peer_b58, pid, sealed)
+                .await?
+            {
                 delivered += 1;
             }
         }
@@ -3709,7 +3751,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 }
             }
             if addrs.is_empty() {
-                tracing::warn!(peer = peer_base58, "group-key deliver: no dialable endpoint");
+                tracing::warn!(
+                    peer = peer_base58,
+                    "group-key deliver: no dialable endpoint"
+                );
                 return Ok(false);
             }
             if !self.dial_and_wait(&peer, addrs, dial_wait).await {
@@ -3769,12 +3814,20 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             sealed,
             ack_tx: Some(tx),
         }) {
-            tracing::warn!(peer = peer_base58, group = group_id, "cmd channel closed: {e}");
+            tracing::warn!(
+                peer = peer_base58,
+                group = group_id,
+                "cmd channel closed: {e}"
+            );
             return Ok(false);
         }
         match tokio::time::timeout(send_timeout, rx).await {
             Ok(Ok(Ok(()))) => {
-                tracing::info!(peer = peer_base58, group = group_id, "group key delivered (ack)");
+                tracing::info!(
+                    peer = peer_base58,
+                    group = group_id,
+                    "group key delivered (ack)"
+                );
                 Ok(true)
             }
             Ok(Ok(Err(e))) => {
@@ -3783,11 +3836,20 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             Ok(Err(_)) => {
                 // The waiter was dropped (e.g. peer disconnected before ack).
-                tracing::warn!(peer = peer_base58, group = group_id, "group key: peer dropped before ack");
+                tracing::warn!(
+                    peer = peer_base58,
+                    group = group_id,
+                    "group key: peer dropped before ack"
+                );
                 Ok(false)
             }
             Err(_) => {
-                tracing::warn!(peer = peer_base58, group = group_id, "group key: no ack within {}s", send_timeout.as_secs());
+                tracing::warn!(
+                    peer = peer_base58,
+                    group = group_id,
+                    "group key: no ack within {}s",
+                    send_timeout.as_secs()
+                );
                 Ok(false)
             }
         }
@@ -4109,7 +4171,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         // request) — those are never deduplicated here.
                         let chat = store::dm_chat_id(&self.resolve_peer_username(&peer_b58));
                         if let (Some(cid), Some(pool)) = (req.client_id, self.store.pool()) {
-                            let fresh = match sqlite::inbound_seen::mark(&pool, cid as i64, &peer_b58).await {
+                            let fresh = match sqlite::inbound_seen::mark(
+                                &pool, cid as i64, &peer_b58,
+                            )
+                            .await
+                            {
                                 Ok(f) => f,
                                 Err(e) => {
                                     // Table query failed — degrade to "persist it"

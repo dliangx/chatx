@@ -3,6 +3,14 @@ name = "chatx-signal"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "chatx-signal"
+path = "src/main.rs"
+
+[[bin]]
+name = "chatx-stun"
+path = "src/stun.rs"
+
 [dependencies]
 chatx-core = { workspace = true }
 axum = { workspace = true }

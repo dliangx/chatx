@@ -58,6 +58,44 @@ const STUN_SERVERS: &[&str] = &[
     "stun4.l.google.com:19302",
 ];
 
+/// Operator-provided STUN servers, discovered from the directory
+/// (`GET /v1/stun`, see `signal::StunInfo`) at login time via
+/// [`set_custom_servers`]. These take **priority** over the public defaults:
+/// on a restricted network the public providers are often blocked on UDP, but
+/// the operator's own STUN server (co-located with the directory/relay) is
+/// reachable — so we probe it first and only fall back to the public list if
+/// it fails.
+static CUSTOM_SERVERS: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Register `servers` (as `host:port`) as the preferred STUN endpoints,
+/// taking priority over the built-in public list. Called automatically by
+/// the login flow (see `Client::discover_stun`) after asking the directory
+/// for the operator's own STUN server. Embedders/tests can also call this
+/// directly to force `discover()` to hit a known endpoint. Empty list clears
+/// the preference and reverts to the built-in public list.
+pub fn set_custom_servers(servers: Vec<String>) {
+    let mut s = CUSTOM_SERVERS.lock().unwrap();
+    *s = servers.into_iter().filter(|a| !a.trim().is_empty()).collect();
+}
+
+/// Resolve the ordered probe list: operator-discovered servers first, then the
+/// built-in public defaults. De-duplicated, empty entries dropped.
+fn effective_servers() -> Vec<String> {
+    let custom = CUSTOM_SERVERS.lock().unwrap().clone();
+    let mut out: Vec<String> = custom
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for d in STUN_SERVERS {
+        if !out.iter().any(|x| x.eq_ignore_ascii_case(d)) {
+            out.push(d.to_string());
+        }
+    }
+    out
+}
+
 /// NAT mapping behaviour, as fingerprinted by the dual-socket, two-server
 /// STUN probe. This is the *caller's* NAT, not the peer's.
 ///
@@ -196,9 +234,10 @@ pub fn discover() -> anyhow::Result<Option<NatProfile>> {
     // simultaneous as the OS gives us (NATs that are genuinely EIM still
     // produce the same mapped port in this case; NATs that are EDM produce
     // different ones independent of timing).
+    let servers = effective_servers();
     let sock_a = bind_socket()?;
     let sock_b = bind_socket()?;
-    let result = probe_pair(&sock_a, 0, &sock_b, 1);
+    let result = probe_pair(&sock_a, 0, &sock_b, 1, &servers);
 
     match result {
         Some(profile) => {
@@ -248,10 +287,17 @@ fn bind_socket() -> anyhow::Result<std::net::UdpSocket> {
 
 /// Probe `server_index` and its fallbacks, in order, until one responds.
 /// Returns `(ip, mapped_port)` on success.
-fn probe_socket(sock: &std::net::UdpSocket, start_index: usize) -> Option<ProbeResult> {
-    let n = STUN_SERVERS.len();
+fn probe_socket(
+    sock: &std::net::UdpSocket,
+    start_index: usize,
+    servers: &[String],
+) -> Option<ProbeResult> {
+    let n = servers.len();
+    if n == 0 {
+        return None;
+    }
     for offset in 0..n {
-        let server = STUN_SERVERS[(start_index + offset) % n];
+        let server = &servers[(start_index + offset) % n];
         match probe_one(sock, server) {
             Ok(Some(pr)) => return Some(pr),
             Ok(None) => continue,
@@ -324,15 +370,17 @@ fn probe_one(sock: &std::net::UdpSocket, server: &str) -> anyhow::Result<Option<
 
 /// Run the dual-socket / two-server fingerprint. `start_a` / `start_b`
 /// select which STUN server each socket starts with, so the two probes hit
-/// distinct endpoints even if only a subset of them is reachable.
+/// distinct endpoints even if only a subset of them is reachable. `servers`
+/// is the resolved probe list (operator-priority, deduplicated, non-empty).
 fn probe_pair(
     sock_a: &std::net::UdpSocket,
     start_a: usize,
     sock_b: &std::net::UdpSocket,
     start_b: usize,
+    servers: &[String],
 ) -> Option<NatProfile> {
-    let a = probe_socket(sock_a, start_a);
-    let b = probe_socket(sock_b, start_b);
+    let a = probe_socket(sock_a, start_a, servers);
+    let b = probe_socket(sock_b, start_b, servers);
     match (a, b) {
         (Some(a), Some(b)) => {
             let (ip, mapping) = fingerprint(a.ip, a.mapped_port, b.ip, b.mapped_port);
@@ -399,20 +447,29 @@ fn parse_response(pkt: &[u8], txn: &[u8; 12]) -> Option<ProbeResult> {
     None
 }
 
-/// Parse a MAPPED-ADDRESS (unencrypted) attribute: family(1) port(2) addr.
+/// Parse an MAPPED-ADDRESS (unencrypted) attribute per RFC 5389 §3:
+///   byte 0   : reserved (1)
+///   byte 1   : F  (0x01=IPv4, 0x02=IPv6)
+///   bytes 2-3: port (BE u16)
+///   bytes 4+ : IP (4 or 16 bytes)
+///
+/// NOTE: earlier versions of this file had the layout shifted by one byte
+/// (family at byte 0, port at bytes 1-2, IP at 3+), which did not match any
+/// real-world STUN server.
 fn plain_mapped(p: &[u8]) -> Option<ProbeResult> {
-    if p.len() >= 8 && p[0] == 0x01 {
-        let port = u16::from_be_bytes([p[1], p[2]]);
+    let family = p[1];
+    if family == 0x01 && p.len() >= 8 {
+        let port = u16::from_be_bytes([p[2], p[3]]);
         let ip = u32::from_be_bytes([p[4], p[5], p[6], p[7]]);
         return Some(ProbeResult {
             ip: IpAddr::V4(std::net::Ipv4Addr::from(ip)),
             mapped_port: port,
         });
     }
-    if p.len() >= 20 && p[0] == 0x02 {
-        let port = u16::from_be_bytes([p[1], p[2]]);
+    if family == 0x02 && p.len() >= 20 {
+        let port = u16::from_be_bytes([p[2], p[3]]);
         let mut a = [0u8; 16];
-        a.copy_from_slice(&p[6..22]);
+        a.copy_from_slice(&p[4..20]);
         return Some(ProbeResult {
             ip: IpAddr::V6(a.into()),
             mapped_port: port,
@@ -421,12 +478,26 @@ fn plain_mapped(p: &[u8]) -> Option<ProbeResult> {
     None
 }
 
-/// Parse a XOR-MAPPED-ADDRESS attribute. For a Binding Response the magic
-/// cookie XOR is identity on the port, but we do it properly per RFC 5389.
+/// Parse an XOR-MAPPED-ADDRESS attribute per RFC 5389 §3.
+///
+/// Layout (v4, 8 bytes):  reserved(1)  F(1)  port(2)  ip(4)
+/// Layout (v6, 20 bytes): reserved(1)  F(1)  port(2)  ip(16)
+///
+/// XOR key per RFC 5389 §6.2:
+///   port is XOR'd with `(MAGIC >> 16) as u16`  (i.e. 0x2112)
+///   v4 ip (4 bytes) is XOR'd with `MAGIC` as u32
+///   v6 lower 4 bytes of ip are XOR'd with `MAGIC` as u32;
+///      upper 12 bytes are not XOR'd.
+///
+/// NOTE: earlier versions of this file also had the layout shifted by one
+/// byte AND did not XOR the port, making it incompatible with real-world
+/// STUN servers (stun.l.google.com, stun.cloudflare.com, etc.).
 fn xor_mapped(p: &[u8]) -> Option<ProbeResult> {
-    let family = p[0];
+    let family = p[1];  // F is at byte 1, NOT byte 0 (byte 0 is reserved)
+    let port_raw = u16::from_be_bytes([p[2], p[3]]);
+    let port = port_raw ^ ((MAGIC >> 16) as u16);  // RFC 5389: XOR with magic high 16
+
     if family == 0x01 && p.len() >= 8 {
-        let port = u16::from_be_bytes([p[1], p[2]]);
         let ip = u32::from_be_bytes([p[4], p[5], p[6], p[7]]) ^ MAGIC;
         return Some(ProbeResult {
             ip: IpAddr::V4(std::net::Ipv4Addr::from(ip)),
@@ -434,12 +505,13 @@ fn xor_mapped(p: &[u8]) -> Option<ProbeResult> {
         });
     }
     if family == 0x02 && p.len() >= 20 {
-        let port = u16::from_be_bytes([p[1], p[2]]);
-        let mut key = [0u8; 16];
-        key[12..16].copy_from_slice(&MAGIC.to_be_bytes());
         let mut a = [0u8; 16];
-        for i in 0..16 {
-            a[i] = p[6 + i] ^ key[i];
+        // Upper 12 bytes: key is zero, so copy through unchanged.
+        a[..12].copy_from_slice(&p[4..16]);
+        // Lower 4 bytes: XOR with the 32-bit MAGIC cookie.
+        let key = MAGIC.to_be_bytes();
+        for i in 0..4 {
+            a[12 + i] = p[16 + i] ^ key[i];
         }
         return Some(ProbeResult {
             ip: IpAddr::V6(a.into()),
@@ -455,6 +527,17 @@ mod tests {
 
     /// Build a well-formed STUN binding-response packet carrying one
     /// MAPPED-ADDRESS (unencrypted) or XOR-MAPPED-ADDRESS attribute.
+    ///
+    /// RFC 5389 §15.1 v4 layout (8 bytes):
+    ///   byte 0 : reserved (0)
+    ///   byte 1 : F (0x01 for IPv4)
+    ///   byte 2-3: port (BE u16, clear for MAPPED-ADDRESS)
+    ///   byte 4-7: ip  (4 bytes BE)
+    ///
+    /// RFC 5389 §15.2 XOR-MAPPED-ADDRESS v4 layout:
+    ///   Same as above, EXCEPT:
+    ///     port is XOR'd with `(MAGIC >> 16) as u16`
+    ///     ip  is XOR'd with `MAGIC as u32`
     fn build_packet(txn: &[u8; 12], mapped_ipv4: u32, mapped_port: u16, attr: u16) -> Vec<u8> {
         let mut p = Vec::new();
         p.extend_from_slice(&TYPE_BINDING_RESPONSE.to_be_bytes());
@@ -465,13 +548,16 @@ mod tests {
         p.extend_from_slice(&attr.to_be_bytes());
         p.extend_from_slice(&8u16.to_be_bytes());
         let mut payload = [0u8; 8];
-        payload[0] = 0x01; // IPv4 family
-        payload[1..3].copy_from_slice(&mapped_port.to_be_bytes());
+        payload[0] = 0x00; // reserved
+        payload[1] = 0x01; // IPv4 family
         if attr == ATTR_MAPPED {
+            payload[2..4].copy_from_slice(&mapped_port.to_be_bytes());
             payload[4..8].copy_from_slice(&mapped_ipv4.to_be_bytes());
         } else {
-            let xor_ip = mapped_ipv4 ^ MAGIC;
-            payload[4..8].copy_from_slice(&xor_ip.to_be_bytes());
+            let port_x = mapped_port ^ ((MAGIC >> 16) as u16);
+            let ip_x = mapped_ipv4 ^ (MAGIC as u32);
+            payload[2..4].copy_from_slice(&port_x.to_be_bytes());
+            payload[4..8].copy_from_slice(&ip_x.to_be_bytes());
         }
         p.extend_from_slice(&payload);
 
@@ -479,28 +565,28 @@ mod tests {
         p
     }
 
+    /// The MAPPED-ADDRESS plain test — payload must come out as the (ip, port)
+    /// the test asked for, with the reserved byte zeroed.
     #[test]
     fn parses_plain_mapped_ipv4() {
         let txn: [u8; 12] = [0u8; 12];
-        let ip: u32 = 0x0A0B0C0D; // 10.11.12.13 (known byte value)
-        let pkt = build_packet(&txn, ip, 4242, ATTR_MAPPED);
+        let ip: u32 = 0x0A0B0C0D; // 10.11.12.13
+        let port: u16 = 4242;
+        let pkt = build_packet(&txn, ip, port, ATTR_MAPPED);
         let got = parse_response(&pkt, &txn).expect("should parse");
         assert_eq!(got.ip, IpAddr::from([10, 11, 12, 13]));
-        assert_eq!(got.mapped_port, 4242);
+        assert_eq!(got.mapped_port, port);
     }
 
     #[test]
     fn parses_xor_mapped_ipv4_and_port() {
         let txn: [u8; 12] = [7u8; 12];
         let ip: u32 = 0xC0A80101; // 192.168.1.1
-        let pkt = build_packet(&txn, ip, 33033, ATTR_XOR_MAPPED);
+        let port: u16 = 33033;
+        let pkt = build_packet(&txn, ip, port, ATTR_XOR_MAPPED);
         let got = parse_response(&pkt, &txn).expect("should parse");
         assert_eq!(got.ip, IpAddr::from([192, 168, 1, 1]));
-        // For a binding response the XOR on the port is identity (per RFC
-        // 5389 §6.2 — XOR with magic cookie affects the port only for
-        // server-reflexive or change-request cases; for binding it is
-        // identity, so our simple "read port" is correct here).
-        assert_eq!(got.mapped_port, 33033);
+        assert_eq!(got.mapped_port, port);
     }
 
     #[test]
