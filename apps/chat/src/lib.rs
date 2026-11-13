@@ -978,10 +978,11 @@ pub fn run_app() {
         // Navigation across units of the deck: slides (PNG) or sheets (grid).
         // Both are keyed by `page` in the Slint side, so one callback serves
         // both view modes.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let page_weak = weak.clone();
         ui.global::<DocHost>().on_page_at(move |idx: i32| {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             {
-                let page_weak = weak.clone();
                 if let Some(ui) = page_weak.upgrade() {
                     let dh = ui.global::<DocHost>();
                     if dh.get_mode() == 2 {
@@ -1005,9 +1006,6 @@ pub fn run_app() {
                     }
                 }
             }
-            // Mobile: the Doc overlay is never populated (office files are
-            // handed to the OS), so page navigation is a no-op. `idx` is
-            // intentionally unused on this target.
             let _ = idx;
         });
     }
@@ -7329,7 +7327,8 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
             };
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    ui.global::<AppState>().set_add_status(SharedString::from(msg));
+                    ui.global::<AppState>()
+                        .set_add_status(SharedString::from(msg));
                 }
             });
             return;
