@@ -228,12 +228,17 @@ pub trait DirectoryClient: Sync + Send {
         anyhow::bail!("directory does not support server-mediated friend requests")
     }
 
-    /// Mark the pending request between `actor` and `other` as `accepted`
-    /// (`true`) or `rejected` (`false`) on the server side and fan the
-    /// decision out to the counterparty's devices.
+    /// Mark the pending request between `actor_user` / `actor_peer` (the
+    /// decision-maker, i.e. the recipient of the original request) and
+    /// `other_user` (the counter-party) as `accepted` (`true`) or `rejected`
+    /// (`false`) on the server side and fan the decision out to the
+    /// counterparty's devices. `actor_peer` is included in the fan-out
+    /// `Notice` payload so the counter-party can bind `devices.peer_id`
+    /// directly without a directory round-trip.
     fn fr_decide(
         &self,
         _actor_user: &str,
+        _actor_peer: &str,
         _other_user: &str,
         _accept: bool,
     ) -> anyhow::Result<()> {
@@ -974,10 +979,16 @@ impl DirectoryClient for HttpDirectory {
             .map_err(|e| anyhow::anyhow!("fr_send failed: {e}"))
     }
 
-    fn fr_decide(&self, actor_user: &str, other_user: &str, accept: bool) -> anyhow::Result<()> {
+    fn fr_decide(
+        &self,
+        actor_user: &str,
+        actor_peer: &str,
+        other_user: &str,
+        accept: bool,
+    ) -> anyhow::Result<()> {
         let action = if accept { "accept" } else { "reject" };
         let url = format!(
-            "{}/v1/friend-requests/{actor_user}/{other_user}/{action}",
+            "{}/v1/friend-requests/{actor_user}/{other_user}/{action}/{actor_peer}",
             self.base
         );
         http_client().request("PUT", &url).send_string("null")

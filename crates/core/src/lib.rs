@@ -3202,7 +3202,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
     /// Confirm (accept) or decline (reject) a pending friend request with the
     /// signaling server. The counter-party receives the decision as a
-    /// [`ChatEvent::FriendAction`] on their next long-poll tick.
+    /// [`ChatEvent::FriendAction`] on their next long-poll tick; the fan-out
+    /// payload carries `actor_peer` (this device's base58 peer id) so the
+    /// counter-party can bind `devices.peer_id` directly.
     pub fn decide_friend_request(
         &self,
         other_username: &str,
@@ -3212,7 +3214,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         if me_user.is_empty() {
             anyhow::bail!("not logged in");
         }
-        self.dir.fr_decide(&me_user, other_username, accept)
+        let me_peer = self.peer_base58();
+        self.dir.fr_decide(&me_user, &me_peer, other_username, accept)
     }
 
     pub fn all_messages(&self) -> Vec<store::StoredMsg> {

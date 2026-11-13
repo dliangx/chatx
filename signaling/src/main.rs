@@ -884,13 +884,16 @@ async fn post_friend_request(
     Ok(ok_json(&"ok"))
 }
 
-/// `PUT /v1/friend-requests/{actor}/{other}/accept` — the recipient (or
-/// sender cancelling their own pending request) sets the pair's status to
-/// `accepted` and fans out a `fr_accept` Notice to the other user's devices
-/// so their "sent" list updates.
+/// `PUT /v1/friend-requests/{actor}/{other}/{action}/{actor_peer}` — the
+/// recipient (or sender cancelling their own pending request) sets the pair's
+/// status to `accepted`/`rejected` and fans out a `fr_accept` / `fr_reject`
+/// Notice to the other user's devices so their "sent" list updates.
+/// `actor_peer` is the decision-maker's base58 device id, echoed back in the
+/// notice payload so the counterparty can bind `devices.peer_id` directly
+/// without a directory round-trip.
 async fn fr_decision(
     State(app): State<App>,
-    Path((actor, other, action)): Path<(String, String, String)>,
+    Path((actor, other, action, actor_peer)): Path<(String, String, String, String)>,
 ) -> ApiResult {
     if actor.is_empty() || other.is_empty() {
         return Err(bad(StatusCode::BAD_REQUEST, "actor/other required"));
@@ -938,6 +941,7 @@ async fn fr_decision(
             kind: kind.clone(),
             payload: Some(serde_json::json!({
                 "actor_user": actor,
+                "actor_peer": actor_peer,
             })),
         });
     }
@@ -966,7 +970,7 @@ pub(crate) fn make_router(app: App) -> Router {
         .route("/v1/devices/{peer_id}/presence", put(device_presence))
         .route("/v1/friend-requests", post(post_friend_request))
         .route(
-            "/v1/friend-requests/{actor}/{other}/{action}",
+            "/v1/friend-requests/{actor}/{other}/{action}/{actor_peer}",
             put(fr_decision),
         )
         .route("/v1/groups", get(list_groups))
