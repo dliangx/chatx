@@ -271,6 +271,20 @@ pub enum ChatEvent {
         peer: PeerId,
         topic: String,
     },
+    /// A friend-related event fanned out from the signaling server via the
+    /// long-poll `Notice` channel. `from_peer` is the acting device (or the
+    /// *counterparty's* device for `fr_accept`/`fr_reject` — the recipient of
+    /// the long-poll must map this back to themselves via the `kind` and
+    /// `peer` username resolution); `kind` is one of `"fr_inquire"`,
+    /// `"fr_accept"`, `"fr_reject"`; `payload` is the raw JSON `Value` from
+    /// the server, with at least an `actor_user` key (the counter-party's
+    /// username). The UI layer owns the state update — this crate simply
+    /// forwards the notice.
+    FriendAction {
+        from_peer: String,
+        kind: String,
+        payload: serde_json::Value,
+    },
 }
 
 pub enum Cmd {

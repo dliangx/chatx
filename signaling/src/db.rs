@@ -39,6 +39,7 @@ async fn apply_migrations(pool: &Sdb) -> anyhow::Result<()> {
         include_str!("migrations/0002_group_mail.sql"),
         include_str!("migrations/0003_post_index.sql"),
         include_str!("migrations/0004_user_profiles.sql"),
+        include_str!("migrations/0005_friend_requests.sql"),
     ] {
         sqlx::raw_sql(sql).execute(pool).await?;
     }
@@ -729,6 +730,66 @@ pub async fn load_all(
     Ok((users, devices, groups))
 }
 
+// --- friend requests (server-mediated, user_id dimension) -------------------
+//
+// The server is the authoritative ledger: the requester's device POSTs the
+// request, the server upserts the pair (requester_user, recipient_user) and
+// pushes a fan-out Notice to every online device of the recipient. The
+// recipient's device then calls `accept` / `reject` (by its own username);
+// the server flips the row and pushes a `fr_accept` / `fr_reject` Notice to
+// every device of the requester. `actor_peer` is the device that acted —
+// the UI uses it to find the right local `fr_requests` row.
+
+pub async fn fr_upsert(
+    db: &Sdb,
+    requester_user: &str,
+    recipient_user: &str,
+    actor_peer: &str,
+    actor_user: &str,
+) -> anyhow::Result<i64> {
+    let now = chatx_core::message::now_ms();
+    let row: (i64,) = sqlx::query_as(
+        "INSERT INTO friend_requests (requester_user, recipient_user, actor_peer, actor_user, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?5)
+         ON CONFLICT(requester_user, recipient_user) DO UPDATE SET
+            actor_peer = ?3, actor_user = ?4, status = 'pending', updated_at = ?5
+         RETURNING id",
+    )
+    .bind(requester_user)
+    .bind(recipient_user)
+    .bind(actor_peer)
+    .bind(actor_user)
+    .bind(now as i64)
+    .fetch_one(db)
+    .await?;
+    Ok(row.0)
+}
+
+/// Set the status of the request between `actor` and `other` (order
+/// irrelevant — either user may appear first). Returns true when a matching
+/// row was updated; false when no row matched (caller treats it as a no-op).
+pub async fn fr_set_status(
+    db: &Sdb,
+    actor: &str,
+    other: &str,
+    new_status: &str,
+) -> anyhow::Result<bool> {
+    let now = chatx_core::message::now_ms();
+    let n = sqlx::query(
+        "UPDATE friend_requests
+         SET status = ?1, updated_at = ?2
+         WHERE (requester_user = ?3 AND recipient_user = ?4)
+            OR (requester_user = ?4 AND recipient_user = ?3)",
+    )
+    .bind(new_status)
+    .bind(now as i64)
+    .bind(actor)
+    .bind(other)
+    .execute(db)
+    .await?;
+    Ok(n.rows_affected() > 0)
+}
+
 // --- raw row shapes ---------------------------------------------------------
 
 #[derive(sqlx::FromRow)]
@@ -954,6 +1015,36 @@ mod tests {
         let (_2u, devs2, _2g) = load_all(&db).await.unwrap();
         assert!(!devs2.contains_key("QmDev1"));
         assert!(delete_device(&db, "QmGhost").await.unwrap() == false);
+    }
+
+    #[tokio::test]
+    async fn friend_requests_upsert_and_decide() {
+        let (_d, db) = tmp_db().await;
+
+        // Inquire: a -> b (a's device is "peerA").
+        let id = fr_upsert(&db, "a", "b", "peerA", "a").await.unwrap();
+        assert!(id > 0);
+
+        // Re-inquire: same pair, fresh pending.
+        let id2 = fr_upsert(&db, "a", "b", "peerA2", "a")
+            .await
+            .unwrap();
+        assert_eq!(id2, id, "same pair → same id, status flipped back to pending");
+
+        // Accept: b accepts (actor=b, other=a). Status flips.
+        let ok = fr_set_status(&db, "b", "a", "accepted").await.unwrap();
+        assert!(ok, "accept by recipient");
+
+        // Sender cancelling their own pending after re-inquire.
+        let _ = fr_upsert(&db, "c", "a", "peerC", "c").await.unwrap();
+        let ok = fr_set_status(&db, "a", "c", "rejected").await.unwrap();
+        assert!(ok, "sender may cancel their own pending");
+
+        // Unknown pair → no-op.
+        let ok = fr_set_status(&db, "ghost", "nobody", "accepted")
+            .await
+            .unwrap();
+        assert!(!ok, "no row, no update");
     }
 
     #[tokio::test]

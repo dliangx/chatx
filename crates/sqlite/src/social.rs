@@ -336,9 +336,65 @@ pub async fn frq_set_status(
         .bind(status)
         .bind(now)
         .bind(id)
-    .execute(pool)
-    .await?;
+        .execute(pool)
+        .await?;
     Ok(true)
+}
+
+/// Resolve the stored `note` (i.e. the counterparty's username) for a
+/// request pair that involves `my_peer`, regardless of which direction the
+/// request originally went. Returns `None` when no row matches (e.g. the
+/// peer is not in our local history).
+pub async fn frq_note_for_me(
+    pool: &Pool,
+    my_peer: &str,
+    other_username: &str,
+) -> anyhow::Result<String> {
+    let row: Option<String> =
+        sqlx::query_scalar(
+            "SELECT note FROM fr_requests
+             WHERE (requester = ?1 AND note = ?2)
+                OR (recipient = ?1 AND note = ?2)
+             LIMIT 1",
+        )
+        .bind(my_peer)
+        .bind(other_username)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.unwrap_or_else(|| other_username.to_string()))
+}
+
+/// Convenience: find the local `fr_requests` row that involves `my_peer` and
+/// whose `note` displays `other_username`, and set it to `status`. Used for
+/// server-mediated accept/reject, where the only thing we know about the
+/// counter-party is their username (their peer id may have changed since the
+/// original upsert).
+pub async fn frq_set_status_for_me(
+    pool: &Pool,
+    my_peer: &str,
+    other_username: &str,
+    status: &str,
+) -> anyhow::Result<()> {
+    let row: Vec<(i64,)> =
+        sqlx::query_as(
+            "SELECT id FROM fr_requests
+             WHERE (requester = ?1 AND note = ?2)
+                OR (recipient = ?1 AND note = ?2)",
+        )
+        .bind(my_peer)
+        .bind(other_username)
+        .fetch_all(pool)
+        .await?;
+    let now = now_ms();
+    for (id,) in row {
+        let _ = sqlx::query("UPDATE fr_requests SET status = ?1, updated_at = ?2 WHERE id = ?3")
+            .bind(status)
+            .bind(now)
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
 }
 
 /// Delete any `fr_requests` row between the two peer ids, in either

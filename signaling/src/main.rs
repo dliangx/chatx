@@ -24,6 +24,15 @@ pub(crate) struct Notice {
     pub(crate) peer_id: String,
     pub(crate) from: String,
     pub(crate) at: u64,
+    /// Kind of notice: "wake" (default), "fr_inquire" (someone asked to add
+    /// me), "fr_accept" (a peer accepted my request), "fr_reject". Old
+    /// clients ignore this field; new clients use it to route friend events.
+    #[serde(default)]
+    pub(crate) kind: String,
+    /// Kind-specific payload (e.g. the friend request id pair `actor_peer`
+    /// / `actor_user` for friend events). `None` for wake notices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) payload: Option<serde_json::Value>,
 }
 
 /// Server-side broadcast of wake notices. One `Notice` (target-peer, sender,
@@ -525,6 +534,8 @@ async fn notify_peer(
         peer_id: q.peer_id.clone(),
         from,
         at: now_ms(),
+        kind: "wake".to_string(),
+        payload: None,
     });
     Ok(ok_json(&"ok"))
 }
@@ -805,6 +816,134 @@ async fn list_posts(
     Ok(ok_json(&out))
 }
 
+/// `POST /v1/friend-requests` — body:
+/// `{"requester": "<username>", "recipient": "<username>",
+///   "actor_peer": "<base58 peer id>"}`.
+///
+/// Register a pending friend request on the server side, and fan out a
+/// `fr_inquire` Notice to every online device of the recipient so they see
+/// the inbox on whichever device they open next. The recipient's other
+/// devices (not the acting one) will update their local `fr_requests` inbox
+/// when they long-poll the notice.
+async fn post_friend_request(
+    State(app): State<App>,
+    body: String,
+) -> ApiResult {
+    #[derive(Deserialize)]
+    struct Body {
+        requester: String,
+        #[serde(default)]
+        recipient: String,
+        actor_peer: String,
+        actor_user: String,
+    }
+    let b: Body = serde_json::from_str(&body)
+        .map_err(|e| bad(StatusCode::BAD_REQUEST, format!("bad body: {e}")))?;
+    if b.requester.is_empty() || b.recipient.is_empty() {
+        return Err(bad(
+            StatusCode::BAD_REQUEST,
+            "requester/recipient required",
+        ));
+    }
+    if b.requester == b.recipient {
+        return Err(bad(
+            StatusCode::BAD_REQUEST,
+            "cannot friend-request yourself",
+        ));
+    }
+    let actor_peer = b.actor_peer.clone();
+    let actor_user = b.actor_user.clone();
+    let _id = db::fr_upsert(
+        app.db.as_ref(),
+        &b.requester,
+        &b.recipient,
+        &actor_peer,
+        &actor_user,
+    )
+    .await
+    .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Fan out to every device of `b.recipient` (excluding none — multi-device
+    // users must all see the inbox) so the inbox surfaces on their next online
+    // device. Recipients that are offline will pick it up on next login via
+    // the regular `load_fr_requests` call.
+    let recipients = db::list_user_devices_db(app.db.as_ref(), &b.recipient)
+        .await
+        .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    for d in recipients {
+        app.notifies.push(Notice {
+            peer_id: d.peer_id,
+            from: actor_peer.clone(),
+            at: now_ms(),
+            kind: "fr_inquire".into(),
+            payload: Some(serde_json::json!({
+                "actor_peer": actor_peer,
+                "actor_user": actor_user,
+            })),
+        });
+    }
+    Ok(ok_json(&"ok"))
+}
+
+/// `PUT /v1/friend-requests/{actor}/{other}/accept` — the recipient (or
+/// sender cancelling their own pending request) sets the pair's status to
+/// `accepted` and fans out a `fr_accept` Notice to the other user's devices
+/// so their "sent" list updates.
+async fn fr_decision(
+    State(app): State<App>,
+    Path((actor, other, action)): Path<(String, String, String)>,
+) -> ApiResult {
+    if actor.is_empty() || other.is_empty() {
+        return Err(bad(StatusCode::BAD_REQUEST, "actor/other required"));
+    }
+    if actor == other {
+        return Err(bad(
+            StatusCode::BAD_REQUEST,
+            "actor and other must differ",
+        ));
+    }
+    let new_status = match action.as_str() {
+        "accept" => "accepted",
+        "reject" => "rejected",
+        _ => {
+            return Err(bad(
+                StatusCode::BAD_REQUEST,
+                "action must be accept or reject",
+            ));
+        }
+    };
+    let kind = format!("fr_{action}");
+    let updated = db::fr_set_status(app.db.as_ref(), &actor, &other, new_status)
+        .await
+        .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !updated {
+        return Err(bad(
+            StatusCode::NOT_FOUND,
+            format!("no pending request between {actor} and {other}"),
+        ));
+    }
+    // Fan out the decision to the *counterparty's* (other's) devices. We use
+    // `from` = the counterparty's peer (decorative for friend events — the
+    // real identity is the actor's username in the payload) so the receiver
+    // can record "the peer that acted (actor_user) accepted/rejected my
+    // request". We look up the counterparty's first online (or any) device
+    // for the target peer id.
+    let recipients = db::list_user_devices_db(app.db.as_ref(), &other)
+        .await
+        .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    for d in recipients {
+        app.notifies.push(Notice {
+            peer_id: d.peer_id,
+            from: other.clone(),
+            at: now_ms(),
+            kind: kind.clone(),
+            payload: Some(serde_json::json!({
+                "actor_user": actor,
+            })),
+        });
+    }
+    Ok(ok_json(&"ok"))
+}
+
 pub(crate) fn make_router(app: App) -> Router {
     Router::new()
         .route("/v1/health", get(health))
@@ -825,6 +964,11 @@ pub(crate) fn make_router(app: App) -> Router {
             put(upsert_device).get(resolve_device).delete(delete_device),
         )
         .route("/v1/devices/{peer_id}/presence", put(device_presence))
+        .route("/v1/friend-requests", post(post_friend_request))
+        .route(
+            "/v1/friend-requests/{actor}/{other}/{action}",
+            put(fr_decision),
+        )
         .route("/v1/groups", get(list_groups))
         .route(
             "/v1/groups/{group_id}",

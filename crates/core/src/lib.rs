@@ -667,14 +667,30 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     /// Run one notice-poll round: block (up to ~50 s) on the long-poll, and
-    /// for every wake notice received, dial the sender back. Called by a
-    /// background thread that the app pumps (see `start_notify_pump`). Returns
-    /// the number of peers dialed in this round.
+    /// for every wake notice received, dial the sender back. Friend-kind
+    /// notices (`fr_inquire`/`fr_accept`/`fr_reject`) are routed to
+    /// [`ChatEvent::FriendAction`] on the injected channel so the UI can
+    /// update its local `fr_requests` state. The background thread that the
+    /// app pumps (see `start_notify_pump`) blocks up to ~50 s per round —
+    /// no additional pacing needed.
     pub fn process_wakes(self: &Arc<Self>) -> u32 {
         let me = self.peer_base58();
         let notices = self.dir().poll_notices(&me);
         let mut dialed = 0u32;
+        let injected = self.running.injected.clone();
         for n in notices {
+            // Friend-kind events route through the `ChatEvent` channel so the
+            // UI (which already pumps `next_event`) can observe them in the
+            // same stream as P2P text/media/voice.
+            if !n.kind.is_empty() && n.kind != "wake" {
+                let evt = sw::ChatEvent::FriendAction {
+                    from_peer: n.from.clone(),
+                    kind: n.kind.clone(),
+                    payload: n.payload.clone().unwrap_or(serde_json::Value::Null),
+                };
+                let _ = injected.send(evt);
+                continue;
+            }
             if n.from == me {
                 continue;
             }
@@ -1890,6 +1906,13 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
     pub fn peer_base58(&self) -> String {
         self.device.peer_base58().to_string()
+    }
+
+    /// The currently-logged-in user's username (account id). Empty if not
+    /// logged in or not derivable. Distinct from `peer_base58` — the username
+    /// is shared across a user's devices; the peer id is per-device.
+    pub fn current_username(&self) -> String {
+        self.account.user_id().to_string()
     }
 
     pub fn e2e_public(&self) -> &str {
@@ -3154,172 +3177,42 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
     }
 
-    /// Send a friend-request frame to `peer_base58` over the DM channel and
-    /// wait for the peer's ack. Unlike `send_dm`, the frame is NOT stored in
-    /// the chat history.
-    pub async fn send_friendq(&self, peer_base58: &str, frame: &str) -> anyhow::Result<()> {
-        let rec = self
-            .dir
-            .resolve_device(peer_base58)
-            .map_err(|e| anyhow::anyhow!("device {peer_base58} not found in directory: {e}"))?;
-        if rec.endpoints.is_empty() {
-            anyhow::bail!("device {peer_base58} is offline (no endpoints)");
+    /// Send a friend-related operation (Inquire / Accept / Reject) to the
+    /// signaling server, which fans the resulting `Notice` (kind
+    /// `fr_inquire`) to the counter-party's online devices. The peer does NOT
+    /// call this directly — they receive the change as a
+    /// [`ChatEvent::FriendAction`] on their next long-poll round
+    /// (`start_notify_pump`).
+    ///
+    /// Returns `Ok(())` on acceptance (HTTP 2xx) and `Err(anyhow)` on any
+    /// other failure (server unreachable, HTTP 4xx/5xx, malformed body). The
+    /// UI surfaces the error to the user.
+    pub fn send_friend_request(
+        &self,
+        recipient_username: &str,
+    ) -> anyhow::Result<()> {
+        let me_user = self.current_username();
+        let me_peer = self.peer_base58();
+        if me_user.is_empty() {
+            anyhow::bail!("not logged in");
         }
-        let peer: PeerId = peer_base58
-            .parse()
-            .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
+        self.dir
+            .fr_send(&me_user, recipient_username, &me_peer, &me_user)
+    }
 
-        let from = self.peer_base58();
-        let e2e = self.e2e_public().to_string();
-        let timeout = std::time::Duration::from_secs(8);
-        let mut last_err = String::new();
-
-        // Fast path: if we already have a live link to this peer, send over
-        // it directly — do NOT re-dial every advertised address. Each
-        // `Cmd::Connect` triggers a full parallel fan-out dial; reusing the
-        // existing connection is faster and avoids a burst of redundant
-        // dials when the peer is already reachable (the common case after
-        // login / a prior DM).
-        if self.peer_connected(&peer) {
-            let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
-            if let Err(e) = self.running.cmd_tx.send(Cmd::SendText {
-                peer,
-                from: from.clone(),
-                e2e: e2e.clone(),
-                text: frame.to_string(),
-                ack_tx: Some(tx),
-                client_id: None,
-            }) {
-                anyhow::bail!("cmd channel closed: {e}");
-            }
-            match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(Ok(()))) => {
-                    tracing::info!("[friendq] delivered (live link)");
-                    return Ok(());
-                }
-                _ => {
-                    tracing::warn!(
-                        "[friendq] live-link path failed; falling back to dial fan-out"
-                    );
-                    last_err = "live-link path failed; trying dial fan-out".to_string();
-                }
-            }
+    /// Confirm (accept) or decline (reject) a pending friend request with the
+    /// signaling server. The counter-party receives the decision as a
+    /// [`ChatEvent::FriendAction`] on their next long-poll tick.
+    pub fn decide_friend_request(
+        &self,
+        other_username: &str,
+        accept: bool,
+    ) -> anyhow::Result<()> {
+        let me_user = self.current_username();
+        if me_user.is_empty() {
+            anyhow::bail!("not logged in");
         }
-
-        let mut candidates: Vec<Multiaddr> = Vec::new();
-        for endpoint in &rec.endpoints {
-            let Ok(addr) = endpoint.parse::<Multiaddr>() else {
-                continue;
-            };
-            if let Some(reason) = unroutable_reason(&addr) {
-                tracing::debug!("[friendq] skip unroutable endpoint ({reason}): {addr}");
-                continue;
-            }
-            candidates.push(addr);
-        }
-        if candidates.is_empty() {
-            anyhow::bail!("device {peer_base58} has no dialable endpoint");
-        }
-
-        // Round 1: try every dialable endpoint. Track the last error for
-        // diagnostics. (Same shape as `send_dm` Round 1.)
-        for addr in &candidates {
-            tracing::debug!("[friendq] send -> {peer_base58} via {addr}");
-            if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
-                peer: peer.clone(),
-                addr: addr.clone(),
-            }) {
-                last_err = format!("cmd channel closed: {e}");
-                continue;
-            }
-            let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
-            if let Err(e) = self.running.cmd_tx.send(Cmd::SendText {
-                peer: peer.clone(),
-                from: from.clone(),
-                e2e: e2e.clone(),
-                text: frame.to_string(),
-                ack_tx: Some(tx),
-                client_id: None,
-            }) {
-                last_err = format!("cmd channel closed: {e}");
-                continue;
-            }
-            match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(Ok(()))) => {
-                    tracing::info!(
-                        path = classify_transport(addr),
-                        "[friendq] delivered via {addr}"
-                    );
-                    return Ok(());
-                }
-                Ok(Ok(Err(e))) => {
-                    tracing::warn!("[friendq] send to {addr} failed: {e}");
-                    last_err = e.to_string();
-                }
-                Ok(Err(_)) => last_err = "peer connection dropped before ack".to_string(),
-                Err(_) => last_err = format!("no ack from peer within {:?}s", timeout.as_secs()),
-            }
-        }
-
-        // Round 2: hole-punch. Ask the directory to poke the peer, wait a
-        // short window for it to be woken / for its STUN-derived public
-        // endpoint or a relay circuit to land, then dial the peer back using
-        // a freshly-resolved endpoint list. Without this the request is lost
-        // because libp2p request-response doesn't buffer in-flight messages.
-        // Mirrors `send_dm` Round 2 exactly (lib.rs:1481-1522).
-        if self.wake_peer(peer_base58) {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            if let Ok(rec2) = self.dir.resolve_device(peer_base58) {
-                for endpoint in &rec2.endpoints {
-                    let Ok(addr) = endpoint.parse::<Multiaddr>() else {
-                        continue;
-                    };
-                    if let Some(reason) = unroutable_reason(&addr) {
-                        tracing::debug!("[friendq] retry: skip unroutable ({reason}): {addr}");
-                        continue;
-                    }
-                    tracing::debug!("[friendq] retry (post-wake) -> {addr}");
-                    if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
-                        peer: peer.clone(),
-                        addr: addr.clone(),
-                    }) {
-                        last_err = format!("cmd channel closed: {e}");
-                        continue;
-                    }
-                    let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
-                    if let Err(e) = self.running.cmd_tx.send(Cmd::SendText {
-                        peer: peer.clone(),
-                        from: from.clone(),
-                        e2e: e2e.clone(),
-                        text: frame.to_string(),
-                        ack_tx: Some(tx),
-                        client_id: None,
-                    }) {
-                        last_err = format!("cmd channel closed: {e}");
-                        continue;
-                    }
-                    match tokio::time::timeout(timeout, rx).await {
-                        Ok(Ok(Ok(()))) => {
-                            tracing::info!(
-                                path = classify_transport(&addr),
-                                "[friendq] retry delivered via {addr}"
-                            );
-                            return Ok(());
-                        }
-                        Ok(Ok(Err(e))) => {
-                            tracing::warn!("[friendq] retry send to {addr} failed: {e}");
-                            last_err = e.to_string();
-                        }
-                        Ok(Err(_)) => last_err = "peer connection dropped before ack".to_string(),
-                        Err(_) => {
-                            last_err =
-                                format!("no ack from peer within {}s (retry)", timeout.as_secs())
-                        }
-                    }
-                }
-            }
-        }
-        anyhow::bail!("failed to deliver friendq to {peer_base58}: {last_err}");
+        self.dir.fr_decide(&me_user, other_username, accept)
     }
 
     pub fn all_messages(&self) -> Vec<store::StoredMsg> {
@@ -4710,34 +4603,6 @@ fn tcp_port_of(addr: &str) -> Option<u16> {
             })
         })
         .filter(|p| *p != 0)
-}
-
-/// Classify a dialable multiaddr into a coarse transport token for log output.
-/// Returns:
-///   - `"relay-circuit"`  when the address tunnels through a relay
-///   - `"direct-quic"`    when it is a direct QUIC/UDP path
-///   - `"direct-tcp"`     when it is a direct TCP path
-///   - `"other"`          for anything else (e.g. websocket, dns)
-fn classify_transport(addr: &Multiaddr) -> &'static str {
-    if addr
-        .iter()
-        .any(|c| matches!(c, libp2p::multiaddr::Protocol::P2pCircuit))
-    {
-        return "relay-circuit";
-    }
-    if addr
-        .iter()
-        .any(|c| matches!(c, libp2p::multiaddr::Protocol::Udp(_)))
-    {
-        return "direct-quic";
-    }
-    if addr
-        .iter()
-        .any(|c| matches!(c, libp2p::multiaddr::Protocol::Tcp(_)))
-    {
-        return "direct-tcp";
-    }
-    "other"
 }
 
 /// True when a multiaddr is dial-able from *another* network — i.e. it carries

@@ -351,6 +351,21 @@ impl DataBackend {
             .map(|(dir, peer)| (*dir, peer.as_str()))
     }
 
+    /// Resolve a friend-request UI key back to its display name AND username.
+    /// The `name` is what the UI shows; for friend rows stored from a P2P
+    /// frame the `name` is the counterparty's *username* so we can use it
+    /// directly as the second arg of `Client::decide_friend_request`.
+    pub fn frq_for_name(&self, key: i32) -> Option<(FrqDir, &str, &str)> {
+        let dir_peer = self.frq_for(key)?;
+        let name = self
+            .friend_requests
+            .iter()
+            .find(|r| r.id == key)
+            .map(|r| r.name.as_str())
+            .unwrap_or(dir_peer.1);
+        Some((dir_peer.0, dir_peer.1, name))
+    }
+
     /// Remove a friend request by UI key.
     pub fn remove_friend_request(&mut self, key: i32) {
         self.friend_requests.retain(|r| r.id != key);

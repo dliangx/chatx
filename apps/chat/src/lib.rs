@@ -2730,6 +2730,15 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                         .await;
                         continue;
                     }
+                    if let chatx_core::swarm::ChatEvent::FriendAction {
+                        kind,
+                        payload,
+                        ..
+                    } = &evt
+                    {
+                        handle_friend_action(weak.clone(), kind, payload.clone()).await;
+                        continue;
+                    }
                     // A new NAT-traversable address (UPnP-mapped public IP or a
                     // relay-circuit reservation) is now dialable. Re-announce our
                     // endpoint list to the directory immediately so remote peers
@@ -3886,8 +3895,11 @@ fn set_chat_send_error(weak: slint::Weak<MainWindow>, msg: &str) {
 }
 
 /// Handle an inbound friendq frame (someone sent us Inquire / Accept / Reject
-/// over P2P). Persists the local copy, refreshes the UI, and sends any
-/// required local contact update on acceptance.
+/// over P2P). Persists the local copy, reflects it in the inbox, and applies
+/// any required local contact update on acceptance. Deprecated: prefer the
+/// server-mediated path (`Client::decide_friend_request` + `ChatEvent::
+/// FriendAction`) — this frame handler remains for legacy P2P peers that
+/// still encode FriendQ over `ChatRequest::text`.
 async fn handle_inbound_friendq(weak: slint::Weak<MainWindow>, from_peer: &str, q: FriendQ) {
     tracing::debug!(
         "[friendq] INBOUND action={:?} from={from_peer} req={} rec={}",
@@ -7327,83 +7339,49 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
 
     let rt = runtime();
     rt.spawn(async move {
-        // Compose the Inquire frame with our own profile (nickname / bio /
-        // research / E2E pk / 40×40 avatar). Profile fetch failures are
-        // non-fatal — we just send an older-style frame.
-        let profile = my_profile_snapshot(&client).await.ok();
-        let mut frame = FriendQ::new(FriendQAction::Inquire, &me_peer, &me, &peer_id);
-        if let Some(p) = profile {
-            frame = frame.with_profile(p);
-        }
-        let frame = frame.encode().unwrap_or_default();
-
-        // Fan the request out to EVERY approved device the target user holds,
-        // mirroring the DM path (`dm_devices_of_username` + per-delivery
-        // delivery loop). A multi-device user — bob on a laptop and a phone —
-        // must see the request on both, so whichever client they next open
-        // is where they accept. One device's failure must NOT block the
-        // others; we succeed if at least one device acks.
-        let username_key = if !username.is_empty() {
-            username.clone()
-        } else {
+        // Server-mediated: POST to `/v1/friend-requests{requester: me,
+        // recipient: <peer>} ` and let the server fan the `fr_inquire` Notice
+        // out to the recipient's online devices. We no longer need to dial the
+        // peer over P2P — the server does the work and the recipient's other
+        // devices pick it up on their next long-poll tick. Offline? The
+        // request persists in the server's table and shows up in their inbox
+        // when they come back.
+        let sender_name = if username.is_empty() {
             client.resolve_peer_username(&peer_id)
+        } else {
+            username
         };
-        let targets: Vec<String> = {
-            let ds = client.dm_devices_of_username(&username_key);
-            if ds.is_empty() {
-                vec![peer_id.clone()]
-            } else {
-                ds
-            }
+        let err = match client.send_friend_request(&sender_name) {
+            Ok(()) => None,
+            Err(e) => Some(e.to_string()),
         };
-        let mut any_ok = false;
-        let mut first_err = String::new();
-        for dev in &targets {
-            tracing::debug!("[friendq] trying peer={dev} (targets={})", targets.len());
-            match client.send_friendq(dev, &frame).await {
-                Ok(()) => {
-                    any_ok = true;
-                    tracing::info!("[friendq] inquired -> {dev}");
-                }
-                Err(e) => {
-                    tracing::warn!("[friendq] to {dev} failed: {e} — continuing to next device");
-                    if first_err.is_empty() {
-                        first_err = e.to_string();
-                    }
-                }
-            }
-        }
-        if !any_ok {
-            let msg = if targets.len() > 1 {
-                format!(
-                    "Send failed on {} of {} device(s): {}",
-                    targets.len(),
-                    targets.len(),
-                    first_err
-                )
-            } else {
-                format!("Send failed: {first_err}")
-            };
+        if let Some(err) = err {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<AppState>()
-                        .set_add_status(SharedString::from(msg));
+                        .set_add_status(SharedString::from(format!("Failed to send: {err}")));
                 }
             });
             return;
         }
-        // Persist now that delivery to at least one device succeeded; the note
-        // carries the username for later rendering even if it is never
-        // resolved locally.
-        let _ = sqlite::social::frq_upsert(&pool, &me_peer, &peer_id, Some(&username)).await;
+
+        // Locally persist (peer-keyed row) the sent request so the inbox /
+        // "sent" view is correct on this device; other devices get the row
+        // via the `fr_inquire` Notice they receive.
+        let _ = sqlite::social::frq_upsert(&pool, &me_peer, &peer_id, Some(&sender_name)).await;
         {
             let mut g = backend.write().await;
-            g.add_friend_request(
-                &peer_id,
-                username.clone(),
-                sqlite::now_ms(),
-                data::FrqDir::Sent,
-            );
+            if !g.friend_requests
+                .iter()
+                .any(|r| r.peer_id == peer_id && r.dir == data::FrqDir::Sent)
+            {
+                g.add_friend_request(
+                    &peer_id,
+                    sender_name.clone(),
+                    sqlite::now_ms(),
+                    data::FrqDir::Sent,
+                );
+            }
         }
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
@@ -7512,8 +7490,8 @@ fn accept_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
         return;
     };
 
-    let (dir, other_peer) = match backend.blocking_read().frq_for(key) {
-        Some((dir, peer)) => (dir, peer.to_string()),
+    let (dir, other_peer, other_name) = match backend.blocking_read().frq_for_name(key) {
+        Some((dir, peer, name)) => (dir, peer.to_string(), name.to_string()),
         None => return,
     };
     if dir != data::FrqDir::Inbox {
@@ -7521,65 +7499,42 @@ fn accept_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
     }
 
     let me = current_me();
-    let me_peer = {
-        let c = CLIENT.lock().unwrap().clone();
-        match c {
-            Some(c) => c.peer_base58(),
-            None => return,
-        }
+    let client = match CLIENT.lock().unwrap().clone() {
+        Some(c) => c,
+        None => return,
     };
+    let me_peer = client.peer_base58();
 
-    // Send the accept back to the requester (best-effort; they may be offline).
-    // Include our own profile so the peer's contact list can render us with
-    // avatar / bio / research / public key as soon as they accept.
-    if let Some(client) = CLIENT.lock().unwrap().clone() {
-        let me_peer2 = me_peer.clone();
-        let me2 = me.clone();
-        let other_peer2 = other_peer.clone();
-        let rt = runtime();
-        rt.spawn(async move {
-            let mut frame = FriendQ::new(FriendQAction::Accept, &me_peer2, &me2, &other_peer2);
-            if let Ok(p) = my_profile_snapshot(&client).await {
-                frame = frame.with_profile(p);
-            }
-            if let Some(encoded) = frame.encode() {
-                let _ = client.send_friendq(&other_peer2, &encoded).await;
-            }
-        });
+    // 1. Tell the signaling server to accept (fan-out to the requester's
+    //    devices — they receive a `ChatEvent::FriendAction` on their next
+    //    long-poll and add us to their contacts locally).
+    if let Err(e) = client.decide_friend_request(&other_name, true) {
+        tracing::warn!("[friendq] decide(accept) for {other_name} failed: {e}");
     }
 
     let rt = runtime();
     rt.spawn(async move {
-        // 1. Persist the acceptance in the local DB.
-        let _ = sqlite::social::frq_set_status(
+        // 2. Persist the acceptance in the local DB (peer-keyed row).
+        let _ = sqlite::social::frq_set_status_for_me(
             &pool,
-            &other_peer,
             &me_peer,
+            &other_name,
             sqlite::social::FRQ_ACCEPTED,
         )
         .await;
 
-        // 2. Resolve a friendly name and create the contact entry (idempotent).
-        //    The peer's profile was already persisted from their Inquire frame;
-        //    here we only link them into our contacts.
-        let display = {
-            let b = backend.read().await;
-            b.friend_requests
-                .iter()
-                .find(|r| r.id == key)
-                .map(|r| r.name.clone())
-                .unwrap_or_else(|| other_peer.clone())
-        };
-        let name = if display == other_peer {
-            data::name_for_peer(&pool, &other_peer).await
-        } else {
-            display
-        };
+        // 3. Resolve a friendly name (username is what the server gave us
+        //    for `actor_user`, but the local row's `note` is what the
+        //    requester's device set originally — prefer the local row).
+        let name = sqlite::social::frq_note_for_me(&pool, &me_peer, &other_name)
+            .await
+            .unwrap_or_else(|_| other_name.clone());
+
         if let Err(e) = do_add(&pool, &me, &other_peer, &name, &backend, None).await {
             tracing::warn!("[friendq] accept failed: {e}");
         }
 
-        // 3. Refresh UI.
+        // 4. Refresh UI.
         {
             let mut g = backend.write().await;
             g.remove_friend_request(key);
@@ -7601,38 +7556,32 @@ fn reject_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
         return;
     };
 
-    let (dir, other_peer) = match backend.blocking_read().frq_for(key) {
-        Some((dir, peer)) => (dir, peer.to_string()),
+    let (dir, other_name) = match backend.blocking_read().frq_for_name(key) {
+        Some((dir, _peer, name)) => (dir, name.to_string()),
         None => return,
     };
     if dir != data::FrqDir::Inbox {
         return;
     }
 
-    let me_peer = match CLIENT.lock().unwrap().clone() {
-        Some(c) => c.peer_base58(),
+    let client = match CLIENT.lock().unwrap().clone() {
+        Some(c) => c,
         None => return,
     };
-    let me_name = current_me();
 
-    if let Some(client) = CLIENT.lock().unwrap().clone() {
-        if let Some(frame) =
-            FriendQ::new(FriendQAction::Reject, &me_peer, &me_name, &other_peer).encode()
-        {
-            let peer = other_peer.clone();
-            let rt = runtime();
-            rt.spawn(async move {
-                let _ = client.send_friendq(&peer, &frame).await;
-            });
-        }
+    // 1. Tell the signaling server to reject (fan-out to the requester's
+    //    devices — they receive a `ChatEvent::FriendAction`).
+    if let Err(e) = client.decide_friend_request(&other_name, false) {
+        tracing::warn!("[friendq] decide(reject) for {other_name} failed: {e}");
     }
 
+    let me_peer = client.peer_base58();
     let rt = runtime();
     rt.spawn(async move {
-        let _ = sqlite::social::frq_set_status(
+        let _ = sqlite::social::frq_set_status_for_me(
             &pool,
-            &other_peer,
             &me_peer,
+            &other_name,
             sqlite::social::FRQ_REJECTED,
         )
         .await;
@@ -7647,6 +7596,148 @@ fn reject_friend_request(weak: slint::Weak<MainWindow>, key: i32) {
             }
         });
     });
+}
+
+/// Handle an inbound server-mediated friend action (delivered through the
+/// long-poll `Notice` channel and surfaced as
+/// [`chatx_core::swarm::ChatEvent::FriendAction`]) . Three cases:
+///
+/// * `fr_inquire`: the counterparty (`actor_user`) wants to add me. Insert a
+///   local `fr_requests` row with `recipient=me_peer, requester=???,
+///   note=actor_user` and surface it in the inbox. We don't have the
+///   counterparty's *peer id* here, so we use their username as the row key
+///   — `data::name_for_peer` already tolerates username-shaped input.
+///
+/// * `fr_accept`: the counterparty accepted my pending request. Flip my
+///   local row to `accepted` and create the contact.
+///
+/// * `fr_reject`: the counterparty declined my request. Flip my local row to
+///   `rejected`.
+async fn handle_friend_action(
+    weak: slint::Weak<MainWindow>,
+    kind: &str,
+    payload: serde_json::Value,
+) {
+    use serde_json::Value;
+    // Pull the counterparty's username out of the payload (the server always
+    // sets `actor_user` for `fr_inquire` / `fr_accept` / `fr_reject`).
+    let actor_user = payload
+        .get("actor_user")
+        .and_then(Value::as_str)
+        .map(String::from);
+    tracing::debug!("[friend-action] kind={kind} actor_user={:?}", actor_user);
+    if actor_user.as_deref().map(str::is_empty).unwrap_or(true) {
+        tracing::debug!("[friend-action] no actor_user — ignoring");
+        return;
+    }
+    let actor_user = actor_user.unwrap();
+
+    let pool = POOL.lock().unwrap().clone();
+    let backend = BACKEND.lock().unwrap().clone();
+    let (Some(pool), Some(backend)) = (pool.clone(), backend.clone()) else {
+        return;
+    };
+    let client = match CLIENT.lock().unwrap().clone() {
+        Some(c) => c,
+        None => return,
+    };
+    let me_peer = client.peer_base58();
+    let me = client.current_username();
+
+    match kind {
+        "fr_inquire" => {
+            // Persist our inbox: (requester = me-side placeholder, recipient
+            // = me_peer, note = actor_user). `sqlite::social` keys by
+            // username, but we keep the row keyed by *peer id* for UI
+            // consistency — for inbound inquiries the *peer id* is not
+            // knowable (the counterparty is a different device from the one
+            // that sent the frame, and we don't have it in this payload);
+            // we use the actor's username as a stable identifier.
+            let _ = sqlite::social::frq_upsert(
+                &pool,
+                &me_peer,   // requester
+                &actor_user, // recipient  (we display by username)
+                Some(&actor_user),
+            )
+            .await;
+            let mut g = backend.write().await;
+            if !g.friend_requests
+                .iter()
+                .any(|r| r.peer_id == actor_user && r.dir == data::FrqDir::Inbox)
+            {
+                g.add_friend_request(
+                    &actor_user,
+                    actor_user.clone(),
+                    sqlite::now_ms(),
+                    data::FrqDir::Inbox,
+                );
+            }
+            drop(g);
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    let state = ui.global::<AppState>();
+                    publish_to_views(&state, backend.clone());
+                    state.set_notice_text(SharedString::from(format!(
+                        "{actor_user} asked to add you"
+                    )));
+                }
+            });
+        }
+        "fr_accept" => {
+            // The counterparty accepted my request. Flip my local row (the
+            // row I wrote when I called `send_friend_request`) to accepted,
+            // and create the contact.
+            let _ = sqlite::social::frq_set_status_for_me(
+                &pool,
+                &me_peer,
+                &actor_user,
+                sqlite::social::FRQ_ACCEPTED,
+            )
+            .await;
+            let name = sqlite::social::frq_note_for_me(&pool, &me_peer, &actor_user)
+                .await
+                .unwrap_or_else(|_| actor_user.clone());
+            if let Err(e) = do_add(&pool, &me, &actor_user, &name, &backend, None).await {
+                tracing::warn!("[friend-action] accept add failed: {e}");
+            }
+            let mut g = backend.write().await;
+            g.remove_friend_request_if(&actor_user, data::FrqDir::Sent);
+            drop(g);
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    let state = ui.global::<AppState>();
+                    publish_to_views(&state, backend.clone());
+                    state.set_notice_text(SharedString::from(format!(
+                        "{actor_user} accepted your add request"
+                    )));
+                }
+            });
+        }
+        "fr_reject" => {
+            let _ = sqlite::social::frq_set_status_for_me(
+                &pool,
+                &me_peer,
+                &actor_user,
+                sqlite::social::FRQ_REJECTED,
+            )
+            .await;
+            let mut g = backend.write().await;
+            g.remove_friend_request_if(&actor_user, data::FrqDir::Sent);
+            drop(g);
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    let state = ui.global::<AppState>();
+                    publish_to_views(&state, backend.clone());
+                    state.set_notice_text(SharedString::from(format!(
+                        "{actor_user} declined your add request"
+                    )));
+                }
+            });
+        }
+        _ => {
+            tracing::debug!("[friend-action] unknown kind {kind} — ignoring");
+        }
+    }
 }
 
 fn refresh_devices(weak: slint::Weak<MainWindow>) {

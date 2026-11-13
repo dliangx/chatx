@@ -84,14 +84,22 @@ pub struct StunInfo {
 ///     target. The target should now dial this peer (via `warm_dial_peer`)
 ///     as soon as this notice is observed.
 ///   - `at`: when the sender called the server (ms since epoch).
-///
-/// No payload (message/ack) flows through this channel — it is purely a
-/// "ping me over P2P" coordinator.
+///   - `kind`:  event kind. "wake" (default) for hole-punch; "fr_inquire"
+///     (someone wants to add me), "fr_accept" (my add request was accepted),
+///     "fr_reject" (my add request was declined).
+///   - `payload`: kind-specific data. `None` for wake. For friend events, a
+///     JSON value with `actor_user` (username of the counter-party) and —
+///     only on incoming friend-request — `actor_peer` (counter-party's
+///     device peer id), `actor_profile` (optional UserProfile).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Notice {
     pub peer_id: String,
     pub from: String,
     pub at: u64,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
 }
 
 pub const ONLINE_TTL_MS: u64 = 30_000;
@@ -195,6 +203,49 @@ pub trait DirectoryClient: Sync + Send {
     /// Returns `Ok(None)` when the directory has no profile row for the user.
     fn fetch_profile(&self, _user_id: &str) -> anyhow::Result<Option<UserProfile>> {
         Ok(None)
+    }
+
+    // --- server-mediated friend requests ------------------------------------
+    //
+    // The signaling server is the authoritative ledger. A request is
+    // registered once (`fr_send`) and the long-poll `poll_notices` fan-out
+    // (kind `fr_inquire`) alerts the recipient's other devices. Decisions are
+    // pushed back over the same channel with `fr_accept` / `fr_reject`.
+    // The `actor_peer` is the device acting (so the recipient can map the
+    // event onto one of its local peer-keyed `fr_requests` rows);
+    // `actor_user` is the username acting.
+
+    /// Register a pending friend request and fan it out to the recipient's
+    /// devices via the long-poll channel. Best-effort: any HTTP failure is
+    /// surfaced to the caller (they choose to retry / report to the user).
+    fn fr_send(
+        &self,
+        _requester_user: &str,
+        _recipient_user: &str,
+        _actor_peer: &str,
+        _actor_user: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("directory does not support server-mediated friend requests")
+    }
+
+    /// Mark the pending request between `actor` and `other` as `accepted`
+    /// (`true`) or `rejected` (`false`) on the server side and fan the
+    /// decision out to the counterparty's devices.
+    fn fr_decide(
+        &self,
+        _actor_user: &str,
+        _other_user: &str,
+        _accept: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("directory does not support server-mediated friend decisions")
+    }
+
+    /// List the recipient's (username-keyed) pending inbound friend requests
+    /// known to the server. Used to reconcile the inbox after an offline
+    /// period: the local `fr_requests` table is peer-keyed, so this gives the
+    /// missing rows. Returns empty when the server does not support it.
+    fn fr_inbox_users(&self, _recipient_user: &str) -> Vec<(String, String)> {
+        Vec::new()
     }
 
     fn check(&self) -> anyhow::Result<()> {
@@ -899,6 +950,39 @@ impl DirectoryClient for HttpDirectory {
             Err(ureq::Error::Status(code, _)) if code == 404 => Ok(None),
             Err(e) => Err(anyhow::anyhow!("fetch profile failed: {e}")),
         }
+    }
+
+    fn fr_send(
+        &self,
+        requester_user: &str,
+        recipient_user: &str,
+        actor_peer: &str,
+        actor_user: &str,
+    ) -> anyhow::Result<()> {
+        let url = format!("{}/v1/friend-requests", self.base);
+        let body = serde_json::json!({
+            "requester": requester_user,
+            "recipient": recipient_user,
+            "actor_peer": actor_peer,
+            "actor_user": actor_user,
+        })
+        .to_string();
+        http_client().request("POST", &url)
+            .set("content-type", "application/json")
+            .send_string(&body)
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("fr_send failed: {e}"))
+    }
+
+    fn fr_decide(&self, actor_user: &str, other_user: &str, accept: bool) -> anyhow::Result<()> {
+        let action = if accept { "accept" } else { "reject" };
+        let url = format!(
+            "{}/v1/friend-requests/{actor_user}/{other_user}/{action}",
+            self.base
+        );
+        http_client().request("PUT", &url).send_string("null")
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("fr_decide failed: {e}"))
     }
 
     fn upsert_group(&self, g: &crate::group::GroupPublic) {
