@@ -881,7 +881,7 @@ async fn main() {
     );
 
     let relays = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    // Long-poll waits up to 45 s: long enough that the ~15 s client presence
+    // Long-poll waits up to 45 s: long enough that the ~31 s client presence
     // tick comfortably fits, short enough that a server restart or peer churn
     // doesn't strand a connection for a full minute.
     let notifies = Notifies::new(std::time::Duration::from_secs(45));

@@ -1,3 +1,2 @@
 # chatx-core default signal (directory) server.
-# signal_url = "http://139.159.201.87:8080"
-signal_url = "http://192.168.2.2:8080"
+signal_url = "http://139.159.201.87:8080"

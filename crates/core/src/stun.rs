@@ -34,7 +34,7 @@
 //! Design notes:
 //! * Uses `std::net::UdpSocket` with a hard timeout — blocking, callers must
 //!   run on a `spawn_blocking` / presence thread.
-//! * Cache is process-wide for ~120 s so the 15 s heartbeat loop and the
+//! * Cache is process-wide for ~120 s so the 31 s heartbeat loop and the
 //!   startup prewarm share one result.
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -170,7 +170,7 @@ struct Cached {
 }
 
 struct StunCache {
-    /// Cache lifetime: long enough that the 15 s heartbeat loop and the
+    /// Cache lifetime: long enough that the 31 s heartbeat loop and the
     /// startup prewarm share one result, short enough that a WAN failover is
     /// picked up within a couple of heartbeat cycles.
     ttl: Duration,

@@ -1457,7 +1457,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         // advertised endpoint is private and we have no relay circuit, cross-NAT
         // peers cannot reach us. Once we recover (public IP / relay appears) we
         // log info-level so the operator can see the state flip — but we do NOT
-        // spam the same warn line every 15s heartbeat while still behind NAT.
+        // spam the same warn line every 31s heartbeat while still behind NAT.
         let has_public = ep.iter().any(|e| is_routable_public_or_circuit(e));
         static NAT_WARNED: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
@@ -1541,7 +1541,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
     /// Start the presence-heartbeat thread. Idempotent per `Client` instance
     /// (the per-instance latch means re-calling this on the same account is a
-    /// no-op); the thread exits on the next 15 s tick after `stop()` is
+    /// no-op); the thread exits on the next 31 s tick after `stop()` is
     /// called. A different `Client` (a new login) has its own latch and
     /// therefore starts its own thread.
     pub fn start_presence_loop(self: &Arc<Self>) {
@@ -1572,7 +1572,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     Err(e) => tracing::warn!(%e, "STUN prewarm failed"),
                 }
                 // Trigger one immediate heartbeat so the directory learns our
-                // new endpoints without waiting the 15 s tick. Skipped if the
+                // new endpoints without waiting the 31 s tick. Skipped if the
                 // account logged out before prewarm finished.
                 if !prewarm.is_stopped() {
                     prewarm.heartbeat();
@@ -1586,7 +1586,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 let mut tick = 0u32;
                 loop {
                     tick = tick.wrapping_add(1);
-                    std::thread::sleep(std::time::Duration::from_secs(15));
+                    std::thread::sleep(std::time::Duration::from_secs(31));
                     if client.is_stopped() {
                         break;
                     }

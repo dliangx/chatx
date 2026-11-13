@@ -978,10 +978,10 @@ pub fn run_app() {
         // Navigation across units of the deck: slides (PNG) or sheets (grid).
         // Both are keyed by `page` in the Slint side, so one callback serves
         // both view modes.
-        let page_weak = weak.clone();
         ui.global::<DocHost>().on_page_at(move |idx: i32| {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             {
+                let page_weak = weak.clone();
                 if let Some(ui) = page_weak.upgrade() {
                     let dh = ui.global::<DocHost>();
                     if dh.get_mode() == 2 {
@@ -2735,7 +2735,7 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                     // A new NAT-traversable address (UPnP-mapped public IP or a
                     // relay-circuit reservation) is now dialable. Re-announce our
                     // endpoint list to the directory immediately so remote peers
-                    // can reach us without waiting up to 15s for the periodic
+                    // can reach us without waiting up to 31s for the periodic
                     // heartbeat. `heartbeat()` does blocking directory HTTP and
                     // `self`/client is the owning `Arc` here; debounce so the
                     // UPnP + relay confirmations that fire together result in one
