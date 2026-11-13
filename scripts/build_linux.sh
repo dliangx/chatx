@@ -1,40 +1,40 @@
 #!/usr/bin/env bash
 # Chatx — Linux desktop build & packaging.
 #
-# Works two ways:
+# Native to Linux: it builds against the host toolchain + system GUI libraries
+# (slint → wayland/X11 → fontconfig, xkbcommon, gbm, drm, libseat, pipewire,
+# alsa, zbus). There is no macOS/Windows cross path here — cross-compiling a
+# full GUI stack needs a complete per-target Linux sysroot + pkg-config and a
+# dozen shared libs at runtime, which is fragile and not worth maintaining.
 #
-#   1. Native (on Linux, recommended — simplest):
-#        ./scripts/build_linux.sh
-#      Uses the host clang/gcc.
+#   Linux host (native, any arch)      →  ./scripts/build_linux.sh
+#   x86_64 Linux CI building an ARM64  →  CX_ARCH=aarch64 ./scripts/build_linux.sh
+#                                         (host must have the cross gcc + sysroot)
+#   macOS / Windows                    →  build inside a Linux container/VM, e.g.:
+#       docker run --rm -it -v "$PWD":/w -w /w \
+#         rust:1-x86_64 bash -lc "apt-get update && apt-get install -y \
+#         pkg-config libxcb1-dev libx11-dev libxrandr-dev libxkbcommon-dev \
+#         libwayland-dev libpixman-1-dev libfontconfig1-dev libegl-dev \
+#         libgbm-dev libasound2-dev libpipewire-0.3-dev \
+#         && cargo build -p chatx --release && cp target/release/chatx ."
 #
-#   2. Cross from macOS:
-#        brew tap messense/macos-cross-toolchains
-#        brew install x86_64-unknown-linux-gnu          # glibc target (default)
-#        #   or:  brew install x86_64-unknown-linux-musl   # for --musl
-#        CX_ARCH=x86_64 ./scripts/build_linux.sh   # from an arm64 Mac
-#   
-#   3. Cross from Windows (WSL2):
-#        sed -i 's/\r$//' ./scripts/build_linux.sh
-#        ./scripts/build_linux.sh
-#
-# Produces `chatx` + a portable `chatx-<arch>-linux-<mode>.tar.gz` (glibc
-# build by default, musl with `--musl`) in `build/linux/`.
+# Produces `chatx` + a portable `chatx-<arch>-linux-<mode>.tar.gz` (glibc) in
+# `build/linux/`. For a static build, install the matching `*-musl` dev
+# packages and run with `LIBC=musl ./scripts/build_linux.sh`.
 #
 # Usage:
 #   ./scripts/build_linux.sh                 # Release, host-arch target
 #   ./scripts/build_linux.sh --debug         # Debug build
-#   ./scripts/build_linux.sh --musl          # Cross-build with musl libc
-#   ./scripts/build_linux.sh --clean         # Wipe cargo artifacts first
-#   CX_ARCH=x86_64 ./scripts/build_linux.sh  # Force the x86_64 target (e.g. from an arm64 Mac)
+#   ./scripts/build_linux.sh --clean         # Wipe cargo artifacts for target first
+#   CX_ARCH=aarch64 ./scripts/build_linux.sh # Cross arch on a Linux that has the toolchain
 #
-# Set CC / CXX / AR in the environment to force a specific toolchain.
+# Set CC / CXX / AR in the environment to force a specific compiler.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 RELEASE="release"
-MUSL=0
 CLEAN=0
 OUT_DIR="$ROOT/build/linux"
 
@@ -42,7 +42,6 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --release)  RELEASE="release" ;;
     --debug)    RELEASE="" ;;
-    --musl)     MUSL=1 ;;
     --clean)    CLEAN=1 ;;
     -h|--help)  grep '^#' "$0" | sed 's/^# \?//'; exit 0 ;;
     *)          echo "unknown flag: $1" >&2; exit 2 ;;
@@ -51,7 +50,7 @@ while [ $# -gt 0 ]; do
 done
 
 MODE="${RELEASE:-debug}"
-if [ "$MUSL" = "1" ]; then LIBC="musl"; else LIBC="gnu"; fi
+LIBC="${LIBC:-gnu}"   # override with LIBC=musl for a static build (needs musl dev pkgs)
 # Map `uname -m` (arm64/x86_64/aarch64) to a Rust target arch.
 HOST_ARCH="$(uname -m)"
 case "$HOST_ARCH" in
@@ -59,123 +58,85 @@ case "$HOST_ARCH" in
   arm64|aarch64)  RUST_ARCH="aarch64"  ;;
   *)              RUST_ARCH="$HOST_ARCH" ;;
 esac
-# Cross-compile for a different target arch (used when the host-arch toolchain
-# is absent but a cross-compiler for this arch is installed, e.g. an arm64 Mac
-# with the x86_64-linux-gnu toolchain): CX_ARCH=x86_64 ./scripts/build_linux.sh
+# Cross-arch on a Linux host that has the matching cross toolchain + sysroot
+# (e.g. an x86_64 CI producing an aarch64 build for an ARM server).
 if [ -n "${CX_ARCH:-}" ]; then RUST_ARCH="$CX_ARCH"; fi
 TARGET="${RUST_ARCH}-unknown-linux-${LIBC}"
 
 ON_LINUX=false
 [ "$(uname -s)" = "Linux" ] && ON_LINUX=true
 
-# ── CC/CXX/AR selection ─────────────────────────────────────────────────────
-# Priority:
-#   1. CC / CXX / AR already in the environment (explicit user choice)
-#   2. A named cross-compiler on PATH  (e.g. x86_64-linux-gnu-gcc via Homebrew)
-#   3. Fallback to host cc (Linux native)
-#
-# For macOS cross, the recommended install (see header) gives us (2). We never
-# auto-install anything.
+if ! $ON_LINUX; then
+  cat >&2 <<EOF
+✗ build_linux.sh must run on a Linux host (it links against system GUI libs).
 
+You are on $(uname -s). Options:
+  1. Run this script on a Linux machine / VM (preferred).
+  2. Build inside a Linux container with the GUI dev packages installed —
+     see the Docker one-liner in this script's header.
+
+There is no macOS/Windows cross path: a full slint GUI app needs a complete
+per-target sysroot + pkg-config + ~a dozen shared libs, so we only build natively.
+EOF
+  exit 1
+fi
+
+# ── toolchain ───────────────────────────────────────────────────────────────
+# Native / Linux cross-arch: use the host gcc (or a CC in the environment).
 if [ -z "${CC:-}" ]; then
-  CC=""
-  # 1) A real gcc cross-compiler on PATH (Homebrew x86_64-linux-gnu / musl).
-  CROSS_CC_NAMES=(
-    "${RUST_ARCH}-linux-gnu-gcc"
-    "${RUST_ARCH}-linux-musl-gcc"
-    "${RUST_ARCH}-linux-gnu-clang"
-  )
-  for c in "${CROSS_CC_NAMES[@]}"; do
+  # A same-arch or cross gcc on PATH (e.g. aarch64-linux-gnu-gcc) wins, else cc.
+  for c in "${RUST_ARCH}-linux-gnu-gcc" "cc" "gcc"; do
     if command -v "$c" >/dev/null; then CC="$c"; break; fi
   done
-
-  # 2) Native Linux: fall back to the distro's cc.
-  if [ -z "$CC" ] && $ON_LINUX; then CC="$(command -v cc || echo cc)"; fi
-
-  if [ -z "$CC" ] && ! $ON_LINUX; then
-    echo "✗ no Linux C compiler found on this non-Linux host. Install one:" >&2
-    cat >&2 <<'EOF'
-
-    # Preferred (Homebrew, real gcc cross toolchain):
-      brew tap messense/macos-cross-toolchains
-      brew install x86_64-linux-gnu          # glibc
-      # or:  brew install x86_64-linux-musl  # musl (with --musl)
-    Then re-run this script.
-EOF
-    exit 1
-  fi
 fi
+CXX=""
+case "${CC}" in
+  *-gcc) CXX="${CC%-gcc}-g++" ;;
+  gcc|cc) CXX="${CC}++" ;;
+esac
+AR=""
+case "${CC}" in
+  *-gcc) AR="${CC%-gcc}-ar" ;;
+  gcc)  AR="ar" ;;
+  cc)   AR="gcc-ar" ;;
+esac
+[ -n "$CC" ]  && export CC
+[ -n "$CXX" ] && export CXX
+[ -n "$AR" ]  && export AR
 
-# Derive CXX + AR to match whichever CC we picked.
-if [ -z "${CXX:-}" ]; then
-  CXX=""
-  case "$CC" in
-    *-gcc)   CXX="${CC%-gcc}-g++" ;;
-    gcc)     CXX="g++" ;;
-  esac
-fi
-if [ -z "${AR:-}" ]; then
-  AR=""
-  case "$CC" in
-    *-gcc)   AR="${CC%-gcc}-ar" ;;
-    gcc)     AR="ar" ;;
-  esac
-fi
-
-if $ON_LINUX; then
-  # Native: host == target, a bare CC is correct and harmless.
-  [ -n "$CC" ]  && export CC
-  [ -n "$CXX" ] && export CXX
-  [ -n "$AR" ]  && export AR
-else
-  # Cross-build from a non-Linux host.
-  #
-  # IMPORTANT: do NOT export bare CC/CXX/AR. Those are consulted by cc-rs for
-  # *host* build-dependencies (e.g. `ring`'s build step compiles native C for
-  # the Apple/Windows host), and forcing the Linux cross-compiler there produces
-  # bogus Apple/Windows flags.
-  #
-  # cc-rs (see its `get_var`) resolves the compiler for a crate as:
-  #   CC_<target>  →  CC_<target with '-' replaced by '_'>  →  …  →  CC
-  # so the first form below (lowercase, underscored) is exactly what it reads.
-  # Dashes aren't valid in shell var names, so we use the underscore form.
-  CC_TU="$(printf '%s' "$TARGET" | tr '-' '_')"
-  [ -n "$CC" ]  && export "CC_${CC_TU}=$CC"
-  [ -n "$CXX" ] && export "CXX_${CC_TU}=$CXX"
-  [ -n "$AR" ]  && export "AR_${CC_TU}=$AR"
-
-  # rustc, meanwhile, needs the cross-compiler as its *linker* (otherwise it
-  # invokes the host `cc` — AppleClang on macOS — which can't emit a Linux ELF).
-  # Cargo reads the linker from CARGO_TARGET_<UPPERCASED>_LINKER.
+# rustc needs the (cross-)gcc as its linker when building a different arch;
+# for a same-arch native build the default linker already works, but pinning it
+# to the chosen CC is harmless and makes cross-arch on Linux deterministic.
+if [ -n "${CX_ARCH:-}" ]; then
   TU="$(printf '%s' "$TARGET" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
-  LINKER_NAME="$(basename "$CC")"
-  export "CARGO_TARGET_${TU}_LINKER=$LINKER_NAME"
-fi
-
-if ! $ON_LINUX; then
-  # Cross-build from a non-Linux host: a valid Linux C toolchain must be
-  # present, otherwise cc-rs silently falls back to the host compiler and
-  # produces a non-Linux ELF (which will not link against the Rust target).
-  if ! [[ "$CC" == *linux* ]]; then
-    echo "✗ cross-build requested from $(uname -s) but no Linux C toolchain found." >&2
-    echo "  This would silently target $(uname -s) (cc=$(command -v cc)), producing a broken binary for $TARGET." >&2
-    echo "" >&2
-    echo "Install one of:" >&2
-    echo "  brew install messense/macos-cross-toolchains/x86_64-linux-gnu     # x86_64 glibc" >&2
-    echo "  brew install messense/macos-cross-toolchains/x86_64-linux-musl    # x86_64 musl" >&2
-    exit 1
-  fi
+  export "CARGO_TARGET_${TU}_LINKER=$(basename "$CC")"
 fi
 
 echo "──────── chatx Linux build ────────"
-if $ON_LINUX; then HOST_KIND="native-linux"; else HOST_KIND="cross from $(uname -s)"; fi
-echo "  host   : $(uname -s)/$(uname -m) ($HOST_KIND)"
+echo "  host   : $(uname -s)/$(uname -m) (Linux native)"
 echo "  target : $TARGET"
 echo "  mode   : $MODE"
-echo "  cc     : ${CC:-<unset>}  ${CXX:+cxx: $CXX}  ${AR:+ar: $AR}"
+echo "  cc     : ${CC:-unset}${CXX:+   cxx: $CXX}${AR:+   ar: $AR}"
+
+# ── GUI build deps (informational — required to compile) ───────────────────
+# If the host lacks these the build will fail; print a pointer to install them.
+if ! pkg-config --exists fontconfig 2>/dev/null; then
+  cat >&2 <<'EOF'
+
+⚠ fontconfig not found via pkg-config. The desktop build needs the dev packages
+  (Debian/Ubuntu):
+    apt install pkg-config libxcb1-dev libx11-dev libxrandr-dev libxkbcommon-dev \
+                libwayland-dev libpixman-1-dev libfontconfig1-dev libegl-dev \
+                libgbm-dev libasound2-dev libpipewire-0.3-dev
+(Fedora: dnf install pkgconf pcre2-devel xcb-devel libX11-devel libXrandr-devel
+         libxkbcommon-devel wayland-devel pixman-devel fontconfig-devel
+         mesa-libEGL-devel mesa-libgbm-devel alsa-lib-devel pipewire-devel)
+Continuing — the build will surface a hard error if any are missing.
+EOF
+fi
 
 # ── rustup target ───────────────────────────────────────────────────────────
-command -v cargo   >/dev/null || { echo "missing tool: cargo" >&2; exit 1; }
+command -v cargo >/dev/null || { echo "missing tool: cargo" >&2; exit 1; }
 if ! rustup target list --installed 2>/dev/null | grep -qx "$TARGET"; then
   echo "==> rustup target add $TARGET"
   rustup target add "$TARGET"
@@ -245,22 +206,17 @@ echo "  -> $TARBALL (${#ENTRIES[@]} items: ${ENTRIES[*]})"
 
 # ── what the *target* machine needs (glibc build) ──────────────────────────
 echo
-if [ "$MUSL" -eq 0 ]; then
-  cat <<EOF
-  NOTE: glibc build links against shared system libraries. On the target machine:
+cat <<'EOF'
+  NOTE: glibc build links shared system libraries. On the target machine:
     Debian/Ubuntu:
-      apt install libxcb1 libx11-6 libxrandr2 libxkbcommon0 \\
-                  libwayland-client0 libpixman-1-2 libfontconfig1 libegl-dev libgbm-dev
+      apt install libxcb1 libx11-6 libxrandr2 libxkbcommon0 \
+                  libwayland-client0 libpixman-1-2 libfontconfig1 libegl1 libgbm1
     Fedora:
-      dnf install xcb libX11 libXrandr libxkbcommon wayland libpixman-1 fontconfig libegl libgbm
+      dnf install xcb libX11 libXrandr libxkbcommon wayland libpixman-1 fontconfig libEGL libgbm
     Arch:
-      pacman -S libxcb libx11 libxrandr libxkbcommon wayland libpipewire 
-    (pipewire/pulseaudio optional — only needed for audio)  
+      pacman -S libxcb libx11 libxrandr libxkbcommon wayland libpipewire
+    (pipewire/pulseaudio optional — only needed for audio)
 EOF
-else
-  echo "  NOTE: musl build is closer to statically linked; most distros need no extra libs."
-fi
-
 echo
 echo "──────── done ────────"
 ls -lh "$TARBALL"

@@ -34,6 +34,21 @@ Unit tests:
 cargo test -p chatx-signal
 ```
 
+### Linux server package (x86_64)
+
+To build an x86_64 Linux tarball for deployment — from **macOS or Linux** —
+use `scripts/build_signal.sh`. It cross-compiles both binaries and bundles a
+deployment `.env` + systemd units:
+
+```sh
+./scripts/build_signal.sh             # release, glibc  → build/signal/chatx-signal-x86_64linux-gnu-release.tar.gz
+./scripts/build_signal.sh --musl      # musl build (self-contained, no host deps)
+./scripts/build_signal.sh --debug     # faster compile
+
+# macOS needs a Linux cross C toolchain first (glibc default):
+brew tap messense/macos-cross-toolchains && brew install x86_64-linux-gnu
+```
+
 ---
 
 ## 2. Environment variables
