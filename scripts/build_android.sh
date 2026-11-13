@@ -4,7 +4,7 @@
 #   1. cargo build   → target/aarch64-linux-android/<mode>/libchatx.so
 #   2. llvm-strip    → ~71MB stripped copy
 #   3. aapt2 link    → base.apk (manifest only, no res)
-#   4. zipalign -p 4 → 4-byte + 4096-page aligned
+#   4. zipalign -P 16 4 → 4-byte + 16384-page aligned (16K kernels)
 #   5. apksigner     → signed debug APK at apps/platform/android/build/Chatx.apk
 #
 # Requires: .cargo/env-android.sh already sourced, or this script sources it.
@@ -17,6 +17,15 @@ cd "$ROOT"
 
 # ── 1. env ─────────────────────────────────────────────────────────────────
 source "$ROOT/.cargo/env-android.sh"
+
+# 16K-page kernels (recent Google Pixel / sdk_gphone16k images, and most
+# 2025+ Android 15+ devices on arm64) require ELF LOAD segments to be
+# aligned to the kernel's page size (16384). The default NDK linker uses
+# 4096 → dlopen fails at launch with
+#   "program alignment (4096) cannot be smaller than system page size (16384)"
+# So we pin max-page-size for the .so we ship. This only affects the Android
+# target build (scoped by RUSTFLAGS here, not the host dev build).
+export RUSTFLAGS="${RUSTFLAGS:-} -C link-args=-Wl,-z,max-page-size=16384"
 
 MODE="release"
 if [[ "${RELEASE:-1}" == "0" ]]; then MODE="debug"; fi
@@ -43,8 +52,16 @@ echo "──────── chatx Android packaging ($MODE) ─────�
 # Always invoke cargo — it's incremental and a no-op when nothing changed.
 # (The old `[[ -x $SO_SRC ]]` shortcut shipped stale .so's whenever sources
 # were edited after the first successful build.)
-echo "▶ cargo build -p chatx --target $TARGET --$MODE"
-cargo build -p chatx --target "$TARGET" --"$MODE"
+# Note: cargo's `debug` profile is the *default* — there is no `--debug`
+# flag. Release is opt-in via `--release`.
+# (Plain string, not an array — `set -u` + bash 3.2 chokes on empty-array
+# `[\"${arr[@]}\"]` expansion.)
+PROFILE_FLAG=""
+if [[ "$MODE" == "release" ]]; then PROFILE_FLAG="--release"; fi
+echo "▶ cargo build -p chatx --target $TARGET ${PROFILE_FLAG:-<debug>}"
+# Unquoted `$PROFILE_FLAG` intentionally word-splits to zero tokens when empty.
+# shellcheck disable=SC2086
+cargo build -p chatx --target "$TARGET" $PROFILE_FLAG
 
 # ── 3. strip ───────────────────────────────────────────────────────────────
 echo "▶ llvm-strip"
@@ -105,9 +122,13 @@ if [ -x "$ROOT/scripts/build_x.sh" ]; then
   bash "$ROOT/scripts/build_x.sh" >/dev/null 2>&1 || echo "   (build_x.sh failed — X page will be unavailable in APK)"
 fi
 
-# ── 7. zipalign (with 4096-page alignment for native lib mmap) ─────────────
+# ── 7. zipalign (16K page alignment for native lib mmap on 16K kernels) ────
+# `-P 16` aligns uncompressed .so entries to 16384-byte offsets — required by
+# sdk_gphone16k / 16K-page Android 15+ kernels. `-p` (no arg) is 4K only and
+# is ignored by 16K kernels, producing `UnsatisfiedLinkError: program
+# alignment (4096) cannot be smaller than system page size (16384)` at dlopen.
 rm -f "$APK_RAW" "$APK_ALIGNED"
-echo "▶ zipalign -p 4"
+echo "▶ zipalign -P 16 4"
 mkdir -p "$OUT_DIR/lib/arm64-v8a"
 cp "$SO_STRIPPED" "$OUT_DIR/lib/arm64-v8a/libchatx.so"
 
@@ -147,7 +168,7 @@ if [ -d "$OUT_DIR/assets" ]; then
 fi
 cd "$ROOT"
 
-"$ZIPALIGN" -p -v -f 4 "$APK_BASE" "$APK_ALIGNED" | tail -n 3
+"$ZIPALIGN" -P 16 -v -f 4 "$APK_BASE" "$APK_ALIGNED" | tail -n 3
 echo "  aligned: $(ls -lh "$APK_ALIGNED" | awk '{print $5}')"
 
 # ── 8. sign ────────────────────────────────────────────────────────────────

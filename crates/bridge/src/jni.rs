@@ -454,6 +454,13 @@ pub extern "system" fn Java_com_chatx_NativeBridge_filePickDone(
 // X extension open, so parallelism is not a real concern here.
 
 pub(crate) fn read_asset_jni(path: &str) -> Option<Vec<u8>> {
+    let bridge = match BRIDGE_CLASS.get() {
+        Some(c) => c,
+        None => {
+            tracing::warn!("[x-bridge] read_asset: NativeBridge class not yet cached — bailing");
+            return None;
+        }
+    };
     let vm = match VM.get() {
         Some(v) => v,
         None => {
@@ -486,7 +493,7 @@ pub(crate) fn read_asset_jni(path: &str) -> Option<Vec<u8>> {
         }
     };
     match env.call_static_method::<_, _, _>(
-        "com/chatx/NativeBridge",
+        bridge,
         "extractAsset",
         "(Ljava/lang/String;Ljava/lang/String;)V",
         &[(&jsrc).into(), (&jdst).into()],
