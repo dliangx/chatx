@@ -2255,6 +2255,49 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         out
     }
 
+    /// Enumerate **every approved, dial-able device** of `username` from the
+    /// local SQLite `users` + `devices` tables — zero network. Intersection of
+    /// the local `devices` table (rows exist when we saw/bind the device
+    /// locally, e.g. at add-contact) and the in-memory `approved` set
+    /// (peers we've actually completed an E2E handshake with — which itself
+    /// only succeeds if the device's owner has approved it). This is the
+    /// strongest local guarantee of "Approved" without a round-trip.
+    ///
+    /// Returns an empty `Vec` when the username is unknown locally, has no
+    /// device rows, or none have completed an E2E handshake yet — callers
+    /// fall back to the directory in that case (first-ever exchange with a
+    /// fresh contact, or a newly-approved device we haven't connected to
+    /// since).
+    pub async fn local_dm_devices(&self, username: &str) -> Vec<String> {
+        let Some(pool) = self.store.pool() else {
+            return Vec::new();
+        };
+        let me = self.peer_base58();
+        let approved: std::collections::HashSet<String> = {
+            let set = self.running.approved.lock().unwrap();
+            let mut out = std::collections::HashSet::new();
+            for p in set.iter() {
+                out.insert(p.to_base58());
+            }
+            out
+        };
+        let local = match sqlite::devices::peers_by_username(&pool, username).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!("[dm] local devices query failed for {username}: {e}");
+                return Vec::new();
+            }
+        };
+        local
+            .into_iter()
+            .filter(|p| {
+                !p.trim().is_empty()
+                    && *p != me
+                    && approved.contains(p.as_str())
+            })
+            .collect()
+    }
+
     /// Stage a text DM for delivery to **every approved device** of the
     /// target user, and return the (chat_id, msg_id) pair so the caller can
     /// immediately drive the live-delivery phase.
@@ -2272,8 +2315,12 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         peer_base58: &str,
         text: &str,
     ) -> anyhow::Result<(String, i64)> {
+        // Legacy path: two directory HTTP round-trips
+        // (`GET /v1/devices/{peer}` + `GET /v1/users/{username}/devices`).
+        // `queue_dm_text_ex` is the HTTP-free variant for callers that
+        // already know the username + device list (the chat app's hot path
+        // always does — it reads them from the local `contacts` table).
         let username = self.resolve_peer_username(peer_base58);
-        let chat = store::dm_chat_id(&username);
         let devices = {
             let ds = self.dm_devices_of_username(&username);
             if ds.is_empty() {
@@ -2282,15 +2329,63 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 ds
             }
         };
+        self.queue_dm_text_ex(&username, &devices, text).await
+    }
+
+    /// Fast-path variant of [`Self::queue_dm_text`] for callers that already
+    /// know the target user's **username** and the **device fan-out list**.
+    ///
+    /// Used by the chat app's send path (`send_chat_message`), which builds
+    /// `username` from the `dm:<username>` conversation key and `devices`
+    /// from the local `chats` / `contacts` tables — neither value requires
+    /// a directory round-trip, so this saves **two HTTP requests per DM
+    /// send** versus [`Self::queue_dm_text`].
+    ///
+    /// Semantics are otherwise identical: one local `messages` row in state
+    /// `SENDING` (msg id returned), plus one `dm_send_queue` row per device
+    /// for redelivery. Returns `(chat_id, msg_id)`.
+    ///
+    /// Caller invariants (enforced in this fn, not just by convention):
+    ///   - `username` must be non-empty; the `dm:` chat id is derived directly
+    ///     from it (`store::dm_chat_id`).
+    ///   - `devices` must be non-empty and must not contain the sender's own
+    ///     base58 (delivered to self would loop the message); this fn guards
+    ///     both.
+    pub async fn queue_dm_text_ex(
+        &self,
+        username: &str,
+        devices: &[String],
+        text: &str,
+    ) -> anyhow::Result<(String, i64)> {
+        let username = username.trim();
+        if username.is_empty() {
+            anyhow::bail!("queue_dm_text_ex: empty username");
+        }
+        let me = self.peer_base58();
+        let mut dev_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for d in devices {
+            let d = d.trim();
+            if d.is_empty() || *d == me {
+                continue;
+            }
+            dev_set.insert(d.to_string());
+        }
+        if dev_set.is_empty() {
+            anyhow::bail!(
+                "queue_dm_text_ex: no valid device for username={username} \
+                 (devices passed in were empty, blank, or all self)"
+            );
+        }
+        let chat = store::dm_chat_id(username);
         let msg_id = self.store.insert_mine_sending(&chat, text).await?;
         if let Some(pool) = self.store.pool() {
-            for dev in &devices {
+            for dev in &dev_set {
                 let _ = sqlite::queue::enqueue(&pool, msg_id, dev, &chat).await;
             }
         }
         tracing::debug!(
-            "[dm] queued peer={peer_base58} username={username} devices={} msg_id={msg_id} chat={chat}",
-            devices.len()
+            "[dm] queued(username) username={username} devices={} msg_id={msg_id} chat={chat}",
+            dev_set.len()
         );
         Ok((chat, msg_id))
     }
@@ -2539,33 +2634,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         text: &str,
         client_id: u64,
     ) -> Result<(), String> {
-        let rec = self
-            .dir
-            .resolve_device(peer_base58)
-            .map_err(|e| format!("device {peer_base58} not found in directory: {e}"))?;
-        if rec.endpoints.is_empty() {
-            return Err(format!("device {peer_base58} is offline (no endpoints)"));
-        }
         let peer: PeerId = peer_base58.parse().map_err(|e| format!("bad peer: {e}"))?;
-
-        let mut candidates: Vec<Multiaddr> = Vec::new();
-        for endpoint in &rec.endpoints {
-            let Ok(addr) = endpoint.parse::<Multiaddr>() else {
-                tracing::debug!("[dm] skip unparseable endpoint: {endpoint}");
-                continue;
-            };
-            if let Some(reason) = unroutable_reason(&addr) {
-                tracing::debug!("[dm] skip unroutable endpoint ({reason}): {addr}");
-                continue;
-            }
-            candidates.push(addr);
-        }
-        if candidates.is_empty() {
-            return Err(
-                "device {peer_base58} has no dialable endpoint (only loopback/tcp0 addrs are registered — restart the peer with a LAN-reachable address)"
-                    .to_string(),
-            );
-        }
 
         let from = self.peer_base58();
         let e2e = self.e2e_public().to_string();
@@ -2574,13 +2643,69 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
         let mut last_err: String;
 
+        // Step 1 — resolve candidate endpoints. Prefer the local
+        // `known_addrs` cache (written on `ConnectionEstablished` and
+        // `NewExternalAddrOfPeer` events — see `swarm.rs`) to skip the
+        // `GET /v1/devices/{peer}` HTTP round-trip. On a miss / TTL expiry,
+        // fall back to the directory; this path also covers first-contact
+        // peers and the case where the peer's NAT mapping has rotated.
+        let cached: Vec<Multiaddr> = {
+            let m = self.running.known_addrs.lock().unwrap();
+            let now = crate::message::now_ms();
+            let a = m.get(&peer);
+            if let Some(v) = a {
+                if now.saturating_sub(v.at_ms) < sw::ADDR_CACHE_TTL_MS {
+                    let addr = v.addr.clone();
+                    if unroutable_reason(&addr).is_none() {
+                        vec![addr]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        };
+        let cached_count = cached.len();
+        let candidates: Vec<Multiaddr> = if !cached.is_empty() {
+            cached
+        } else {
+            let rec = self
+                .dir
+                .resolve_device(peer_base58)
+                .map_err(|e| format!("device {peer_base58} not found in directory: {e}"))?;
+            if rec.endpoints.is_empty() {
+                return Err(format!(
+                    "device {peer_base58} is offline (no endpoints; no cached address either)"
+                ));
+            }
+            let mut out = Vec::new();
+            for endpoint in &rec.endpoints {
+                let Ok(addr) = endpoint.parse::<Multiaddr>() else {
+                    tracing::debug!("[dm] skip unparseable endpoint: {endpoint}");
+                    continue;
+                };
+                if let Some(reason) = unroutable_reason(&addr) {
+                    tracing::debug!("[dm] skip unroutable endpoint ({reason}): {addr}");
+                    continue;
+                }
+                out.push(addr);
+            }
+            out
+        };
+        if candidates.is_empty() {
+            return Err(
+                "device {peer_base58} has no dialable endpoint (only loopback/tcp0 addrs are registered — restart the peer with a LAN-reachable address)"
+                    .to_string(),
+            );
+        }
+
         // Round 1: fan out every candidate address in parallel (`Cmd::Dial` →
         // `swarm.add_peer_address` × N + one `swarm.dial(peer)`), wait up to
         // `dial_wait` for any one to come up, then issue a single
-        // `Cmd::SendText` and wait once for the ack. Worst case is one
-        // (dial + send) window (~14 s) regardless of how many candidate
-        // endpoints the directory knows — contrast with the old per-address
-        // Connect+SendText loop, which blocked for N×(dial+send) windows.
+        // `Cmd::SendText` and wait once for the ack.
         if self
             .dial_and_wait(&peer, candidates.clone(), dial_wait)
             .await
@@ -2592,6 +2717,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 Ok(()) => {
                     tracing::info!(
                         n = candidates.len(),
+                        cached = cached_count,
                         "[dm] send delivered (parallel fan-out)"
                     );
                     return Ok(());
@@ -2602,16 +2728,21 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
         } else {
             last_err = format!(
-                "no candidate dial connected to {peer_base58} within {} s ({} candidates)",
+                "no candidate dial connected to {peer_base58} within {} s ({} candidates, {} cached)",
                 dial_wait.as_secs(),
-                candidates.len()
+                candidates.len(),
+                cached_count
             );
         }
-        tracing::info!(last_err);
+        tracing::info!(last_err, "[dm] round 1 missed; trying wake+retry");
         // Round 2: hole-punch. Ask the directory to poke the peer, wait a
         // short window for it to be woken and dial us back, then re-resolve
         // the candidates and fan out again. Without this the message is lost
         // because libp2p request-response doesn't buffer in-flight messages.
+        //
+        // The wake/retry path must always re-resolve from the directory —
+        // the cache holds a *pre-wake* view of the peer's endpoints, which
+        // is exactly the stale state we are trying to escape.
         if self.wake_peer(peer_base58) {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             if let Ok(rec2) = self.dir.resolve_device(peer_base58) {
@@ -2705,69 +2836,87 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             "[voice] send_voice peer={peer_base58} bytes={} rate={rate} ch={ch} dur={duration_ms}ms",
             data.len()
         );
-        let rec = self
-            .dir
-            .resolve_device(peer_base58)
-            .map_err(|e| anyhow::anyhow!("device {peer_base58} not found: {e}"))?;
-        if rec.endpoints.is_empty() {
-            anyhow::bail!("device {peer_base58} is offline (no endpoints)");
-        }
         let peer: PeerId = peer_base58
             .parse()
             .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
+        // Cache-first: prefer the locally-known multiaddr (populated by a
+        // prior `ConnectionEstablished` / `NewExternalAddrOfPeer`) so a warm
+        // connection sends with zero directory HTTP. Only on a miss (or TTL
+        // expiry) do we fall back to `resolve_device`, matching the text path.
+        let endpoints: Vec<String> = {
+            let m = self.running.known_addrs.lock().unwrap();
+            let now = crate::message::now_ms();
+            if let Some(v) = m.get(&peer) {
+                if now.saturating_sub(v.at_ms) < sw::ADDR_CACHE_TTL_MS {
+                    if unroutable_reason(&v.addr).is_none() {
+                        vec![v.addr.to_string()]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        };
+        let rec_owned;
+        let endpoints = if endpoints.is_empty() {
+            rec_owned = self
+                .dir
+                .resolve_device(peer_base58)
+                .map_err(|e| anyhow::anyhow!("device {peer_base58} not found: {e}"))?;
+            rec_owned.endpoints.clone()
+        } else {
+            endpoints
+        };
+        if endpoints.is_empty() {
+            anyhow::bail!("device {peer_base58} is offline (no endpoints)");
+        }
         let from = self.peer_base58();
         let e2e = self.e2e_public().to_string();
         let timeout = std::time::Duration::from_secs(8);
-        let mut last_err = String::new();
-        for endpoint in &rec.endpoints {
-            let Ok(addr) = endpoint.parse::<Multiaddr>() else {
-                continue;
-            };
-            if let Some(reason) = unroutable_reason(&addr) {
-                last_err = format!("{addr} unroutable ({reason})");
-                continue;
-            }
-            if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
-                peer: peer.clone(),
-                addr: addr.clone(),
-            }) {
-                last_err = format!("cmd channel closed: {e}");
-                continue;
-            }
-            let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
-            if let Err(e) = self.running.cmd_tx.send(Cmd::SendVoice {
-                peer: peer.clone(),
-                from: from.clone(),
-                e2e: e2e.clone(),
-                rate,
-                ch,
-                duration_ms,
-                data: data.clone(),
-                ack_tx: Some(tx),
-            }) {
-                last_err = format!("cmd channel closed: {e}");
-                continue;
-            }
-            match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(Ok(()))) => {
-                    tracing::info!(
-                        path = classify_transport(&addr),
-                        "[voice] delivered via {addr}"
-                    );
-                    return Ok(());
-                }
-                Ok(Ok(Err(e))) => {
-                    last_err = format!("send to {addr} failed: {e}");
-                }
-                Ok(Err(_)) => {
-                    last_err = "peer connection dropped before ack".to_string();
-                }
-                Err(_) => {
-                    last_err = format!("no ack from {addr} within {timeout:?}");
-                }
-            }
+        let candidates: Vec<Multiaddr> = endpoints
+            .iter()
+            .filter_map(|s| s.parse::<Multiaddr>().ok())
+            .filter(|a| unroutable_reason(a).is_none())
+            .collect();
+        if candidates.is_empty() {
+            anyhow::bail!("device {peer_base58} has no dialable endpoint (all unroutable)");
         }
-        anyhow::bail!("failed to deliver to {peer_base58}: {last_err}");
+        // `dial_and_wait` already short-circuits when the peer is connected
+        // (`peer_connected && addrs empty → true`), so a warm link sends with
+        // no extra dial. On a miss it fans out all candidates in parallel
+        // (one `Cmd::Dial`), waits up to `DIAL_BACKOFF_DUR`, then we issue
+        // the payload once. Same shape as text's `try_send_dm_once`.
+        if !self.dial_and_wait(&peer, candidates.clone(), sw::DIAL_BACKOFF_DUR).await {
+            anyhow::bail!(
+                "failed to deliver to {peer_base58} (no candidate dial connected within {} s, {} candidates)",
+                sw::DIAL_BACKOFF_DUR.as_secs(),
+                candidates.len()
+            );
+        }
+        let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+        self.running.cmd_tx.send(Cmd::SendVoice {
+            peer: peer.clone(),
+            from: from.clone(),
+            e2e: e2e.clone(),
+            rate,
+            ch,
+            duration_ms,
+            data: data.clone(),
+            ack_tx: Some(tx),
+        })
+        .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(()))) => {
+                tracing::info!("[voice] delivered");
+                Ok(())
+            }
+            Ok(Ok(Err(e))) => Err(anyhow::anyhow!("send to {peer_base58} failed: {e}")),
+            Ok(Err(_)) => Err(anyhow::anyhow!("peer connection dropped before ack")),
+            Err(_) => Err(anyhow::anyhow!("no ack from {peer_base58} within {timeout:?}")),
+        }
     }
 
     /// Record a voice message in the chat store (after the clip is on disk).
@@ -2836,64 +2985,76 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
     pub async fn send_image_cmd(&self, peer_base58: &str, data: Vec<u8>) -> anyhow::Result<()> {
         tracing::debug!("[image] send_image peer={peer_base58} bytes={}", data.len());
-        let rec = self
-            .dir
-            .resolve_device(peer_base58)
-            .map_err(|e| anyhow::anyhow!("device {peer_base58} not found: {e}"))?;
-        if rec.endpoints.is_empty() {
-            anyhow::bail!("device {peer_base58} is offline (no endpoints)");
-        }
         let peer: PeerId = peer_base58
             .parse()
             .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
+        let endpoints: Vec<String> = {
+            let m = self.running.known_addrs.lock().unwrap();
+            let now = crate::message::now_ms();
+            if let Some(v) = m.get(&peer) {
+                if now.saturating_sub(v.at_ms) < sw::ADDR_CACHE_TTL_MS {
+                    if unroutable_reason(&v.addr).is_none() {
+                        vec![v.addr.to_string()]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        };
+        let rec_owned;
+        let endpoints = if endpoints.is_empty() {
+            rec_owned = self
+                .dir
+                .resolve_device(peer_base58)
+                .map_err(|e| anyhow::anyhow!("device {peer_base58} not found: {e}"))?;
+            rec_owned.endpoints.clone()
+        } else {
+            endpoints
+        };
+        if endpoints.is_empty() {
+            anyhow::bail!("device {peer_base58} is offline (no endpoints)");
+        }
         let from = self.peer_base58();
         let timeout = std::time::Duration::from_secs(15);
-        let mut last_err = String::new();
-        for endpoint in &rec.endpoints {
-            let Ok(addr) = endpoint.parse::<Multiaddr>() else {
-                continue;
-            };
-            if let Some(reason) = unroutable_reason(&addr) {
-                last_err = format!("{addr} unroutable ({reason})");
-                continue;
-            }
-            if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
-                peer: peer.clone(),
-                addr: addr.clone(),
-            }) {
-                last_err = format!("cmd channel closed: {e}");
-                continue;
-            }
-            let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
-            if let Err(e) = self.running.cmd_tx.send(Cmd::SendImage {
-                peer: peer.clone(),
-                from: from.clone(),
-                data: data.clone(),
-                ack_tx: Some(tx),
-            }) {
-                last_err = format!("cmd channel closed: {e}");
-                continue;
-            }
-            match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(Ok(()))) => {
-                    tracing::info!(
-                        path = classify_transport(&addr),
-                        "[image] delivered via {addr}"
-                    );
-                    return Ok(());
-                }
-                Ok(Ok(Err(e))) => {
-                    last_err = format!("send to {addr} failed: {e}");
-                }
-                Ok(Err(_)) => {
-                    last_err = "peer connection dropped before ack".to_string();
-                }
-                Err(_) => {
-                    last_err = format!("no ack from {addr} within {timeout:?}");
-                }
-            }
+        let candidates: Vec<Multiaddr> = endpoints
+            .iter()
+            .filter_map(|s| s.parse::<Multiaddr>().ok())
+            .filter(|a| unroutable_reason(a).is_none())
+            .collect();
+        if candidates.is_empty() {
+            anyhow::bail!("device {peer_base58} has no dialable endpoint (all unroutable)");
         }
-        anyhow::bail!("failed to deliver to {peer_base58}: {last_err}");
+        // `dial_and_wait` short-circuits when already connected; otherwise it
+        // fans out all candidates in parallel then a single payload send
+        // follows. Same shape as text's `try_send_dm_once`.
+        if !self.dial_and_wait(&peer, candidates.clone(), sw::DIAL_BACKOFF_DUR).await {
+            anyhow::bail!(
+                "failed to deliver to {peer_base58} (no candidate dial connected within {} s, {} candidates)",
+                sw::DIAL_BACKOFF_DUR.as_secs(),
+                candidates.len()
+            );
+        }
+        let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+        self.running.cmd_tx.send(Cmd::SendImage {
+            peer,
+            from,
+            data,
+            ack_tx: Some(tx),
+        })
+        .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(()))) => {
+                tracing::info!("[image] delivered");
+                Ok(())
+            }
+            Ok(Ok(Err(e))) => Err(anyhow::anyhow!("send to {peer_base58} failed: {e}")),
+            Ok(Err(_)) => Err(anyhow::anyhow!("peer connection dropped before ack")),
+            Err(_) => Err(anyhow::anyhow!("no ack from {peer_base58} within {timeout:?}")),
+        }
     }
 
     /// Acknowledge an inbound photo to `peer_base58` **after** the app has
@@ -2920,65 +3081,77 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         data: Vec<u8>,
     ) -> anyhow::Result<()> {
         tracing::debug!("[file] send_file peer={peer_base58} bytes={}", data.len());
-        let rec = self
-            .dir
-            .resolve_device(peer_base58)
-            .map_err(|e| anyhow::anyhow!("device {peer_base58} not found: {e}"))?;
-        if rec.endpoints.is_empty() {
-            anyhow::bail!("device {peer_base58} is offline (no endpoints)");
-        }
         let peer: PeerId = peer_base58
             .parse()
             .map_err(|e| anyhow::anyhow!("bad peer: {e}"))?;
+        let endpoints: Vec<String> = {
+            let m = self.running.known_addrs.lock().unwrap();
+            let now = crate::message::now_ms();
+            if let Some(v) = m.get(&peer) {
+                if now.saturating_sub(v.at_ms) < sw::ADDR_CACHE_TTL_MS {
+                    if unroutable_reason(&v.addr).is_none() {
+                        vec![v.addr.to_string()]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        };
+        let rec_owned;
+        let endpoints = if endpoints.is_empty() {
+            rec_owned = self
+                .dir
+                .resolve_device(peer_base58)
+                .map_err(|e| anyhow::anyhow!("device {peer_base58} not found: {e}"))?;
+            rec_owned.endpoints.clone()
+        } else {
+            endpoints
+        };
+        if endpoints.is_empty() {
+            anyhow::bail!("device {peer_base58} is offline (no endpoints)");
+        }
         let from = self.peer_base58();
         let timeout = std::time::Duration::from_secs(15);
-        let mut last_err = String::new();
-        for endpoint in &rec.endpoints {
-            let Ok(addr) = endpoint.parse::<Multiaddr>() else {
-                continue;
-            };
-            if let Some(reason) = unroutable_reason(&addr) {
-                last_err = format!("{addr} unroutable ({reason})");
-                continue;
-            }
-            if let Err(e) = self.running.cmd_tx.send(Cmd::Connect {
-                peer: peer.clone(),
-                addr: addr.clone(),
-            }) {
-                last_err = format!("cmd channel closed: {e}");
-                continue;
-            }
-            let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
-            if let Err(e) = self.running.cmd_tx.send(Cmd::SendFile {
-                peer: peer.clone(),
-                from: from.clone(),
-                name: name.clone(),
-                data: data.clone(),
-                ack_tx: Some(tx),
-            }) {
-                last_err = format!("cmd channel closed: {e}");
-                continue;
-            }
-            match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(Ok(()))) => {
-                    tracing::info!(
-                        path = classify_transport(&addr),
-                        "[file] delivered via {addr}"
-                    );
-                    return Ok(());
-                }
-                Ok(Ok(Err(e))) => {
-                    last_err = format!("send to {addr} failed: {e}");
-                }
-                Ok(Err(_)) => {
-                    last_err = "peer connection dropped before ack".to_string();
-                }
-                Err(_) => {
-                    last_err = format!("no ack from {addr} within {timeout:?}");
-                }
-            }
+        let candidates: Vec<Multiaddr> = endpoints
+            .iter()
+            .filter_map(|s| s.parse::<Multiaddr>().ok())
+            .filter(|a| unroutable_reason(a).is_none())
+            .collect();
+        if candidates.is_empty() {
+            anyhow::bail!("device {peer_base58} has no dialable endpoint (all unroutable)");
         }
-        anyhow::bail!("failed to deliver to {peer_base58}: {last_err}");
+        // `dial_and_wait` short-circuits when already connected; otherwise it
+        // fans out all candidates in parallel then a single payload send
+        // follows. Same shape as text's `try_send_dm_once`.
+        if !self.dial_and_wait(&peer, candidates.clone(), sw::DIAL_BACKOFF_DUR).await {
+            anyhow::bail!(
+                "failed to deliver to {peer_base58} (no candidate dial connected within {} s, {} candidates)",
+                sw::DIAL_BACKOFF_DUR.as_secs(),
+                candidates.len()
+            );
+        }
+        let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+        self.running.cmd_tx.send(Cmd::SendFile {
+            peer,
+            from,
+            name,
+            data,
+            ack_tx: Some(tx),
+        })
+        .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(()))) => {
+                tracing::info!("[file] delivered");
+                Ok(())
+            }
+            Ok(Ok(Err(e))) => Err(anyhow::anyhow!("send to {peer_base58} failed: {e}")),
+            Ok(Err(_)) => Err(anyhow::anyhow!("peer connection dropped before ack")),
+            Err(_) => Err(anyhow::anyhow!("no ack from {peer_base58} within {timeout:?}")),
+        }
     }
 
     /// Send a friend-request frame to `peer_base58` over the DM channel and

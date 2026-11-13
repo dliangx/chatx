@@ -29,6 +29,13 @@ pub const MOMENT_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/moment/1
 /// envelope — so the on-wire size equals the clip size.
 pub const VOICE_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/voice/1");
 
+/// TTL for cached peer multiaddrs (see [`KnownAddr`]). Generous relative to
+/// the online-TTL (`ONLINE_TTL_MS` = 30s): a NAT mapping stays alive far
+/// longer than the "is peer online" heuristic. 10 minutes is enough to ride
+/// out a transient network blip and a typical app re-launch cycle, while
+/// still forcing a directory re-resolve for genuinely stale mappings.
+pub const ADDR_CACHE_TTL_MS: u64 = 10 * 60 * 1000;
+
 /// Binary (CBOR) photo-message transport — raw image bytes as a byte-string.
 pub const IMAGE_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/image/1");
 
@@ -425,6 +432,12 @@ pub struct Running {
     /// guard so a flapping peer isn't re-dialed on every connection event.
     pub escalation_last: Arc<Mutex<HashMap<PeerId, u64>>>,
     pub relays: Arc<Mutex<Vec<(PeerId, Multiaddr)>>>,
+    /// Cached peer multiaddrs (keyed by `PeerId`). Written whenever a
+    /// `ConnectionEstablished` or `NewExternalAddrOfPeer` event fires for a
+    /// peer; read synchronously by `try_send_dm_once` to skip the
+    /// `GET /v1/devices/{id}` directory round-trip. Entries expire via
+    /// `ADDR_CACHE_TTL_MS`; lazy-evicted on read (no background reaper).
+    pub known_addrs: Arc<Mutex<HashMap<PeerId, KnownAddr>>>,
     pub injected: mpsc::UnboundedSender<ChatEvent>,
     /// Live direct-transport connections (QUIC/TCP LAN/internet) per peer,
     /// counted from `ConnectionEstablished`/`ConnectionClosed` events — the
@@ -450,6 +463,22 @@ pub struct Running {
     /// progress" (grey + pulsing dot). Added in `Cmd::Connect`, cleared once the
     /// connection is established or the dial errors out.
     pub dialing: Arc<Mutex<std::collections::HashSet<PeerId>>>,
+    /// Confirmed-Approved peers, in the sense of "we have (had) a live P2P
+    /// connection with them whose E2E handshake completed". This is a *sufficient*
+    /// proxy for "directory-Approved": the only way to complete the E2E
+    /// handshake and bring a stream up against a peer is for both sides to have
+    /// mutually approved each other (the receiver-side friend-approval gate
+    /// rejects peers that aren't in their approved set, and the handshake
+    /// would not otherwise complete with a fresh keypair).
+    ///
+    /// Written from `ConnectionEstablished` (add on every event — the set is
+    /// monotone within a process lifetime). The `local_dm_devices` hot path
+    /// uses it as the local filter: `local_devices ∩ Approved ∩ (live or not)`
+    /// gives us a "guaranteed Approved, zero HTTP" fan-out list.
+    ///
+    /// Monotone-by-design (no removal) so a peer that is currently offline is
+    /// still deliverable via the offline redelivery path.
+    pub approved: Arc<Mutex<std::collections::HashSet<PeerId>>>,
 }
 
 /// True if `addr` is a local/loopback endpoint or one of our own advertised
@@ -499,6 +528,58 @@ fn is_endpoint_relayed(endpoint: &libp2p::core::connection::ConnectedPoint) -> b
             send_back_addr,
         } => is_relayed(local_addr) || is_relayed(send_back_addr),
     }
+}
+
+/// Where a known peer address came from. Useful for logs + future policy
+/// (e.g. we may later prefer `Dialed` over `Advertised`, or vice versa).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddrSource {
+    /// We dialed the peer using this address and got a working connection —
+    /// strongest confidence.
+    Dialed,
+    /// The peer advertised this address to us (identify / mDNS / hole-punch
+    /// escalation). Slightly less proven, but often fresher.
+    Advertised,
+}
+
+/// A peer's known-reachable multiaddr (with the trailing `/p2p/<id>`
+/// component stripped, so the value can be handed straight back to
+/// `swarm.dial`). Cached in [`Running::known_addrs`] so subsequent DM
+/// deliveries skip the `GET /v1/devices/{id}` directory round-trip.
+///
+/// See `lib.rs`: `try_send_dm_once` reads this first and only falls through
+/// to an HTTP directory resolve on a miss (or TTL expiry).
+#[derive(Debug, Clone)]
+pub struct KnownAddr {
+    /// Base multiaddr, e.g. `/ip4/1.2.3.4/tcp/4001` or
+    /// `/ip4/1.2.3.4/tcp/4001/quic-v1`. No trailing `/p2p/<peer_id>` —
+    /// `libp2p::swarm::dial` re-appends it for us.
+    pub addr: Multiaddr,
+    /// Wall-clock (ms since epoch) when the address was learned. Compared
+    /// against `ADDR_CACHE_TTL_MS` on read.
+    pub at_ms: u64,
+    pub source: AddrSource,
+}
+
+/// Split `full` at the first `/p2p/<peer>` segment, returning `(base, peer)`.
+/// `base` is everything *before* that segment (a valid, dialable multiaddr);
+/// `peer` is the peer id. When `full` has no `/p2p` component, the original
+/// address is returned as the base and `peer` is `None`.
+///
+/// Splitting at the *first* `/p2p/` (rather than the last) is important for
+/// relay circuit addresses like
+/// `/ip4/relay/tcp/1883/p2p/<relay_peer>/p2p-circuit/p2p/<me>`: the dialable
+/// base is the relay host — `/ip4/relay/tcp/1883` — and the rest is the
+/// circuit reservation path we do not want to retain.
+pub fn strip_p2p_suffix(full: &Multiaddr) -> (Multiaddr, Option<PeerId>) {
+    let mut base = Multiaddr::empty();
+    for p in full.iter() {
+        match p {
+            libp2p::multiaddr::Protocol::P2p(id) => return (base, Some(id)),
+            other => base.push(other),
+        }
+    }
+    (base, None)
 }
 
 pub fn split_relay_addr(full: &Multiaddr) -> Option<(PeerId, Multiaddr)> {
@@ -733,7 +814,9 @@ pub async fn boot(
     let relays = Arc::new(Mutex::new(parse_relay_env()));
     let link_direct: Arc<Mutex<HashMap<PeerId, u32>>> = Arc::new(Mutex::new(HashMap::new()));
     let link_relay: Arc<Mutex<HashMap<PeerId, u32>>> = Arc::new(Mutex::new(HashMap::new()));
+    let known_addrs: Arc<Mutex<HashMap<PeerId, KnownAddr>>> = Arc::new(Mutex::new(HashMap::new()));
     let dialing: Arc<Mutex<std::collections::HashSet<PeerId>>> = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let approved: Arc<Mutex<std::collections::HashSet<PeerId>>> = Arc::new(Mutex::new(std::collections::HashSet::new()));
     // Start UNKNOWN (false) — the heartbeat NAT diagnostic treats `false` as
     // the conservative "can't prove reachability yet" state. Flipped by the
     // first `StatusChanged` event once the relay probe has an answer.
@@ -785,10 +868,12 @@ pub async fn boot(
         dial_fail_log: Arc::clone(&dial_fail_log),
         escalation_last: Arc::clone(&escalation_last),
         relays: Arc::clone(&relays),
+        known_addrs: Arc::clone(&known_addrs),
         injected: injected_tx.clone(),
         link_direct: Arc::clone(&link_direct),
         link_relay: Arc::clone(&link_relay),
         dialing: Arc::clone(&dialing),
+        approved: Arc::clone(&approved),
         nat_public: Arc::clone(&nat_public),
     });
 
@@ -1192,6 +1277,26 @@ async fn swarm_loop(
                     tracing::debug!(
                         "[swarm] CONNECTED to {peer_id} endpoint={endpoint:?}"
                     );
+                    // Cache a dialable base address for this peer, learned
+                    // from this freshly-established connection. Only the
+                    // `Dialer` variant carries an address we can use later to
+                    // reach the peer (a `Listener` variant tells us where the
+                    // peer reached *us*, which is not a dial target for us).
+                    // The trailing `/p2p/<peer_id>` segment is stripped so the
+                    // value can be fed straight back to `swarm.dial`.
+                    if let libp2p::core::connection::ConnectedPoint::Dialer { address, .. } =
+                        &endpoint
+                    {
+                        let (base, _) = strip_p2p_suffix(address);
+                        running.known_addrs.lock().unwrap().insert(
+                            peer_id,
+                            KnownAddr {
+                                addr: base,
+                                at_ms: crate::message::now_ms(),
+                                source: AddrSource::Dialed,
+                            },
+                        );
+                    }
                     // Decrement counters on a best-effort basis; classify via
                     // the live `endpoint` (the only unambiguous source — the
                     // address we *tried* to dial is not the address we
@@ -1213,9 +1318,30 @@ async fn swarm_loop(
                     }
                     running.dial_backoff.lock().unwrap().remove(&peer_id.to_base58());
                     running.dialing.lock().unwrap().remove(&peer_id);
+                    // A completed connection (E2E handshake done) is a strong
+                    // signal the peer is mutually approved — record it so the
+                    // local DM fan-out can rely on local state instead of the
+                    // directory. Monotone: never removed within a process life.
+                    running.approved.lock().unwrap().insert(peer_id);
                     let _ = ev.send(ChatEvent::Connected(peer_id));
                 }
                 SwarmEvent::NewExternalAddrOfPeer { peer_id, address } => {
+                    // Cache the newly-advertised address regardless of
+                    // connection state: even when we are not currently
+                    // connected, this is a fresher reachable endpoint than
+                    // whatever we may have remembered, and `try_send_dm_once`
+                    // will use it to skip a directory round-trip.
+                    if peer_id != running.my_peer_id {
+                        let (base, _) = strip_p2p_suffix(&address);
+                        running.known_addrs.lock().unwrap().insert(
+                            peer_id,
+                            KnownAddr {
+                                addr: base,
+                                at_ms: crate::message::now_ms(),
+                                source: AddrSource::Advertised,
+                            },
+                        );
+                    }
                     // §A escalation: the peer just advertised a *new* address.
                     // If that's a direct (non-relay) address and we're currently
                     // connected to this peer, re-dial so libp2p re-contends and
@@ -1808,6 +1934,63 @@ mod tests {
             parse_relay_strings(&specs).is_empty(),
             "a relay addr without /p2p/ is unusable"
         );
+    }
+
+    /// `strip_p2p_suffix` must split at the FIRST `/p2p/`, not the last —
+    /// otherwise a relay circuit address like
+    /// `/ip4/relay/tcp/1883/p2p/<relay_peer>/p2p-circuit/p2p/<me>` would
+    /// come back as `/ip4/relay/tcp/1883/p2p-circuit` (an unreachable
+    /// dangling circuit segment), and any cached `KnownAddr` we wrote from
+    /// `NewExternalAddrOfPeer` / `ConnectionEstablished` would silently kill
+    /// cross-NAT delivery. This test pins the first-segment behaviour.
+    #[test]
+    fn strip_p2p_splits_at_first_segment() {
+        let relay_peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let me = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let full: Multiaddr = format!(
+            "/ip4/139.159.201.87/tcp/1883/p2p/{relay_peer}/p2p-circuit/p2p/{me}"
+        )
+        .parse()
+        .unwrap();
+        let (base, peer) = strip_p2p_suffix(&full);
+        assert_eq!(peer, Some(relay_peer));
+        assert_eq!(
+            base.to_string(),
+            "/ip4/139.159.201.87/tcp/1883",
+            "base must be the relay host, not carry the circuit path"
+        );
+    }
+
+    /// A plain direct address with no `/p2p/` component passes through
+    /// unchanged, with `peer == None` — the call sites can rely on `Some` to
+    /// mean "this is a peer-bearing endpoint", `None` to mean "direct addr,
+    /// no peer id to extract".
+    #[test]
+    fn strip_p2p_no_p2p_returns_input() {
+        let addr: Multiaddr = "/ip4/1.2.3.4/udp/4001/quic-v1".parse().unwrap();
+        let (base, peer) = strip_p2p_suffix(&addr);
+        assert!(peer.is_none());
+        assert_eq!(base, addr);
+    }
+
+    /// A direct address with a single trailing `/p2p/<peer>` returns the
+    /// base + the peer id, which is the shape we see from `Dialer` arms of
+    /// `ConnectionEstablished` when we dialed a peer directly.
+    #[test]
+    fn strip_p2p_direct_trailing() {
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let full: Multiaddr = format!("/ip4/1.2.3.4/tcp/4001/p2p/{peer}")
+            .parse()
+            .unwrap();
+        let (base, p) = strip_p2p_suffix(&full);
+        assert_eq!(p, Some(peer));
+        assert_eq!(base.to_string(), "/ip4/1.2.3.4/tcp/4001");
     }
 
     /// Regression: the exact shape the built-in relay now advertises via

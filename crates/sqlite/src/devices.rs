@@ -141,6 +141,31 @@ pub async fn list_by_user(pool: &Pool, user_id: i64) -> anyhow::Result<Vec<Devic
     Ok(rows)
 }
 
+/// Every dial-able `peer_id` (base58) registered for the user identified by
+/// `username`, read straight from the local `users` + `devices` tables.
+/// Zero network. Returns an empty `Vec` when the username is unknown locally
+/// or the user has no device rows yet — callers should treat that as "nothing
+/// known locally" and fall back to the directory.
+///
+/// This is the authoritative local source for the DM fan-out list: a user
+/// with two approved devices has two rows here, and both must receive a DM.
+pub async fn peers_by_username(pool: &Pool, username: &str) -> anyhow::Result<Vec<String>> {
+    let out: Vec<String> = sqlx::query_scalar(
+        "SELECT d.peer_id
+           FROM devices d
+           JOIN users u ON u.id = d.user_id
+          WHERE u.username = ?1
+          ORDER BY COALESCE(d.last_seen, -1) DESC, d.device_id ASC",
+    )
+    .bind(username)
+    .fetch_all(pool)
+    .await?;
+    Ok(out
+        .into_iter()
+        .filter(|p| !p.trim().is_empty())
+        .collect())
+}
+
 pub async fn touch_last_seen(pool: &Pool, device_id: i64) -> anyhow::Result<()> {
     let now = now_ms();
     sqlx::query("UPDATE devices SET last_seen = ?2 WHERE device_id = ?1")

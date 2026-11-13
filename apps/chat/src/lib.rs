@@ -3021,24 +3021,36 @@ fn send_chat_voice(
         // Fan out the clip to EVERY approved device of the target user (see
         // `dm_target_devices`). The user may have B+C clients open, and each
         // should see the voice message — do NOT stop at the first success.
-        // The bubble flips to SENT when at least one device acks (we can't
-        // realistically wait for all of the user's devices for a voice
-        // clip); FAILED only when every device is unreachable.
+        // The bubble flips to SENT when at least one device acks; FAILED only
+        // when every device is unreachable.
+        //
+        // Devices are dialed CONCURRENTLY (one spawned task each) so a peer
+        // with N devices doesn't cost N× the single-device latency — the slow
+        // device can't stall the fast one.
         let mut any_ok = false;
+        let mut handles = Vec::new();
         for cand in &my_peers {
             if cand == &me {
                 continue;
             }
-            match c
-                .send_voice_cmd(cand, data.clone(), rate, ch, duration_ms)
-                .await
-            {
-                Ok(()) => {
-                    tracing::debug!("[voice] fanout ok -> {cand}");
+            let c = c.clone();
+            let cand = cand.clone();
+            let data = data.clone();
+            handles.push(tokio::spawn(async move {
+                c.send_voice_cmd(&cand, data, rate, ch, duration_ms).await
+            }));
+        }
+        for h in handles {
+            match h.await {
+                Ok(Ok(())) => {
                     any_ok = true;
                 }
+                Ok(Err(e)) => {
+                    tracing::warn!("[voice] device failed: {e}");
+                    last_err = e.to_string();
+                }
                 Err(e) => {
-                    tracing::warn!("[voice] peer={cand} failed: {e}");
+                    tracing::warn!("[voice] device task join failed: {e}");
                     last_err = e.to_string();
                 }
             }
@@ -3509,17 +3521,29 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
         //    FAILED only when every device is unreachable.
         let wire = bytes;
         let mut any_ok = false;
+        let mut handles = Vec::new();
         for cand in &my_peers {
             if cand == &me {
                 continue;
             }
-            match c.send_image_cmd(cand, wire.clone()).await {
-                Ok(_) => {
+            let c = c.clone();
+            let cand = cand.clone();
+            let wire = wire.clone();
+            handles.push(tokio::spawn(async move {
+                c.send_image_cmd(&cand, wire).await
+            }));
+        }
+        for h in handles {
+            match h.await {
+                Ok(Ok(_)) => {
                     any_ok = true;
-                    tracing::debug!("[chat-image] fanout ok -> {cand}");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("[chat-image] device failed: {e}");
+                    last_err = e.to_string();
                 }
                 Err(e) => {
-                    tracing::warn!("[chat-image] peer={cand} failed: {e}");
+                    tracing::warn!("[chat-image] device task join failed: {e}");
                     last_err = e.to_string();
                 }
             }
@@ -3693,17 +3717,30 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
         // flips to SENT when at least one device acks (after durable persist);
         // FAILED only when every device is unreachable.
         let mut any_ok = false;
+        let mut handles = Vec::new();
         for cand in &my_peers {
             if cand == &me {
                 continue;
             }
-            match c.send_file_cmd(cand, name.clone(), bytes.clone()).await {
-                Ok(_) => {
+            let c = c.clone();
+            let cand = cand.clone();
+            let name = name.clone();
+            let bytes = bytes.clone();
+            handles.push(tokio::spawn(async move {
+                c.send_file_cmd(&cand, name, bytes).await
+            }));
+        }
+        for h in handles {
+            match h.await {
+                Ok(Ok(_)) => {
                     any_ok = true;
-                    tracing::debug!("[chat-file] fanout ok -> {cand}");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("[chat-file] device failed: {e}");
+                    last_err = e.to_string();
                 }
                 Err(e) => {
-                    tracing::warn!("[chat-file] peer={cand} failed: {e}");
+                    tracing::warn!("[chat-file] device task join failed: {e}");
                     last_err = e.to_string();
                 }
             }
@@ -4825,15 +4862,46 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         // queue entry per **device** of the target user, so a friend with
         // B+C clients receives it on both. Refresh the chat so the "发送中"
         // bubble appears IMMEDIATELY, before any network I/O.
+        //
+        // The username is free (embedded in the `dm:<username>` conversation
+        // key). The **full** device fan-out list must come from the directory
+        // (`dm_devices_of_username`) — the local `chats` row only carries one
+        // (`row_peer`), so we cannot enumerate sibling devices locally. But we
+        // fetch it exactly ONCE here and reuse it in Phase 2, saving the
+        // duplicate directory round-trip the original code made.
         let primary: String = me_peers
             .iter()
             .find(|p| **p != my_peer)
             .cloned()
             .unwrap_or_default();
-        let (_chat, msg_id) = match client.queue_dm_text(&primary, &body).await {
+        let username = chat_id
+            .strip_prefix("dm:")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| primary.clone());
+        // Fan-out list from the LOCAL `users` + `devices` tables first (zero
+        // network) — both of a friend's approved devices are mirrored there by
+        // the add-contact / receive paths. Only when local has nothing (e.g.
+        // first-ever message to a fresh contact) do we fall back to the
+        // directory. The locally-known `primary` is always merged in.
+        let mut targets: Vec<String> = client.local_dm_devices(&username).await;
+        if !primary.is_empty() && primary != my_peer && !targets.iter().any(|d| *d == primary) {
+            targets.push(primary.clone());
+        }
+        if targets.is_empty() {
+            // Last resort: directory (1 HTTP). Covers contacts not yet in our
+            // local devices table.
+            targets = client.dm_devices_of_username(&username);
+            if targets.is_empty() && !primary.is_empty() {
+                targets.push(primary.clone());
+            }
+        }
+        let (_chat, msg_id) = match client
+            .queue_dm_text_ex(&username, &targets, &body)
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("[send] queue_dm_text failed: {e}");
+                tracing::warn!("[send] queue_dm_text_ex failed: {e}");
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.global::<ChatSession>().set_send_busy(false);
@@ -4853,20 +4921,11 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
             load_chat_messages(weak2.clone(), key);
         }
 
-        // Phase 2 — attempt live delivery to **every** device of the target
-        // user. `queue_dm_text` already enumerated them (resolved from the
-        // primary peer's username); we deliver to the same set. The message
-        // row flips SENDING→SENT only once the last device acks (or is given
-        // up on), driven in `deliver_dm` / `redeliver_due`.
-        let username = client.resolve_peer_username(&primary);
-        let targets: Vec<String> = {
-            let ds = client.dm_devices_of_username(&username);
-            if ds.is_empty() {
-                vec![primary.clone()]
-            } else {
-                ds
-            }
-        };
+        // Phase 2 — attempt live delivery to **every** device in `targets`
+        // (the same set `queue_dm_text_ex` enqueued). No further directory
+        // lookup. The message row flips SENDING→SENT only once the last
+        // device acks (or is given up on), driven in `deliver_dm` /
+        // `redeliver_due`.
         let mut any_ok = false;
         for dev in &targets {
             tracing::debug!("[send] dm trying peer={dev}");
