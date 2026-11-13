@@ -763,19 +763,23 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .expect("spawn dm-redeliver thread");
     }
 
-    /// One redelivery round: scan `dm_send_queue` for due rows and send
-    /// each. Intentionally idempotent — multiple calls in quick succession
-    /// (e.g. from a Connected-event handler) are harmless because rows are
-    /// processed independently and the peer's ack is the terminal state.
-    /// `peer` = `None` to drain all due rows (polling-task path), or a
-    /// specific base58 peer id to drain only its rows (event fast-path).
+    /// One redelivery round: scan `dm_send_queue` for due rows and, **only**
+    /// when the peer is already connected inbound, flush them over the live
+    /// link. This loop never dials outbound — delivery to an offline peer is
+    /// deferred until that peer connects in (the `Connected` event calls
+    /// `redeliver_due` again, where the fastpath succeeds). Rows to a peer
+    /// that isn't connected are left untouched in SQLite (zero resident
+    /// memory) and stay `SENDING` until delivered.
+    ///
+    /// `peer` = `None` to scan all due rows (polling-task path), or a specific
+    /// base58 peer id to drain only its rows (event fast-path).
     pub async fn redeliver_due(&self, peer: Option<&str>) {
         let Some(pool) = self.store.pool() else {
             return;
         };
         let res = match peer {
-            Some(p) => sqlite::queue::due_for_peer(&pool, p, 16).await,
-            None => sqlite::queue::due(&pool, 16).await,
+            Some(p) => sqlite::queue::due_for_peer(&pool, p, 64).await,
+            None => sqlite::queue::due(&pool, 64).await,
         };
         let rows = match res {
             Ok(rows) => rows,
@@ -812,29 +816,32 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 let _ = sqlite::queue::give_up_pair(&pool, row.msg_id, &row.peer_base58).await;
                 continue;
             }
-            tracing::info!(
-                msg_id = row.msg_id,
-                peer = %row.peer_base58,
-                attempt = row.attempts,
-                "[redeliver] retrying offline DM"
-            );
+
+            // Fastpath only: send if (and only if) the peer is connected
+            // inbound *right now*. No dial, no backoff, no budget. A miss
+            // simply leaves the row in place for the next `Connected` event.
             match self
-                .try_send_dm_once(&row.peer_base58, &text, row.msg_id as u64)
+                .send_dm_fastpath(&row.peer_base58, &text, row.msg_id as u64)
                 .await
             {
                 Ok(()) => {
-                    let _ = sqlite::queue::give_up_pair(&pool, row.msg_id, &row.peer_base58).await;
+                    let _ =
+                        sqlite::queue::give_up_pair(&pool, row.msg_id, &row.peer_base58).await;
                     // Flip the message row to SENT only when every device
-                    // for this message is done (acked or given up on).
-                    let remaining = sqlite::queue::pending_peers_for_msg(&pool, row.msg_id)
-                        .await
-                        .unwrap_or_default();
+                    // for this message is done (acked or dropped).
+                    let remaining =
+                        sqlite::queue::pending_peers_for_msg(&pool, row.msg_id)
+                            .await
+                            .unwrap_or_default();
                     if remaining.is_empty() {
-                        let _ = self.store.set_status(row.msg_id, sqlite::STATUS_SENT).await;
+                        let _ = self
+                            .store
+                            .set_status(row.msg_id, sqlite::STATUS_SENT)
+                            .await;
                         tracing::info!(
                             msg_id = row.msg_id,
                             peer = %row.peer_base58,
-                            "[redeliver] DELIVERED — row → SENT (all devices done)"
+                            "[redeliver] DELIVERED over inbound link — row → SENT"
                         );
                     } else {
                         tracing::info!(
@@ -846,44 +853,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     }
                 }
                 Err(why) => {
-                    let attempts =
-                        match sqlite::queue::bump(&pool, row.msg_id, &row.peer_base58).await {
-                            Ok(a) => a,
-                            Err(e) => {
-                                tracing::warn!("[redeliver] bump failed: {e}");
-                                continue;
-                            }
-                        };
-                    if attempts >= sqlite::queue::MAX_ATTEMPTS {
-                        let _ =
-                            sqlite::queue::give_up_pair(&pool, row.msg_id, &row.peer_base58).await;
-                        // Mark FAILED only when every device for this message
-                        // is exhausted — otherwise leave it SENDING so the
-                        // remaining devices can still land.
-                        let remaining = sqlite::queue::pending_peers_for_msg(&pool, row.msg_id)
-                            .await
-                            .unwrap_or_default();
-                        if remaining.is_empty() {
-                            let _ = self
-                                .store
-                                .set_status(row.msg_id, sqlite::STATUS_FAILED)
-                                .await;
-                        }
-                        tracing::warn!(
-                            msg_id = row.msg_id,
-                            peer = %row.peer_base58,
-                            attempts,
-                            still_pending = remaining.len(),
-                            "[redeliver] giving up on this device (reason: {why})"
-                        );
-                    } else {
-                        tracing::debug!(
-                            msg_id = row.msg_id,
-                            peer = %row.peer_base58,
-                            attempts,
-                            "[redeliver] failed, scheduled next attempt ({why})"
-                        );
-                    }
+                    // Not connected (or ack missed). Leave the row in the
+                    // queue — `Connected` will retry via this same fastpath.
+                    // No dial, no backoff, no FAILED.
+                    tracing::debug!(
+                        msg_id = row.msg_id,
+                        peer = %row.peer_base58,
+                        "[redeliver] peer not inbound-connected, deferring ({why})"
+                    );
                 }
             }
         }
@@ -2662,7 +2639,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let from = self.peer_base58();
         let e2e = self.e2e_public().to_string();
         let send_timeout = std::time::Duration::from_secs(8);
-        let dial_wait = sw::DIAL_BACKOFF_DUR;
+        let dial_wait = sw::DIAL_BACKOFF_DUR; 
 
         let mut last_err: String;
 
@@ -4413,6 +4390,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         // without waiting for the 1.5 s poll tick. Best-effort — the
         // redelivery task remains the backstop if this fails.
         if let sw::ChatEvent::Discovered { peer, .. } = &evt {
+            let b58 = peer.to_base58();
+            self.redeliver_due(Some(b58.as_str())).await;
+        }
+        // A peer just connected inbound: flush any DMs we had queued for it.
+        // `redeliver_due` is now fastpath-only (no dial), so this succeeds
+        // only because a live link exists — exactly the "wait until they
+        // connect in, then send" path.
+        if let sw::ChatEvent::Connected(peer) = &evt {
             let b58 = peer.to_base58();
             self.redeliver_due(Some(b58.as_str())).await;
         }
