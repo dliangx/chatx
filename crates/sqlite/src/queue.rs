@@ -30,29 +30,44 @@ pub struct Row {
     pub attempts: i64,
     pub next_try_ms: i64,
     pub created_at: i64,
+    /// Hard expiry for media rows. `None` = text (indefinite passive-deferral).
+    /// A nullable column maps naturally to `Option<i64>` via `FromRow`.
+    pub deadline_ms: Option<i64>,
 }
+
+/// Hard expiry window (ms) for queued **media** rows (voice / image / file).
+/// After this the redelivery sweep drops them and flips the local `messages`
+/// row to `FAILED`. Text rows use `None` (no deadline — wait for the peer's
+/// inbound link forever while the app runs).
+pub const MEDIA_DEADLINE_MS: i64 = 3 * 24 * 60 * 60 * 1000; // 3 days
 
 pub fn next_delay_ms(attempts: i64) -> i64 {
     let idx = (attempts as usize).min(BACKOFF_SECS.len() - 1);
     BACKOFF_SECS[idx] * 1000
 }
 
-/// Register `msg_id` as awaiting delivery. INSERT OR REPLACE makes
-/// re-enqueue idempotent (redeliver loop racing a fresh `send_dm`).
+/// Register `msg_id` as awaiting delivery. `deadline_ms = None` for text rows
+/// (indefinite passive-deferral); a millisecond epoch for media rows (swept
+/// to `FAILED` after it elapses — see [`MEDIA_DEADLINE_MS`]).
+/// INSERT OR REPLACE makes re-enqueue idempotent (redeliver loop racing a
+/// fresh `send_dm`).
 pub async fn enqueue(
     pool: &Pool,
     msg_id: i64,
     peer_base58: &str,
     chat_id: &str,
+    deadline_ms: Option<i64>,
 ) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT OR REPLACE INTO dm_send_queue (msg_id, peer_base58, chat_id, attempts, next_try_ms, created_at)
-         VALUES (?1, ?2, ?3, 0, ?4, ?4)",
+        "INSERT OR REPLACE INTO dm_send_queue
+         (msg_id, peer_base58, chat_id, attempts, next_try_ms, created_at, deadline_ms)
+         VALUES (?1, ?2, ?3, 0, ?4, ?4, ?5)",
     )
     .bind(msg_id)
     .bind(peer_base58)
     .bind(chat_id)
     .bind(now_ms())
+    .bind(deadline_ms)
     .execute(pool)
     .await?;
     Ok(())
@@ -61,7 +76,7 @@ pub async fn enqueue(
 /// All rows whose retry cooldown has elapsed, oldest first.
 pub async fn due(pool: &Pool, limit: u32) -> anyhow::Result<Vec<Row>> {
     sqlx::query_as::<_, Row>(
-        "SELECT msg_id, peer_base58, chat_id, attempts, next_try_ms, created_at
+        "SELECT msg_id, peer_base58, chat_id, attempts, next_try_ms, created_at, deadline_ms
          FROM dm_send_queue
          WHERE next_try_ms <= ?1
          ORDER BY created_at ASC
@@ -72,6 +87,32 @@ pub async fn due(pool: &Pool, limit: u32) -> anyhow::Result<Vec<Row>> {
     .fetch_all(pool)
     .await
     .map_err(Into::into)
+}
+
+/// Drop all queue rows whose media `deadline_ms` has elapsed and return the
+/// distinct `msg_id`s the caller should flip to status `FAILED`. Text rows
+/// (`deadline_ms IS NULL`) are never swept. Idempotent — the DELETE is the
+/// authoritative action, and any subsequent `try_send_dm_once` for a swept
+/// row finds no local message to replay (the app's `FAILED` badge persists).
+pub async fn sweep_expired(pool: &Pool) -> anyhow::Result<Vec<i64>> {
+    // Find the ids first so we can report them back, then delete. The
+    // two-step is intentional: `DELETE ... RETURNING` is not available in
+    // SQLite < 3.35, and we want a single deterministic return shape.
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT msg_id FROM dm_send_queue WHERE deadline_ms IS NOT NULL AND deadline_ms <= ?1",
+    )
+    .bind(now_ms())
+    .fetch_all(pool)
+    .await?;
+    if !ids.is_empty() {
+        let _ = sqlx::query(
+            "DELETE FROM dm_send_queue WHERE deadline_ms IS NOT NULL AND deadline_ms <= ?1",
+        )
+        .bind(now_ms())
+        .execute(pool)
+        .await?;
+    }
+    Ok(ids)
 }
 
 /// Bump the attempt counter and refresh the retry cooldown for a specific
@@ -154,7 +195,7 @@ pub async fn pending_peers_for_msg(
 /// for immediate redelivery).
 pub async fn due_for_peer(pool: &Pool, peer_base58: &str, limit: u32) -> anyhow::Result<Vec<Row>> {
     sqlx::query_as::<_, Row>(
-        "SELECT msg_id, peer_base58, chat_id, attempts, next_try_ms, created_at
+        "SELECT msg_id, peer_base58, chat_id, attempts, next_try_ms, created_at, deadline_ms
          FROM dm_send_queue
          WHERE peer_base58 = ?1 AND next_try_ms <= ?2
          ORDER BY created_at ASC
@@ -201,7 +242,7 @@ mod tests {
     #[tokio::test]
     async fn enqueue_bump_exhaustion_flow() {
         let p = pool().await;
-        enqueue(&p, 1, "peerA", "chatA").await.unwrap();
+        enqueue(&p, 1, "peerA", "chatA", None).await.unwrap();
 
         let rows = due(&p, 10).await.unwrap();
         assert_eq!(rows.len(), 1);
@@ -226,8 +267,8 @@ mod tests {
     async fn per_device_retry_is_independent() {
         let p = pool().await;
         // One message delivered to two devices: each has its own queue row.
-        enqueue(&p, 1, "B", "dm:alice").await.unwrap();
-        enqueue(&p, 1, "C", "dm:alice").await.unwrap();
+        enqueue(&p, 1, "B", "dm:alice", None).await.unwrap();
+        enqueue(&p, 1, "C", "dm:alice", None).await.unwrap();
         assert_eq!(due(&p, 10).await.unwrap().len(), 2);
 
         // Bumping B must NOT move C's row forward (per-pair independence).
@@ -257,8 +298,8 @@ mod tests {
     #[tokio::test]
     async fn due_for_peer_filters_by_peer() {
         let p = pool().await;
-        enqueue(&p, 10, "peerX", "cX").await.unwrap();
-        enqueue(&p, 11, "peerY", "cY").await.unwrap();
+        enqueue(&p, 10, "peerX", "cX", None).await.unwrap();
+        enqueue(&p, 11, "peerY", "cY", None).await.unwrap();
 
         let only_x = due_for_peer(&p, "peerX", 10).await.unwrap();
         assert_eq!(only_x.len(), 1);
@@ -268,7 +309,7 @@ mod tests {
         assert!(none.is_empty());
 
         // enqueue is idempotent (re-sending the same message doesn't dup)
-        enqueue(&p, 10, "peerX", "cX").await.unwrap();
+        enqueue(&p, 10, "peerX", "cX", None).await.unwrap();
         assert_eq!(due(&p, 100).await.unwrap().len(), 2);
     }
 }

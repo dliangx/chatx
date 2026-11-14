@@ -49,6 +49,91 @@ pub struct Client<D: DirectoryClient + ?Sized> {
     loops: Arc<LoopsCtl>,
 }
 
+/// How long a stale `media_inflight` claim can linger before it is treated as
+/// gone. A live send can legitimately hold the claim for the full send+ack
+/// window (image ack is deferred; worst case ~15 s ack timeout + dial), so 60 s
+/// is comfortably longer than any legitimate hold yet short enough that a task
+/// which panicked mid-send (skipping the `clear`) can't wedge the pair
+/// forever — after 60 s the redelivery loop takes over and re-delivers.
+const MEDIA_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl<D: DirectoryClient + ?Sized> Client<D> {
+    /// True if a live media send currently owns `(msg_id, peer)` and the
+    /// background redelivery loop must defer. A claim older than
+    /// [`MEDIA_CLAIM_TTL`] is treated as a leaked one (crashed task) and
+    /// ignored, so it doesn't block redelivery forever.
+    pub fn media_inflight(&self, msg_id: i64, peer_base58: &str) -> bool {
+        let key = (msg_id, peer_base58.to_string());
+        if let Some(at) = self
+            .running
+            .media_inflight
+            .lock()
+            .unwrap()
+            .get(&key)
+            .copied()
+        {
+            at.elapsed() < MEDIA_CLAIM_TTL
+        } else {
+            false
+        }
+    }
+
+    /// Claim `(msg_id, peer)` for an in-flight media send so that
+    /// the background redelivery loop skips it for the duration of the
+    /// `send_*_cmd` + `media_delivered` window. Cheap no-op if a live send
+    /// already holds it (or if the pair has no queue row to protect). Call
+    /// [`Self::media_release`] once to drop the claim.
+    pub fn media_claim(&self, msg_id: i64, peer_base58: &str) {
+        self.running
+            .media_inflight
+            .lock()
+            .unwrap()
+            .insert(
+                (msg_id, peer_base58.to_string()),
+                std::time::Instant::now(),
+            );
+    }
+
+    /// Release the claim set by [`Self::media_claim`]. Safe to call without a
+    /// matching claim (the entry is simply absent from the map).
+    pub fn media_release(&self, msg_id: i64, peer_base58: &str) {
+        self.running
+            .media_inflight
+            .lock()
+            .unwrap()
+            .remove(&(msg_id, peer_base58.to_string()));
+    }
+
+    /// Receiver-side idempotency for an inbound media (voice/image/file) row,
+    /// mirroring text's `MsgKind::Dm` dedup. `client_id` is the *sender's*
+    /// stable `messages.id`, carried on every redelivery of the same logical
+    /// media item. Returns `true` on FIRST sight (caller persists the row);
+    /// `false` on a repeat (caller drops the copy — it's a duplicate re-send of
+    /// a media item we already stored, the "image received twice" bug's tail
+    /// case where the sender re-sent after an ack loss). `None` means the
+    /// sender is legacy / no id — always treated as fresh (never deduped),
+    /// never dropped. Delegates to the shared `dm_inbound_seen` table (keyed by
+    /// `(client_id, peer_base58)`), so a legitimate late redelivery within the
+    /// 7-day retention is never pruned mid-flight. A store/pool error degrades
+    /// to `true` (persist it) rather than silently dropping a real message.
+    pub async fn media_inbound_fresh(&self, client_id: Option<u64>, peer_base58: &str) -> bool {
+        let (Some(cid), Some(pool)) = (client_id, self.store.pool()) else {
+            return true;
+        };
+        let fresh = match sqlite::inbound_seen::mark(&pool, cid as i64, peer_base58).await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("[media] dedup mark failed: {e}; persisting");
+                true
+            }
+        };
+        if fresh {
+            let _ = sqlite::inbound_seen::prune(&pool).await;
+        }
+        fresh
+    }
+}
+
 /// Per-`Client` shutdown + single-start control for the three background
 /// loops. `stopped` is raised by [`Client::stop`]; each `started*` is a
 /// one-shot guard so re-calling the matching `start_*` on the *same* account
@@ -763,13 +848,17 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .expect("spawn dm-redeliver thread");
     }
 
-    /// One redelivery round: scan `dm_send_queue` for due rows and, **only**
-    /// when the peer is already connected inbound, flush them over the live
-    /// link. This loop never dials outbound — delivery to an offline peer is
-    /// deferred until that peer connects in (the `Connected` event calls
-    /// `redeliver_due` again, where the fastpath succeeds). Rows to a peer
-    /// that isn't connected are left untouched in SQLite (zero resident
-    /// memory) and stay `SENDING` until delivered.
+    /// One redelivery round. Two always-run steps, then per-row dispatch:
+    ///  1. **Sweep expired media** — any row past its 3-day `deadline_ms`
+    ///     (media only; text is `None` and lives forever) is dropped and its
+    ///     local `messages` row flipped to `FAILED`, which the app's badge
+    ///     reads as "failed".
+    ///  2. **Dispatch due rows** — for each due row, send it **only if the peer
+    ///     is already connected inbound** (never dials outbound). This loop is
+    ///     purely passive: delivery to an offline peer is deferred until that
+    ///     peer connects in (`Connected` re-invokes this, where the fastpath
+    ///     succeeds). Rows to a disconnected peer are left untouched in
+    ///     SQLite.
     ///
     /// `peer` = `None` to scan all due rows (polling-task path), or a specific
     /// base58 peer id to drain only its rows (event fast-path).
@@ -777,6 +866,25 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let Some(pool) = self.store.pool() else {
             return;
         };
+
+        // 1. Expiry sweep (media with a deadline). Returns the message ids to
+        //    flip to FAILED.
+        match sqlite::queue::sweep_expired(&pool).await {
+            Ok(ids) => {
+                for id in &ids {
+                    let _ = self.store.set_status(*id, sqlite::STATUS_FAILED).await;
+                }
+                if !ids.is_empty() {
+                    tracing::info!(
+                        drained = ids.len(),
+                        "[redeliver] swept expired media rows → FAILED"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!("[redeliver] sweep_expired failed: {e}"),
+        }
+
+        // 2. Dispatch due rows (passive, fastpath-only).
         let res = match peer {
             Some(p) => sqlite::queue::due_for_peer(&pool, p, 64).await,
             None => sqlite::queue::due(&pool, 64).await,
@@ -792,79 +900,135 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             return;
         }
         for row in rows {
-            // Re-read the text from the local `messages` row (the queue only
-            // stores the id — single source of truth for content).
-            let Some(text) = sqlite::messages::get(&pool, row.msg_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|m| m.text_content)
-            else {
-                // Local row missing (user deleted?) — drop the queue row.
-                let _ = sqlite::queue::give_up(&pool, row.msg_id).await;
-                tracing::debug!(
-                    msg_id = row.msg_id,
-                    "[redeliver] local row missing — dropped"
-                );
-                continue;
-            };
-            if text.is_empty() {
-                // Local message row has no text yet (shouldn't happen post-
-                // insert, but if it does, the row for this device is useless —
-                // drop it. Other devices of the same user keep their own
-                // redelivery schedule.
-                let _ = sqlite::queue::give_up_pair(&pool, row.msg_id, &row.peer_base58).await;
-                continue;
-            }
+            self.dispatch_redeliver(&pool, &row).await;
+        }
+    }
 
-            // Fastpath only: send if (and only if) the peer is connected
-            // inbound *right now*. No dial, no backoff, no budget. A miss
-            // simply leaves the row in place for the next `Connected` event.
-            match self
-                .send_dm_fastpath(&row.peer_base58, &text, row.msg_id as u64)
-                .await
-            {
-                Ok(()) => {
-                    let _ =
-                        sqlite::queue::give_up_pair(&pool, row.msg_id, &row.peer_base58).await;
-                    // Flip the message row to SENT only when every device
-                    // for this message is done (acked or dropped).
-                    let remaining =
-                        sqlite::queue::pending_peers_for_msg(&pool, row.msg_id)
-                            .await
-                            .unwrap_or_default();
-                    if remaining.is_empty() {
-                        let _ = self
-                            .store
-                            .set_status(row.msg_id, sqlite::STATUS_SENT)
-                            .await;
-                        tracing::info!(
-                            msg_id = row.msg_id,
-                            peer = %row.peer_base58,
-                            "[redeliver] DELIVERED over inbound link — row → SENT"
-                        );
-                    } else {
-                        tracing::info!(
-                            msg_id = row.msg_id,
-                            peer = %row.peer_base58,
-                            still_pending = remaining.len(),
-                            "[redeliver] DELIVERED on this device, others still pending"
-                        );
-                    }
+    /// Send one due queue row over the inbound link (if connected), or leave
+    /// it queued (if not). Dispatches by the local message's type: text uses
+    /// the text fastpath; voice / image / file are read back from their on-disk
+    /// files and sent over the matching no-dial channel. On success the pair
+    /// is dropped and the message marked `SENT` once no device is pending.
+    /// File reads happen only when the peer is connected (so a large file is
+    /// not pulled into memory on an offline tick).
+    async fn dispatch_redeliver(&self, pool: &sqlite::Pool, row: &sqlite::queue::Row) {
+        if !self.peer_connected_str(&row.peer_base58) {
+            // Not inbound-connected: leave the row queued; `Connected` will
+            // retry via this same path. No dial, no file I/O, no FAILED.
+            tracing::debug!(
+                msg_id = row.msg_id,
+                peer = %row.peer_base58,
+                "[redeliver] peer not inbound-connected, deferring"
+            );
+            return;
+        }
+
+        let Some(payload) = sqlite::messages::redeliver_payload(pool, row.msg_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            // Local row missing (user deleted?) — drop the queue row for all
+            // its devices.
+            let _ = sqlite::queue::give_up(pool, row.msg_id).await;
+            tracing::debug!(msg_id = row.msg_id, "[redeliver] local row missing — dropped");
+            return;
+        };
+        let (msg_type, media_path, text_content) = payload;
+
+        // Media only: if the app's live `send_*_cmd` fan-out is currently in
+        // flight for this `(msg, peer)` (it claims the pair for the full
+        // send+ack window — image ack is deferred, so this can be seconds),
+        // defer. Firing now would re-send a payload the live path already put
+        // on the wire, and media has no receiver-side dedup → a real duplicate
+        // bubble. Text (the `_` arm) is unaffected — text's ack is immediate
+        // and covered by the receiver's `inbound_seen` dedup.
+        if msg_type != sqlite::MSG_TYPE_TEXT && self.media_inflight(row.msg_id, &row.peer_base58) {
+            tracing::debug!(
+                msg_id = row.msg_id,
+                peer = %row.peer_base58,
+                "[redeliver] live send in flight for this pair, deferring"
+            );
+            return;
+        }
+
+        // Send is async; the per-kind payload is already a local value. Each
+        // arm returns `anyhow::Result<()>` (file read + nodial send).
+        let outcome: anyhow::Result<()> = async {
+            match (msg_type, media_path.clone()) {
+                (sqlite::MSG_TYPE_VOICE, Some(path)) => {
+                    let buf = std::fs::read(&path).map_err(|e| anyhow::anyhow!("read voice {path}: {e}"))?;
+                    self.send_voice_nodial_from_buffer(&row.peer_base58, &buf, Some(row.msg_id as u64)).await
                 }
-                Err(why) => {
-                    // Not connected (or ack missed). Leave the row in the
-                    // queue — `Connected` will retry via this same fastpath.
-                    // No dial, no backoff, no FAILED.
-                    tracing::debug!(
+                (sqlite::MSG_TYPE_IMAGE, Some(path)) => {
+                    let buf = std::fs::read(&path).map_err(|e| anyhow::anyhow!("read image {path}: {e}"))?;
+                    self.send_image_nodial(&row.peer_base58, buf, Some(row.msg_id as u64)).await
+                }
+                (sqlite::MSG_TYPE_FILE, Some(path)) => {
+                    let buf = std::fs::read(&path).map_err(|e| anyhow::anyhow!("read file {path}: {e}"))?;
+                    self.send_file_nodial(&row.peer_base58, text_content.unwrap_or_default(), buf, Some(row.msg_id as u64)).await
+                }
+                _ => self
+                    .send_dm_fastpath(&row.peer_base58, &text_content.unwrap_or_default(), row.msg_id as u64)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}")),
+            }
+        }
+        .await;
+
+        match outcome {
+            Ok(()) => {
+                let _ = sqlite::queue::give_up_pair(pool, row.msg_id, &row.peer_base58).await;
+                let remaining = sqlite::queue::pending_peers_for_msg(pool, row.msg_id)
+                    .await
+                    .unwrap_or_default();
+                if remaining.is_empty() {
+                    let _ = self.store.set_status(row.msg_id, sqlite::STATUS_SENT).await;
+                    tracing::info!(
                         msg_id = row.msg_id,
                         peer = %row.peer_base58,
-                        "[redeliver] peer not inbound-connected, deferring ({why})"
+                        "[redeliver] DELIVERED over inbound link → SENT"
+                    );
+                } else {
+                    tracing::info!(
+                        msg_id = row.msg_id,
+                        peer = %row.peer_base58,
+                        still_pending = remaining.len(),
+                        "[redeliver] DELIVERED on this device, others still pending"
                     );
                 }
             }
+            Err(why) => {
+                tracing::warn!(
+                    msg_id = row.msg_id,
+                    peer = %row.peer_base58,
+                    "[redeliver] send failed, leaving queued ({why})"
+                );
+            }
         }
     }
+
+    /// Voice fastpath that takes an already-decoded PCM buffer *with its
+    /// on-file header stripped*. Reads rate/ch/dur from the `CHAV` magic
+    /// prefix of the buffer (see `record::write_voice_clip`), because a
+    /// redelivery has no capture time to recover those from.
+    async fn send_voice_nodial_from_buffer(
+        &self,
+        peer_base58: &str,
+        buf: &[u8],
+        client_id: Option<u64>,
+    ) -> anyhow::Result<()> {
+        if buf.len() < 12 || &buf[0..4] != b"CHAV" {
+            anyhow::bail!("voice nodial: bad clip header");
+        }
+        let rate = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+        let ch = u32::from_le_bytes(buf[8..12].try_into().unwrap()).max(1);
+        let samples = (buf.len().saturating_sub(12) / (2 * ch as usize)).max(0) as u64;
+        let duration_ms = if rate == 0 { 0 } else { (samples * 1000) / rate as u64 };
+        self.send_voice_nodial(peer_base58, buf[12..].to_vec(), rate, ch, duration_ms, client_id)
+            .await
+    }
+
 
     /// Background thread that long-polls the directory for wake
     /// notices and dials the sender back on arrival. Safe to call multiple
@@ -2380,7 +2544,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let msg_id = self.store.insert_mine_sending(&chat, text).await?;
         if let Some(pool) = self.store.pool() {
             for dev in &dev_set {
-                let _ = sqlite::queue::enqueue(&pool, msg_id, dev, &chat).await;
+                let _ = sqlite::queue::enqueue(&pool, msg_id, dev, &chat, None).await;
             }
         }
         tracing::debug!(
@@ -2818,6 +2982,154 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
     }
 
+    /// Passive voice delivery: send ONLY if `peer_base58` is already
+    /// connected inbound; never resolves endpoints and never dials. Used by the
+    /// background redelivery loop so a queued voice clip is flushed the moment
+    /// the peer connects in, without the loop producing outbound dials (and the
+    /// noisy dial-fail retries). Returns `Err` when not connected so the caller
+    /// leaves the row queued.
+    pub async fn send_voice_nodial(
+        &self,
+        peer_base58: &str,
+        data: Vec<u8>,
+        rate: u32,
+        ch: u32,
+        duration_ms: u64,
+        client_id: Option<u64>,
+    ) -> anyhow::Result<()> {
+        if !self.peer_connected_str(peer_base58) {
+            anyhow::bail!("voice nodial: peer {peer_base58} not connected");
+        }
+        let peer: PeerId = peer_base58.parse()?;
+        let from = self.peer_base58();
+        let e2e = self.e2e_public().to_string();
+        let timeout = std::time::Duration::from_secs(8);
+        let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+        self.running.cmd_tx.send(Cmd::SendVoice {
+            peer,
+            from,
+            e2e,
+            rate,
+            ch,
+            duration_ms,
+            data,
+            ack_tx: Some(tx),
+            client_id,
+        })
+        .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(anyhow::anyhow!("send failed: {e}")),
+            Ok(Err(_)) => anyhow::bail!("peer connection dropped before ack"),
+            Err(_) => anyhow::bail!("no ack within {timeout:?}"),
+        }
+    }
+
+    /// Passive image delivery: send ONLY if `peer_base58` is already connected
+    /// inbound; never resolves endpoints and never dials. Returns `Err` when not
+    /// connected so the caller leaves the row queued.
+    pub async fn send_image_nodial(
+        &self,
+        peer_base58: &str,
+        data: Vec<u8>,
+        client_id: Option<u64>,
+    ) -> anyhow::Result<()> {
+        if !self.peer_connected_str(peer_base58) {
+            anyhow::bail!("image nodial: peer {peer_base58} not connected");
+        }
+        let peer: PeerId = peer_base58.parse()?;
+        let from = self.peer_base58();
+        let timeout = std::time::Duration::from_secs(15);
+        let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+        self.running
+            .cmd_tx
+            .send(Cmd::SendImage {
+                peer,
+                from,
+                data,
+                ack_tx: Some(tx),
+                client_id,
+            })
+            .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(anyhow::anyhow!("send failed: {e}")),
+            Ok(Err(_)) => anyhow::bail!("peer connection dropped before ack"),
+            Err(_) => anyhow::bail!("no ack within {timeout:?}"),
+        }
+    }
+
+    /// Passive file delivery: send ONLY if `peer_base58` is already connected
+    /// inbound; never resolves endpoints and never dials. Returns `Err` when not
+    /// connected so the caller leaves the row queued.
+    pub async fn send_file_nodial(
+        &self,
+        peer_base58: &str,
+        name: String,
+        data: Vec<u8>,
+        client_id: Option<u64>,
+    ) -> anyhow::Result<()> {
+        if !self.peer_connected_str(peer_base58) {
+            anyhow::bail!("file nodial: peer {peer_base58} not connected");
+        }
+        let peer: PeerId = peer_base58.parse()?;
+        let from = self.peer_base58();
+        let timeout = std::time::Duration::from_secs(15);
+        let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+        self.running
+            .cmd_tx
+            .send(Cmd::SendFile {
+                peer,
+                from,
+                name,
+                data,
+                ack_tx: Some(tx),
+                client_id,
+            })
+            .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(anyhow::anyhow!("send failed: {e}")),
+            Ok(Err(_)) => anyhow::bail!("peer connection dropped before ack"),
+            Err(_) => anyhow::bail!("no ack within {timeout:?}"),
+        }
+    }
+
+    /// Enqueue an outbound message (a voice / image / file row created via the
+    /// `persist_*` helpers) for passive redelivery to `peer_base58`, with a hard
+    /// 3-day deadline. Text rows enqueue with `deadline_ms = None` (indefinite);
+    /// media rows use this helper. On deadline the background loop drops the
+    /// queue row and flips the local `messages` row to `FAILED` so the app's
+    /// queue/status-driven badge can render "failed".
+    pub async fn enqueue_media_deadline(
+        &self,
+        msg_id: i64,
+        peer_base58: &str,
+        chat_id: &str,
+    ) -> anyhow::Result<()> {
+        let pool = self.store.pool().ok_or_else(|| anyhow::anyhow!("no pool"))?;
+        let deadline = sqlite::now_ms() + sqlite::queue::MEDIA_DEADLINE_MS;
+        sqlite::queue::enqueue(&pool, msg_id, peer_base58, chat_id, Some(deadline)).await
+    }
+
+    /// Ack a live-delivered media pair. Drops the queue row for
+    /// `(msg_id, peer_base58)` and, if no other device for this message is
+    /// still pending, flips the local `messages` row to `SENT` (which is what
+    /// the app's badge reads as "sent"). Safe to call multiple times.
+    pub async fn media_delivered(&self, msg_id: i64, peer_base58: &str) -> anyhow::Result<()> {
+        let Some(pool) = self.store.pool() else {
+            return Ok(());
+        };
+        let _ = sqlite::queue::give_up_pair(&pool, msg_id, peer_base58).await;
+        let remaining = sqlite::queue::pending_peers_for_msg(&pool, msg_id)
+            .await
+            .unwrap_or_default();
+        if remaining.is_empty() {
+            let _ = self.store.set_status(msg_id, sqlite::STATUS_SENT).await;
+        }
+        Ok(())
+    }
+
     /// Send a voice message to `peer_base58` over the DM channel and wait for
     /// the peer's ack. The clip itself is NOT persisted by core — the caller
     /// is expected to have already written the s16le bytes to a local path and
@@ -2831,6 +3143,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         rate: u32,
         ch: u32,
         duration_ms: u64,
+        client_id: Option<u64>,
     ) -> anyhow::Result<()> {
         tracing::debug!(
             "[voice] send_voice peer={peer_base58} bytes={} rate={rate} ch={ch} dur={duration_ms}ms",
@@ -2906,6 +3219,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             duration_ms,
             data: data.clone(),
             ack_tx: Some(tx),
+            client_id,
         })
         .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
         match tokio::time::timeout(timeout, rx).await {
@@ -2983,7 +3297,12 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .await
     }
 
-    pub async fn send_image_cmd(&self, peer_base58: &str, data: Vec<u8>) -> anyhow::Result<()> {
+    pub async fn send_image_cmd(
+        &self,
+        peer_base58: &str,
+        data: Vec<u8>,
+        client_id: Option<u64>,
+    ) -> anyhow::Result<()> {
         tracing::debug!("[image] send_image peer={peer_base58} bytes={}", data.len());
         let peer: PeerId = peer_base58
             .parse()
@@ -3044,6 +3363,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             from,
             data,
             ack_tx: Some(tx),
+            client_id,
         })
         .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
         match tokio::time::timeout(timeout, rx).await {
@@ -3079,6 +3399,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         peer_base58: &str,
         name: String,
         data: Vec<u8>,
+        client_id: Option<u64>,
     ) -> anyhow::Result<()> {
         tracing::debug!("[file] send_file peer={peer_base58} bytes={}", data.len());
         let peer: PeerId = peer_base58
@@ -3141,6 +3462,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             name,
             data,
             ack_tx: Some(tx),
+            client_id,
         })
         .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
         match tokio::time::timeout(timeout, rx).await {

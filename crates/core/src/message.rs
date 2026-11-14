@@ -80,6 +80,12 @@ pub struct VoiceRequest {
     pub ch: u32,
     #[serde(default)]
     pub duration_ms: u64,
+    /// Sender-local stable message id (the `messages.id`) carried on every
+    /// redelivery so the receiver can drop a duplicate re-send of the same
+    /// logical clip. `None` = legacy sender — never deduplicated. See
+    /// `inbound_seen` (text's idempotency) for the receiver-side drop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<u64>,
     /// Raw s16le PCM. `len == frames * 2 * ch`.
     pub data: Vec<u8>,
 }
@@ -95,6 +101,10 @@ pub struct VoiceAck {
 pub struct ImageRequest {
     pub id: u64,
     pub from: String,
+    /// Sender-local stable message id (the `messages.id`), stable across
+    /// re-sends of the same logical photo — lets the receiver drop a duplicate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<u64>,
     pub data: Vec<u8>,
 }
 
@@ -108,6 +118,10 @@ pub struct ImageAck {
 pub struct FileRequest {
     pub id: u64,
     pub from: String,
+    /// Sender-local stable message id (the `messages.id`), stable across
+    /// re-sends of the same logical file — lets the receiver drop a duplicate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<u64>,
     pub name: String,
     pub data: Vec<u8>,
 }

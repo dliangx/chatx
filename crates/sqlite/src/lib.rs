@@ -23,7 +23,8 @@ pub use sqlx::{self, SqlitePool as Pool};
 pub use sqlx::sqlite::SqlitePoolOptions;
 
 pub use messages::{
-    MSG_TYPE_TEXT, STATUS_DELIVERED, STATUS_FAILED, STATUS_READ, STATUS_SENDING, STATUS_SENT,
+    MSG_TYPE_FILE, MSG_TYPE_IMAGE, MSG_TYPE_TEXT, MSG_TYPE_VOICE, STATUS_DELIVERED, STATUS_FAILED,
+    STATUS_READ, STATUS_SENDING, STATUS_SENT,
 };
 
 /// Which kind of media `MsgRow::media_path` points at (used to disambiguate a

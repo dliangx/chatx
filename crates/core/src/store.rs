@@ -191,7 +191,11 @@ impl Store {
             let _ = sqlite::messages::insert_row(
                 db,
                 &sqlite::MsgRow {
-                    id: 0,
+                    // Row `id` == its timestamp `t`, matching the in-memory
+                    // `StoredMsg.id` and (for outbound media) the app's send
+                    // badge key, so the offline-queue / replay / badge all
+                    // reference one identity.
+                    id: msg.t as i64,
                     chat_id: msg.chat_id,
                     sender: msg.sender,
                     text: row_text,

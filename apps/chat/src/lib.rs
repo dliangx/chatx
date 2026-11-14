@@ -2697,6 +2697,7 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                         ch,
                         data,
                         duration_ms,
+                        client_id,
                     } = &evt
                     {
                         handle_inbound_voice(
@@ -2706,26 +2707,41 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                             *ch,
                             data.clone(),
                             *duration_ms,
+                            *client_id,
                         )
                         .await;
                         continue;
                     }
-                    if let chatx_core::swarm::ChatEvent::Image { peer, data, id } = &evt {
+                    if let chatx_core::swarm::ChatEvent::Image {
+                        peer,
+                        data,
+                        id,
+                        client_id,
+                    } = &evt
+                    {
                         handle_inbound_image(
                             weak.clone(),
                             &peer.to_base58(),
                             data.clone(),
                             *id,
+                            *client_id,
                         )
                         .await;
                         continue;
                     }
-                    if let chatx_core::swarm::ChatEvent::File { peer, name, data } = &evt {
+                    if let chatx_core::swarm::ChatEvent::File {
+                        peer,
+                        name,
+                        data,
+                        client_id,
+                    } = &evt
+                    {
                         handle_inbound_file(
                             weak.clone(),
                             &peer.to_base58(),
                             name.clone(),
                             data.clone(),
+                            *client_id,
                         )
                         .await;
                         continue;
@@ -2814,9 +2830,10 @@ async fn handle_inbound_voice(
     ch: u32,
     data: Vec<u8>,
     duration_ms: u64,
+    client_id: Option<u64>,
 ) {
     tracing::debug!(
-        "[voice] INBOUND from={peer_base58} bytes={} rate={rate} ch={ch} dur={duration_ms}ms",
+        "[voice] INBOUND from={peer_base58} client_id={client_id:?} bytes={} rate={rate} ch={ch} dur={duration_ms}ms",
         data.len()
     );
     let Some(client) = CLIENT.lock().unwrap().clone() else {
@@ -2825,6 +2842,17 @@ async fn handle_inbound_voice(
     };
     let username = client.resolve_peer_username(peer_base58);
     let chat_id = dm_chat_id(&username);
+    // Receiver-side idempotency — same as image / file. Core acks the voice
+    // clip on receipt (immediate in-core ack), so a dropped redelivery leaves
+    // no sender waiter to resolve.
+    if !client.media_inbound_fresh(client_id, peer_base58).await {
+        tracing::debug!(
+            client_id = ?client_id,
+            peer = %peer_base58,
+            "[voice] duplicate redelivery dropped"
+        );
+        return;
+    }
     match record::write_voice_clip(rate, ch, &data) {
         Ok(path) => {
             let path_str = path.to_string_lossy().into_owned();
@@ -2851,9 +2879,10 @@ async fn handle_inbound_image(
     peer_base58: &str,
     data: Vec<u8>,
     id: u64,
+    client_id: Option<u64>,
 ) {
     tracing::debug!(
-        "[chat-image] INBOUND from={peer_base58} id={id} bytes={}",
+        "[chat-image] INBOUND from={peer_base58} id={id} client_id={client_id:?} bytes={}",
         data.len()
     );
     let Some(client) = CLIENT.lock().unwrap().clone() else {
@@ -2862,6 +2891,20 @@ async fn handle_inbound_image(
     };
     let username = client.resolve_peer_username(peer_base58);
     let chat_id = dm_chat_id(&username);
+    // Receiver-side idempotency. A redelivery of a photo we already stored
+    // (the sender re-sent because its ACK was lost/timed out) is a duplicate —
+    // dropping it is what stops the "image received twice" bug from surfacing
+    // past the in-flight window. We still ack so the resending sender's waiter
+    // resolves (badge → sent) rather than timing out.
+    if !client.media_inbound_fresh(client_id, peer_base58).await {
+        tracing::debug!(
+            client_id = ?client_id,
+            peer = %peer_base58,
+            "[chat-image] duplicate redelivery dropped"
+        );
+        let _ = client.ack_image(peer_base58, id).await;
+        return;
+    }
     // `data` is the original image bytes, sent raw over the wire (no
     // lossless-compression envelope — both peers treat a photo as an opaque
     // HD byte blob; see the `chat` module header for the design decision).
@@ -2895,9 +2938,10 @@ async fn handle_inbound_file(
     peer_base58: &str,
     name: String,
     data: Vec<u8>,
+    client_id: Option<u64>,
 ) {
     tracing::debug!(
-        "[chat-file] INBOUND from={peer_base58} name={name} bytes={}",
+        "[chat-file] INBOUND from={peer_base58} name={name} client_id={client_id:?} bytes={}",
         data.len()
     );
     let Some(client) = CLIENT.lock().unwrap().clone() else {
@@ -2906,6 +2950,17 @@ async fn handle_inbound_file(
     };
     let username = client.resolve_peer_username(peer_base58);
     let chat_id = dm_chat_id(&username);
+    // Receiver-side idempotency — same as the image path. Core already acks
+    // the file on receipt (immediate in-core ack, unlike image's deferred
+    // ack), so a dropped redelivery leaves no sender waiter to resolve.
+    if !client.media_inbound_fresh(client_id, peer_base58).await {
+        tracing::debug!(
+            client_id = ?client_id,
+            peer = %peer_base58,
+            "[chat-file] duplicate redelivery dropped"
+        );
+        return;
+    }
     match image::store_file_bytes(&name, &data).await {
         Ok(path) => {
             let path_str = path.to_string_lossy().into_owned();
@@ -3020,22 +3075,29 @@ fn send_chat_voice(
             "[voice] optimistic persist chat={chat_id} t={row_t} ({} bytes)",
             data.len()
         );
-        crate::chat::note_media_sending(&chat_id, row_t);
+        // Enqueue every target device for passive redelivery (3-day deadline).
+        // This makes the offline queue the badge's source of truth ("sending")
+        // instantly, and gives the background loop the rows to flush the moment
+        // a peer connects in.
+        for cand in &my_peers {
+            if cand == &me {
+                continue;
+            }
+            if let Err(e) = c.enqueue_media_deadline(row_t, cand, &chat_id).await {
+                tracing::warn!("[voice] enqueue failed for {cand}: {e}");
+            }
+        }
         load_chat_messages(weak2.clone(), key);
         let mut last_err = if my_peers.is_empty() {
             "Cannot determine peer".to_string()
         } else {
             String::new()
         };
-        // Fan out the clip to EVERY approved device of the target user (see
-        // `dm_target_devices`). The user may have B+C clients open, and each
-        // should see the voice message — do NOT stop at the first success.
-        // The bubble flips to SENT when at least one device acks; FAILED only
-        // when every device is unreachable.
-        //
-        // Devices are dialed CONCURRENTLY (one spawned task each) so a peer
-        // with N devices doesn't cost N× the single-device latency — the slow
-        // device can't stall the fast one.
+        // Attempt live delivery to EVERY approved device (concurrently). A
+        // device that is already connected (or dials over) acks and is flushed
+        // out of the queue via `media_delivered`; one that can't be reached now
+        // stays queued for passive redelivery. No FAILED here either way — the
+        // 3-day deadline sweep is the only thing that marks failure.
         let mut any_ok = false;
         let mut handles = Vec::new();
         for cand in &my_peers {
@@ -3046,7 +3108,17 @@ fn send_chat_voice(
             let cand = cand.clone();
             let data = data.clone();
             handles.push(tokio::spawn(async move {
-                c.send_voice_cmd(&cand, data, rate, ch, duration_ms).await
+                // Mark (msg, device) in-flight so the background redelivery
+                // loop defers for the full send+ack window — voice has immediate
+                // ack so the window is short, but the same guard prevents the
+                // loop from re-sending while we have it on the wire.
+                c.media_claim(row_t, &cand);
+                let r = c.send_voice_cmd(&cand, data, rate, ch, duration_ms, Some(row_t as u64)).await;
+                if r.is_ok() {
+                    let _ = c.media_delivered(row_t, &cand).await;
+                }
+                c.media_release(row_t, &cand);
+                r
             }));
         }
         for h in handles {
@@ -3065,10 +3137,8 @@ fn send_chat_voice(
             }
         }
         if any_ok {
-            crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_SENT);
             touch_chat_activity(&chat_id);
-        } else {
-            crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_FAILED);
+            load_chat_messages(weak2.clone(), key);
         }
         let msg = if !any_ok {
             if last_err.trim().is_empty() {
@@ -3516,18 +3586,28 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
             "[chat-image] optimistic persist chat={chat_id} t={row_t} ({} bytes)",
             bytes.len()
         );
-        crate::chat::note_media_sending(&chat_id, row_t);
+        // Enqueue every target device for passive redelivery (3-day deadline)
+        // — the queue is the badge's source of truth ("sending") and the
+        // background loop's flush list.
+        for cand in &my_peers {
+            if cand == &me {
+                continue;
+            }
+            if let Err(e) = c.enqueue_media_deadline(row_t, cand, &chat_id).await {
+                tracing::warn!("[chat-image] enqueue failed for {cand}: {e}");
+            }
+        }
         load_chat_messages(weak2.clone(), key);
         let mut last_err = if my_peers.is_empty() {
             "Cannot determine peer".to_string()
         } else {
             String::new()
         };
-        // 3. Wire payload = the ORIGINAL (HD) bytes, sent raw. Fan out to
-        //    EVERY approved device of the target user (B+C clients) — do NOT
-        //    stop at the first success. The bubble flips to SENT when at
-        //    least one device acks (after it durably persists the image);
-        //    FAILED only when every device is unreachable.
+        // Wire payload = the ORIGINAL (HD) bytes, sent raw. Fan out to
+        // EVERY approved device (B+C clients). A device that is connected (or
+        // dials over) acks and is flushed via `media_delivered`; one that
+        // can't be reached now stays queued for passive redelivery. No FAILED
+        // here — the 3-day deadline sweep is the only thing that marks failure.
         let wire = bytes;
         let mut any_ok = false;
         let mut handles = Vec::new();
@@ -3539,7 +3619,20 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
             let cand = cand.clone();
             let wire = wire.clone();
             handles.push(tokio::spawn(async move {
-                c.send_image_cmd(&cand, wire).await
+                // Image ack is deferred (receiver persists then `ack_image`), so
+                // this live send is in flight for seconds — exactly the window
+                // in which the background redelivery loop would have fired a
+                // duplicate copy to the same device. Hold the (msg, device)
+                // claim for the whole send+ack span so the loop defers, and
+                // release it once the queue row is reconciled (or the send
+                // failed and we want the loop to retry).
+                c.media_claim(row_t, &cand);
+                let r = c.send_image_cmd(&cand, wire, Some(row_t as u64)).await;
+                if r.is_ok() {
+                    let _ = c.media_delivered(row_t, &cand).await;
+                }
+                c.media_release(row_t, &cand);
+                r
             }));
         }
         for h in handles {
@@ -3558,10 +3651,8 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
             }
         }
         if any_ok {
-            crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_SENT);
             touch_chat_activity(&chat_id);
-        } else {
-            crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_FAILED);
+            load_chat_messages(weak2.clone(), key);
         }
         let msg = if any_ok {
             String::new()
@@ -3714,17 +3805,27 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
             "[chat-file] optimistic persist chat={chat_id} t={row_t} ({} bytes)",
             bytes.len()
         );
-        crate::chat::note_media_sending(&chat_id, row_t);
+        // Enqueue every target device for passive redelivery (3-day deadline)
+        // — the queue is the badge's source of truth ("sending") and the
+        // background loop's flush list.
+        for cand in &my_peers {
+            if cand == &me {
+                continue;
+            }
+            if let Err(e) = c.enqueue_media_deadline(row_t, cand, &chat_id).await {
+                tracing::warn!("[chat-file] enqueue failed for {cand}: {e}");
+            }
+        }
         load_chat_messages(weak2.clone(), key);
         let mut last_err = if my_peers.is_empty() {
             "Cannot determine peer".to_string()
         } else {
             String::new()
         };
-        // Fan out the file to EVERY approved device of the target user (see
-        // `dm_target_devices`); do NOT stop at the first success. The bubble
-        // flips to SENT when at least one device acks (after durable persist);
-        // FAILED only when every device is unreachable.
+        // Fan out the file to EVERY approved device. A connected (or dialed)
+        // device acks and is flushed via `media_delivered`; an unreachable one
+        // stays queued for passive redelivery. No FAILED here — the 3-day
+        // deadline sweep is the only thing that marks failure.
         let mut any_ok = false;
         let mut handles = Vec::new();
         for cand in &my_peers {
@@ -3736,7 +3837,16 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
             let name = name.clone();
             let bytes = bytes.clone();
             handles.push(tokio::spawn(async move {
-                c.send_file_cmd(&cand, name, bytes).await
+                // File ack is immediate, so the in-flight window is short, but
+                // the claim still prevents the redelivery loop from racing a
+                // concurrent copy to the same device.
+                c.media_claim(row_t, &cand);
+                let r = c.send_file_cmd(&cand, name, bytes, Some(row_t as u64)).await;
+                if r.is_ok() {
+                    let _ = c.media_delivered(row_t, &cand).await;
+                }
+                c.media_release(row_t, &cand);
+                r
             }));
         }
         for h in handles {
@@ -3755,10 +3865,8 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
             }
         }
         if any_ok {
-            crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_SENT);
             touch_chat_activity(&chat_id);
-        } else {
-            crate::chat::set_media_state(&chat_id, row_t, crate::chat::SEND_STATE_FAILED);
+            load_chat_messages(weak2.clone(), key);
         }
         let msg = if any_ok {
             String::new()
@@ -4509,6 +4617,20 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                     std::collections::HashSet::new()
                 }
             };
+        // Outbound rows the peer never acked AND which have already outlived
+        // their delivery window (media deadline). Keyed by `messages.id`;
+        // drives the "failed" badge in the render loop below. Text rows keep
+        // their `SENDING` badge indefinitely (no FAILED for text; the loop
+        // retries indefinitely while the app is running).
+        let me_peer_self = client.peer_base58();
+        let failed_msg_ids: std::collections::HashSet<i64> =
+            match sqlite::messages::failed_outbound_ids(&pool, &chat_id, &me_peer_self).await {
+                Ok(ids) => ids.into_iter().collect(),
+                Err(e) => {
+                    tracing::warn!("[chat] failed_outbound_ids failed: {e}");
+                    std::collections::HashSet::new()
+                }
+            };
         ensure_renderer();
 
         let mut rows = rows;
@@ -4731,14 +4853,18 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         if is_media {
                             let is_self = src.sender == me_peer || src.sender == me;
                             if is_self {
-                                md.send_state =
-                                    match crate::chat::media_state(&chat_id, src.t as i64) {
-                                        crate::chat::SEND_STATE_NONE
-                                        | crate::chat::SEND_STATE_SENT => {
-                                            crate::chat::SEND_STATE_SENT
-                                        }
-                                        other => other, // sending(1) / failed(3)
-                                    };
+                                // Queue/status-driven (unified with text). Priority:
+                                // failed (outlived its delivery deadline) > sending
+                                // (still in the offline queue) > sent. Keyed by the
+                                // row's `id`, which for media == its `t` (aligned
+                                // in `Store::push`).
+                                md.send_state = if failed_msg_ids.contains(&src.id) {
+                                    crate::chat::SEND_STATE_FAILED
+                                } else if pending_msg_ids.contains(&src.id) {
+                                    crate::chat::SEND_STATE_SENDING
+                                } else {
+                                    crate::chat::SEND_STATE_SENT
+                                };
                             }
                         }
                     }

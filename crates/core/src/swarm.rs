@@ -188,6 +188,9 @@ pub enum ChatEvent {
         ch: u32,
         data: Vec<u8>,
         duration_ms: u64,
+        /// Sender-local stable message id (the `messages.id`) — for
+        /// receiver-side dedup of re-sends (mirrors text's `client_id`).
+        client_id: Option<u64>,
     },
 
     /// Persistent photo message received from a peer. The application layer is
@@ -200,6 +203,8 @@ pub enum ChatEvent {
         peer: PeerId,
         data: Vec<u8>,
         id: u64,
+        /// Sender-local stable message id — for receiver-side dedup.
+        client_id: Option<u64>,
     },
 
     /// Persistent document file (pdf/docx/xlsx/pptx) received from a peer; `name` = sender's basename — the app writes `data` to disk and records the row via [`crate::Client::persist_file`].
@@ -207,6 +212,8 @@ pub enum ChatEvent {
         peer: PeerId,
         name: String,
         data: Vec<u8>,
+        /// Sender-local stable message id — for receiver-side dedup.
+        client_id: Option<u64>,
     },
 
     Webrtc {
@@ -343,6 +350,9 @@ pub enum Cmd {
         duration_ms: u64,
         data: Vec<u8>,
         ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+        /// Stable sender-local message id for receiver-side dedup (mirrors
+        /// `SendText::client_id`). `None` = not dedup-eligible (legacy).
+        client_id: Option<u64>,
     },
     /// Send a persistent photo *message*. The peer responds with the standard
     /// ack (resolved via `ack_tx`). The sender writes the image to local disk
@@ -352,6 +362,8 @@ pub enum Cmd {
         from: String,
         data: Vec<u8>,
         ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+        /// Stable sender-local message id for receiver-side dedup.
+        client_id: Option<u64>,
     },
     /// Acknowledge an inbound photo: the app has durably written the image and
     /// persisted its row, so we may now tell the sender it is "sent". Replies
@@ -368,6 +380,8 @@ pub enum Cmd {
         name: String,
         data: Vec<u8>,
         ack_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+        /// Stable sender-local message id for receiver-side dedup.
+        client_id: Option<u64>,
     },
     SendWebrtc {
         peer: PeerId,
@@ -493,6 +507,21 @@ pub struct Running {
     /// Monotone-by-design (no removal) so a peer that is currently offline is
     /// still deliverable via the offline redelivery path.
     pub approved: Arc<Mutex<std::collections::HashSet<PeerId>>>,
+    /// In-flight marks for a media (voice/image/file) send, keyed
+    /// `(msg_id, peer_base58)` → `Instant` of when the live send started.
+    /// Primary guard against the "media received twice" race: while a live
+    /// `send_*_cmd` + `media_delivered` pair is in flight for this (msg, peer),
+    /// the background redelivery loop MUST defer — firing the same payload to
+    /// the same device again would be a real duplicate bubble (image's ack is
+    /// deferred by the receiver's "persist-then-ack_image" pattern, so the
+    /// live send is in flight for seconds; file/voice ack immediately).
+    ///
+    /// A timestamp on each entry means a panicked task (which skips the
+    /// `media_release`) can't wedged the pair forever: the redelivery loop
+    /// treats entries older than `MEDIA_CLAIM_TTL` as stale and re-dispatches,
+    /// at which point the receiver-side dedup (a backstop, see
+    /// `media_inbound_fresh`) drops any true duplicate.
+    pub media_inflight: Arc<Mutex<std::collections::HashMap<(i64, String), std::time::Instant>>>,
 }
 
 /// True if `addr` is a local/loopback endpoint or one of our own advertised
@@ -889,6 +918,7 @@ pub async fn boot(
         dialing: Arc::clone(&dialing),
         approved: Arc::clone(&approved),
         nat_public: Arc::clone(&nat_public),
+        media_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     });
 
     // Fan injected (server-fanout / B-mode) events into the app event stream.
@@ -1084,6 +1114,7 @@ async fn swarm_loop(
                     duration_ms,
                     data,
                     ack_tx,
+                    client_id,
                 }) => {
                     let id: u64 = rand::random();
                     if let Some(tx) = ack_tx {
@@ -1100,6 +1131,7 @@ async fn swarm_loop(
                         rate,
                         ch,
                         duration_ms,
+                        client_id,
                         data,
                     };
                     let _rid = swarm.behaviour_mut().voice.send_request(&peer, req);
@@ -1109,6 +1141,7 @@ async fn swarm_loop(
                     from,
                     data,
                     ack_tx,
+                    client_id,
                 }) => {
                     let id: u64 = rand::random();
                     if let Some(tx) = ack_tx {
@@ -1121,7 +1154,7 @@ async fn swarm_loop(
                         id,
                         data.len()
                     );
-                    let req = ImageRequest { id, from, data };
+                    let req = ImageRequest { id, from, client_id, data };
                     let _rid = swarm.behaviour_mut().image.send_request(&peer, req);
                 }
                 Some(Cmd::AckImage { peer, id }) => {
@@ -1150,6 +1183,7 @@ async fn swarm_loop(
                     name,
                     data,
                     ack_tx,
+                    client_id,
                 }) => {
                     let id: u64 = rand::random();
                     if let Some(tx) = ack_tx {
@@ -1165,6 +1199,7 @@ async fn swarm_loop(
                     let req = FileRequest {
                         id,
                         from,
+                        client_id,
                         name,
                         data,
                     };
@@ -1690,6 +1725,7 @@ async fn swarm_loop(
                                     ch: request.ch,
                                     data: request.data,
                                     duration_ms: request.duration_ms,
+                                    client_id: request.client_id,
                                 });
                             }
                             RrMessage::Response { response, .. } => {
@@ -1749,6 +1785,7 @@ async fn swarm_loop(
                                     peer,
                                     data: request.data,
                                     id: request.id,
+                                    client_id: request.client_id,
                                 });
                             }
                             RrMessage::Response { response, .. } => {
@@ -1790,6 +1827,7 @@ async fn swarm_loop(
                                     peer,
                                     name: request.name,
                                     data: request.data,
+                                    client_id: request.client_id,
                                 });
                             }
                             RrMessage::Response { response, .. } => {

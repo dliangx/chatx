@@ -159,6 +159,11 @@ pub async fn insert_row(pool: &Pool, m: &MsgRow) -> anyhow::Result<()> {
     insert(
         pool,
         &NewMessage {
+            // Honour a caller-provided id (set to the row's timestamp `t` by
+            // `Store::push`) so the row's `id`, its in-memory `id`, and the
+            // app's send-badge key all agree on one value. `0` keeps the
+            // legacy auto-generated id for the few callers that don't set it.
+            id: if m.id > 0 { Some(m.id) } else { None },
             conversation_id,
             sender_user_id,
             sender_peer_id: Some(m.sender.clone()),
@@ -342,6 +347,47 @@ pub async fn set_status(pool: &Pool, id: i64, status: i64) -> anyhow::Result<()>
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// For a single message, return its `msg_type`, `media_path` (the on-disk
+/// clip / photo / file), and `text_content`. Used by the background redelivery
+/// dispatch to decide which wire channel a queued row needs and to recover the
+/// file name (carried in `text_content` for `MSG_TYPE_FILE`). Returns `None`
+/// when the row is gone (deleted by the user) — the caller then drops the
+/// queue row.
+pub async fn redeliver_payload(
+    pool: &Pool,
+    id: i64,
+) -> anyhow::Result<Option<(i64, Option<String>, Option<String>)>> {
+    let row: Option<(i64, i64, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, msg_type, media_path, text_content FROM messages WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(_id, msg_type, media_path, text)| (msg_type, media_path, text)))
+}
+
+/// Outbound (`sender_peer_id = me`) message ids in a chat whose delivery is
+/// `FAILED` (e.g. a media row that outlived its redelivery deadline). Keyed on
+/// the conversation, so the caller can stamp just that chat's rows. Mirrors
+/// `queue::all_pending_ids` (which drives the "sending" state) — together the
+/// two give the badge its full state space: pending → sending, failed →
+/// failed, otherwise → sent.
+pub async fn failed_outbound_ids(pool: &Pool, chat_id: &str, me_peer: &str) -> anyhow::Result<Vec<i64>> {
+    let Some(conv) = conversations::resolve_id(pool, chat_id).await? else {
+        return Ok(Vec::new());
+    };
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM messages
+         WHERE conversation_id = ?1 AND status = ?2 AND sender_peer_id = ?3",
+    )
+    .bind(conv)
+    .bind(STATUS_FAILED)
+    .bind(me_peer)
+    .fetch_all(pool)
+    .await?;
+    Ok(ids)
 }
 
 /// Convenience wrapper that forwards to `conversations` for ergonomics.
