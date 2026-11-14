@@ -285,11 +285,14 @@ pub async fn start(
     let mut registered = false;
     for (family, host) in [("ip4", public_v4), ("ip6", public_v6)] {
         let Some(host) = host else { continue };
-        for spec in [format!("{family}/{host}/tcp/{port}"), format!("{family}/{host}/udp/{port}/quic-v1")] {
-            if let Ok(m) = spec.parse::<Multiaddr>() {
-                swarm.add_external_address(m.clone());
-                tracing::info!(%m, "relay registered external address");
-                registered = true;
+        for spec in [format!("/{family}/{host}/tcp/{port}"), format!("/{family}/{host}/udp/{port}/quic-v1")] {
+            match spec.parse::<Multiaddr>() {
+                Ok(m) => {
+                    swarm.add_external_address(m.clone());
+                    tracing::info!(%m, "relay registered external address");
+                    registered = true;
+                }
+                Err(e) => tracing::error!(%spec, %e, "failed to parse external address multiaddr"),
             }
         }
     }
