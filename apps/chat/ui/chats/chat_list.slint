@@ -2,6 +2,7 @@
 import { ConversationRow } from "../components/app_state.slint";
 import { SubPageType, AppState } from "../components/app_state.slint";
 import { ChatListItem } from "../components/item.slint";
+import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
 import { SearchBar } from "../components/search.slint";
 
@@ -23,9 +24,54 @@ export component ChatListView inherits Rectangle {
         y: 0px;
     }
 
+    // AI assistant entry — pinned at the top of the chat list, above the
+    // conversation rows. Tapping it pushes the AiAssistant sub-page.
+    TouchArea {
+        x: 0px;
+        y: 48px;
+        width: parent.width;
+        height: 52px;
+        clicked => { AppState.push-sub(SubPageType.AiAssistant, 0); }
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: Theme.bg;
+            Rectangle {
+                x: 0px; y: 0px; width: 100%; height: 1px; background: Theme.border;
+            }
+            Icon {
+                x: 14px;
+                y: (parent.height - 24px) / 2;
+                size: 24px;
+                glyph: Glyph.siri;
+                tint: Theme.brand;
+            }
+            Text {
+                x: 48px;
+                y: 0px;
+                width: parent.width - 80px;
+                height: 100%;
+                text: @tr("AI assistant");
+                font-size: 15px;
+                font-weight: 600;
+                color: Theme.fg;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+            }
+            Icon {
+                x: parent.width - 30px;
+                y: (parent.height - 18px) / 2;
+                size: 18px;
+                glyph: Glyph.right;
+                tint: Theme.fg-muted;
+            }
+        }
+    }
+
     if root.rows.length == 0 && !root.searching && root.status == "":
     Text {
-        y: 180px;
+        y: 200px;
         width: parent.width;
         text: @tr("No conversations yet. Messages will appear here.");
         color: Theme.fg-muted;
@@ -36,7 +82,7 @@ export component ChatListView inherits Rectangle {
 
     if root.searching && root.rows.length == 0:
     Text {
-        y: 180px;
+        y: 200px;
         width: parent.width;
         text: @tr("No results");
         color: Theme.fg-muted;
@@ -46,7 +92,7 @@ export component ChatListView inherits Rectangle {
 
     if root.status != "" && !root.searching:
     Text {
-        y: 48px;
+        y: 100px;
         width: parent.width;
         height: 26px;
         text: root.status;
@@ -58,13 +104,13 @@ export component ChatListView inherits Rectangle {
 
     Flickable {
         x: 0px;
-        // The status banner is hidden while searching, so the list always
-        // starts right under the search bar in that mode.
-        y: (root.status == "" || root.searching) ? 48px : 74px;
+        // The AI row (48..100) always sits under the search bar; the status
+        // banner (when present) pushes the list down further.
+        y: (root.status == "" || root.searching) ? 100px : 126px;
         width: parent.width;
         height: (root.status == "" || root.searching)
-            ? (parent.height - 48px - (AppState.is-mobile ? AppState.bottom-nav : 0px))
-            : (parent.height - 74px - (AppState.is-mobile ? AppState.bottom-nav : 0px));
+            ? (parent.height - 100px - (AppState.is-mobile ? AppState.bottom-nav : 0px))
+            : (parent.height - 126px - (AppState.is-mobile ? AppState.bottom-nav : 0px));
         content-height: root.viewport-h;
         interactive: true;
 

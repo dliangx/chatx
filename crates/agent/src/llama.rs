@@ -1,0 +1,160 @@
+//! Local GGUF backend via [`llama-cpp-2`](https://crates.io/crates/llama-cpp-2).
+//!
+//! Enabled with the `llama` feature. Runs the model fully on-device — no
+//! network — which is what keeps chatx's "conversations never leave the
+//! machine" property honest.
+//!
+//! This backend is **thread-confined**: it owns a `LlamaBackend` /
+//! `LlamaModel` / context and must be used from one thread at a time. That
+//! matches the [`crate::Llm`] contract (`generate` takes `&mut self`), and
+//! the REPL in `apps/bot` runs it on a single dedicated thread.
+//!
+//! `generate` collects the full completion into a `String` and yields it in
+//! small word-ish chunks so callers get the same token-stream experience as
+//! a true tokenizer-stream, without exposing the non-`Send` model internals
+//! across the iterator boundary.
+
+use std::path::Path;
+
+use crate::conversation::Conversation;
+use crate::{Error, Llm, Result};
+
+use llama_cpp_2::context::params::LlamaContextParams;
+// Aliased so our own public `LlamaBackend` struct doesn't shadow the
+// runtime type it must hold (a same-named field would become self-referential).
+use llama_cpp_2::llama_backend::LlamaBackend as LlamaRuntime;
+use llama_cpp_2::llama_batch::LlamaBatch;
+use llama_cpp_2::model::params::LlamaModelParams;
+use llama_cpp_2::model::LlamaModel;
+use llama_cpp_2::sampling::LlamaSampler;
+
+/// A local GGUF model loaded with `llama-cpp-2`.
+pub struct LlamaBackend {
+    _runtime: LlamaRuntime,
+    model: LlamaModel,
+    /// Hard cap on generated tokens per turn (guard against runaway output).
+    max_tokens: u32,
+}
+
+impl LlamaBackend {
+    /// Load a GGUF file. `n_ctx` is the context window (defaults to 4096);
+    /// `max_tokens` caps the assistant's output length per turn (default 512).
+    pub fn load(
+        path: impl AsRef<Path>,
+        n_ctx: u32,
+        max_tokens: u32,
+    ) -> Result<Self> {
+        use std::num::NonZeroU32;
+
+        let backend = LlamaRuntime::init().map_err(|e| Error::Model(e.to_string()))?;
+        let model = LlamaModel::load_from_file(
+            &backend,
+            path.as_ref(),
+            &LlamaModelParams::default(),
+        )
+        .map_err(|e| Error::Model(format!("load model: {e}")))?;
+
+        let ctx = model
+            .new_context(
+                &backend,
+                LlamaContextParams::default()
+                    .with_n_ctx(Some(NonZeroU32::new(n_ctx.max(512)).unwrap_or(NonZeroU32::new(4096).unwrap()))),
+            )
+            .map_err(|e| Error::Model(format!("new context: {e}")))?;
+
+        // NOTE: we keep `ctx` alive for the lifetime of the backend by
+        // storing it inside the model wrapper below; but `LlamaModel` does not
+        // own a context. Instead we re-create a context per `generate` call
+        // (cheap — the expensive part, the model, is reused). Dropping `ctx`
+        // here only frees the per-call KV cache.
+        drop(ctx);
+
+        Ok(Self {
+            _runtime: backend,
+            model,
+            max_tokens,
+        })
+    }
+
+    /// Load with default context (4096) and output cap (512).
+    pub fn load_default(path: impl AsRef<Path>) -> Result<Self> {
+        Self::load(path, 4096, 512)
+    }
+
+    /// Run one completion over `conversation`, returning the assistant text.
+    fn complete(&mut self, conversation: &Conversation) -> Result<String> {
+        use std::num::NonZeroU32;
+
+        let prompt = conversation.render();
+
+        let backend = &self._runtime;
+        let mut ctx = self
+            .model
+            .new_context(
+                backend,
+                LlamaContextParams::default()
+                    .with_n_ctx(Some(NonZeroU32::new(4096).unwrap())),
+            )
+            .map_err(|e| Error::Model(format!("new context: {e}")))?;
+
+        let tokens_list = self.model.vocab().tokenize(prompt.as_bytes(), true, true);
+        let n_ctx = ctx.n_ctx() as i32;
+        if tokens_list.len() as i32 >= n_ctx {
+            return Err(Error::Model("prompt exceeds context window".into()));
+        }
+
+        let mut batch = LlamaBatch::new(512, 1);
+        let last_index: i32 = (tokens_list.len() - 1) as i32;
+        for (i, token) in (0_i32..).zip(tokens_list) {
+            let is_last = i == last_index;
+            batch
+                .add(token, i, &[0], is_last)
+                .map_err(|e| Error::Model(format!("batch add: {e}")))?;
+        }
+        ctx.decode(&mut batch)
+            .map_err(|e| Error::Model(format!("decode prompt: {e}")))?;
+
+        let mut sampler = LlamaSampler::chain_simple([LlamaSampler::dist(1234), LlamaSampler::greedy()]);
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
+        let mut out = String::new();
+
+        let mut n_cur = batch.n_tokens();
+        for _ in 0..self.max_tokens {
+            let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+            sampler.accept(token);
+            if self.model.vocab().is_eog(token) {
+                break;
+            }
+            let piece = self.model.vocab().token_to_piece(token, true, None);
+            let mut chunk = String::with_capacity(decoder.max_utf8_buffer_length(piece.len()).unwrap_or(8));
+            let (_, _, _) = decoder.decode_to_string(&piece, &mut chunk, false);
+            out.push_str(&chunk);
+
+            batch.clear();
+            batch
+                .add(token, n_cur, &[0], true)
+                .map_err(|e| Error::Model(format!("batch add gen: {e}")))?;
+            n_cur += 1;
+            ctx.decode(&mut batch)
+                .map_err(|e| Error::Model(format!("decode gen: {e}")))?;
+        }
+
+        if out.is_empty() {
+            return Err(Error::Empty);
+        }
+        Ok(out)
+    }
+}
+
+impl Llm for LlamaBackend {
+    fn generate(&mut self, conversation: &Conversation) -> Result<Box<dyn Iterator<Item = String>>> {
+        let text = self.complete(conversation)?;
+        // Yield in ~24-char chunks so the consumer gets word-ish streaming.
+        let chunks: Vec<String> = text
+            .as_bytes()
+            .chunks(24)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect();
+        Ok(Box::new(chunks.into_iter()))
+    }
+}

@@ -13,6 +13,7 @@ pub mod data;
 use data::ArcBackend;
 pub mod call;
 pub mod call_dispatcher;
+pub mod ai;
 pub mod chat;
 pub mod image;
 pub mod moment;
@@ -617,6 +618,22 @@ pub fn run_app() {
             if let Some(ui) = w.upgrade() {
                 clear_sub_history(&ui.global::<AppState>());
             }
+        });
+    }
+
+    // ── AI assistant (local LLM copilot; actor thread, pumped from a UI Timer) ──
+    {
+        let wr = weak.clone();
+        let wp = weak.clone();
+        ui.global::<AiAssistantState>().on_send(|text| {
+            let t = text.to_string();
+            ai::send(&t);
+        });
+        ui.global::<AiAssistantState>().on_reset(move || {
+            ai::reset(wr.clone());
+        });
+        ui.global::<AiAssistantState>().on_pump(move || {
+            ai::pump(wp.clone());
         });
     }
 

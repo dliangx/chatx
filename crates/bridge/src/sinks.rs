@@ -185,3 +185,63 @@ pub mod photos {
         slot().call(cleaned)
     }
 }
+
+/// Streaming LLM output slot (mobile AI-assistant copilot).
+///
+/// The **native shell** runs the local model with a platform-native engine
+/// (iOS: CoreML / llama.cpp-Metal; Android: MLC-LLM / MediaPipe LLM /
+/// llama.cpp-NDK) and streams the assistant's tokens back through this crate,
+/// two callbacks apart so the Rust consumer can stream to the UI *and* detect
+/// turn completion (and a failure):
+///
+/// - **token** — `bridge_llm_token_in(text)` per chunk; the consumer appends
+///   to its in-progress assistant bubble (typewriter effect).
+/// - **done**  — `bridge_llm_done(error)` once at end-of-turn; `error == 0`
+///   means success, non-zero is a shell-reported error code the consumer may
+///   surface. This is what lets the UI flip "typing…" to a stable state.
+///
+/// The model, prompt, and context live entirely on the shell side; this crate
+/// only carries the *resulting text*. That keeps E2E/keystore material in the
+/// Rust core while the LLM runs with whatever accelerator the OS gives the
+/// shell — the split that makes a 3B model usable on a phone at all.
+#[allow(dead_code)]
+pub mod llm {
+    use super::Slot;
+    use std::sync::OnceLock;
+
+    /// Per-token chunk slot: one text fragment of the assistant's reply.
+    #[doc(hidden)]
+    pub static TOKEN_SLOT: OnceLock<Slot<String>> = OnceLock::new();
+
+    /// End-of-turn slot: `Ok(())` (error 0) or `Err(code)`.
+    #[doc(hidden)]
+    pub static DONE_SLOT: OnceLock<Slot<Result<(), i32>>> = OnceLock::new();
+
+    fn token_slot() -> &'static Slot<String> {
+        TOKEN_SLOT.get_or_init(|| Slot::new())
+    }
+
+    fn done_slot() -> &'static Slot<Result<(), i32>> {
+        DONE_SLOT.get_or_init(|| Slot::new())
+    }
+
+    /// Install the per-token consumer (called as each assistant chunk arrives).
+    pub fn set_token_consumer(cb: Box<dyn Fn(String) + Send + 'static>) {
+        token_slot().set(cb)
+    }
+
+    /// Install the end-of-turn consumer (called once, after all tokens).
+    pub fn set_done_consumer(cb: Box<dyn Fn(Result<(), i32>) + Send + 'static>) {
+        done_slot().set(cb)
+    }
+
+    /// C-ABI/JNI entry: deliver one assistant text chunk to the consumer.
+    pub fn deliver_token(text: String) -> bool {
+        token_slot().call(text)
+    }
+
+    /// C-ABI/JNI entry: deliver the end-of-turn signal (`error == 0` = OK).
+    pub fn deliver_done(error: i32) -> bool {
+        done_slot().call(if error == 0 { Ok(()) } else { Err(error) })
+    }
+}

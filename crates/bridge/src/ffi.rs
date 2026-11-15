@@ -157,6 +157,36 @@ pub extern "C" fn bridge_permission_changed(perm: i32, granted: i32) -> i32 {
     }
 }
 
+/// One assistant LLM text chunk from the native shell (iOS: CoreML /
+/// llama.cpp-Metal). `text` is UTF-8; the buffer must be valid for the call.
+/// Routes to the `sinks::llm` token consumer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bridge_llm_token_in(text: *const u8, len: usize) -> i32 {
+    if text.is_null() || len == 0 {
+        return ERR_NULL_PTR;
+    }
+    let owned = unsafe { std::slice::from_raw_parts(text, len) };
+    let owned = match std::str::from_utf8(owned) {
+        Ok(s) => s.to_owned(),
+        Err(_) => return ERR_INVALID_ARG,
+    };
+    if !sinks::llm::deliver_token(owned) {
+        return ERR_NO_CONSUMER;
+    }
+    ERR_OK
+}
+
+/// End-of-turn LLM signal from the native shell. `error == 0` ⇒ success,
+/// non-zero is a shell-reported error code. Routes to the `sinks::llm`
+/// done consumer.
+#[unsafe(no_mangle)]
+pub extern "C" fn bridge_llm_done(error: i32) -> i32 {
+    if !sinks::llm::deliver_done(error) {
+        return ERR_NO_CONSUMER;
+    }
+    ERR_OK
+}
+
 fn check_incoming(data: *const u8, len: usize, width: u32, height: u32, _fmt: i32) -> i32 {
     if data.is_null() || len == 0 || width == 0 || height == 0 {
         ERR_NULL_PTR

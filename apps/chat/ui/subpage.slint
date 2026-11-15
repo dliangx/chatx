@@ -16,6 +16,7 @@ import { MyNoteView } from "me/my_note.slint";
 import { MyDevicesView } from "me/my_devices.slint";
 import { EditProfileView } from "me/edit.slint";
 import { MyXView } from "me/x-m.slint";
+import { AiAssistantView } from "ai_assistant.slint";
 
 export component SubPageView inherits Rectangle {
     in property <SubPageType> page;
@@ -95,4 +96,5 @@ export component SubPageView inherits Rectangle {
     }
     if root.page == SubPageType.PomegranateSeed: PomegranateSeedView { }
     if root.page == SubPageType.MyX: MyXView { }
+    if root.page == SubPageType.AiAssistant: AiAssistantView { }
 }

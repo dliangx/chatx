@@ -151,6 +151,28 @@ pub fn set_photos_consumer(cb: Box<dyn Fn(Vec<String>) + Send + 'static>) {
 #[cfg(not(target_os = "android"))]
 pub fn set_photos_consumer(_cb: Box<dyn Fn(Vec<String>) + Send + 'static>) {}
 
+/// Install the consumer that receives **streaming assistant LLM tokens**.
+///
+/// Mobile AI-assistant copilot: the native shell runs the local model with a
+/// platform-native engine (iOS CoreML / llama.cpp-Metal, Android MLC-LLM /
+/// MediaPipe LLM / llama.cpp-NDK) and streams each assistant text chunk back
+/// through `bridge_llm_token_in` (iOS) / `NativeBridge.llmToken` (Android)
+/// into this slot. The model and prompt live entirely on the shell side — the
+/// Rust core only ever sees the resulting plaintext, never E2E keys.
+///
+/// Pair with [`set_llm_done_consumer`] to detect the end of a turn.
+pub fn set_llm_token_consumer(cb: Box<dyn Fn(String) + Send + 'static>) {
+    sinks::llm::set_token_consumer(cb)
+}
+
+/// Install the consumer that receives the **end-of-turn** LLM signal.
+/// `Ok(())` = the shell finished the reply successfully; `Err(code)` = the
+/// shell reported an error (its own code, surface it to the user). Called
+/// exactly once per generation, after all token callbacks.
+pub fn set_llm_done_consumer(cb: Box<dyn Fn(Result<(), i32>) + Send + 'static>) {
+    sinks::llm::set_done_consumer(cb)
+}
+
 /// Read a file out of the APK's `assets/` directory (X mini-app plugins).
 ///
 /// Android shell: `Shell`/`NativeBridge.readAsset` reads from the Activity's

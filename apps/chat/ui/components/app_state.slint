@@ -32,6 +32,7 @@ export enum SubPageType {
     MyDevices,
     EditProfile,
     MyX,
+    AiAssistant,
 }
 
 export enum GlobalOverlayType {
@@ -137,6 +138,15 @@ export struct GroupMemberRow {
     // "is-self"), matching contacts (avatars), and dedup in the inline
     // add-candidate list.
     peer: string,
+}
+
+/// One line in the AI-assistant conversation. `side`: 0 = user (right),
+/// 1 = assistant (left). `pending`: true while the assistant is still
+/// streaming this line (drives the spinner); cleared when the turn ends.
+export struct AiMessageRow {
+    text: string,
+    side: int,
+    pending: bool,
 }
 
 export global AppState {
@@ -290,4 +300,29 @@ export global AppState {
     in property <image> scan-preview;
     callback scanner-start();
     callback scanner-stop();
+}
+
+/// AI assistant (local LLM copilot) conversation state. Owned by Rust
+/// (`src/ai.rs`); the view only reads the model + fires `send`/`reset`.
+///
+/// The model is the single source of truth the Rust streaming thread appends
+/// to. The final assistant line carries `pending == true` while tokens are
+/// still arriving; when the turn ends the thread flips it to `false` so the
+/// spinner clears.
+export global AiAssistantState {
+    in property <[AiMessageRow]> messages: [];
+    /// True while the user is typing in the input box (drives the send button).
+    in-out property <string> draft: "";
+    /// True while a generation is in flight (input disabled + spinner on the
+    /// active line).
+    in property <bool> busy: false;
+    /// One-line status: "" = ok, otherwise the last error (shown under the list).
+    in property <string> error: "";
+    /// The user pressed send with `draft` (the view clears `draft` itself).
+    callback send(string);
+    /// "Clear conversation" was tapped.
+    callback reset();
+    /// Driven by a UI Timer while `busy`: pull any tokens the actor thread has
+    /// produced since the last pump (the `pump-mini-app` pattern).
+    callback pump();
 }

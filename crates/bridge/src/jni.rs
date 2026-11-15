@@ -441,6 +441,52 @@ pub extern "system" fn Java_com_chatx_NativeBridge_filePickDone(
     ERR_OK
 }
 
+// ── LLM streaming (mobile AI-assistant copilot) ───────────────────────────
+//
+// The Kotlin shell runs the local model with a platform-native engine
+// (MLC-LLM / MediaPipe LLM / llama.cpp-NDK) and streams the assistant's
+// reply back here, two calls apart:
+//
+//   `NativeBridge.llmToken(String chunk) : int`  — one text fragment
+//   `NativeBridge.llmDone(int error) : int`       — once at end-of-turn
+//                                                   (error 0 = success)
+//
+// Both route to the `sinks::llm` slot the Rust consumer installs via
+// `bridge::set_llm_token_consumer` / `set_llm_done_consumer`.
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_chatx_NativeBridge_llmToken(
+    mut env: JNIEnv,
+    cls: JClass,
+    text: JString,
+) -> jint {
+    setup_bridge(&mut env, &cls);
+    let owned: String = if text.as_raw().is_null() {
+        return ERR_NULL_PTR;
+    } else if let Ok(js) = env.get_string(&text) {
+        js.into()
+    } else {
+        return ERR_NULL_PTR;
+    };
+    if !sinks::llm::deliver_token(owned) {
+        return ERR_NO_CONSUMER;
+    }
+    ERR_OK
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_chatx_NativeBridge_llmDone(
+    mut env: JNIEnv,
+    cls: JClass,
+    error: jint,
+) -> jint {
+    setup_bridge(&mut env, &cls);
+    if !sinks::llm::deliver_done(error) {
+        return ERR_NO_CONSUMER;
+    }
+    ERR_OK
+}
+
 // ── Asset reading (X mini-app plugins packed in assets/) ──────────────────
 //
 // Rust → Java: `NativeBridge.extractAsset(String src, String dst) : void`

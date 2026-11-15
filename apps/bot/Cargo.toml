@@ -1,6 +1,14 @@
 [package]
 name = "bot"
+description = "chatx local AI-assistant copilot REPL (local LLM, no network)"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Forward the agent's `llama` feature so the bot can load a GGUF model
+# (`cargo run -p bot --features llama` with CHATX_MODEL=/path/to/model.gguf).
+default = []
+llama = ["chatx-agent/llama"]
+
 [dependencies]
+chatx-agent = { path = "../../crates/agent" }

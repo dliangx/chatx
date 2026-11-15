@@ -1,0 +1,178 @@
+import { Theme } from "theme.slint";
+import { Header } from "components/header.slint";
+import { Icon, Glyph } from "components/icon.slint";
+import { AiAssistantState, AiMessageRow } from "components/app_state.slint";
+
+export component AiAssistantView inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: Theme.bg;
+
+    out property <length> row-h: 34px;
+    out property <length> row-gap: 10px;
+    out property <length> list-top: 48px;
+    out property <length> input-h: 56px;
+    out property <length> content-h:
+        AiAssistantState.messages.length * (root.row-h + root.row-gap);
+    out property <length> bubble-cap: root.width - 40px;
+    out property <bool> can-send: !AiAssistantState.busy && AiAssistantState.draft != "";
+
+    // Pump tokens from the actor thread while a turn is in flight
+    // (the `pump-mini-app` pattern: a UI Timer drains the channel).
+    Timer {
+        interval: 30ms;
+        running: AiAssistantState.busy;
+        triggered => { AiAssistantState.pump(); }
+    }
+
+    Header {
+        name: @tr("AI assistant");
+    }
+
+    // ── messages ────────────────────────────────────────────────────────────
+    list := Flickable {
+        x: 0px;
+        y: root.list-top;
+        width: parent.width;
+        height: parent.height - root.list-top - root.input-h;
+        content-height: root.content-h;
+        interactive: root.content-h > self.height;
+
+        // Auto-scroll to the newest line whenever the list grows (streaming).
+        in-out property <length> last-ch: root.content-h;
+        Timer {
+            interval: 16ms;
+            running: list.last-ch != root.content-h && root.content-h > 0px;
+            triggered => {
+                list.last-ch = root.content-h;
+                let max = root.content-h - list.height;
+                list.content-y = (max > 0px) ? max : 0px;
+            }
+        }
+
+        for row[i] in AiAssistantState.messages: Rectangle {
+            x: 0px;
+            y: i * (root.row-h + root.row-gap);
+            width: parent.width;
+            height: root.row-h;
+
+            // user (side 0) → right + brand; assistant (side 1) → left + surface.
+            Rectangle {
+                out property <length> cap-w: min(320px, root.bubble-cap);
+                width: min(max(44px, bubble.preferred-width), cap-w);
+                height: 34px;
+                x: row.side == 0 ? parent.width - 10px - self.width : 10px;
+                border-radius: 12px;
+                background: row.side == 0 ? Theme.brand : Theme.surface;
+                clip: true;
+
+                bubble := Text {
+                    x: 10px;
+                    y: 0px;
+                    width: parent.width - 20px;
+                    height: 100%;
+                    text: row.text;
+                    overflow: elide;
+                    font-size: 13px;
+                    color: row.side == 0 ? Theme.fg-on-accent : Theme.fg;
+                    horizontal-alignment: left;
+                    vertical-alignment: center;
+                }
+
+                // streaming spinner on the active (pending) assistant line.
+                if row.side == 1 && row.pending:
+                Icon {
+                    x: parent.width - 28px;
+                    y: 6px;
+                    size: 22px;
+                    glyph: Glyph.record;
+                    tint: Theme.brand;
+                }
+            }
+        }
+    }
+
+    // ── status line (last error, if any) ────────────────────────────────────
+    if AiAssistantState.error != "":
+    Text {
+        x: 10px;
+        y: parent.height - root.input-h - 22px;
+        width: parent.width - 20px;
+        height: 18px;
+        text: AiAssistantState.error;
+        font-size: 12px;
+        color: Theme.danger;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    // ── input bar ───────────────────────────────────────────────────────────
+    Rectangle {
+        x: 0px;
+        y: parent.height - root.input-h;
+        width: parent.width;
+        height: root.input-h;
+        background: Theme.bg;
+
+        Rectangle {
+            x: 0px; y: 0px; width: 100%; height: 1px; background: Theme.border;
+        }
+
+        // input box (leaves room for the send button on the right).
+        Rectangle {
+            x: 10px;
+            y: (parent.height - 40px) / 2;
+            width: parent.width - 92px;
+            height: 40px;
+            background: Theme.surface;
+            border-radius: 20px;
+            border-width: 1px;
+            border-color: Theme.border;
+            clip: true;
+
+            TextInput {
+                x: 14px;
+                y: 0px;
+                width: parent.width - 28px;
+                height: 100%;
+                vertical-alignment: center;
+                font-size: 14px;
+                color: Theme.fg;
+                single-line: true;
+                text <=> AiAssistantState.draft;
+            }
+        }
+
+        // send button.
+        Rectangle {
+            x: parent.width - 70px;
+            y: (parent.height - 40px) / 2;
+            width: 56px;
+            height: 40px;
+            border-radius: 20px;
+            background: Theme.brand;
+            opacity: root.can-send ? 1.0 : 0.4;
+            clip: true;
+            Icon {
+                x: (56px - 22px) / 2;
+                y: (40px - 22px) / 2;
+                size: 22px;
+                glyph: Glyph.up;
+                tint: Theme.fg-on-accent;
+            }
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => {
+                    let t = AiAssistantState.draft;
+                    if (t != "" && !AiAssistantState.busy) {
+                        AiAssistantState.draft = "";
+                        AiAssistantState.error = "";
+                        AiAssistantState.busy = true;
+                        AiAssistantState.send(t);
+                    }
+                }
+            }
+        }
+    }
+}

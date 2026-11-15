@@ -7,6 +7,7 @@ edition = "2024"
 render = {path = "../../crates/render"}
 slint = {workspace = true}
 chatx-core = { path = "../../crates/core" }
+chatx-agent = { path = "../../crates/agent" }
 libp2p = { workspace = true }
 sqlite = { path = "../../crates/sqlite" }
 sqlx = { workspace = true }
