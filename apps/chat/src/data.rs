@@ -4,6 +4,30 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Resolve a chat-list preview from the stored `last_message_preview` field.
+///
+/// DMs are stored in cleartext and pass through unchanged. Group text rows
+/// store a base64 sealed envelope (E2E ciphertext) in this column, so the
+/// plaintext is recovered with `open_stored_group_message` (the same call the
+/// chat window uses). If the envelope can't be opened yet (group key not held
+/// or no client) the preview is left blank rather than surfacing raw base64.
+fn resolve_preview(is_group: bool, chat_id: &str, stored: Option<String>) -> String {
+    let stored = stored.filter(|s| !s.is_empty()).unwrap_or_default();
+    if !is_group {
+        return stored;
+    }
+    if stored.is_empty() {
+        return String::new();
+    }
+    let Some(client) = crate::CLIENT.lock().unwrap().clone() else {
+        return String::new();
+    };
+    client
+        .open_stored_group_message(chat_id, &stored)
+        .map(|plain| plain.text)
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatRow {
     pub key: i32,
@@ -485,18 +509,14 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
                 .unwrap_or_else(|| c.id.to_string())
         };
         b.chat_key_to_id.insert(key, chat_key.clone());
+        // Group previews are stored as a sealed envelope (E2E ciphertext);
+        // `resolve_preview` decrypts them so the list shows plaintext.
+        let preview = resolve_preview(is_group, &chat_key, c.last_message_preview.clone());
         b.chats.push(ChatRow {
             key,
             chat_id: chat_key,
             title,
-            // Group previews at rest are ciphertext (E2E); the chat window
-            // decrypts them, but the list preview is left empty rather than
-            // surfacing the base64 blob.
-            preview: if is_group {
-                String::new()
-            } else {
-                c.last_message_preview.unwrap_or_default()
-            },
+            preview,
             is_group,
             time_ms: c.last_message_time.unwrap_or(0),
             unread: c.unread_count,
@@ -698,11 +718,11 @@ pub async fn refresh_chat_row(
             key,
             chat_id: src_chat_key.clone(),
             title,
-            preview: if is_group {
-                String::new()
-            } else {
-                src.last_message_preview.clone().unwrap_or_default()
-            },
+            preview: resolve_preview(
+                is_group,
+                &src_chat_key,
+                src.last_message_preview.clone(),
+            ),
             is_group,
             time_ms: src.last_message_time.unwrap_or(0),
             unread: src.unread_count,
@@ -752,7 +772,7 @@ pub async fn refresh_chat_row(
         title,
 
         preview: if is_group {
-            row.preview.clone()
+            resolve_preview(true, &src_chat_key, src.last_message_preview.clone())
         } else {
             src.last_message_preview.clone().unwrap_or_default()
         },
