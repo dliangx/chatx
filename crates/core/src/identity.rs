@@ -87,11 +87,21 @@ impl DeviceIdentity {
                 .unwrap_or_else(|| "com.chatx".to_string());
             return std::path::PathBuf::from(format!("/data/user/0/{pkg}/files"));
         }
-        #[cfg(not(target_os = "android"))]
+        // iOS: `$HOME` is the app's sandbox *container root* (…/Application/<uuid>/),
+        // where `.chatx` was landing. That root is the wrong home for durable
+        // data and its `tmp/` is ephemeral (purged on relaunch → media "lost").
+        // The Apple-conventional durable store is `Library/Application Support`,
+        // so anchor there: `$HOME/Library/Application Support/chatx`.
+        #[cfg(target_os = "ios")]
+        {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            return std::path::PathBuf::from(format!("{home}/Library/Application Support/chatx"));
+        }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             #[cfg(windows)]
             let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
-            #[cfg(all(not(windows), not(target_os = "android")))]
+            #[cfg(all(not(windows), not(target_os = "android"), not(target_os = "ios")))]
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
             std::path::PathBuf::from(format!("{home}/.chatx"))
         }
