@@ -70,7 +70,7 @@ export component ChatInputView inherits Rectangle {
         y: root.top-pad;
         width: root.box-w;
         height: root.box-h;
-        background: Theme.surface;
+        background: Theme.bg;
         border-radius: 10px;
         border-width: 1px;
         border-color: Theme.border;
@@ -88,7 +88,7 @@ export component ChatInputView inherits Rectangle {
                 y: (root.btn-h - 22px) / 2;
                 size: 22px;
                 glyph: Glyph.voice;
-                tint: RecordState.state == "recording" ? Theme.brand : Theme.fg-muted;
+                tint: RecordState.state == "recording" ? Theme.brand : Theme.fg;
             }
 
             TouchArea {
@@ -112,7 +112,7 @@ export component ChatInputView inherits Rectangle {
                 y: (root.btn-h - 22px) / 2;
                 size: 22px;
                 glyph: Glyph.photo;
-                tint: Theme.fg-muted;
+                tint: Theme.fg;
             }
 
             TouchArea {
@@ -130,7 +130,7 @@ export component ChatInputView inherits Rectangle {
                 y: (root.btn-h - 22px) / 2;
                 size: 22px;
                 glyph: Glyph.file;
-                tint: Theme.fg-muted;
+                tint: Theme.fg;
             }
 
             TouchArea {
@@ -174,8 +174,9 @@ export component ChatInputView inherits Rectangle {
                 wrap: word-wrap;
                 single-line: false;
                 text <=> root.text;
-                selection-background-color: Theme.brand-soft;
-                selection-foreground-color: Theme.brand;
+                text-cursor-width: 3px;
+                selection-background-color: Theme.brand;
+                selection-foreground-color: white;
                 accepted => { send(input.text); }
             }
 

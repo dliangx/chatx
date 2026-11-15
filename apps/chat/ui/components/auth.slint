@@ -24,8 +24,9 @@ component AuthInput inherits Rectangle {
         vertical-alignment: center;
         single-line: true;
         text <=> root.text;
-        selection-foreground-color: white;
+        text-cursor-width: 3px;
         selection-background-color: Theme.brand;
+        selection-foreground-color: white;
         enabled: root.enabled;
         opacity: root.enabled ? 1 : 0.5;
         accepted => { root.accepted(); }
