@@ -6,6 +6,7 @@
 
 pub mod conversations;
 pub mod devices;
+pub mod gkeyq;
 pub mod groups;
 pub mod inbound_seen;
 pub mod joins;

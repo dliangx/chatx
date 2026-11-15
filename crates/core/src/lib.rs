@@ -146,6 +146,7 @@ struct LoopsCtl {
     notify_started: std::sync::atomic::AtomicBool,
     redeliver_started: std::sync::atomic::AtomicBool,
     upgrade_started: std::sync::atomic::AtomicBool,
+    group_key_redeliver_started: std::sync::atomic::AtomicBool,
 }
 
 impl LoopsCtl {
@@ -157,6 +158,7 @@ impl LoopsCtl {
             notify_started: AtomicBool::new(false),
             redeliver_started: AtomicBool::new(false),
             upgrade_started: AtomicBool::new(false),
+            group_key_redeliver_started: AtomicBool::new(false),
         }
     }
     fn stopped(&self) -> bool {
@@ -846,6 +848,144 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 });
             })
             .expect("spawn dm-redeliver thread");
+    }
+
+    /// Redelivery loop for P2P group keys that never reached a member
+    /// (`deliver_group_key_all` queued the failure into
+    /// [`sqlite::gkeyq`]). The key is the ONLY way a P2P member joins the
+    /// group — without it they cannot decrypt anything — so unlike media DMs
+    /// there is no deadline: we keep retrying while the group exists locally.
+    ///
+    /// Purely passive: a row is serviced **only** when the member is
+    /// currently connected (`peer_connected_str`), so this never dials
+    /// outbound. The real trigger is the `Connected`/`Discovered` fast-path
+    /// in `process_event` (member dials in → immediate redelivery); this
+    /// loop is the backstop for links that appear between the two (mDNS
+    /// re-discovery, relay re-negotiation, peer reconnecting to a group we
+    /// subscribed to).
+    ///
+    /// Rows self-clean: after each round any row whose group no longer
+    /// exists locally or whose peer is no longer a member (owner left,
+    /// member kicked) is dropped, so the table cannot grow unbounded.
+    pub fn start_group_key_redeliver(self: &Arc<Self>) {
+        if !self
+            .loops
+            .try_start(&self.loops.group_key_redeliver_started)
+        {
+            return;
+        }
+        let client = self.clone();
+        let _ = std::thread::Builder::new()
+            .name("chatx-group-key-redeliver".to_string())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build group-key-redeliver runtime");
+                rt.block_on(async {
+                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+                    loop {
+                        tick.tick().await;
+                        if client.is_stopped() {
+                            break;
+                        }
+                        client.redeliver_pending_group_keys(None).await;
+                    }
+                });
+            })
+            .expect("spawn group-key-redeliver thread");
+    }
+
+    /// One group-key redelivery round (see [`Self::start_group_key_redeliver`]).
+    /// `peer` = `None` for the loop scan (all due rows), or a specific base58
+    /// peer id for the Connected/Discovered fast-path (drain only its rows).
+    pub async fn redeliver_pending_group_keys(&self, peer: Option<&str>) {
+        let Some(pool) = self.store.pool() else {
+            return;
+        };
+        let rows = match peer {
+            Some(p) => sqlite::gkeyq::due_for_peer(&pool, p, 64).await,
+            None => sqlite::gkeyq::due(&pool, 64).await,
+        };
+        let rows = match rows {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("[group-key-redeliver] scan failed: {e}");
+                return;
+            }
+        };
+        for row in rows {
+            // The group vanished (owner left / deleted) — nothing to send.
+            if self.get_group(&row.group_id).is_none() {
+                let _ = sqlite::gkeyq::remove(&pool, &row.group_id, &row.peer_base58).await;
+                continue;
+            }
+            // The member was kicked or is otherwise no longer in the group.
+            if !self
+                .get_group(&row.group_id)
+                .map(|g| g.has(&row.peer_base58))
+                .unwrap_or(false)
+            {
+                let _ = sqlite::gkeyq::remove(&pool, &row.group_id, &row.peer_base58).await;
+                continue;
+            }
+            // Passive by design: only redeliver over a live link.
+            if !self.peer_connected_str(&row.peer_base58) {
+                continue;
+            }
+            if self.redeliver_group_key_once(&row.group_id, &row.peer_base58).await {
+                let _ = sqlite::gkeyq::remove(&pool, &row.group_id, &row.peer_base58).await;
+                tracing::info!(
+                    group = %row.group_id,
+                    peer = %row.peer_base58,
+                    "[group-key-redeliver] key delivered to reconnected member"
+                );
+            } else {
+                let _ = sqlite::gkeyq::bump(&pool, &row.group_id, &row.peer_base58).await;
+            }
+        }
+    }
+
+    /// Re-send one group's key to one currently-connected member, awaiting
+    /// the ack. Safe to call for a member that already has the key — the
+    /// receiver rebuilds the `Group` from `resolve_group` + bundle, both
+    /// idempotent.
+    async fn redeliver_group_key_once(&self, group_id: &str, peer_base58: &str) -> bool {
+        let g = match self.get_group(group_id) {
+            Some(g) => g,
+            None => return false,
+        };
+        let me = self.peer_base58();
+        if peer_base58 == me {
+            return true;
+        }
+        let their_e2e = match g.member(peer_base58) {
+            Some(mi) => mi.e2e_public.clone(),
+            None => return false,
+        };
+        let bundle = match group::seal_secret(self.account(), &their_e2e, &g.secret()) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    peer = peer_base58,
+                    group = group_id,
+                    "group-key redeliver: seal failed: {e}"
+                );
+                return false;
+            }
+        };
+        let sealed = crate::account::b64(&bundle);
+        let pid = match peer_base58.parse::<PeerId>() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        match self
+            .deliver_group_key(group_id, peer_base58, pid, sealed)
+            .await
+        {
+            Ok(true) => true,
+            Ok(false) | Err(_) => false,
+        }
     }
 
     /// One redelivery round. Two always-run steps, then per-row dispatch:
@@ -3824,6 +3964,26 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             return Ok(false);
         }
         self.save_group(&g)?;
+        // The kicked member can never re-join in P2P mode — stop the pending
+        // key redelivery for this pair (otherwise the loop keeps retrying a
+        // peer that is no longer a member). This caller is sync and may run
+        // where no tokio runtime exists (Slint thread), so spawn a worker
+        // thread with its own runtime — same pattern as `publish_group_key`.
+        if let Some(pool) = self.store.pool() {
+            let gid = group_id.to_string();
+            let pid = peer_id.to_string();
+            let _ = std::thread::Builder::new()
+                .name(format!("chatx-gkeyq-clean-{gid}"))
+                .spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("build gkeyq-clean runtime");
+                    if let Err(e) = rt.block_on(sqlite::gkeyq::remove(&pool, &gid, &pid)) {
+                        tracing::warn!(group = %gid, peer = %pid, "kick_member: gkeyq remove failed: {e}");
+                    }
+                });
+        }
         if g.mode == group::GroupMode::Server {
             let _ = self.dir.delete_group_key_slot(group_id, peer_id);
             self.announce_group(group_id)?;
@@ -4235,6 +4395,20 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 group = group_id,
                 "group-key deliver: peer did not ack even after a retry round"
             );
+            // Durable redelivery: remember the failure so the background
+            // group-key loop (`redeliver_pending_group_keys`) re-sends the key
+            // once this peer is reachable again — including after the owner's
+            // client restarts. The receiver is idempotent, so a later
+            // redelivery is safe.
+            if let Some(pool) = self.store.pool() {
+                if let Err(e) = sqlite::gkeyq::enqueue(&pool, group_id, &pid.to_string()).await {
+                    tracing::warn!(
+                        peer = %pid,
+                        group = group_id,
+                        "group-key deliver: queue enqueue failed: {e}"
+                    );
+                }
+            }
         }
         Ok(delivered)
     }
@@ -4714,14 +4888,18 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         if let sw::ChatEvent::Discovered { peer, .. } = &evt {
             let b58 = peer.to_base58();
             self.redeliver_due(Some(b58.as_str())).await;
+            self.redeliver_pending_group_keys(Some(b58.as_str())).await;
         }
         // A peer just connected inbound: flush any DMs we had queued for it.
         // `redeliver_due` is now fastpath-only (no dial), so this succeeds
         // only because a live link exists — exactly the "wait until they
-        // connect in, then send" path.
+        // connect in, then send" path. Same for pending group keys: the
+        // member missed its invite and this is their (re)connection — the
+        // only moment a passive redelivery can succeed.
         if let sw::ChatEvent::Connected(peer) = &evt {
             let b58 = peer.to_base58();
             self.redeliver_due(Some(b58.as_str())).await;
+            self.redeliver_pending_group_keys(Some(b58.as_str())).await;
         }
         match evt {
             E::Text { peer, req } => {
