@@ -658,6 +658,9 @@ pub fn run_app() {
     // the UI thread, then push the initial rows.
     {
         models::set_ui(weak.clone());
+        // Restore the persisted model selection so the actor's backend (created
+        // lazily on the first turn) loads the real GGUF, not the echo backend.
+        models::restore_on_launch();
         let a = ui.global::<AiAssistantState>();
         let rows = models::rows();
         let selected = rows.iter().find(|r| r.selected).map(|r| r.name.clone());

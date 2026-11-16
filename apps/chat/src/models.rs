@@ -84,6 +84,35 @@ fn part_for(name: &str) -> PathBuf {
     models_dir().join(format!("{name}.gguf.part"))
 }
 
+/// Where the active model's catalog name is persisted (same profile-scoped dir
+/// as the `.gguf` files), so the next launch auto-selects it.
+fn selected_model_file() -> PathBuf {
+    models_dir().join("selected-model")
+}
+
+/// Persist the active model's catalog name to disk.
+fn save_selected(name: &str) {
+    let _ = std::fs::create_dir_all(models_dir());
+    let _ = std::fs::write(selected_model_file(), name);
+}
+
+/// The persisted active model, if it is a valid catalog entry whose `.gguf` is
+/// present on disk. Used to restore the selection on launch.
+pub fn persisted_selected() -> Option<String> {
+    let name = std::fs::read_to_string(selected_model_file()).ok()?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let list = catalog();
+    if !list.iter().any(|(n, _)| *n == name) {
+        return None;
+    }
+    if !file_for(&name).exists() {
+        return None;
+    }
+    Some(name)
+}
+
 struct State {
     status: HashMap<String, String>,
     done: HashMap<String, u64>,
@@ -116,7 +145,9 @@ pub fn set_ui(weak: slint::Weak<crate::MainWindow>) {
 
 fn init(s: &mut State) {
     if !s.status.is_empty() { return; }
-    s.selected = crate::selected_model_name();
+    // Persisted selection (survives restarts) wins over the CHATX_MODEL env
+    // override; both fall back to the built-in default ("").
+    s.selected = persisted_selected().unwrap_or_else(|| crate::selected_model_name());
     for (name, _) in catalog() {
         if file_for(name).exists() {
             s.status.insert(name.to_string(), "ready".into());
@@ -169,9 +200,19 @@ pub fn select(name: &str) {
     let path = file_for(name);
     if !path.exists() { return; }
     STATE.lock().unwrap().selected = name.to_string();
+    save_selected(name);
     chatx_agent::set_selected_model(Some(path));
     crate::ai::reload();
     publish_rows();
+}
+
+/// On launch, restore the persisted model selection: point the runtime override
+/// at its `.gguf` so the actor's backend (and the first turn) uses the real LLM
+/// instead of the echo backend. Safe no-op if nothing is persisted yet.
+pub fn restore_on_launch() {
+    let Some(name) = persisted_selected() else { return };
+    let path = file_for(&name);
+    chatx_agent::set_selected_model(Some(path));
 }
 
 pub fn download(name: &str) {
@@ -245,6 +286,7 @@ fn finalize(name: &str, file: &mut std::fs::File, part: &PathBuf, dst: &PathBuf)
         return;
     }
     chatx_agent::set_selected_model(Some(dst.clone()));
+    save_selected(name);
     {
         let mut s = STATE.lock().unwrap();
         s.status.insert(name.to_string(), "ready".into());
