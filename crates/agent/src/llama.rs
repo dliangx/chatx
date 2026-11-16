@@ -13,6 +13,11 @@
 //! small word-ish chunks so callers get the same token-stream experience as
 //! a true tokenizer-stream, without exposing the non-`Send` model internals
 //! across the iterator boundary.
+//!
+//! The conversation is converted to a prompt with the **model's own chat
+//! template** (`llama_model_chat_template` + `llama_chat_apply_template`), so
+//! the role framing (`<system>/<user>/<assistant>`) is whatever the GGUF was
+//! trained with — not a hand-rolled `<<user>>` tag the model may not know.
 
 use std::path::Path;
 
@@ -25,26 +30,30 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend as LlamaRuntime;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::LlamaModel;
+use llama_cpp_2::model::{LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 
 /// A local GGUF model loaded with `llama-cpp-2`.
 pub struct LlamaBackend {
     _runtime: LlamaRuntime,
     model: LlamaModel,
+    /// The model's chat template, fetched once at load.
+    chat_template: LlamaChatTemplate,
+    /// Context window (tokens) the model is asked to run with.
+    n_ctx: u32,
     /// Hard cap on generated tokens per turn (guard against runaway output).
     max_tokens: u32,
 }
 
 impl LlamaBackend {
     /// Load a GGUF file. `n_ctx` is the context window (defaults to 4096);
-    /// `max_tokens` caps the assistant's output length per turn (default 512).
+    /// `max_tokens` caps the assistant's output length per turn (default 2048).
     pub fn load(
         path: impl AsRef<Path>,
         n_ctx: u32,
         max_tokens: u32,
     ) -> Result<Self> {
-        use std::num::NonZeroU32;
+        let n_ctx = n_ctx.max(512);
 
         let backend = LlamaRuntime::init().map_err(|e| Error::Model(e.to_string()))?;
         let model = LlamaModel::load_from_file(
@@ -54,38 +63,54 @@ impl LlamaBackend {
         )
         .map_err(|e| Error::Model(format!("load model: {e}")))?;
 
-        let ctx = model
-            .new_context(
-                &backend,
-                LlamaContextParams::default()
-                    .with_n_ctx(Some(NonZeroU32::new(n_ctx.max(512)).unwrap_or(NonZeroU32::new(4096).unwrap()))),
-            )
-            .map_err(|e| Error::Model(format!("new context: {e}")))?;
-
-        // NOTE: we keep `ctx` alive for the lifetime of the backend by
-        // storing it inside the model wrapper below; but `LlamaModel` does not
-        // own a context. Instead we re-create a context per `generate` call
-        // (cheap — the expensive part, the model, is reused). Dropping `ctx`
-        // here only frees the per-call KV cache.
-        drop(ctx);
+        // Fetch the model's own chat template once; the prompt for every
+        // completion is rendered through it (see `complete`).
+        let chat_template = model
+            .chat_template(None)
+            .map_err(|e| Error::Model(format!("no chat template: {e}")))?;
 
         Ok(Self {
             _runtime: backend,
             model,
+            chat_template,
+            n_ctx,
             max_tokens,
         })
     }
 
-    /// Load with default context (4096) and output cap (512).
+    /// Load with default context (4096) and output cap (2048).
     pub fn load_default(path: impl AsRef<Path>) -> Result<Self> {
-        Self::load(path, 4096, 512)
+        Self::load(path, 4096, 2048)
+    }
+
+    /// Convert a [`Conversation`] into a prompt string using the model's own
+    /// chat template (system + history, assistant slot appended).
+    fn render_prompt(&self, conversation: &Conversation) -> Result<String> {
+        let mut messages: Vec<LlamaChatMessage> = Vec::new();
+        if !conversation.system().is_empty() {
+            messages.push(LlamaChatMessage::new("system".into(), conversation.system().into())
+                .map_err(|e| Error::Other(format!("system message: {e}")))?)
+        }
+        for m in conversation.history() {
+            let role = match m.role {
+                crate::Role::System => "system",
+                crate::Role::User => "user",
+                crate::Role::Assistant => "assistant",
+            };
+            messages.push(LlamaChatMessage::new(role.into(), m.text.clone())
+                .map_err(|e| Error::Other(format!("message: {e}")))?)
+        }
+
+        self.model
+            .apply_chat_template(&self.chat_template, &messages, true)
+            .map_err(|e| Error::Model(format!("apply chat template: {e}")))
     }
 
     /// Run one completion over `conversation`, returning the assistant text.
     fn complete(&mut self, conversation: &Conversation) -> Result<String> {
         use std::num::NonZeroU32;
 
-        let prompt = conversation.render();
+        let prompt = self.render_prompt(conversation)?;
 
         let backend = &self._runtime;
         let mut ctx = self
@@ -93,7 +118,7 @@ impl LlamaBackend {
             .new_context(
                 backend,
                 LlamaContextParams::default()
-                    .with_n_ctx(Some(NonZeroU32::new(4096).unwrap())),
+                    .with_n_ctx(Some(NonZeroU32::new(self.n_ctx).unwrap_or(NonZeroU32::new(4096).unwrap()))),
             )
             .map_err(|e| Error::Model(format!("new context: {e}")))?;
 
@@ -103,7 +128,9 @@ impl LlamaBackend {
             return Err(Error::Model("prompt exceeds context window".into()));
         }
 
-        let mut batch = LlamaBatch::new(512, 1);
+        // The batch must hold the whole prompt at once; size it to the prompt
+        // (not a fixed 512) so longer first messages don't hit InsufficientSpace.
+        let mut batch = LlamaBatch::new(tokens_list.len().max(1), 1);
         let last_index: i32 = (tokens_list.len() - 1) as i32;
         for (i, token) in (0_i32..).zip(tokens_list) {
             let is_last = i == last_index;
@@ -149,12 +176,14 @@ impl LlamaBackend {
 impl Llm for LlamaBackend {
     fn generate(&mut self, conversation: &Conversation) -> Result<Box<dyn Iterator<Item = String>>> {
         let text = self.complete(conversation)?;
-        // Yield in ~24-char chunks so the consumer gets word-ish streaming.
-        let chunks: Vec<String> = text
-            .as_bytes()
-            .chunks(24)
-            .map(|c| String::from_utf8_lossy(c).into_owned())
-            .collect();
+        // Yield in ~16-char chunks so the consumer gets word-ish streaming.
+        // Chunk by CHAR (not byte): splitting UTF-8 mid-codepoint would turn
+        // the broken fragment into U+FFFD (the "?" replacement char).
+        let chars: Vec<char> = text.chars().collect();
+        let mut chunks: Vec<String> = Vec::new();
+        for group in chars.chunks(16) {
+            chunks.push(group.iter().collect());
+        }
         Ok(Box::new(chunks.into_iter()))
     }
 }

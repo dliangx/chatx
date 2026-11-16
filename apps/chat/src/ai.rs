@@ -83,7 +83,6 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
                 let ui_text = text.clone();
                 conv.user(text);
                 conv.trim_to_budget(2048);
-                let prompt = conv.render();
 
                 let _ = tx.send(UiEvent::Row(AiMessageRow {
                     side: 0, pending: false, text: SharedString::from(ui_text),
@@ -92,9 +91,8 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
                     side: 1, pending: true, text: SharedString::new(),
                 }));
 
-                let c = chatx_agent::Conversation::new(prompt);
                 let mut collected = String::new();
-                match backend.generate(&c) {
+                match backend.generate(&conv) {
                     Ok(mut iter) => {
                         for tok in iter.by_ref() {
                             collected.push_str(&tok);

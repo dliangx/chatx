@@ -16,6 +16,7 @@ A cross-platform P2P chat application written in Rust. Private messaging, group 
 - **Media in chat** — images, voice messages (record and play), camera photos
 - **Moments / Discover** — a post feed with photos, likes, comments and recommendations
 - **Accounts & devices** — a local sealed keystore, device approval, multi-profile and autologin
+- **AI assistant** — local, on-device LLM copilot (no network); powered by a GGUF model via `llama.cpp`, see [`apps/bot/README.md`](apps/bot/README.md)
 - **UI** — Slint, light/dark themes, and i18n (English, 中文, 日本語, Español, Français, Русский…)
 - **Storage** — local SQLite database; log file under the user's home directory
 

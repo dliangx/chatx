@@ -2,20 +2,47 @@ import { Theme } from "theme.slint";
 import { Header } from "components/header.slint";
 import { Icon, Glyph } from "components/icon.slint";
 import { AiAssistantState, AiMessageRow } from "components/app_state.slint";
+import { ScrollView } from "std-widgets.slint";
 
 export component AiAssistantView inherits Rectangle {
     width: 100%;
     height: 100%;
     background: Theme.bg;
 
-    out property <length> row-h: 34px;
     out property <length> row-gap: 10px;
     out property <length> list-top: 48px;
-    out property <length> input-h: 56px;
-    out property <length> content-h:
-        AiAssistantState.messages.length * (root.row-h + root.row-gap);
-    out property <length> bubble-cap: root.width - 40px;
+    out property <length> bubble-pad: 12px;
+    out property <length> bubble-min-h: 38px;
     out property <bool> can-send: !AiAssistantState.busy && AiAssistantState.draft != "";
+
+    // ── input box sizing (grows with the draft, like `chat_input.slint`) ──
+    // A hidden `imeasure` Text (same font/width/wrap as the input) measures the
+    // draft's laid-out height; the box grows to fit it, clamped to [box-h-min,
+    // box-h-max]. Past the cap the input scrolls internally (Flickable) instead
+    // of growing the page.
+    out property <length> in-pad: 10px;
+    out property <length> box-top-pad: 6px;
+    out property <length> box-bottom-pad: 8px;
+    out property <length> box-h-min: 40px;
+    out property <length> box-h-max: 168px;
+    out property <length> box-w: root.width - 92px;
+    out property <length> field-w: root.box-w - 2 * root.in-pad;
+    out property <length> raw-h: imeasure.preferred-height;
+    out property <length> box-h: min(root.box-h-max, max(root.box-h-min,
+        root.raw-h + 2 * root.in-pad));
+    out property <length> field-h: root.box-h - 2 * root.in-pad;
+    out property <length> content-h: max(root.field-h, root.raw-h);
+    out property <length> input-h: root.box-h + root.box-top-pad + root.box-bottom-pad;
+
+    function send() {
+        let t = AiAssistantState.draft;
+        if (t != "" && !AiAssistantState.busy) {
+            AiAssistantState.draft = "";
+            AiAssistantState.error = "";
+            AiAssistantState.busy = true;
+            AiAssistantState.send(t);
+        }
+    }
 
     // Pump tokens from the actor thread while a turn is in flight
     // (the `pump-mini-app` pattern: a UI Timer drains the channel).
@@ -29,64 +56,102 @@ export component AiAssistantView inherits Rectangle {
         name: @tr("AI assistant");
     }
 
-    // ── messages ────────────────────────────────────────────────────────────
-    list := Flickable {
+    if AiAssistantState.messages.length == 0:
+    Text {
+        x: 0px;
+        y: 180px;
+        width: parent.width;
+        height: 24px;
+        text: @tr("Ask me anything");
+        horizontal-alignment: center;
+        font-size: 14px;
+        color: Theme.fg-muted;
+    }
+
+    list := ScrollView {
         x: 0px;
         y: root.list-top;
         width: parent.width;
         height: parent.height - root.list-top - root.input-h;
-        content-height: root.content-h;
-        interactive: root.content-h > self.height;
 
-        // Auto-scroll to the newest line whenever the list grows (streaming).
-        in-out property <length> last-ch: root.content-h;
+        // While a turn is streaming, keep the newest bubble in view.
         Timer {
-            interval: 16ms;
-            running: list.last-ch != root.content-h && root.content-h > 0px;
+            interval: 40ms;
+            running: AiAssistantState.busy;
             triggered => {
-                list.last-ch = root.content-h;
-                let max = root.content-h - list.height;
-                list.content-y = (max > 0px) ? max : 0px;
+                list.content-y = min(0px, -(list.content-height - list.visible-height));
             }
         }
 
-        for row[i] in AiAssistantState.messages: Rectangle {
-            x: 0px;
-            y: i * (root.row-h + root.row-gap);
-            width: parent.width;
-            height: root.row-h;
+        VerticalLayout {
+            width: 100%;
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            spacing: root.row-gap;
 
-            // user (side 0) → right + brand; assistant (side 1) → left + surface.
-            Rectangle {
-                out property <length> cap-w: min(320px, root.bubble-cap);
-                width: min(max(44px, bubble.preferred-width), cap-w);
-                height: 34px;
-                x: row.side == 0 ? parent.width - 10px - self.width : 10px;
-                border-radius: 12px;
-                background: row.side == 0 ? Theme.brand : Theme.surface;
-                clip: true;
-
-                bubble := Text {
-                    x: 10px;
-                    y: 0px;
-                    width: parent.width - 20px;
-                    height: 100%;
+            for row[i] in AiAssistantState.messages: card := Rectangle {
+                in property <length> bubble-cap: parent.width * 0.8;
+                measure := Text {
+                    width: card.bubble-cap;
                     text: row.text;
-                    overflow: elide;
                     font-size: 13px;
-                    color: row.side == 0 ? Theme.fg-on-accent : Theme.fg;
-                    horizontal-alignment: left;
-                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    visible: false;
+                    accessible-role: none;
                 }
 
-                // streaming spinner on the active (pending) assistant line.
-                if row.side == 1 && row.pending:
-                Icon {
-                    x: parent.width - 28px;
-                    y: 6px;
-                    size: 22px;
-                    glyph: Glyph.record;
-                    tint: Theme.brand;
+                out property <length> bubble-w:
+                    max(2 * root.bubble-pad, min(measure.preferred-width + 2 * root.bubble-pad, card.bubble-cap));
+
+                hmeasure := Text {
+                    width: max(0px, min(measure.preferred-width + 2 * root.bubble-pad, card.bubble-cap) - 2 * root.bubble-pad);
+                    text: row.text;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                    visible: false;
+                    accessible-role: none;
+                }
+
+                out property <length> bubble-h:
+                    max(root.bubble-min-h, hmeasure.preferred-height + 2 * root.bubble-pad);
+
+                width: 100%;
+                height: card.bubble-h;
+
+                // user (side 0) → right + brand; assistant (side 1) → left + surface.
+                bubble := Rectangle {
+                    width: card.bubble-w;
+                    height: parent.height;
+                    x: row.side == 0 ? parent.width - 16px - self.width : 16px;
+                    border-radius: 14px;
+                    background: row.side == 0 ? Theme.brand : Theme.surface;
+                    clip: true;
+
+                    Text {
+                        x: root.bubble-pad;
+                        y: root.bubble-pad;
+                        width: parent.width - 2 * root.bubble-pad;
+                        height: parent.height - 2 * root.bubble-pad;
+                        text: row.text;
+                        wrap: word-wrap;
+                        overflow: clip;
+                        font-size: 13px;
+                        color: row.side == 0 ? Theme.fg-on-accent : Theme.fg;
+                        horizontal-alignment: left;
+                        vertical-alignment: top;
+                    }
+
+                    // streaming spinner on the active (pending) assistant line.
+                    if row.side == 1 && row.pending:
+                    Icon {
+                        x: parent.width - 26px;
+                        y: 8px;
+                        size: 20px;
+                        glyph: Glyph.record;
+                        tint: Theme.brand;
+                    }
                 }
             }
         }
@@ -118,28 +183,65 @@ export component AiAssistantView inherits Rectangle {
             x: 0px; y: 0px; width: 100%; height: 1px; background: Theme.border;
         }
 
-        // input box (leaves room for the send button on the right).
+        // Measures the draft's laid-out height (same font/width/wrap as the
+        // input). Drives `box-h` so the box grows with the text.
+        imeasure := Text {
+            width: root.field-w;
+            text: AiAssistantState.draft;
+            font-size: 14px;
+            wrap: word-wrap;
+            visible: false;
+            accessible-role: none;
+        }
+
+        // input box (grows with the draft; leaves room for the send button).
         Rectangle {
             x: 10px;
-            y: (parent.height - 40px) / 2;
-            width: parent.width - 92px;
-            height: 40px;
+            y: (parent.height - root.box-h) / 2;
+            width: root.box-w;
+            height: root.box-h;
             background: Theme.surface;
-            border-radius: 20px;
+            border-radius: 14px;
             border-width: 1px;
             border-color: Theme.border;
             clip: true;
 
-            TextInput {
-                x: 14px;
-                y: 0px;
-                width: parent.width - 28px;
-                height: 100%;
-                vertical-alignment: center;
-                font-size: 14px;
-                color: Theme.fg;
-                single-line: true;
-                text <=> AiAssistantState.draft;
+            // Scrolls internally once the draft outgrows `box-h-max`.
+            Flickable {
+                x: root.in-pad;
+                y: root.in-pad;
+                width: root.field-w;
+                height: root.field-h;
+                content-height: root.content-h;
+                interactive: true;
+
+                input := TextInput {
+                    x: 0px;
+                    y: 0px;
+                    width: 100%;
+                    height: max(parent.height, root.raw-h);
+                    vertical-alignment: top;
+                    font-size: 14px;
+                    color: Theme.fg;
+                    single-line: false;
+                    wrap: word-wrap;
+                    text <=> AiAssistantState.draft;
+                    text-cursor-width: 3px;
+                    selection-background-color: Theme.brand;
+                    selection-foreground-color: white;
+                }
+
+                placeholder := Text {
+                    x: 0px;
+                    y: 0px;
+                    width: 100%;
+                    height: 20px;
+                    text: @tr("Ask me anything…");
+                    font-size: 14px;
+                    color: Theme.fg-muted;
+                    visible: AiAssistantState.draft == "";
+                    vertical-alignment: top;
+                }
             }
         }
 
@@ -149,29 +251,23 @@ export component AiAssistantView inherits Rectangle {
             y: (parent.height - 40px) / 2;
             width: 56px;
             height: 40px;
-            border-radius: 20px;
+            border-radius: 14px;
             background: Theme.brand;
             opacity: root.can-send ? 1.0 : 0.4;
             clip: true;
-            Icon {
-                x: (56px - 22px) / 2;
-                y: (40px - 22px) / 2;
-                size: 22px;
-                glyph: Glyph.up;
-                tint: Theme.fg-on-accent;
+            Text {
+                width: 100%;
+                height: 100%;
+                text: @tr("Send");
+                font-size: 13px;
+                color: Theme.fg-on-accent;
+                horizontal-alignment: center;
+                vertical-alignment: center;
             }
             TouchArea {
                 width: 100%;
                 height: 100%;
-                clicked => {
-                    let t = AiAssistantState.draft;
-                    if (t != "" && !AiAssistantState.busy) {
-                        AiAssistantState.draft = "";
-                        AiAssistantState.error = "";
-                        AiAssistantState.busy = true;
-                        AiAssistantState.send(t);
-                    }
-                }
+                clicked => { root.send(); }
             }
         }
     }
