@@ -149,6 +149,17 @@ export struct AiMessageRow {
     pending: bool,
 }
 
+/// One row in the AI-assistant model picker. `status` is one of
+/// `not-started` | `downloading` | `paused` | `ready` | `error`;
+/// `progress` is 0.0..1.0; `selected` marks the active model.
+export struct AiModelRow {
+    name: string,
+    status: string,
+    progress: float,
+    error: string,
+    selected: bool,
+}
+
 export global AppState {
     in-out property <NavigationState> nav-state: { active-tab:0, tabs: [], global-overlay: GlobalOverlayType.None };
     callback push-sub(SubPageType, int);
@@ -318,6 +329,14 @@ export global AiAssistantState {
     in property <bool> busy: false;
     /// One-line status: "" = ok, otherwise the last error (shown under the list).
     in property <string> error: "";
+    /// The available models (one row each), populated by the model manager.
+    in property <[AiModelRow]> models: [];
+    /// The name of the currently-active model ("" = the built-in default).
+    in property <string> selected-model-name: "";
+    /// True while the model picker sheet is open over the assistant view.
+    in-out property <bool> model-open: false;
+    /// Download source: false = huggingface.co, true = hf-mirror.com.
+    in-out property <bool> model-mirror: false;
     /// The user pressed send with `draft` (the view clears `draft` itself).
     callback send(string);
     /// "Clear conversation" was tapped.
@@ -325,4 +344,14 @@ export global AiAssistantState {
     /// Driven by a UI Timer while `busy`: pull any tokens the actor thread has
     /// produced since the last pump (the `pump-mini-app` pattern).
     callback pump();
+    /// Pick `name` as the active model (it must already be downloaded).
+    callback model-select(string);
+    /// Start downloading `name`.
+    callback model-download(string);
+    /// Switch the download source (false = huggingface.co, true = mirror).
+    callback model-source(bool);
+    /// Cancel an in-flight download of `name`.
+    callback model-cancel(string);
+    /// Pause / resume an in-flight download of `name`.
+    callback model-pause(string);
 }

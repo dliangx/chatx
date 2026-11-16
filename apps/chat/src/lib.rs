@@ -14,6 +14,7 @@ use data::ArcBackend;
 pub mod call;
 pub mod call_dispatcher;
 pub mod ai;
+pub mod models;
 pub mod chat;
 pub mod image;
 pub mod moment;
@@ -354,6 +355,21 @@ fn profile() -> String {
     chatx_core::identity::DeviceIdentity::default_profile()
 }
 
+/// The catalog name of the currently-active model, or `""` for the built-in
+/// default. Prefers the `CHATX_MODEL` env var's basename; the download manager
+/// otherwise records its own selection.
+fn selected_model_name() -> String {
+    std::env::var("CHATX_MODEL")
+        .ok()
+        .and_then(|v| {
+            std::path::Path::new(&v)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .and_then(|n| n.strip_suffix(".gguf").map(|n| n.to_string()))
+        })
+        .unwrap_or_default()
+}
+
 fn keystore_path(profile: &str) -> std::path::PathBuf {
     chatx_core::identity::DeviceIdentity::keystore_path(profile)
 }
@@ -634,6 +650,42 @@ pub fn run_app() {
         });
         ui.global::<AiAssistantState>().on_pump(move || {
             ai::pump(wp.clone());
+        });
+    }
+
+    // ── AI-assistant model manager (built-in GGUF catalog + downloads) ──────
+    // Register the UI handle so download threads can publish progress back onto
+    // the UI thread, then push the initial rows.
+    {
+        models::set_ui(weak.clone());
+        let a = ui.global::<AiAssistantState>();
+        let rows = models::rows();
+        let selected = rows.iter().find(|r| r.selected).map(|r| r.name.clone());
+        if let Some(name) = selected {
+            a.set_selected_model_name(name);
+        }
+        a.set_model_mirror(models::is_mirror());
+        a.set_models(slint::ModelRc::new(slint::VecModel::from(rows)));
+    }
+    {
+        ui.global::<AiAssistantState>().on_model_select(|name| {
+            let n = name.to_string();
+            models::select(&n);
+        });
+        ui.global::<AiAssistantState>().on_model_download(|name| {
+            let n = name.to_string();
+            models::download(&n);
+        });
+        ui.global::<AiAssistantState>().on_model_source(|mirror| {
+            models::set_source(mirror);
+        });
+        ui.global::<AiAssistantState>().on_model_cancel(|name| {
+            let n = name.to_string();
+            models::cancel(&n);
+        });
+        ui.global::<AiAssistantState>().on_model_pause(|name| {
+            let n = name.to_string();
+            models::pause_toggle(&n);
         });
     }
 

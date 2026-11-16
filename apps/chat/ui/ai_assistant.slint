@@ -54,6 +54,28 @@ export component AiAssistantView inherits Rectangle {
 
     Header {
         name: @tr("AI assistant");
+        // Download / model-picker button in the header's right zone, on the
+        // same baseline as the title.
+        Rectangle {
+            width: 28px;
+            height: 28px;
+            border-radius: 14px;
+            background: AiAssistantState.model-open ? Theme.brand-soft-bg : transparent;
+            Icon {
+                x: (28px - 20px) / 2;
+                y: (28px - 20px) / 2;
+                size: 20px;
+                glyph: Glyph.setting;
+                tint: AiAssistantState.model-open ? Theme.brand : Theme.fg;
+            }
+            TouchArea {
+                width: 40px;
+                height: 40px;
+                x: -6px;
+                y: -6px;
+                clicked => { AiAssistantState.model-open = !AiAssistantState.model-open; }
+            }
+        }
     }
 
     if AiAssistantState.messages.length == 0:
@@ -268,6 +290,231 @@ export component AiAssistantView inherits Rectangle {
                 width: 100%;
                 height: 100%;
                 clicked => { root.send(); }
+            }
+        }
+    }
+
+    // ── model picker (toggle by the header download button) ─────────────────
+    if AiAssistantState.model-open:
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Theme.overlay;
+        clip: true;
+
+        model-card := Rectangle {
+            x: 12px;
+            y: 56px;
+            width: parent.width - 24px;
+            height: min(64 * parent.width * 0.5, parent.height - 96px);
+            background: Theme.surface;
+            border-radius: 16px;
+            clip: true;
+
+            VerticalLayout {
+                padding-top: 12px;
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-bottom: 8px;
+
+                // header row: title (stretches) + source toggle (HF / Mirror) + close
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: @tr("Choose a model");
+                        font-size: 16px;
+                        font-weight: 600;
+                        color: Theme.fg;
+                        vertical-alignment: center;
+                    }
+                    // source buttons (mutually exclusive): which host to download from
+                    Rectangle {
+                        width: 40px;
+                        height: 28px;
+                        border-radius: 8px;
+                        background: !AiAssistantState.model-mirror ? Theme.brand : Theme.surface-2;
+                        clip: true;
+                        Text {
+                            width: 100%;
+                            height: 100%;
+                            text: @tr("HF");
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: !AiAssistantState.model-mirror ? Theme.fg-on-accent : Theme.fg;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => {
+                                if (AiAssistantState.model-mirror) {
+                                    AiAssistantState.model-mirror = false;
+                                    AiAssistantState.model-source(false);
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 64px;
+                        height: 28px;
+                        border-radius: 8px;
+                        background: AiAssistantState.model-mirror ? Theme.brand : Theme.surface-2;
+                        clip: true;
+                        Text {
+                            width: 100%;
+                            height: 100%;
+                            text: @tr("Mirror");
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: AiAssistantState.model-mirror ? Theme.fg-on-accent : Theme.fg;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => {
+                                if (!AiAssistantState.model-mirror) {
+                                    AiAssistantState.model-mirror = true;
+                                    AiAssistantState.model-source(true);
+                                }
+                            }
+                        }
+                    }
+                    Icon {
+                        size: 20px;
+                        glyph: Glyph.close;
+                        tint: Theme.fg;
+                        TouchArea {
+                            width: 32px;
+                            height: 32px;
+                            clicked => { AiAssistantState.model-open = false; }
+                        }
+                    }
+                }
+
+                // current download source (shown under the header row)
+                Text {
+                    width: 100%;
+                    height: 12px;
+                    text: AiAssistantState.model-mirror
+                        ? "https://hf-mirror.com"
+                        : "https://huggingface.co";
+                    font-size: 12px;
+                    color: Theme.fg-muted;
+                }
+
+                // scrollable model list — rows stack in a layout (no absolute y)
+                Flickable {
+                    width: 100%;
+                    content-height: AiAssistantState.models.length * 56px;
+                    interactive: AiAssistantState.models.length * 56px > self.height;
+
+                    VerticalLayout {
+                        spacing: 0px;
+                        padding-top: 20px;
+                        for row in AiAssistantState.models: Rectangle {
+                            width: 100%;
+                            height: 56px;
+
+                            // text block — relative layout (name / status / progress bar stack)
+                            VerticalLayout {
+                                x: 0;
+                                width: parent.width - 116px;
+                                spacing: 2px;
+                                padding-top: 6px;
+                                padding-bottom: 4px;
+
+                                Text {
+                                    width: 100%;
+                                    height: 24px;
+                                    text: row.name;
+                                    font-size: 14px;
+                                    color: Theme.fg;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    width: 100%;
+                                    height: 16px;
+                                    font-size: 11px;
+                                    color: row.status == "error" ? Theme.danger : Theme.fg-muted;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    text:
+                                        row.status == "not-started" ? @tr("Not downloaded")
+                                        : row.status == "downloading" ? @tr("Downloading…")
+                                        : row.status == "paused" ? @tr("Paused")
+                                        : row.status == "ready" ? (@tr("Ready") + (row.selected ? " · " + @tr("Selected") : ""))
+                                        : row.error;
+                                }
+                                Rectangle {
+                                    width: 100%;
+                                    height: 3px;
+                                    background: Theme.border;
+                                    clip: true;
+                                    Rectangle {
+                                        width: parent.width * row.progress;
+                                        height: 100%;
+                                        background: row.selected ? Theme.success : Theme.brand;
+                                    }
+                                }
+                            }
+
+                            // action button — anchored to the row's right edge
+                            Rectangle {
+                                x: parent.width - 116px;
+                                y: 14px;
+                                width: 100px;
+                                height: 28px;
+                                border-radius: 14px;
+                                background:
+                                    row.status == "ready" ? Theme.brand
+                                    : row.status == "downloading" ? Theme.surface-2
+                                    : row.status == "paused" ? Theme.surface-2
+                                    : row.status == "error" ? Theme.danger
+                                    : Theme.brand;
+                                opacity: (row.status == "ready" && row.selected) ? 0.5 : 1.0;
+                                clip: true;
+                                Text {
+                                    width: 100%;
+                                    height: 100%;
+                                    font-size: 12px;
+                                    color: (row.status == "ready" || row.status == "error")
+                                        ? (row.status == "error" ? #ffffff : Theme.fg-on-accent)
+                                        : Theme.fg;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    text:
+                                        row.status == "not-started" ? @tr("Download")
+                                        : row.status == "downloading" ? @tr("Cancel")
+                                        : row.status == "paused" ? @tr("Resume")
+                                        : row.status == "ready" ? @tr("Select")
+                                        : @tr("Retry");
+                                }
+                                TouchArea {
+                                    width: 100%;
+                                    height: 100%;
+                                    enabled: !(row.status == "ready" && row.selected);
+                                    clicked => {
+                                        if (row.status == "ready") {
+                                            AiAssistantState.model-select(row.name);
+                                            AiAssistantState.model-open = false;
+                                        } else if (row.status == "downloading") {
+                                            AiAssistantState.model-cancel(row.name);
+                                        } else if (row.status == "paused") {
+                                            AiAssistantState.model-pause(row.name);
+                                        } else {
+                                            AiAssistantState.model-download(row.name);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

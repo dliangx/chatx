@@ -57,9 +57,30 @@ pub trait Llm {
     fn generate(&mut self, conversation: &Conversation) -> Result<Box<dyn Iterator<Item = String>>>;
 }
 
+/// A process-local override of the active model, set at runtime (e.g. after a
+/// model finishes downloading). Takes precedence over the `CHATX_MODEL` env
+/// var; `None` means "use whatever the environment says".
+static SELECTED: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+/// Set the active model path for this process (used by the in-app download
+/// manager once a model is fully downloaded).
+pub fn set_selected_model(path: Option<std::path::PathBuf>) {
+    *SELECTED.lock().unwrap() = path;
+}
+
+/// Resolve the model path to use: the runtime override first, else the
+/// `CHATX_MODEL` environment variable.
+fn selected_model_path() -> Option<std::path::PathBuf> {
+    SELECTED.lock().unwrap().clone().or_else(|| {
+        std::env::var_os("CHATX_MODEL").map(std::path::PathBuf::from)
+    })
+}
+
 /// Build the default backend from the environment:
 ///
-/// - `llama` feature enabled **and** `CHATX_MODEL` set to a `.gguf` path →
+/// - `llama` feature enabled **and** a model path is resolvable (the runtime
+///   override from [`set_selected_model`] or the `CHATX_MODEL` env var) →
 ///   the on-device [`llama::LlamaBackend`].
 /// - otherwise → the [`MockBackend`] (echo), so the conversation loop, REPL,
 ///   and UI plumbing all run end-to-end without a model or the feature.
@@ -68,7 +89,7 @@ pub trait Llm {
 pub fn default_backend() -> Box<dyn Llm> {
     #[cfg(feature = "llama")]
     {
-        if let Some(path) = std::env::var_os("CHATX_MODEL") {
+        if let Some(path) = selected_model_path() {
             if let Ok(be) = llama::LlamaBackend::load_default(path) {
                 return Box::new(be);
             }

@@ -15,6 +15,7 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 qrcode = { workspace = true }
+ureq = { workspace = true }
 camera = { path = "../../crates/camera" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
 base64 = { workspace = true }

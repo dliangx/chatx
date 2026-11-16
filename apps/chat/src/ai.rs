@@ -39,6 +39,9 @@ enum UiEvent {
 enum Cmd {
     Send(String),
     Reset,
+    /// Rebuild the backend from the (possibly new) selected model. Sent after a
+    /// model finishes downloading or the user picks a different one.
+    Reload,
 }
 
 /// The actor's command sender (created once by [`ensure_actor`]).
@@ -73,6 +76,11 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
 
     for cmd in cmd_rx {
         match cmd {
+            Cmd::Reload => {
+                // Re-read the (possibly newly-downloaded) model and continue
+                // the same conversation with the new backend.
+                backend = chatx_agent::default_backend();
+            }
             Cmd::Reset => {
                 conv = chatx_agent::Conversation::new(SYSTEM_PROMPT);
             }
@@ -116,6 +124,15 @@ pub fn send(text: &str) {
     ensure_actor();
     let Some(cmd_tx) = CMD.lock().unwrap().clone() else { return };
     let _ = cmd_tx.send(Cmd::Send(text.to_string()));
+}
+
+/// Rebuild the actor's backend from the currently-selected model. Called after
+/// a model finishes downloading or the user picks a different one, so the next
+/// turn uses the real LLM instead of the echo backend.
+pub fn reload() {
+    ensure_actor();
+    let Some(cmd_tx) = CMD.lock().unwrap().clone() else { return };
+    let _ = cmd_tx.send(Cmd::Reload);
 }
 
 pub fn reset(weak: slint::Weak<MainWindow>) {
