@@ -75,6 +75,9 @@ export struct ConversationRow {
     time-label: string,
     image: image,
     is-pinned: bool,
+    // Conversation type: 0=DM, 1=group, 2=AI-assistant. Drives which sub-page
+    // the chat list opens for the row (chat room vs AI assistant).
+    conv-type: int,
 }
 
 export struct ContactRow {
@@ -165,6 +168,10 @@ export global AppState {
     callback push-sub(SubPageType, int);
     callback pop-sub();
     callback clear();
+    /// Open an AI-assistant conversation from the chat list. `key` is the row's
+    /// key, or `-1` for the most-recent AI conversation (the pinned top row,
+    /// which falls back to a fresh one when none exists).
+    callback open-ai-chat(int);
     callback login(string, string);
     callback register(string, string);
     callback logout();
@@ -339,6 +346,9 @@ export global AiAssistantState {
     in-out property <bool> model-mirror: false;
     /// The user pressed send with `draft` (the view clears `draft` itself).
     callback send(string);
+    /// "New conversation" was tapped (header button / chat-list top row): the
+    /// current conversation is archived into history and a fresh one starts.
+    callback ai-new-chat();
     /// "Clear conversation" was tapped.
     callback reset();
     /// Driven by a UI Timer while `busy`: pull any tokens the actor thread has

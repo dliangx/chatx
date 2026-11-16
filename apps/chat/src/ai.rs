@@ -38,10 +38,16 @@ enum UiEvent {
 /// Commands the actor understands.
 enum Cmd {
     Send(String),
+    /// Start a fresh, empty conversation (drop the current one). Sent by
+    /// "new chat" / "clear conversation".
     Reset,
     /// Rebuild the backend from the (possibly new) selected model. Sent after a
     /// model finishes downloading or the user picks a different one.
     Reload,
+    /// Replace the running conversation with the loaded history (user/assistant
+    /// turns) so the next turn continues it. Sent when opening a past
+    /// AI-assistant conversation.
+    Load(Vec<(bool, String)>),
 }
 
 /// The actor's command sender (created once by [`ensure_actor`]).
@@ -52,6 +58,17 @@ static CMD: std::sync::Mutex<Option<Sender<Cmd>>> = std::sync::Mutex::new(None);
 /// is owned by this crate and drained on each `pump`.
 static OUT_TX: std::sync::Mutex<Option<Sender<UiEvent>>> = std::sync::Mutex::new(None);
 static OUT_RX: std::sync::Mutex<Option<Receiver<UiEvent>>> = std::sync::Mutex::new(None);
+
+/// Called on the UI thread once a generation finishes, with the full assistant
+/// text. Registered by `lib.rs` to persist the assistant turn to the AI
+/// conversation (type-2) in SQLite.
+static DONE_HOOK: std::sync::Mutex<Option<Box<dyn Fn(String) + Send>>> =
+    std::sync::Mutex::new(None);
+
+/// Register the assistant-turn completion hook (called with the final text).
+pub fn set_done_hook(f: impl Fn(String) + Send + 'static) {
+    *DONE_HOOK.lock().unwrap() = Some(Box::new(f));
+}
 
 fn ensure_actor() {
     if CMD.lock().unwrap().is_some() {
@@ -84,13 +101,27 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
             Cmd::Reset => {
                 conv = chatx_agent::Conversation::new(SYSTEM_PROMPT);
             }
+            Cmd::Load(turns) => {
+                let mut c = chatx_agent::Conversation::new(SYSTEM_PROMPT);
+                for (is_assistant, text) in turns {
+                    if is_assistant {
+                        c.assistant(text);
+                    } else {
+                        c.user(text);
+                    }
+                }
+                // Trim once on load (keeps the most recent turns) so a long
+                // loaded history fits the local model's budget. Per-turn sends
+                // no longer re-trim, which would otherwise erode the history.
+                c.trim_to_budget(2048);
+                conv = c;
+            }
             Cmd::Send(text) => {
                 let tx = OUT_TX.lock().unwrap().clone();
                 let Some(tx) = tx else { continue };
 
                 let ui_text = text.clone();
                 conv.user(text);
-                conv.trim_to_budget(2048);
 
                 let _ = tx.send(UiEvent::Row(AiMessageRow {
                     side: 0, pending: false, text: SharedString::from(ui_text),
@@ -108,8 +139,13 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
                                 break;
                             }
                         }
-                        conv.assistant(collected);
+                        conv.assistant(collected.clone());
                         let _ = tx.send(UiEvent::Done);
+                        // Persist the assistant turn to the AI conversation (type-2)
+                        // on the UI/runtime side — registered by lib.rs.
+                        if let Some(h) = DONE_HOOK.lock().unwrap().as_ref() {
+                            h(collected);
+                        }
                     }
                     Err(e) => {
                         let _ = tx.send(UiEvent::Err(e.to_string()));
@@ -133,6 +169,15 @@ pub fn reload() {
     ensure_actor();
     let Some(cmd_tx) = CMD.lock().unwrap().clone() else { return };
     let _ = cmd_tx.send(Cmd::Reload);
+}
+
+/// Replace the running conversation with `turns` (each `(is_assistant, text)`),
+/// so the next turn continues a past AI conversation. Called when opening a
+/// type-2 conversation from the chat list.
+pub fn load(turns: Vec<(bool, String)>) {
+    ensure_actor();
+    let Some(cmd_tx) = CMD.lock().unwrap().clone() else { return };
+    let _ = cmd_tx.send(Cmd::Load(turns));
 }
 
 pub fn reset(weak: slint::Weak<MainWindow>) {

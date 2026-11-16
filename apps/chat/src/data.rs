@@ -43,6 +43,9 @@ pub struct ChatRow {
     pub avatar_path: String,
     pub is_pinned: bool,
     pub pinned_at: i64,
+    /// Conversation type: 0=DM, 1=group, 2=AI-assistant. Drives which view the
+    /// chat list opens for the row (chat room vs AI assistant).
+    pub conv_type: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -314,6 +317,7 @@ impl DataBackend {
             avatar_path,
             is_pinned: false,
             pinned_at: 0,
+            conv_type: if is_group { 1 } else { 0 },
         });
         key
     }
@@ -491,12 +495,18 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
         let key = b.bump();
         // Chat key: the string chat id (stored in `name` for core-created rows).
         let chat_key = c.name.clone().unwrap_or_else(|| c.id.to_string());
+        let is_ai = c.type_ == 2;
         // Group vs DM: the chat id is authoritative. core always names group
         // ids `grp-…` whereas DM ids are `c<hash>` (and never `grp-`), so the
         // `conversations.type` column — which `ensure_dm` forces to 0 — cannot
         // be trusted for groups. Fall back to it for legacy rows.
-        let is_group = chat_key.starts_with("grp-") || c.type_ == 1;
-        let title = if is_group {
+        let is_group = !is_ai && (chat_key.starts_with("grp-") || c.type_ == 1);
+        let title = if is_ai {
+            // AI-assistant conversations are titled by their first user turn.
+            sqlite::messages::first_user_message(pool, &chat_key)
+                .await
+                .unwrap_or_else(|_| "AI assistant".to_string())
+        } else if is_group {
             group_display_name(pool, &chat_key)
                 .await
                 .unwrap_or_else(|| "Group".to_string())
@@ -510,7 +520,8 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
         };
         b.chat_key_to_id.insert(key, chat_key.clone());
         // Group previews are stored as a sealed envelope (E2E ciphertext);
-        // `resolve_preview` decrypts them so the list shows plaintext.
+        // `resolve_preview` decrypts them so the list shows plaintext. AI and
+        // DM previews are cleartext.
         let preview = resolve_preview(is_group, &chat_key, c.last_message_preview.clone());
         b.chats.push(ChatRow {
             key,
@@ -528,6 +539,7 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
             } else {
                 0
             },
+            conv_type: if is_ai { 2 } else if is_group { 1 } else { 0 },
         });
     }
 
@@ -691,6 +703,7 @@ pub async fn refresh_chat_row(
             avatar_path: String::new(),
             is_pinned: false,
             pinned_at: 0,
+            conv_type: if is_group { 1 } else { 0 },
         });
         return Ok(true);
     };
@@ -699,8 +712,13 @@ pub async fn refresh_chat_row(
     if is_new {
         // The conversation exists in sqlite (created by `ensure_dm` when the
         // first message landed) but no in-memory row yet: materialize it now.
-        let is_group = chat_id.starts_with("grp-") || src.type_ == 1;
-        let title = if is_group {
+        let is_ai = src.type_ == 2;
+        let is_group = !is_ai && (chat_id.starts_with("grp-") || src.type_ == 1);
+        let title = if is_ai {
+            sqlite::messages::first_user_message(pool, &chat_id)
+                .await
+                .unwrap_or_else(|_| "AI assistant".to_string())
+        } else if is_group {
             group_display_name(pool, &chat_id)
                 .await
                 .unwrap_or_else(|| "Group".to_string())
@@ -734,6 +752,7 @@ pub async fn refresh_chat_row(
             } else {
                 0
             },
+            conv_type: if src.type_ == 2 { 2 } else if is_group { 1 } else { 0 },
         });
         return Ok(true);
     }
@@ -742,10 +761,16 @@ pub async fn refresh_chat_row(
     };
     // Group vs DM is decided by the chat id prefix (`grp-…`), not sqlite's
     // `conversations.type` — `insert_row` always writes type=0 via
-    // `ensure_dm`, so a group's type column is unreliable.
-    let is_group = chat_id.starts_with("grp-");
+    // `ensure_dm`, so a group's type column is unreliable. AI (type 2) is
+    // decided by sqlite's type column.
+    let is_ai = src.type_ == 2;
+    let is_group = !is_ai && chat_id.starts_with("grp-");
 
-    let title = if is_group {
+    let title = if is_ai {
+        sqlite::messages::first_user_message(pool, &chat_id)
+            .await
+            .unwrap_or_else(|_| "AI assistant".to_string())
+    } else if is_group {
         group_display_name(pool, &chat_id)
             .await
             .or_else(|| {
@@ -783,6 +808,9 @@ pub async fn refresh_chat_row(
         avatar_path: src.avatar_path.clone().unwrap_or_default(),
         is_pinned: row.is_pinned,
         pinned_at: row.pinned_at,
+        // Preserve the row's conversation type (DM/group/AI) — `is_group` only
+        // reflects the chat-id prefix, not type=2.
+        conv_type: if src.type_ == 2 { 2 } else { row.conv_type },
     };
     let changed = new.title != row.title
         || new.preview != row.preview

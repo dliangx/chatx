@@ -61,6 +61,134 @@ thread_local! {
 /// Set once a scanned QR is resolved, so late frames don't re-fire it.
 static SCAN_RESOLVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+// ── AI-assistant conversation (type-2) state ────────────────────────────────
+/// The conversation name (`ai:<id>`) currently open in the AI-assistant view.
+/// Empty = a fresh, not-yet-persisted conversation. Drives where `ai::send` and
+/// the assistant done-hook persist their turns.
+static AI_CONV: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// The currently-open AI conversation's name, or `""` for a fresh one.
+fn ai_conv_name() -> String {
+    AI_CONV.lock().unwrap().clone()
+}
+
+/// Open an AI conversation in the assistant view: set it as current, load its
+/// turns into the actor, and clear the UI so the history renders fresh.
+fn open_ai_conv(weak: &slint::Weak<MainWindow>, name: &str) {
+    *AI_CONV.lock().unwrap() = name.to_string();
+    let conv = name.to_string();
+    if conv.is_empty() {
+        ai::reset(weak.clone());
+        return;
+    }
+    let pool = POOL.lock().unwrap().clone();
+    let weak2 = weak.clone();
+    if let Some(pool) = pool {
+        let rt = runtime();
+        rt.spawn(async move {
+            match sqlite::messages::load_ai_turns(&pool, &conv).await {
+                Ok(turns) => {
+                    // Rebuild the assistant UI from the loaded history and load
+                    // the same turns into the actor so the next turn continues
+                    // the conversation.
+                    let rows: Vec<AiMessageRow> = turns
+                        .iter()
+                        .map(|(is_assistant, text)| AiMessageRow {
+                            side: if *is_assistant { 1 } else { 0 },
+                            pending: false,
+                            text: SharedString::from(text.clone()),
+                        })
+                        .collect();
+                    ai::load(turns);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak2.upgrade() {
+                            let a = ui.global::<AiAssistantState>();
+                            a.set_messages(slint::ModelRc::new(slint::VecModel::from(rows)));
+                            a.set_error(SharedString::new());
+                            a.set_busy(false);
+                        }
+                    });
+                }
+                Err(e) => tracing::warn!("[ai] load conv {conv} failed: {e}"),
+            }
+        });
+    } else {
+        ai::reset(weak.clone());
+    }
+}
+
+/// Persist one AI turn (user or assistant) to the current conversation and
+/// refresh the chat list. A fresh conversation is minted on its first user
+/// turn so its first exchange is saved too. Runs on the tokio runtime; no-op
+/// if there is no current conversation yet.
+fn persist_ai_turn(weak: &slint::Weak<MainWindow>, is_assistant: bool, text: String) {
+    let name = if is_assistant {
+        ai_conv_name()
+    } else {
+        // Mint the conversation on its first user turn.
+        let mut n = AI_CONV.lock().unwrap();
+        if n.is_empty() {
+            *n = format!("ai:{}", sqlite::new_id());
+        }
+        n.clone()
+    };
+    if name.is_empty() {
+        return;
+    }
+    let pool = POOL.lock().unwrap().clone();
+    let me = current_me();
+    let weak2 = weak.clone();
+    let Some(pool) = pool else { return };
+    if me.is_empty() {
+        return;
+    }
+    let rt = runtime();
+    rt.spawn(async move {
+        if let Err(e) = sqlite::messages::insert_ai_turn(&pool, &name, is_assistant, &text).await {
+            tracing::warn!("[ai] persist conv {name} failed: {e}");
+        }
+        // Pull the (possibly new / just-touched) row back into the in-memory
+        // chat list so the publish below shows it with the right title/time.
+        let backend = {
+            let g = BACKEND.lock().unwrap();
+            g.clone()
+        };
+        if let Some(backend) = backend {
+            let mut b = backend.read().await.clone();
+            let _ = data::refresh_chat_row(&pool, &me, &mut b, &name).await;
+            *backend.write().await = b;
+        }
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak2.upgrade() {
+                let state = ui.global::<AppState>();
+                if let Some(backend) = BACKEND.lock().unwrap().clone() {
+                    publish_to_views(&state, backend);
+                }
+            }
+        });
+    });
+}
+
+/// New AI conversation. Each completed turn auto-persists to the current conv
+/// (user at send, assistant at done), so the current one is already in history
+/// — here we just start a fresh conv and clear the actor + UI.
+fn new_ai_conv(weak: &slint::Weak<MainWindow>) {
+    *AI_CONV.lock().unwrap() = String::new();
+    ai::reset(weak.clone());
+}
+
+/// Register the assistant-turn completion hook: persist the assistant turn to
+/// the current conversation, then refresh the chat list so the row's position
+/// and preview update.
+fn install_ai_done_hook(weak: slint::Weak<MainWindow>) {
+    ai::set_done_hook(move |assistant_text: String| {
+        if assistant_text.is_empty() {
+            return;
+        }
+        persist_ai_turn(&weak, true, assistant_text);
+    });
+}
+
 /// Ordered on-disk photo paths selected for the share / publish draft.
 /// The UI thumbnails (`MomentState.media`) are kept in sync from this list:
 /// `add` / `remove` / `publish` all read & mutate it, then republish the
@@ -639,17 +767,55 @@ pub fn run_app() {
 
     // ── AI assistant (local LLM copilot; actor thread, pumped from a UI Timer) ──
     {
-        let wr = weak.clone();
-        let wp = weak.clone();
-        ui.global::<AiAssistantState>().on_send(|text| {
-            let t = text.to_string();
-            ai::send(&t);
+        install_ai_done_hook(weak.clone());
+        ui.global::<AiAssistantState>().on_send({
+            let w = weak.clone();
+            move |text| {
+                let t = text.to_string();
+                persist_ai_turn(&w, false, t.clone());
+                ai::send(&t);
+            }
         });
-        ui.global::<AiAssistantState>().on_reset(move || {
-            ai::reset(wr.clone());
+        ui.global::<AiAssistantState>().on_reset({
+            let wr = weak.clone();
+            move || ai::reset(wr.clone())
         });
-        ui.global::<AiAssistantState>().on_pump(move || {
-            ai::pump(wp.clone());
+        ui.global::<AiAssistantState>().on_ai_new_chat({
+            let wr = weak.clone();
+            move || new_ai_conv(&wr)
+        });
+        ui.global::<AiAssistantState>().on_pump({
+            let wp = weak.clone();
+            move || ai::pump(wp.clone())
+        });
+    }
+
+    // ── Open an AI-assistant conversation from the chat list ─────────────────
+    // `key` is a row's key, or `-1` for the most-recent AI conversation (the
+    // pinned top row; falls back to a fresh one when none exists yet). The UI
+    // pushes the AiAssistant sub-page itself; this only prepares the actor +
+    // current-conversation state.
+    {
+        let w0 = weak.clone();
+        state.on_open_ai_chat(move |key| {
+            let conv: String = {
+                let backend = BACKEND.lock().unwrap().clone();
+                let Some(backend) = backend else { return };
+                let g = backend.blocking_read();
+                if key < 0 {
+                    // Most recent AI conversation (list is newest-first), or a
+                    // fresh one (empty conv) when none has been persisted yet.
+                    g.chats
+                        .iter()
+                        .find(|r| r.conv_type == 2)
+                        .and_then(|r| g.chat_id_for(r.key))
+                        .map(|s| s.to_string())
+                        .unwrap_or_default()
+                } else {
+                    g.chat_id_for(key).map(|s| s.to_string()).unwrap_or_default()
+                }
+            };
+            open_ai_conv(&w0, &conv);
         });
     }
 
@@ -4326,6 +4492,7 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
             time_label: SharedString::from(fmt_time(r.time_ms)),
             image: load_avatar_path_capped(&r.avatar_path, 40),
             is_pinned: r.is_pinned,
+            conv_type: r.conv_type,
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
@@ -4539,6 +4706,7 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
             time_label: SharedString::from(fmt_time(r.time_ms)),
             image: load_avatar_path_capped(&r.avatar_path, 40),
             is_pinned: r.is_pinned,
+            conv_type: r.conv_type,
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
@@ -7223,6 +7391,7 @@ fn publish_chat_searched(state: &AppState, rows: &[data::ChatRow]) {
             time_label: SharedString::from(fmt_time(r.time_ms)),
             image: load_avatar_path_capped(&r.avatar_path, 40),
             is_pinned: r.is_pinned,
+            conv_type: r.conv_type,
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(out)));

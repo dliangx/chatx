@@ -5,6 +5,10 @@ use sqlx::FromRow;
 pub enum ConversationType {
     Dm = 0,
     Group = 1,
+    /// AI-assistant conversation (local LLM). Keyed by `name = "ai:<id>"`,
+    /// messages carry `sender_peer_id = "bot"` (user / assistant split by
+    /// sender == "bot" vs the local peer).
+    AiAssistant = 2,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
@@ -95,6 +99,28 @@ pub fn peer_username_from_chat_id(chat_id: &str) -> Option<&str> {
 /// Find-or-create a conversation keyed by its text `name`, with the type
 /// (DM=0 / Group=1) derived from the chat id prefix. Self-heals legacy rows
 /// that were created as type=0 by the old unconditional-DM path.
+/// Find-or-create an AI-assistant conversation keyed by `name` (`ai:<id>`).
+/// Unlike DMs, the type is fixed to `AiAssistant` (2) and never re-derived from
+/// the name prefix. Returns the integer conversation id.
+pub async fn ensure_ai(pool: &Pool, name: &str) -> anyhow::Result<i64> {
+    if let Some(id) = resolve_id(pool, name).await? {
+        sqlx::query("UPDATE conversations SET type = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(ConversationType::AiAssistant as i64)
+            .execute(pool)
+            .await?;
+        return Ok(id);
+    }
+    let id = crate::new_id();
+    sqlx::query("INSERT INTO conversations (id, type, name) VALUES (?1, ?2, ?3)")
+        .bind(id)
+        .bind(ConversationType::AiAssistant as i64)
+        .bind(name)
+        .execute(pool)
+        .await?;
+    Ok(id)
+}
+
 pub async fn ensure_dm(pool: &Pool, chat_id: &str) -> anyhow::Result<i64> {
     let t = type_for_chat_id(chat_id);
     if let Some(id) = resolve_id(pool, chat_id).await? {

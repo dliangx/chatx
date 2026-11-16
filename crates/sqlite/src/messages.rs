@@ -189,6 +189,105 @@ pub async fn get(pool: &Pool, id: i64) -> anyhow::Result<Option<Message>> {
     Ok(row)
 }
 
+/// The first user turn's text in an AI conversation (used as its list title).
+pub async fn first_user_message(pool: &Pool, name: &str) -> anyhow::Result<String> {
+    let row: Option<String> = sqlx::query_scalar(
+        "SELECT m.text_content
+           FROM messages m
+           JOIN conversations c ON c.id = m.conversation_id
+          WHERE c.name = ?1 AND m.sender_peer_id = 'user'
+          ORDER BY m.timestamp ASC, m.id ASC
+          LIMIT 1",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.unwrap_or_default())
+}
+
+/// All AI-assistant conversations, newest activity first. Returns
+/// `(name, title, last_message_time)` where `title` is the first user turn.
+pub async fn ai_conversations(pool: &Pool) -> anyhow::Result<Vec<(String, String, i64)>> {
+    let names: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT name, COALESCE(last_message_time, 0)
+           FROM conversations WHERE type = 2 AND name IS NOT NULL
+          ORDER BY COALESCE(last_message_time, 0) DESC, id DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(names.len());
+    for (name, ts) in names {
+        let title = first_user_message(pool, &name).await.unwrap_or_default();
+        out.push((name, title, ts));
+    }
+    Ok(out)
+}
+
+/// Load an AI-assistant conversation's turns in ascending order. Returns
+/// `(is_assistant, text)` pairs — user turns were written with
+/// `sender_peer_id = "user"`, assistant turns with `"bot"`.
+pub async fn load_ai_turns(pool: &Pool, name: &str) -> anyhow::Result<Vec<(bool, String)>> {
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT COALESCE(m.sender_peer_id, '') AS sender, m.text_content
+           FROM messages m
+           JOIN conversations c ON c.id = m.conversation_id
+          WHERE c.name = ?1
+          ORDER BY m.timestamp ASC, m.id ASC",
+    )
+    .bind(name)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(sender, text)| (sender == "bot", text.unwrap_or_default()))
+        .collect())
+}
+
+/// Append one AI-assistant turn (user or assistant) to the conversation keyed
+/// by `name` (`ai:<id>`), stamping the denormalized last-message fields.
+pub async fn insert_ai_turn(
+    pool: &Pool,
+    name: &str,
+    is_assistant: bool,
+    text: &str,
+) -> anyhow::Result<i64> {
+    let conv = conversations::ensure_ai(pool, name).await?;
+    let sender = if is_assistant { "bot" } else { "user" };
+    let ts = crate::now_ms();
+    let id = crate::new_id();
+    let mut trans = pool.begin().await?;
+    {
+        sqlx::query(
+            "UPDATE conversations SET
+                last_message_id   = ?1,
+                last_message_preview = ?2,
+                last_message_time = ?3
+              WHERE id = ?4",
+        )
+        .bind(id)
+        .bind(text)
+        .bind(ts)
+        .bind(conv)
+        .execute(trans.as_mut())
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO messages
+                (id, conversation_id, sender_peer_id, msg_type, text_content, timestamp, status)
+              VALUES (?1, ?2, ?3, 0, ?4, ?5, 1)",
+        )
+        .bind(id)
+        .bind(conv)
+        .bind(sender)
+        .bind(text)
+        .bind(ts)
+        .execute(trans.as_mut())
+        .await?;
+    }
+    trans.commit().await?;
+    Ok(id)
+}
+
 /// Legacy shim: load all messages for a string chat id, resolving the sender's
 /// text identity back from `users`.
 pub async fn load_all(pool: &Pool, chat_id: &str) -> anyhow::Result<Vec<MsgRow>> {
@@ -504,5 +603,28 @@ mod tests {
         let rows = load_all(&pool, "g").await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].text.as_str(), "hi group");
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_roundtrip() {
+        let pool = open_memory().await.unwrap();
+        let name = "ai:1234";
+
+        // A fresh conversation is minted on the first user turn.
+        insert_ai_turn(&pool, name, false, "hello?").await.unwrap();
+        insert_ai_turn(&pool, name, true, "hi there").await.unwrap();
+
+        // Title = first user message.
+        assert_eq!(first_user_message(&pool, name).await.unwrap(), "hello?");
+
+        // Turns load back in order, tagged by sender.
+        let turns = load_ai_turns(&pool, name).await.unwrap();
+        assert_eq!(turns, vec![(false, "hello?".into()), (true, "hi there".into())]);
+
+        // Listed among AI conversations.
+        let list = ai_conversations(&pool).await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].0, name);
+        assert_eq!(list[0].1, "hello?");
     }
 }

@@ -25,13 +25,17 @@ export component ChatListView inherits Rectangle {
     }
 
     // AI assistant entry — pinned at the top of the chat list, above the
-    // conversation rows. Tapping it pushes the AiAssistant sub-page.
+    // conversation rows. Tapping it opens the most-recent AI conversation
+    // (key -1), or a fresh one when none exists yet.
     TouchArea {
         x: 0px;
         y: 48px;
         width: parent.width;
         height: 52px;
-        clicked => { AppState.push-sub(SubPageType.AiAssistant, 0); }
+        clicked => {
+            AppState.open-ai-chat(-1);
+            AppState.push-sub(SubPageType.AiAssistant, 0);
+        }
 
         Rectangle {
             width: 100%;
@@ -118,7 +122,15 @@ export component ChatListView inherits Rectangle {
             content: row.preview;
             time: row.time-label;
             selected: row.chat-id == root.selected-key;
-            clicked(id) => { root.selected-key = id; AppState.push-sub(SubPageType.ChatRoom, id); }
+            clicked(id) => {
+                root.selected-key = id;
+                if (row.conv-type == 2) {
+                    AppState.open-ai-chat(id);
+                    AppState.push-sub(SubPageType.AiAssistant, 0);
+                } else {
+                    AppState.push-sub(SubPageType.ChatRoom, id);
+                }
+            }
         }
     }
 }

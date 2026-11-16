@@ -54,9 +54,34 @@ export component AiAssistantView inherits Rectangle {
 
     Header {
         name: @tr("AI assistant");
+        // Right zone (96px) holds two buttons: new-conversation (left) and the
+        // download / model-picker (right), both on the title's baseline.
+        // New conversation — archive the current one into history, start fresh.
+        Rectangle {
+            x: 4px;
+            width: 28px;
+            height: 28px;
+            border-radius: 14px;
+            background: transparent;
+            Icon {
+                x: (28px - 20px) / 2;
+                y: (28px - 20px) / 2;
+                size: 20px;
+                glyph: Glyph.add;
+                tint: Theme.fg;
+            }
+            TouchArea {
+                width: 40px;
+                height: 40px;
+                x: -6px;
+                y: -6px;
+                clicked => { AiAssistantState.ai-new-chat(); }
+            }
+        }
         // Download / model-picker button in the header's right zone, on the
         // same baseline as the title.
         Rectangle {
+            x: 56px;
             width: 28px;
             height: 28px;
             border-radius: 14px;
