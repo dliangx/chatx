@@ -2003,7 +2003,7 @@ pub fn run_app() {
                 if b.is_empty() {
                     return;
                 }
-                send_chat_message(weak.clone(), key, b);
+                send_chat_message(weak.clone(), key, b, false);
             });
     }
 
@@ -5139,7 +5139,129 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     });
 }
 
-fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
+/// Parse a leading `@bot` prefix off an outbound chat line.
+/// Returns `Some(question)` when the line is a bot trigger, `None` otherwise.
+/// Accepts ASCII / full-width `@` and any-casing `bot`. The trigger must be the
+/// leading whole word (end-of-line, whitespace, or `:`/`,` boundary).
+fn parse_bot_trigger(body: &str) -> Option<String> {
+    let t = body.trim_start();
+    let rest = t
+        .strip_prefix('@')
+        .or_else(|| t.strip_prefix('\u{ff20}'))?;
+    let rest = rest.trim_start();
+    // "bot" must be the leading word (ASCII, 3 bytes).
+    if rest.len() < 3 || !rest[..3].eq_ignore_ascii_case("bot") {
+        return None;
+    }
+    let after = &rest[3..];
+    let boundary_ok = match after.chars().next() {
+        None => true,
+        Some(c) => {
+            c.is_whitespace()
+                || c == ':'
+                || c == ','
+                || c == '\u{ff1a}' // full-width colon
+                || c == '\u{ff0c}' // full-width comma
+        }
+    };
+    if !boundary_ok {
+        return None;
+    }
+    Some(after.trim().to_string())
+}
+
+/// Kick off the `@bot` background reply: build the chat context, ask the local
+/// LLM (via the shared actor), then deliver the answer as a normal outgoing
+/// message through the regular send path.
+fn spawn_bot_reply(
+    weak: slint::Weak<MainWindow>,
+    key: i32,
+    chat_id: String,
+    is_group: bool,
+    question: String,
+) {
+    let client = CLIENT.lock().unwrap().clone();
+    let Some(client) = client else {
+        let _ = slint::invoke_from_event_loop(move || {
+            show_app_notice(weak, "AI not available".to_string(), false);
+        });
+        return;
+    };
+    let rt = runtime();
+    rt.spawn(async move {
+        let context = build_bot_context(&client, &chat_id, is_group).await;
+        let weak2 = weak.clone();
+        let ctx = context;
+        let q = question;
+        let answer = tokio::task::spawn_blocking(move || crate::ai::ask_on(ctx, q))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        match answer {
+            Ok(answer) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    send_chat_message(weak, key, answer, true);
+                });
+            }
+            Err(e) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    show_app_notice(weak2, format!("AI error: {e}"), false);
+                });
+            }
+        }
+    });
+}
+
+/// Assemble the chat context (most recent ~`n` TEXT messages, chronological)
+/// into `(is_assistant, text)` turns for the `@bot` one-shot question. Own
+/// messages are the "user" side, everyone else is "assistant". Group text rows
+/// are opened (decrypted) the same way the chat window does; DM rows are
+/// plaintext already.
+async fn build_bot_context(
+    client: &chatx_core::Client<HttpDirectory>,
+    chat_id: &str,
+    is_group: bool,
+) -> Vec<(bool, String)> {
+    use chatx_core::store::Kind;
+    let rows = match client.store().load(chat_id, 200, 0).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("[bot] load context failed: {e}");
+            return Vec::new();
+        }
+    };
+    // `load` returns newest-first; reverse to chronological, keep TEXT only.
+    let mut text_rows: Vec<&chatx_core::store::StoredMsg> = rows
+        .iter()
+        .rev()
+        .filter(|m| matches!(m.kind, Kind::Text))
+        .collect();
+    // Keep the most recent ~20.
+    if text_rows.len() > 20 {
+        let start = text_rows.len() - 20;
+        let kept: Vec<&chatx_core::store::StoredMsg> = text_rows[start..].to_vec();
+        text_rows = kept;
+    }
+    let me_peer = client.peer_base58();
+    let mut turns = Vec::with_capacity(text_rows.len());
+    for m in text_rows {
+        let text = if is_group {
+            match client.open_stored_group_message(chat_id, &m.text) {
+                Ok(plain) => plain.text,
+                Err(_) => continue,
+            }
+        } else {
+            m.text.clone()
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let is_self = m.sender == me_peer || m.sender == client.user_id().to_string();
+        turns.push((!is_self, text));
+    }
+    turns
+}
+
+fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String, from_bot: bool) {
     if !require_approved(weak.clone()) {
         return;
     }
@@ -5161,6 +5283,18 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         "[send] key={key} chat_id={chat_id} is_group={is_group} body_len={}",
         body.len()
     );
+
+    // `@bot <question>` trigger: send the original line as-is, then in a
+    // background task answer the question with the local LLM using the chat's
+    // most-recent context and deliver the answer as a fresh outgoing message.
+    // Bot-generated answers never re-trigger this (no infinite loop).
+    if !from_bot {
+        if let Some(question) = parse_bot_trigger(&body) {
+            if !question.is_empty() {
+                spawn_bot_reply(weak.clone(), key, chat_id.clone(), is_group, question);
+            }
+        }
+    }
 
     if is_group {
         if let Some(ui) = weak.upgrade() {
@@ -9542,7 +9676,7 @@ fn send_dm_to_contact(weak: slint::Weak<MainWindow>, key: i32, body: String) -> 
             }
         }
     };
-    send_chat_message(weak, chat_key, body);
+    send_chat_message(weak, chat_key, body, false);
     Some(chat_key)
 }
 

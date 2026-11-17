@@ -48,6 +48,16 @@ enum Cmd {
     /// turns) so the next turn continues it. Sent when opening a past
     /// AI-assistant conversation.
     Load(Vec<(bool, String)>),
+    /// One-shot question against a given conversation context (chat history).
+    /// The answer is delivered to the provided oneshot channel and the running
+    /// AI-assistant conversation is left untouched (this is the `@bot` chat
+    /// reply path).
+    Ask {
+        /// Prior turns: `(is_assistant, text)` in chronological order.
+        context: Vec<(bool, String)>,
+        question: String,
+        reply: std::sync::mpsc::Sender<String>,
+    },
 }
 
 /// The actor's command sender (created once by [`ensure_actor`]).
@@ -116,6 +126,33 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
                 c.trim_to_budget(2048);
                 conv = c;
             }
+            Cmd::Ask { context, question, reply } => {
+                // One-shot: build a fresh conversation from the supplied context
+                // so the running AI-assistant conversation (`conv`) is left
+                // untouched. The answer goes to the oneshot `reply` channel.
+                let mut c = chatx_agent::Conversation::new(SYSTEM_PROMPT);
+                for (is_assistant, text) in context {
+                    if is_assistant {
+                        c.assistant(text);
+                    } else {
+                        c.user(text);
+                    }
+                }
+                c.user(question);
+                c.trim_to_budget(2048);
+                let mut collected = String::new();
+                match backend.generate(&c) {
+                    Ok(mut iter) => {
+                        for tok in iter.by_ref() {
+                            collected.push_str(&tok);
+                        }
+                    }
+                    Err(e) => {
+                        collected = format!("(AI error: {e})");
+                    }
+                }
+                let _ = reply.send(collected);
+            }
             Cmd::Send(text) => {
                 let tx = OUT_TX.lock().unwrap().clone();
                 let Some(tx) = tx else { continue };
@@ -178,6 +215,26 @@ pub fn load(turns: Vec<(bool, String)>) {
     ensure_actor();
     let Some(cmd_tx) = CMD.lock().unwrap().clone() else { return };
     let _ = cmd_tx.send(Cmd::Load(turns));
+}
+
+/// One-shot question (the `@bot` chat reply path). Asks the actor to answer
+/// `question` given `context` (chronological `(is_assistant, text)` turns)
+/// and blocks until the full answer is ready (or a 120s timeout). The actor's
+/// running AI-assistant conversation is left untouched.
+pub fn ask_on(
+    context: Vec<(bool, String)>,
+    question: String,
+) -> Result<String, String> {
+    ensure_actor();
+    let Some(cmd_tx) = CMD.lock().unwrap().clone() else {
+        return Err("AI actor unavailable".to_string());
+    };
+    let (tx, rx) = channel::<String>();
+    cmd_tx
+        .send(Cmd::Ask { context, question, reply: tx })
+        .map_err(|e| e.to_string())?;
+    rx.recv_timeout(std::time::Duration::from_secs(120))
+        .map_err(|e| format!("AI reply timed out: {e}"))
 }
 
 pub fn reset(weak: slint::Weak<MainWindow>) {
