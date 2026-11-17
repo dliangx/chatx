@@ -1,11 +1,12 @@
 # chatx bot — Local AI Assistant
 
-`chatx-agent` is the local LLM runtime for chatx's AI assistant. **On-device inference, no network access** — consistent with chatx's E2E privacy model. It powers two entry points:
+`chatx-agent` is the local LLM runtime for chatx's AI assistant. **On-device inference, no network access** — consistent with chatx's E2E privacy model. It powers three surfaces:
 
 - **`apps/bot`** — a standalone CLI copilot REPL (this directory)
-- **`apps/chat`** — the "AI assistant" page inside the GUI (pinned row in the chat list)
+- **The AI assistant page** inside the GUI — a pinned "AI assistant" row in the chat list, with **persistent conversation history**
+- **`@bot` in any DM / group** — type `@bot <question>` to get a local-LLM answer that reads the chat's recent context and is posted back into the conversation as a normal message
 
-Both share the same entry point `chatx_agent::default_backend()` (`crates/agent/src/lib.rs:68`) and behave identically.
+All three share the same backend `chatx_agent::default_backend()` (`crates/agent/src/lib.rs:68`).
 
 ## Features
 
@@ -16,9 +17,45 @@ Both share the same entry point `chatx_agent::default_backend()` (`crates/agent/
 - **Thread-confined** — the model context is thread-confined; `generate` is synchronous `&mut self`. The GUI calls it from a dedicated actor thread (`chatx-ai-actor`) and ships events back to the UI.
 - **Platform-agnostic** — desktop, iOS, and Android share the same Rust code; mobile can later swap in a native engine (see below).
 
+---
+
+## AI assistant page (GUI)
+
+The pinned "AI assistant" row opens a chat-style copilot (`apps/chat/ui/ai_assistant.slint`). Beyond a plain REPL:
+
+- **Persistent conversation history.** Each assistant chat is stored in SQLite as a first-class conversation (`conversations.type = 2`, `crates/sqlite/src/conversations.rs`). Turns are recorded to `messages` (user turn on **send**, assistant turn on **completion** — `apps/chat/src/lib.rs`, `apps/chat/src/ai.rs`). The conversation **title is its first user message**. Reopening a past chat from the list reloads its history into the model (`Cmd::Load`) so you can **continue** where you left off; the **new-conversation** button in the header archives the current one and starts fresh. The pinned top row always opens the most-recent assistant chat.
+- **Model picker + download manager.** The header's download button opens a model catalog (`apps/chat/src/models.rs`) split by platform. Downloads are **resumable** (stream to a `.part`, survive interruptions) with **pause / resume / cancel** and live progress. A **source toggle** switches between `huggingface.co` and the `hf-mirror.com` mirror. The selected model is **persisted** and auto-restored on launch (`restore_on_launch`).
+- **Streaming UI.** Tokens are pumped from the actor thread into the message list (`pump-mini-app` pattern) — the GUI thread is never blocked by inference.
+
+## `@bot` inline reply (DM & group)
+
+Type `@bot <question>` in any 1:1 or group chat. The app:
+
+1. **Sends your line normally** (the peer sees `@bot <question>` as a normal message), then
+2. builds the **chat context** — the most recent ~20 text messages (group rows are decrypted the same way the chat window does), your messages on the "user" side, everyone else on the "assistant" side (`build_bot_context`, `apps/chat/src/lib.rs`),
+3. asks the local LLM a **one-shot question** that does **not** touch the assistant page's conversation (`Cmd::Ask` / `ai::ask_on`, `apps/chat/src/ai.rs`), and
+4. **posts the answer as a fresh outgoing message** through the regular send path.
+
+Trigger matching (`parse_bot_trigger`): leading whole word `bot`, case-insensitive, ASCII or full-width `@`, optional `:`/`,` boundary (e.g. `@bot 你好` or `@bot: 你好`). Bot-generated answers never re-trigger `@bot`, so there is no recursion.
+
+| Item | Value |
+|---|---|
+| Trigger | leading `@bot` word |
+| Context window | most recent ~20 text messages |
+| One-shot budget | 2048 tokens (`apps/chat/src/ai.rs`) |
+| Reply delivery | normal outgoing message (DM or group) |
+| Failure | in-app notice, your original line already sent |
+
+---
+
 ## Model configuration
 
-The model is selected via the `CHATX_MODEL` environment variable pointing to a `.gguf` file. There are no cloud models and no hardcoded model names in the code.
+A `.gguf` file is required for real inference. There are two ways to provide one:
+
+- **CLI (`apps/bot`)** — point the `CHATX_MODEL` environment variable at a `.gguf` file. Unset → `MockBackend`.
+- **GUI (assistant page + `@bot`)** — use the built-in **model download manager** (see above). The downloaded file is registered as the active model via `chatx_agent::set_selected_model` and the choice is **persisted**, so the next launch (and the `@bot` path) reuse it without re-downloading.
+
+There are no cloud models and no hardcoded model names in the inference path — the model is always a local file.
 
 | Item | Value | Where |
 |---|---|---|
