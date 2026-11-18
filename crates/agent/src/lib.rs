@@ -8,10 +8,10 @@
 //!   (feature `llama`) so conversation text never leaves the machine.
 //! * **Sync + thread-confined**: a local model owns a thread-confined
 //!   context, so `Llm::generate` is synchronous and takes `&mut self`.
-//!   Callers that need cross-thread delivery (the Slint UI) run
-//!   `generate` + iteration on one dedicated worker thread and ship the
-//!   yielded `String`s across — the same pattern chatx uses for group-key
-//!   delivery and DM redelivery.
+//!   Callers that need cross-thread delivery (the Slint UI) run `generate`
+//!   on one dedicated worker thread; every text piece is pushed out
+//!   immediately through the `on_token` callback as it is decoded, so the
+//!   UI can paint each piece the moment it exists.
 //! * **Budgeted context**: [`Conversation`] renders a single prompt and can
 //!   trim its own history to fit a context window, so long chats don't
 //!   silently overflow a local model's `n_ctx`.
@@ -48,13 +48,20 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// A local language model.
 ///
-/// `generate` returns an iterator over the assistant's tokens; consume it to
-/// completion (or drop it to abort). The iterator is `'static` so it can be
-/// boxed and moved; backends that stream from an owning buffer satisfy this
-/// naturally.
+/// `generate` invokes `on_token` with each decoded text piece **as it is
+/// generated** (true streaming — no buffering until the turn ends) and
+/// returns the full reply text.
 pub trait Llm {
-    /// Produce the assistant's reply to `conversation`, streaming tokens.
-    fn generate(&mut self, conversation: &Conversation) -> Result<Box<dyn Iterator<Item = String>>>;
+    /// Produce the assistant's reply to `conversation`.
+    ///
+    /// `on_token` is called for every text piece the moment it is decoded,
+    /// so callers can render or print it immediately. Returns the complete
+    /// reply text on success.
+    fn generate(
+        &mut self,
+        conversation: &Conversation,
+        on_token: &mut dyn FnMut(String),
+    ) -> Result<String>;
 }
 
 /// A process-local override of the active model, set at runtime (e.g. after a
@@ -113,7 +120,11 @@ impl MockBackend {
 }
 
 impl Llm for MockBackend {
-    fn generate(&mut self, conversation: &Conversation) -> Result<Box<dyn Iterator<Item = String>>> {
+    fn generate(
+        &mut self,
+        conversation: &Conversation,
+        on_token: &mut dyn FnMut(String),
+    ) -> Result<String> {
         let last = conversation
             .history()
             .iter()
@@ -122,9 +133,15 @@ impl Llm for MockBackend {
             .map(|m| m.text.clone())
             .unwrap_or_default();
         let out = format!("(mock) heard: {last}");
-        // Yield word-by-word (each chunk is "word ") so streaming looks natural.
-        let chunks: Vec<String> = out.split_whitespace().map(|w| format!("{w} ")).collect();
-        Ok(Box::new(chunks.into_iter()))
+        // Stream word-by-word (each chunk is "word ") so the callback sees
+        // natural streaming; the final chunk drops the trailing space so the
+        // streamed text equals the returned text exactly.
+        let words: Vec<&str> = out.split_whitespace().collect();
+        for (i, w) in words.iter().enumerate() {
+            let sep = if i + 1 == words.len() { "" } else { " " };
+            on_token(format!("{w}{sep}"));
+        }
+        Ok(out)
     }
 }
 
@@ -137,11 +154,11 @@ mod tests {
         let mut conv = Conversation::new("You are helpful.");
         conv.user("hello");
         let mut b = MockBackend::new();
-        let collected: String = b
-            .generate(&conv)
-            .unwrap()
-            .collect::<Vec<_>>()
-            .concat();
+        let mut streamed = String::new();
+        let collected = b
+            .generate(&conv, &mut |tok| streamed.push_str(&tok))
+            .unwrap();
         assert!(collected.contains("hello"));
+        assert_eq!(streamed, collected);
     }
 }

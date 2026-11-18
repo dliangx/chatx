@@ -9,10 +9,10 @@
 //! matches the [`crate::Llm`] contract (`generate` takes `&mut self`), and
 //! the REPL in `apps/bot` runs it on a single dedicated thread.
 //!
-//! `generate` collects the full completion into a `String` and yields it in
-//! small word-ish chunks so callers get the same token-stream experience as
-//! a true tokenizer-stream, without exposing the non-`Send` model internals
-//! across the iterator boundary.
+//! `generate` streams: every decoded text piece is delivered to the
+//! `on_token` callback the moment it is produced (no buffering until the
+//! turn ends), and the full reply text is returned at the end. This keeps
+//! the non-`Send` model internals confined to the backend thread.
 //!
 //! The conversation is converted to a prompt with the **model's own chat
 //! template** (`llama_model_chat_template` + `llama_chat_apply_template`), so
@@ -83,15 +83,20 @@ impl LlamaBackend {
         Self::load(path, 4096, 2048)
     }
 
-    /// Convert a [`Conversation`] into a prompt string using the model's own
-    /// chat template (system + history, assistant slot appended).
-    fn render_prompt(&self, conversation: &Conversation) -> Result<String> {
+    /// Tokenize a rendered prompt (system + the given history messages) using
+    /// the model's own chat template. Returns the prompt text and its real
+    /// token count.
+    fn render_messages(
+        &self,
+        system: &str,
+        history: &[crate::Message],
+    ) -> Result<(String, usize)> {
         let mut messages: Vec<LlamaChatMessage> = Vec::new();
-        if !conversation.system().is_empty() {
-            messages.push(LlamaChatMessage::new("system".into(), conversation.system().into())
+        if !system.is_empty() {
+            messages.push(LlamaChatMessage::new("system".into(), system.into())
                 .map_err(|e| Error::Other(format!("system message: {e}")))?)
         }
-        for m in conversation.history() {
+        for m in history {
             let role = match m.role {
                 crate::Role::System => "system",
                 crate::Role::User => "user",
@@ -101,32 +106,87 @@ impl LlamaBackend {
                 .map_err(|e| Error::Other(format!("message: {e}")))?)
         }
 
-        self.model
+        let prompt = self
+            .model
             .apply_chat_template(&self.chat_template, &messages, true)
-            .map_err(|e| Error::Model(format!("apply chat template: {e}")))
+            .map_err(|e| Error::Model(format!("apply chat template: {e}")))?;
+        let tokens = self.model.vocab().tokenize(prompt.as_bytes(), true, true).len();
+        Ok((prompt, tokens))
     }
 
-    /// Run one completion over `conversation`, returning the assistant text.
-    fn complete(&mut self, conversation: &Conversation) -> Result<String> {
+    /// Build the prompt for `conversation`, dropping the **oldest** history
+    /// turns (never the system prompt or the most recent turns) until the
+    /// real tokenized prompt fits within the model's context window with room
+    /// left for the generated reply. Uses the model's own tokenizer + `n_ctx`,
+    /// so this is exact rather than a character estimate.
+    fn fit_prompt(
+        &self,
+        conversation: &Conversation,
+        budget: i32,
+    ) -> Result<String> {
+        let system = conversation.system().to_string();
+        let all = conversation.history().to_vec();
+
+        // Reserve room for the reply so the full turn (prompt + output) fits.
+        let max_prompt_tokens = budget - self.max_tokens.min(self.n_ctx as u32 / 4) as i32;
+
+        let (prompt, tokens) = self.render_messages(&system, &all)?;
+        if tokens as i32 <= max_prompt_tokens {
+            return Ok(prompt);
+        }
+
+        // Drop oldest turns one at a time until it fits. Always keep the last
+        // turn (the current user message) so the model has immediate context.
+        let keep_min = all.len().min(1);
+        let mut drop = 0usize;
+        while drop < all.len().saturating_sub(keep_min) {
+            let trimmed = &all[drop + 1..];
+            if trimmed.is_empty() {
+                break;
+            }
+            let (_p, t) = self.render_messages(&system, trimmed)?;
+            if t as i32 <= max_prompt_tokens {
+                return self.render_messages(&system, trimmed).map(|(p, _)| p);
+            }
+            drop += 1;
+        }
+
+        // Even keeping only the last turn doesn't fit — the last turn itself
+        // is too large for this model. Report a clear, actionable error.
+        Err(Error::Model(format!(
+            "the most recent message alone exceeds the model's context window ({} tokens); \
+             start a new chat or use a larger model",
+            self.n_ctx
+        )))
+    }
+
+    /// Run one completion over `conversation`. Each decoded text piece is
+    /// passed to `on_token` as it is generated; the full reply is returned.
+    fn complete(
+        &mut self,
+        conversation: &Conversation,
+        on_token: &mut dyn FnMut(String),
+    ) -> Result<String> {
         use std::num::NonZeroU32;
 
-        let prompt = self.render_prompt(conversation)?;
-
         let backend = &self._runtime;
-        let mut ctx = self
+        let n_ctx = NonZeroU32::new(self.n_ctx).unwrap_or(NonZeroU32::new(4096).unwrap());
+
+        let ctx = self
             .model
-            .new_context(
-                backend,
-                LlamaContextParams::default()
-                    .with_n_ctx(Some(NonZeroU32::new(self.n_ctx).unwrap_or(NonZeroU32::new(4096).unwrap()))),
-            )
+            .new_context(backend, LlamaContextParams::default().with_n_ctx(Some(n_ctx)))
             .map_err(|e| Error::Model(format!("new context: {e}")))?;
 
+        // Trim the history (oldest first) to the context's REAL decode limit.
+        // A prompt is submitted in one batch, so it must fit in `n_batch`
+        // (which is <= `n_ctx`), leaving room for the generated reply. Budget
+        // on the smaller of the two so the `n_tokens_all <= n_batch` assert in
+        // `llama_decode` can never fire.
+        let budget = ctx.n_batch().min(ctx.n_ctx()) as i32;
+        let prompt = self.fit_prompt(conversation, budget)?;
+
+        let mut ctx = ctx;
         let tokens_list = self.model.vocab().tokenize(prompt.as_bytes(), true, true);
-        let n_ctx = ctx.n_ctx() as i32;
-        if tokens_list.len() as i32 >= n_ctx {
-            return Err(Error::Model("prompt exceeds context window".into()));
-        }
 
         // The batch must hold the whole prompt at once; size it to the prompt
         // (not a fixed 512) so longer first messages don't hit InsufficientSpace.
@@ -156,6 +216,9 @@ impl LlamaBackend {
             let mut chunk = String::with_capacity(decoder.max_utf8_buffer_length(piece.len()).unwrap_or(8));
             let (_, _, _) = decoder.decode_to_string(&piece, &mut chunk, false);
             out.push_str(&chunk);
+            if !chunk.is_empty() {
+                on_token(chunk);
+            }
 
             batch.clear();
             batch
@@ -174,16 +237,11 @@ impl LlamaBackend {
 }
 
 impl Llm for LlamaBackend {
-    fn generate(&mut self, conversation: &Conversation) -> Result<Box<dyn Iterator<Item = String>>> {
-        let text = self.complete(conversation)?;
-        // Yield in ~16-char chunks so the consumer gets word-ish streaming.
-        // Chunk by CHAR (not byte): splitting UTF-8 mid-codepoint would turn
-        // the broken fragment into U+FFFD (the "?" replacement char).
-        let chars: Vec<char> = text.chars().collect();
-        let mut chunks: Vec<String> = Vec::new();
-        for group in chars.chunks(16) {
-            chunks.push(group.iter().collect());
-        }
-        Ok(Box::new(chunks.into_iter()))
+    fn generate(
+        &mut self,
+        conversation: &Conversation,
+        on_token: &mut dyn FnMut(String),
+    ) -> Result<String> {
+        self.complete(conversation, on_token)
     }
 }

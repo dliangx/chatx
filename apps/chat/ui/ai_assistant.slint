@@ -189,16 +189,6 @@ export component AiAssistantView inherits Rectangle {
                         horizontal-alignment: left;
                         vertical-alignment: top;
                     }
-
-                    // streaming spinner on the active (pending) assistant line.
-                    if row.side == 1 && row.pending:
-                    Icon {
-                        x: parent.width - 26px;
-                        y: 8px;
-                        size: 20px;
-                        glyph: Glyph.record;
-                        tint: Theme.brand;
-                    }
                 }
             }
         }

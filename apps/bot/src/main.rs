@@ -24,10 +24,6 @@ use std::io::{self, Write};
 
 use chatx_agent::{Conversation, Llm, MockBackend};
 
-/// Cap on how many tokens of context the assistant keeps. Keeps a local model
-/// from overflowing `n_ctx` on a long REPL session.
-const MAX_CONTEXT_TOKENS: usize = 2048;
-
 const SYSTEM_PROMPT: &str = "You are ChatX's built-in assistant. Be concise and helpful. \
      You are running fully locally; you have no network access.";
 
@@ -95,22 +91,17 @@ fn main() -> std::process::ExitCode {
         }
 
         conv.user(input);
-        conv.trim_to_budget(MAX_CONTEXT_TOKENS);
 
         print!("chatx> ");
         io::stdout().flush().ok();
 
-        match backend.generate(&conv) {
-            Ok(stream) => {
-                let mut reply = String::new();
-                for tok in stream {
-                    reply.push_str(&tok);
-                    print!("{tok}");
-                    io::stdout().flush().ok();
-                }
-                println!();
+        match backend.generate(&conv, &mut |tok| {
+            print!("{tok}");
+            io::stdout().flush().ok();
+        }) {
+            Ok(full) => {
                 // Keep continuity: record the assistant's own turn.
-                conv.assistant(reply);
+                conv.assistant(full);
             }
             Err(e) => {
                 println!();

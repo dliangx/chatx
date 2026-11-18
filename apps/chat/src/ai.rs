@@ -120,10 +120,6 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
                         c.user(text);
                     }
                 }
-                // Trim once on load (keeps the most recent turns) so a long
-                // loaded history fits the local model's budget. Per-turn sends
-                // no longer re-trim, which would otherwise erode the history.
-                c.trim_to_budget(2048);
                 conv = c;
             }
             Cmd::Ask { context, question, reply } => {
@@ -139,13 +135,10 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
                     }
                 }
                 c.user(question);
-                c.trim_to_budget(2048);
                 let mut collected = String::new();
-                match backend.generate(&c) {
-                    Ok(mut iter) => {
-                        for tok in iter.by_ref() {
-                            collected.push_str(&tok);
-                        }
+                match backend.generate(&c, &mut |tok| collected.push_str(&tok)) {
+                    Ok(full) => {
+                        collected = full;
                     }
                     Err(e) => {
                         collected = format!("(AI error: {e})");
@@ -168,14 +161,14 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
                 }));
 
                 let mut collected = String::new();
-                match backend.generate(&conv) {
-                    Ok(mut iter) => {
-                        for tok in iter.by_ref() {
-                            collected.push_str(&tok);
-                            if tx.send(UiEvent::Text(tok)).is_err() {
-                                break;
-                            }
-                        }
+                let result = backend.generate(&conv, &mut |tok: String| {
+                    // Stream each piece to the UI the moment it is decoded.
+                    collected.push_str(&tok);
+                    let _ = tx.send(UiEvent::Text(tok));
+                });
+                match result {
+                    Ok(full) => {
+                        collected = full;
                         conv.assistant(collected.clone());
                         let _ = tx.send(UiEvent::Done);
                         // Persist the assistant turn to the AI conversation (type-2)
