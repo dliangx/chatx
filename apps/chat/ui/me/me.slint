@@ -11,6 +11,10 @@ export component MeView inherits Rectangle {
     in-out property <int> selected-key: -1;
 
     ProfileItem {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100px;
         image: AppState.own-avatar;
         name: AppState.user-id;
         nickname: AppState.nickname;
@@ -24,49 +28,47 @@ export component MeView inherits Rectangle {
         }
     }
 
-    ScrollView {
+
+    VerticalLayout {
         width: 100%;
-        height: parent.height - 100px;
+        height: 48px * 4;
+        spacing: 0px;
         y: 100px;
-        VerticalLayout {
+
+        SettingItem {
             width: 100%;
-            spacing: 0px;
+            id: 1;
+            icon: Glyph.notes;
+            title: @tr("My notes");
+            selected: root.selected-key == 1;
+            clicked => { root.selected-key = 1; AppState.push-sub(SubPageType.MyNote, 0); }
+        }
 
-            SettingItem {
-                width: 100%;
-                id: 1;
-                icon: Glyph.notes;
-                title: @tr("My notes");
-                selected: root.selected-key == 1;
-                clicked => { root.selected-key = 1; AppState.push-sub(SubPageType.MyNote, 0); }
-            }
+        SettingItem {
+            width: 100%;
+            id: 5;
+            icon: Glyph.device;
+            title: @tr("My devices");
+            selected: root.selected-key == 5;
+            clicked => { root.selected-key = 5; AppState.push-sub(SubPageType.MyDevices, 0); }
+        }
 
-            SettingItem {
-                width: 100%;
-                id: 5;
-                icon: Glyph.device;
-                title: @tr("My devices");
-                selected: root.selected-key == 5;
-                clicked => { root.selected-key = 5; AppState.push-sub(SubPageType.MyDevices, 0); }
-            }
+        SettingItem {
+            width: 100%;
+            id: 6;
+            icon: Glyph.app;
+            title: @tr("X extension");
+            selected: root.selected-key == 6;
+            clicked => { root.selected-key = 6; AppState.push-sub(SubPageType.MyX, 0); }
+        }
 
-            SettingItem {
-                width: 100%;
-                id: 6;
-                icon: Glyph.app;
-                title: @tr("X extension");
-                selected: root.selected-key == 6;
-                clicked => { root.selected-key = 6; AppState.push-sub(SubPageType.MyX, 0); }
-            }
-
-            SettingItem {
-                width: 100%;
-                id: 4;
-                icon: Glyph.setting;
-                title: @tr("Settings");
-                selected: root.selected-key == 4;
-                clicked => { root.selected-key = 4; AppState.push-sub(SubPageType.Settings, 0); }
-            }
+        SettingItem {
+            width: 100%;
+            id: 4;
+            icon: Glyph.setting;
+            title: @tr("Settings");
+            selected: root.selected-key == 4;
+            clicked => { root.selected-key = 4; AppState.push-sub(SubPageType.Settings, 0); }
         }
     }
 }

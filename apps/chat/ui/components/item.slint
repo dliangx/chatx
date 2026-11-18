@@ -11,89 +11,92 @@ export component ProfileItem inherits Rectangle {
     callback show-qr(string);
     callback open-edit();
 
-    HorizontalLayout {
-        x: 0px;
-        y: 0px;
-        width: 100%;
-        height: 100px;
-        padding: 16px;
-        spacing: 12px;
+    width: 100%;
+    height: 100px;
+    clip: true;
 
-        Rectangle {
+    out property <length> pad: 16px;
+    out property <length> info-x: root.pad + 56px + 12px;
+
+    Rectangle {
+        x: root.pad;
+        y: 22px;
+        width: 56px;
+        height: 56px;
+        border-radius: 4px;
+        background: Theme.surface-2;
+        clip: true;
+
+        Image {
             width: 56px;
             height: 56px;
-            border-radius: 4px;
-            background: Theme.surface-2;
-            clip: true;
+            source: root.image;
+        }
+    }
 
-            Image {
-                width: 56px;
-                height: 56px;
-                source: root.image;
-            }
+    HorizontalLayout {
+        x: root.info-x;
+        y: 20px;
+        width: parent.width - root.info-x - root.pad;
+        height: 22px;
+        spacing: 4px;
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.name;
+            font-size: 18px;
+            font-weight: 800;
+            color: Theme.fg;
+            overflow: elide;
         }
 
-        VerticalLayout {
+        if root.edit-visible:
+        Icon {
+            size: 18px;
+            glyph: Glyph.edit;
+            variant: Variant.raw;
+            tint: Theme.brand;
+            TouchArea {
+                width: 30px;
+                height: 30px;
+                clicked => { root.open-edit(); }
+            }
+        }
+    }
+
+    Text {
+        x: root.info-x;
+        y: 45px;
+        width: parent.width - root.info-x - root.pad;
+        text: root.nickname;
+        font-size: 14px;
+        color: Theme.fg-muted;
+        overflow: elide;
+    }
+
+    HorizontalLayout {
+        x: root.info-x;
+        y: 65px;
+        width: parent.width - root.info-x - root.pad;
+        height: 18px;
+        spacing: 4px;
+
+        Text {
             horizontal-stretch: 1;
-            spacing: 3px;
-            height: 56px;
-            HorizontalLayout {
-                width: 100%;
-                spacing: 4px;
+            text: root.peer-id;
+            font-size: 14px;
+            color: Theme.fg-muted;
+            overflow: elide;
+        }
 
-                Text {
-                    horizontal-stretch: 1;
-                    text: root.name;
-                    font-size: 18px;
-                    font-weight: 800;
-                    color: Theme.fg;
-                    overflow: elide;
-                }
-
-                if root.edit-visible:
-                Icon {
-                    size: 18px;
-                    glyph: Glyph.edit;
-                    variant: Variant.raw;
-                    tint: Theme.brand;
-                    TouchArea {
-                        width: 30px;
-                        height: 30px;
-                        clicked => { root.open-edit(); }
-                    }
-                }
-            }
-
-            Text {
-                width: 100%;
-                text: root.nickname;
-                font-size: 14px;
-                color: Theme.fg-muted;
-                overflow: elide;
-            }
-
-            HorizontalLayout {
-                width: 100%;
-                spacing: 4px;
-
-                Text {
-                    horizontal-stretch: 1;
-                    text: root.peer-id;
-                    font-size: 14px;
-                    color: Theme.fg-muted;
-                    overflow: elide;
-                }
-
-                Icon {
-                    size: 16px;
-                    glyph: Glyph.qrcode;
-                    tint: Theme.fg-muted;
-                    TouchArea {
-                        width: 24px;
-                        height: 24px;
-                        clicked => { root.show-qr(root.peer-id); }
-                    }
-                }
+        Icon {
+            size: 16px;
+            glyph: Glyph.qrcode;
+            tint: Theme.fg-muted;
+            TouchArea {
+                width: 24px;
+                height: 24px;
+                clicked => { root.show-qr(root.peer-id); }
             }
         }
     }

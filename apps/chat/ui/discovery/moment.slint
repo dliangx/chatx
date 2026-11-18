@@ -41,7 +41,7 @@ export component AddMomentView inherits Rectangle {
         2 * root.media-pad
         + root.media-rows * root.tile-h
         + (root.media-rows - 1) * root.grid-gap;
-    out property <length> editor-h: 350px;
+    out property <length> editor-h: root.height/3;
     // Geometric width + min height of the content TextInput (editor card, which
     // is `width: 100%` inside the scroll layout, minus its 12px padding on each
     // side, minus the 8px scroll-layout gutters). Grows with the text via a
@@ -230,7 +230,7 @@ export component AddMomentView inherits Rectangle {
         }
 
         Rectangle {
-            height: 48px;
+            height: 64px;
             border-radius: 10px;
             background: Theme.surface;
             border-width: 1px;
@@ -238,7 +238,7 @@ export component AddMomentView inherits Rectangle {
 
             Rectangle {
                 x: parent.width - 128px;
-                y: 8px;
+                y: 16px;
                 width: 112px;
                 height: 32px;
                 border-radius: 16px;

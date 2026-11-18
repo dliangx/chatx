@@ -67,6 +67,22 @@ export component MainWindow inherits Window {
     preferred-height: AppState.is-mobile ? 844px : 768px;
     preferred-width: AppState.is-mobile ? 390px : 1024px;
 
+    // ── Virtual keyboard (mobile) ───────────────────────────────────────────
+    // Slint reports the software keyboard as a rectangle over the window
+    // (`Window.virtual-keyboard-position` / `-size`). When it is visible we lift
+    // the content area to the keyboard's top edge so bottom-docked inputs (chat
+    // box, comment box, …) stay visible instead of sliding under it — the "keep
+    // the editing area visible" behaviour from the Slint mobile guide.
+    out property <bool> kb-shown:
+        root.virtual-keyboard-size.width > 0
+        && root.virtual-keyboard-size.height > 0
+        && root.virtual-keyboard-position.y < root.height - root.safe-area-insets.bottom;
+    /// Bottom edge (window space) of the usable content area: the keyboard's top
+    /// when it is shown, otherwise the bottom safe-area edge.
+    out property <length> content-bottom:
+        root.kb-shown ? min(root.height, root.virtual-keyboard-position.y)
+                      : (root.height - root.safe-area-insets.bottom);
+
     changed width => {
         AppState.xp = root.width;
     }
@@ -98,8 +114,15 @@ export component MainWindow inherits Window {
     }
 
     if !root.logged-in:
-    AuthView {
-        uid <=> AppState.user-id;
+    Rectangle {
+        x: root.safe-area-insets.left;
+        y: root.safe-area-insets.top;
+        width: root.width - root.safe-area-insets.right - root.safe-area-insets.left;
+        height: max(0px, root.content-bottom - root.safe-area-insets.top);
+        clip: true;
+        AuthView {
+            uid <=> AppState.user-id;
+        }
     }
     Rectangle {
         x: root.safe-area-insets.left;
@@ -109,7 +132,9 @@ export component MainWindow inherits Window {
         // content area so full-height pages (chat input, comment box, ...) never
         // slip under the gesture strip. The tab bar's same-colour strip (above)
         // covers that inset band so the bar reads as full-height and native.
-        height: root.height - root.safe-area-insets.bottom - root.safe-area-insets.top;
+        // When the virtual keyboard is visible we also shrink the area up to the
+        // keyboard's top edge so the bottom-docked inputs stay in view.
+        height: max(0px, root.content-bottom - root.safe-area-insets.top);
 
         if root.logged-in && AppState.is-mobile:
         Rectangle {
