@@ -177,7 +177,17 @@ export component ChatInputView inherits Rectangle {
                 text-cursor-width: 3px;
                 selection-background-color: Theme.brand;
                 selection-foreground-color: white;
-                accepted => { send(input.text); }
+                key-pressed(event) => {
+                    // Slint maps the platform's primary modifier to `control`
+                    // (Windows/Linux Ctrl, macOS Command ⌘), and macOS Control
+                    // ⌃ to `meta`. Accept either so Ctrl+Enter / ⌘+Enter both send.
+                    if (event.text == "\n"
+                            && (event.modifiers.control || event.modifiers.meta)) {
+                        send(input.text);
+                        return accept;
+                    }
+                    return reject;
+                }
             }
 
             placeholder := Text {
