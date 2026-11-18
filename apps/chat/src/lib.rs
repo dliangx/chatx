@@ -732,6 +732,23 @@ pub fn run_app() {
                     s.set_current_chat_peer_key(k);
                     s.set_current_chat_key(payload);
                     s.set_current_chat_is_group(is_group);
+                    // Seed the input box with this conversation's saved draft (if
+                    // any). Must run before Slint creates the ChatInputView, so
+                    // its `init` reads the right value.
+                    let draft = {
+                        let backend = BACKEND.lock().unwrap();
+                        backend
+                            .as_ref()
+                            .and_then(|b| {
+                                b.blocking_read()
+                                    .chats
+                                    .iter()
+                                    .find(|r| r.key == payload)
+                                    .map(|r| r.draft.clone())
+                            })
+                            .unwrap_or_default()
+                    };
+                    s.set_active_draft(SharedString::from(draft));
                     // Seed the header status dot (green/yellow/grey-pulsing/red)
                     // from the live link state of the counterparty.
                     refresh_chat_conn(&ui);
@@ -2003,7 +2020,18 @@ pub fn run_app() {
                 if b.is_empty() {
                     return;
                 }
+                // Clear the draft for this conversation (backend + DB + model)
+                // before sending, so the empty input persists on re-open.
+                clear_chat_draft(weak.clone(), key);
                 send_chat_message(weak.clone(), key, b, false);
+            });
+    }
+
+    {
+        ui.global::<ChatSession>()
+            .on_draft_changed(move |key, text| {
+                let t = text.as_str().to_string();
+                save_chat_draft(key, &t);
             });
     }
 
@@ -4493,6 +4521,7 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
             image: load_avatar_path_capped(&r.avatar_path, 40),
             is_pinned: r.is_pinned,
             conv_type: r.conv_type,
+            draft: SharedString::from(r.draft.clone()),
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
@@ -4707,6 +4736,7 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
             image: load_avatar_path_capped(&r.avatar_path, 40),
             is_pinned: r.is_pinned,
             conv_type: r.conv_type,
+            draft: SharedString::from(r.draft.clone()),
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
@@ -5257,6 +5287,47 @@ async fn build_bot_context(
         turns.push((!is_self, text));
     }
     turns
+}
+
+/// Persist a conversation's in-progress draft to the in-memory backend AND the
+/// DB (`conversations.draft`). `draft` empty/whitespace clears it.
+fn save_chat_draft(key: i32, draft: &str) {
+    let trimmed = draft.trim().to_string();
+    let (backend, pool) = {
+        let b = BACKEND.lock().unwrap().clone();
+        let p = POOL.lock().unwrap().clone();
+        (b, p)
+    };
+    let Some(backend) = backend else { return };
+    let chat_id = {
+        let mut g = backend.blocking_write();
+        g.set_chat_draft(key, &trimmed)
+    };
+    let Some(chat_id) = chat_id else { return };
+    if let Some(pool) = pool {
+        let rt = runtime();
+        rt.spawn(async move {
+            let Some(conv_id) =
+                sqlite::conversations::resolve_id(&pool, &chat_id).await.ok().flatten()
+            else {
+                return;
+            };
+            // Empty draft → NULL so the row has no stored draft.
+            let d = if trimmed.is_empty() { None } else { Some(trimmed.as_str()) };
+            if let Err(e) = sqlite::conversations::set_draft(&pool, conv_id, d).await {
+                tracing::warn!("[chat] set_draft({chat_id}) failed: {e}");
+            }
+        });
+    }
+}
+
+/// Clear a conversation's draft (after a successful send): backend + DB +
+/// the active working buffer.
+fn clear_chat_draft(weak: slint::Weak<MainWindow>, key: i32) {
+    save_chat_draft(key, "");
+    if let Some(ui) = weak.upgrade() {
+        ui.global::<AppState>().set_active_draft(SharedString::new());
+    }
 }
 
 fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String, from_bot: bool) {
@@ -7524,6 +7595,7 @@ fn publish_chat_searched(state: &AppState, rows: &[data::ChatRow]) {
             image: load_avatar_path_capped(&r.avatar_path, 40),
             is_pinned: r.is_pinned,
             conv_type: r.conv_type,
+            draft: SharedString::from(r.draft.clone()),
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(out)));

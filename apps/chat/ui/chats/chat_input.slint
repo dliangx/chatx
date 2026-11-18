@@ -1,12 +1,16 @@
 import { Theme } from "../theme.slint";
 import { Icon, Glyph } from "../components/icon.slint";
 import { RecordState } from "../global/record_state.slint";
+import { AppState } from "../components/app_state.slint";
 
 export component ChatInputView inherits Rectangle {
     in property <string> placeholder-text: @tr("Type a message…");
     in property <int> chat-id: -1;
-    in-out property <string> text: "";
+    in-out property <string> text;
     callback sent(string);
+    /// The user typed or deleted. Rust persists the draft per-conversation
+    /// (keyed by `chat-id` in the backend + DB) so it survives a tab switch.
+    callback draft-changed(string);
     /// The photo icon was tapped — Rust opens the system photo picker for
     /// `chat-id`, then sends the chosen photo to the peer.
     callback sent-image(int);
@@ -14,6 +18,19 @@ export component ChatInputView inherits Rectangle {
     callback sent-file(int);
 
     background: Theme.bg;
+
+    // `AppState.active-draft` is the working buffer for the CURRENT conversation.
+    // Rust resets it to that conversation's own saved draft on every open (each
+    // conversation's draft is stored separately, keyed by chat id, in the
+    // backend + `conversations.draft` DB column — so switching never clobbers
+    // another one's draft). A two-way binding keeps the box in sync BOTH when
+    // the component is recreated AND when it is reused across a conversation
+    // switch (where `init` would not re-run). Typing also fires `draft-changed`
+    // so Rust persists per-conversation.
+    text <=> AppState.active-draft;
+    changed text => {
+        root.draft-changed(root.text);
+    }
 
     // 1px top divider.
     Rectangle {

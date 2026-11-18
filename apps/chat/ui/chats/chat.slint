@@ -66,6 +66,9 @@ export global ChatSession {
     /// Advanced by one Timer while `playing-idx >= 0`; frozen otherwise.
     in-out property <angle> spin: 0deg;
     callback message-sent(int, string);
+    /// Draft text changed (user is typing). Rust persists to `conversations.draft`
+    /// for the given chat key so it survives ChatInputView destruction.
+    callback draft-changed(int, string);
     callback update-scroll(int, length);
     callback scroll-request(int);
     /// User tapped a voice bubble — start playback (Rust sets `playing-idx`).
@@ -204,6 +207,7 @@ export component ChatView inherits Rectangle {
         height: root.input-h;
         chat-id: root.chat-id;
         sent(t) => { ChatSession.message-sent(root.chat-id, t); }
+        draft-changed(t) => { ChatSession.draft-changed(root.chat-id, t); }
         sent-image(id) => { ChatSession.sent-image(id); }
         sent-file(id) => { ChatSession.sent-file(id); }
     }

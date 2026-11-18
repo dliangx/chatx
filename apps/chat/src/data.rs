@@ -46,6 +46,7 @@ pub struct ChatRow {
     /// Conversation type: 0=DM, 1=group, 2=AI-assistant. Drives which view the
     /// chat list opens for the row (chat room vs AI assistant).
     pub conv_type: i32,
+    pub draft: String,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +265,19 @@ impl DataBackend {
         }
     }
 
+    /// Set the in-progress draft text for a chat row (per-conversation).
+    /// Returns the chat id string when a matching row was updated, `None`
+    /// otherwise (so the caller can skip the DB write).
+    pub fn set_chat_draft(&mut self, key: i32, draft: &str) -> Option<String> {
+        self.chats
+            .iter_mut()
+            .find(|r| r.key == key)
+            .map(|r| {
+                r.draft = draft.to_string();
+                r.chat_id.clone()
+            })
+    }
+
     /// Flip the pinned flag + stamp the pin time on a chat row.
     pub fn set_chat_pinned(&mut self, key: i32, pinned: bool) -> bool {
         if let Some(row) = self.chats.iter_mut().find(|r| r.key == key) {
@@ -318,6 +332,7 @@ impl DataBackend {
             is_pinned: false,
             pinned_at: 0,
             conv_type: if is_group { 1 } else { 0 },
+            draft: String::new(),
         });
         key
     }
@@ -540,6 +555,7 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
                 0
             },
             conv_type: if is_ai { 2 } else if is_group { 1 } else { 0 },
+            draft: c.draft.clone().unwrap_or_default(),
         });
     }
 
@@ -704,6 +720,7 @@ pub async fn refresh_chat_row(
             is_pinned: false,
             pinned_at: 0,
             conv_type: if is_group { 1 } else { 0 },
+            draft: String::new(),
         });
         return Ok(true);
     };
@@ -753,6 +770,7 @@ pub async fn refresh_chat_row(
                 0
             },
             conv_type: if src.type_ == 2 { 2 } else if is_group { 1 } else { 0 },
+            draft: src.draft.clone().unwrap_or_default(),
         });
         return Ok(true);
     }
@@ -811,6 +829,9 @@ pub async fn refresh_chat_row(
         // Preserve the row's conversation type (DM/group/AI) — `is_group` only
         // reflects the chat-id prefix, not type=2.
         conv_type: if src.type_ == 2 { 2 } else { row.conv_type },
+        // The in-flight draft is managed separately (input box); a refresh of
+        // the row's metadata must not clobber what the user is typing.
+        draft: row.draft.clone(),
     };
     let changed = new.title != row.title
         || new.preview != row.preview

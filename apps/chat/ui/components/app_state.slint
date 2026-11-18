@@ -75,9 +75,8 @@ export struct ConversationRow {
     time-label: string,
     image: image,
     is-pinned: bool,
-    // Conversation type: 0=DM, 1=group, 2=AI-assistant. Drives which sub-page
-    // the chat list opens for the row (chat room vs AI assistant).
     conv-type: int,
+    draft: string,
 }
 
 export struct ContactRow {
@@ -198,6 +197,12 @@ export global AppState {
     /// Current text in the active tab's search bar (all three boxes bind to
     /// this single shared box; the handler dispatches by active tab).
     in-out property <string> search-q: "";
+    /// Working buffer for the CURRENT conversation's input draft. Rust resets
+    /// it to that conversation's own saved draft each time the chat opens, and
+    /// each conversation's real draft is stored separately (keyed by chat id in
+    /// the backend + the `conversations.draft` DB column), so switching
+    /// conversations never clobbers another one's draft.
+    in-out property <string> active-draft: "";
     /// Fired from the shared SearchBar on every keystroke (incl. clears);
     /// an empty string restores each tab's full list.
     callback local-search(string);
