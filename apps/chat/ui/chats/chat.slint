@@ -269,19 +269,6 @@ export component ChatView inherits Rectangle {
             }
         }
 
-        if root.lp-active >= 0:
-        Rectangle {
-            width: 100%;
-            height: 100%;
-            background: transparent;
-            clip: true;
-            TouchArea {
-                width: 100%;
-                height: 100%;
-                clicked => { root.lp-active = -1; }
-            }
-        }
-
         for msg[i] in ChatSession.messages: Rectangle {
             x: 0px;
             y: msg.top;
@@ -536,10 +523,27 @@ export component ChatView inherits Rectangle {
             }
         }
 
+        // Dimming overlay + tap-anywhere-to-close. Rendered AFTER the message
+        // rows (so it sits on top of the bubbles) but BEFORE the menu (so the
+        // menu stays clickable on top). Tapping a bubble while the menu is open
+        // therefore closes it instead of triggering the bubble's own action.
+        if root.lp-active >= 0:
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: transparent;
+            clip: true;
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { root.lp-active = -1; }
+            }
+        }
+
         // Long-press icon menu. Rendered as the last child of the Flickable
-        // (i.e. on top of every message row) so adjacent bubbles can never
-        // cover it; positioned from the active row's geometry in content
-        // coordinates.
+        // (i.e. on top of the overlay + every message row) so adjacent bubbles
+        // can never cover it; positioned from the active row's geometry in
+        // content coordinates.
         if root.lp-active >= 0:
         menu := Rectangle {
             out property <length> menu-w: 168px;
@@ -551,12 +555,9 @@ export component ChatView inherits Rectangle {
             out property <length> menu-x:
                 max(6px, min(menu.center-x - menu.menu-w / 2, parent.width - menu.menu-w - 6px));
             x: menu.menu-x;
-            // Placement in content coordinates: prefer above the bubble; if
-            // that would clip at the viewport top, try below; if neither
-            // fits (bubble at the very bottom), clamp so the menu stays
-            // fully inside the visible viewport.
-            out property <length> vp-top: fk.content-y;
-            out property <length> vp-bottom: fk.content-y + fk.height;
+
+            out property <length> vp-top: -fk.content-y;
+            out property <length> vp-bottom: fk.height - fk.content-y;
             out property <length> y-above: menu.msg.top - menu.menu-h - 8px;
             out property <length> y-below: menu.msg.top + menu.msg.height + 8px;
             y: max(menu.vp-top, min(
@@ -572,8 +573,8 @@ export component ChatView inherits Rectangle {
             border-color: Theme.border;
 
             TouchArea {
-                width: 100%;
-                height: 100%;
+                width: root.width;
+                height: root.height;
                 clicked => { root.lp-active = -1; }
             }
 
