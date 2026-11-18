@@ -41,6 +41,9 @@ export struct MessageData {
     /// Shown bottom-right over OWN image bubbles so a send reads as sending /
     /// sent / failed without a global spinner.
     send_state: int,
+    /// Empty unless the row's text contains a link (http / https / www.);
+    /// the first detected URL — tapping the bubble opens it in the browser.
+    link: string,
 }
 
 export global ChatSession {
@@ -510,6 +513,11 @@ export component ChatView inherits Rectangle {
                 y: 0px;
                 width: msg.width;
                 height: msg.height;
+                clicked => {
+                    if (msg.link != "") {
+                        AppState.open-link(msg.link);
+                    }
+                }
                 pointer-event(e) => {
                     if (e.kind == PointerEventKind.down) {
                         root.lp-armed = i;

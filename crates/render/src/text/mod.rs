@@ -32,6 +32,7 @@ pub struct PositionedGlyph {
     pub baseline_y: f32,
     pub color: Rgba,
     pub char_index: u32,
+    pub underline: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +57,7 @@ pub struct TextLine {
 pub struct Span<'a> {
     pub text: &'a str,
     pub color: Rgba,
+    pub underline: bool,
 }
 
 pub enum RichItem<'a> {

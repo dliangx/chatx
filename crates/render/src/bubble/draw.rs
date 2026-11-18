@@ -228,6 +228,18 @@ fn draw_line(canvas: &mut Canvas, manager: &mut FontManager, line: &TextLine, x:
     for img in &line.images {
         canvas.blit_scaled((x + img.x) as i32, (y + img.y) as i32, img.w as u32, img.h as u32, &img.img);
     }
+    for g in &line.glyphs {
+        if g.underline {
+            let thick = (px * 0.08).max(1.0);
+            canvas.fill_rect(
+                (x + g.pen_x).round() as i32,
+                (y + g.baseline_y + thick).round() as i32,
+                g.advance.ceil().max(1.0) as u32,
+                thick.ceil().max(1.0) as u32,
+                g.color,
+            );
+        }
+    }
     let FontManager { entries, cache, .. } = manager;
     for g in &line.glyphs {
         let font = &entries[g.font.0 as usize].font;

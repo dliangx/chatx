@@ -11,7 +11,7 @@ use unicode_bidi::Level;
 const EMOJI_PLACEHOLDER: char = '\u{E000}';
 
 enum CharMeta {
-    Text { color: Rgba },
+    Text { color: Rgba, underline: bool },
     Emoji { ch: char },
 }
 
@@ -23,6 +23,7 @@ struct CharInfo {
     font: FontId,
     color: Rgba,
     emoji: Option<char>,
+    underline: bool,
 }
 
 pub fn layout_text(
@@ -31,7 +32,11 @@ pub fn layout_text(
     style: &TextStyle,
     max_width: f32,
 ) -> Vec<TextLine> {
-    let items = [RichItem::Text(crate::text::Span { text, color: style.color })];
+    let items = [RichItem::Text(crate::text::Span {
+        text,
+        color: style.color,
+        underline: false,
+    })];
     layout_rich(manager, &EmojiAtlas::new(), &items, style, max_width)
 }
 
@@ -55,11 +60,11 @@ pub fn layout_rich(
         .enumerate()
         .map(|(index, (((byte, ch), level), m))| {
             let rtl = level.is_rtl();
-            let (font, color, emoji) = match m {
-                CharMeta::Text { color } => (manager.resolve(ch, rtl), *color, None),
-                CharMeta::Emoji { ch: e } => (FontId(0), Rgba::TRANSPARENT, Some(*e)),
+            let (font, color, emoji, underline) = match m {
+                CharMeta::Text { color, underline } => (manager.resolve(ch, rtl), *color, None, *underline),
+                CharMeta::Emoji { ch: e } => (FontId(0), Rgba::TRANSPARENT, Some(*e), false),
             };
-            CharInfo { byte, index: index as u32, ch, rtl, font, color, emoji }
+            CharInfo { byte, index: index as u32, ch, rtl, font, color, emoji, underline }
         })
         .collect();
 
@@ -83,7 +88,7 @@ fn build_combined(items: &[RichItem]) -> (String, Vec<CharMeta>) {
             RichItem::Text(span) => {
                 for ch in span.text.chars() {
                     combined.push(ch);
-                    meta.push(CharMeta::Text { color: span.color });
+                    meta.push(CharMeta::Text { color: span.color, underline: span.underline });
                 }
             }
             RichItem::Emoji(ch) => {
@@ -281,13 +286,19 @@ fn layout_line(
         let rtl = info.rtl;
         let font = info.font;
         let color = info.color;
+        let underline = info.underline;
         let mut run = String::new();
         let mut run_indices: Vec<u32> = Vec::new();
         let mut j = i;
         while j < order.len() {
             let cj = order[j];
             let c = line_chars[cj];
-            if c.emoji.is_none() && c.rtl == rtl && c.font == font && c.color == color {
+            if c.emoji.is_none()
+                && c.rtl == rtl
+                && c.font == font
+                && c.color == color
+                && c.underline == underline
+            {
                 run.push(c.ch);
                 run_indices.push(c.index);
                 j += 1;
@@ -306,6 +317,7 @@ fn layout_line(
                 baseline_y: baseline,
                 color,
                 char_index,
+                underline,
             });
             pen_x += g.x_advance;
         }

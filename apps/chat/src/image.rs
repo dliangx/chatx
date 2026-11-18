@@ -403,6 +403,27 @@ pub struct RenderedMsg {
     pub avatar: Option<render::canvas::Image>,
     /// Time label (e.g. "14:32") — displayed under the voice bubble body.
     pub time: String,
+    /// First link (http/https/www.) detected in a text bubble — the tap
+    /// target for the default browser; `None` for non-link text rows.
+    pub link: Option<String>,
+}
+
+/// First http / https / www. URL found in `text` (whole trimmed word); used to
+/// decide whether tapping a text bubble opens the default browser.
+pub fn first_link(text: &str) -> Option<String> {
+    for seg in parse_text(text) {
+        if let render::bubble::Segment::Link(l) = seg {
+            let u = l.trim().trim_end_matches(['.', ',', '!', '?', ')', ']', '"', '\'']);
+            if !u.is_empty() {
+                return Some(if u.starts_with("http://") || u.starts_with("https://") {
+                    u.to_string()
+                } else {
+                    format!("https://{u}")
+                });
+            }
+        }
+    }
+    None
 }
 
 pub struct ChatMsg {
@@ -449,6 +470,7 @@ pub fn render_msg(
             preview: None,
             avatar: msg.avatar.clone(),
             time: msg.time.clone(),
+            link: None,
         };
     }
     // Voice bubbles are drawn by Slint (icon + duration + play state), so the
@@ -467,6 +489,7 @@ pub fn render_msg(
             preview: None,
             avatar: msg.avatar.clone(),
             time: msg.time.clone(),
+            link: None,
         };
     }
     if let Some(path) = &msg.image {
@@ -494,6 +517,7 @@ pub fn render_msg(
             preview: msg.image_preview.clone(),
             avatar: msg.avatar.clone(),
             time: msg.time.clone(),
+            link: None,
         };
     }
     let segs = parse_text(&msg.text);
@@ -518,6 +542,7 @@ pub fn render_msg(
         preview: None,
         avatar: None,
         time: msg.time.clone(),
+        link: first_link(&msg.text),
     }
 }
 
@@ -621,6 +646,7 @@ pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageDa
         // 0 = no badge; the model build in `load_chat_messages` overwrites this
         // with the in-flight send state for self image rows.
         send_state: 0,
+        link: m.link.clone().map(SharedString::from).unwrap_or_default(),
     }
 }
 

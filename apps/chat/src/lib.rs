@@ -1520,6 +1520,16 @@ pub fn run_app() {
         });
     }
     {
+        ui.global::<AppState>().on_open_link(move |url| {
+            let u = url.to_string();
+            std::thread::spawn(move || {
+                if let Err(e) = webbrowser::open(&u) {
+                    tracing::warn!("[link] open failed: {e}");
+                }
+            });
+        });
+    }
+    {
         let weak = weak.clone();
         ui.global::<AppState>().on_delete_contact(move |id| {
             delete_contact(weak.clone(), id);
