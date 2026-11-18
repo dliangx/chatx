@@ -1,25 +1,22 @@
-//! Client-side DM offline queue. Each row is an outgoing text message whose
-//! local `messages` row is still `status = sending` — i.e. the peer never
-//! acked — pending a redelivery attempt.
+//! Client-side DM offline queue. Each row is an outgoing DM (text, voice,
+//! image or file) whose local `messages` row is still `status = sending` —
+//! i.e. the peer never acked — pending a redelivery attempt.
 //!
-//! The redelivery task in `core::Client` scans [`due`] until the peer acks
-//! (row removed, local row `status` → `sent`) or the attempt budget is
-//! exhausted (row removed, local row `status` → `failed`). This module owns
-//! retry bookkeeping only; the caller flips the message row status.
-//!
-//! Text only by design — media clips are multi-MB and resending them would
-//! dominate; media keeps the "retry manually on failure" behaviour.
+//! The redelivery task in `core::Client` is **passive**: it only fires a
+//! queued row when the peer is already inbound-connected, and defers to the
+//! peer's `Connected` fast-path otherwise. Failure of a single attempt merely
+//! advances a per-pair **cooldown** ([`bump`]) so a half-dead link is not
+//! re-hit every tick. Termination is by **deadline** only ([`DM_DEADLINE_MS`],
+//! swept by [`sweep_expired`] → local row `status = failed`), not by an
+//! attempt budget: in a passive model the peer may be offline for days and
+//! still valid, so a count cap would give up too early.
 
 use crate::{now_ms, Pool};
 use sqlx::FromRow;
 
-/// Total redelivery attempts before giving up (first send + 11 retries).
-pub const MAX_ATTEMPTS: i64 = 12;
-
-/// Per-attempt backoff schedule (seconds), capped at the last entry. With
-/// 11 retries over this schedule the total wait is ~10h — comfortably
-/// inside a 24h delivery window while still giving up on permanently
-/// unreachable peers.
+/// Per-attempt backoff schedule (seconds), capped at the last entry. A failed
+/// attempt waits this long before the next; the cap (1h) keeps a wedged link
+/// from being re-hit every redelivery tick (~1.5s) without ever giving up.
 const BACKOFF_SECS: [i64; 7] = [5, 15, 60, 300, 900, 1800, 3600];
 
 #[derive(Debug, FromRow, Clone)]
@@ -30,25 +27,29 @@ pub struct Row {
     pub attempts: i64,
     pub next_try_ms: i64,
     pub created_at: i64,
-    /// Hard expiry for media rows. `None` = text (indefinite passive-deferral).
-    /// A nullable column maps naturally to `Option<i64>` via `FromRow`.
+    /// Hard expiry epoch (ms). After this [`sweep_expired`] drops the row and
+    /// flips the local `messages` row to `FAILED`. `None` = legacy rows from
+    /// before deadlines existed; those fall back to `created_at + DM_DEADLINE_MS`
+    /// in the sweep. A nullable column maps naturally to `Option<i64>` via
+    /// `FromRow`.
     pub deadline_ms: Option<i64>,
 }
 
-/// Hard expiry window (ms) for queued **media** rows (voice / image / file).
-/// After this the redelivery sweep drops them and flips the local `messages`
-/// row to `FAILED`. Text rows use `None` (no deadline — wait for the peer's
-/// inbound link forever while the app runs).
-pub const MEDIA_DEADLINE_MS: i64 = 3 * 24 * 60 * 60 * 1000; // 3 days
+/// Hard expiry window (ms) for queued DM rows — text **and** media. After this
+/// the redelivery sweep drops the row and flips the local `messages` row to
+/// `FAILED`. Delivery is passive (we only send while the peer is connected),
+/// so a peer that stays offline past the deadline is considered unreachable.
+pub const DM_DEADLINE_MS: i64 = 3 * 24 * 60 * 60 * 1000; // 3 days
 
 pub fn next_delay_ms(attempts: i64) -> i64 {
     let idx = (attempts as usize).min(BACKOFF_SECS.len() - 1);
     BACKOFF_SECS[idx] * 1000
 }
 
-/// Register `msg_id` as awaiting delivery. `deadline_ms = None` for text rows
-/// (indefinite passive-deferral); a millisecond epoch for media rows (swept
-/// to `FAILED` after it elapses — see [`MEDIA_DEADLINE_MS`]).
+/// Register `msg_id` as awaiting delivery. `deadline_ms` is a millisecond
+/// epoch (swept to `FAILED` after it elapses — see [`DM_DEADLINE_MS`]); pass
+/// `None` for legacy rows, which fall back to a `created_at`-based 3-day
+/// window in [`sweep_expired`]. New enqueue sites always pass a deadline.
 /// INSERT OR REPLACE makes re-enqueue idempotent (redeliver loop racing a
 /// fresh `send_dm`).
 pub async fn enqueue(
@@ -89,40 +90,50 @@ pub async fn due(pool: &Pool, limit: u32) -> anyhow::Result<Vec<Row>> {
     .map_err(Into::into)
 }
 
-/// Drop all queue rows whose media `deadline_ms` has elapsed and return the
-/// distinct `msg_id`s the caller should flip to status `FAILED`. Text rows
-/// (`deadline_ms IS NULL`) are never swept. Idempotent — the DELETE is the
-/// authoritative action, and any subsequent `try_send_dm_once` for a swept
-/// row finds no local message to replay (the app's `FAILED` badge persists).
+/// Drop all expired queue rows and return the distinct `msg_id`s the caller
+/// should flip to status `FAILED`. A row is expired when its `deadline_ms`
+/// has elapsed, or when `deadline_ms IS NULL` and its `created_at` is older
+/// than [`DM_DEADLINE_MS`] (legacy text rows enqueued before deadlines were
+/// added — otherwise they would live forever). Idempotent — the DELETE is the
+/// authoritative action, and any subsequent redelivery for a swept row finds
+/// no local message to replay (the app's `FAILED` badge persists).
 pub async fn sweep_expired(pool: &Pool) -> anyhow::Result<Vec<i64>> {
     // Find the ids first so we can report them back, then delete. The
     // two-step is intentional: `DELETE ... RETURNING` is not available in
     // SQLite < 3.35, and we want a single deterministic return shape.
+    let now = now_ms();
+    let legacy_cutoff = now.saturating_sub(DM_DEADLINE_MS);
     let ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT DISTINCT msg_id FROM dm_send_queue WHERE deadline_ms IS NOT NULL AND deadline_ms <= ?1",
+        "SELECT DISTINCT msg_id FROM dm_send_queue
+         WHERE (deadline_ms IS NOT NULL AND deadline_ms <= ?1)
+            OR (deadline_ms IS NULL AND created_at <= ?2)",
     )
-    .bind(now_ms())
+    .bind(now)
+    .bind(legacy_cutoff)
     .fetch_all(pool)
     .await?;
     if !ids.is_empty() {
         let _ = sqlx::query(
-            "DELETE FROM dm_send_queue WHERE deadline_ms IS NOT NULL AND deadline_ms <= ?1",
+            "DELETE FROM dm_send_queue
+             WHERE (deadline_ms IS NOT NULL AND deadline_ms <= ?1)
+                OR (deadline_ms IS NULL AND created_at <= ?2)",
         )
-        .bind(now_ms())
+        .bind(now)
+        .bind(legacy_cutoff)
         .execute(pool)
         .await?;
     }
     Ok(ids)
 }
 
-/// Bump the attempt counter and refresh the retry cooldown for a specific
-/// (msg, device) pair. Per-device attempt budgets are tracked independently
-/// so a flaky device does not starve a fast one and vice versa.
+/// Refresh the retry cooldown for a (msg, device) pair after a failed attempt.
+/// Advances `next_try_ms` by the next backoff step so the pair is not due on
+/// the very next redelivery tick — but never gives up; termination is left to
+/// the [`DM_DEADLINE_MS`] sweep. Per-device counters stay independent so a
+/// flaky device does not starve a fast one.
 ///
-/// Returns the attempt count AFTER this bump. When it reaches
-/// [`MAX_ATTEMPTS`] the caller is expected to call [`give_up_pair`] and
-/// (optionally, if no other devices remain for this message) mark the local
-/// message row failed.
+/// Returns the attempt count AFTER this bump (for logging), or `0` if the
+/// pair was already removed from the queue (nothing to cool down).
 pub async fn bump(pool: &Pool, msg_id: i64, peer_base58: &str) -> anyhow::Result<i64> {
     let delay = {
         let (a,): (i64,) =
@@ -143,7 +154,7 @@ pub async fn bump(pool: &Pool, msg_id: i64, peer_base58: &str) -> anyhow::Result
     .execute(pool)
     .await?;
     if n.rows_affected() == 0 {
-        return Ok(MAX_ATTEMPTS); // already removed — treat as exhausted
+        return Ok(0); // pair removed between SELECT and UPDATE — nothing to cool down
     }
     let (a,): (i64,) =
         sqlx::query_as("SELECT attempts FROM dm_send_queue WHERE msg_id = ?1 AND peer_base58 = ?2")
@@ -191,18 +202,20 @@ pub async fn pending_peers_for_msg(
     Ok(rows.into_iter().map(|(p,)| p).collect())
 }
 
-/// Due rows for a specific peer only (used by the Connected-event handler
-/// for immediate redelivery).
+/// All pending rows for a specific peer, **ignoring the retry cooldown**.
+/// Used by the `Connected`/`Discovered` fast-path: the peer just came online,
+/// which is the one moment a passive redelivery can succeed, so we must drain
+/// it immediately even if the pair is mid-backoff. (The polling loop uses
+/// [`due`], which honours the cooldown, to keep a half-dead link quiet.)
 pub async fn due_for_peer(pool: &Pool, peer_base58: &str, limit: u32) -> anyhow::Result<Vec<Row>> {
     sqlx::query_as::<_, Row>(
         "SELECT msg_id, peer_base58, chat_id, attempts, next_try_ms, created_at, deadline_ms
          FROM dm_send_queue
-         WHERE peer_base58 = ?1 AND next_try_ms <= ?2
+         WHERE peer_base58 = ?1
          ORDER BY created_at ASC
-         LIMIT ?3",
+         LIMIT ?2",
     )
     .bind(peer_base58)
-    .bind(now_ms())
     .bind(limit as i64)
     .fetch_all(pool)
     .await
@@ -240,7 +253,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enqueue_bump_exhaustion_flow() {
+    async fn enqueue_bump_backoff_flow() {
         let p = pool().await;
         enqueue(&p, 1, "peerA", "chatA", None).await.unwrap();
 
@@ -253,12 +266,22 @@ mod tests {
         assert!(next_delay_ms(0) < next_delay_ms(3));
         assert_eq!(next_delay_ms(99), next_delay_ms(6));
 
-        // Bumping eventually exhausts (per (msg, device) pair).
-        let mut attempts = 0i64;
-        for _ in 0..MAX_ATTEMPTS {
-            attempts = bump(&p, 1, "peerA").await.unwrap();
+        // Bumping advances the cooldown: after a bump the row is no longer due
+        // (next_try_ms pushed into the future), and the counter grows without
+        // any hard cap — termination is the deadline sweep's job, not the
+        // attempt counter's.
+        let first = bump(&p, 1, "peerA").await.unwrap();
+        assert_eq!(first, 1);
+        assert!(due(&p, 10).await.unwrap().is_empty());
+        for _ in 0..30 {
+            let _ = bump(&p, 1, "peerA").await.unwrap();
         }
-        assert_eq!(attempts, MAX_ATTEMPTS);
+        let last: (i64,) =
+            sqlx::query_as("SELECT attempts FROM dm_send_queue WHERE msg_id = 1")
+                .fetch_one(&p)
+                .await
+                .unwrap();
+        assert_eq!(last.0, 31); // 31 bumps, still present — no exhaustion
         give_up(&p, 1).await.unwrap();
         assert!(due(&p, 10).await.unwrap().is_empty());
     }
@@ -311,5 +334,38 @@ mod tests {
         // enqueue is idempotent (re-sending the same message doesn't dup)
         enqueue(&p, 10, "peerX", "cX", None).await.unwrap();
         assert_eq!(due(&p, 100).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sweep_expired_covers_legacy_null_deadline_rows() {
+        let p = pool().await;
+        // A legacy row: deadline_ms IS NULL, created just now.
+        enqueue(&p, 100, "peerX", "cX", None).await.unwrap();
+        // A fresh row WITH a deadline (the normal path).
+        let deadline = crate::now_ms() + DM_DEADLINE_MS;
+        enqueue(&p, 101, "peerX", "cX", Some(deadline)).await.unwrap();
+
+        // Neither should be swept yet.
+        assert!(sweep_expired(&p).await.unwrap().is_empty());
+
+        // Age the legacy row past the 3-day window (backdate created_at).
+        let old = crate::now_ms() - DM_DEADLINE_MS - 1000;
+        let _ = sqlx::query(
+            "UPDATE dm_send_queue SET created_at = ?3 WHERE msg_id = 100 AND peer_base58 = 'peerX'",
+        )
+        .bind(100)
+        .bind("peerX")
+        .bind(old)
+        .execute(&p)
+        .await
+        .unwrap();
+
+        // Now the legacy row is expired (and so is its sibling), the fresh
+        // deadline row is not.
+        let swept = sweep_expired(&p).await.unwrap();
+        assert!(sweep_expired(&p).await.unwrap().is_empty());
+        let swept_set: std::collections::HashSet<i64> = swept.into_iter().collect();
+        assert!(swept_set.contains(&100), "legacy NULL-deadline row must be swept");
+        assert!(!swept_set.contains(&101), "deadline not yet reached must be kept");
     }
 }

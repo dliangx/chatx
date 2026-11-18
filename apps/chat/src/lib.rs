@@ -4859,10 +4859,8 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 }
             };
         // Outbound rows the peer never acked AND which have already outlived
-        // their delivery window (media deadline). Keyed by `messages.id`;
-        // drives the "failed" badge in the render loop below. Text rows keep
-        // their `SENDING` badge indefinitely (no FAILED for text; the loop
-        // retries indefinitely while the app is running).
+        // their delivery window (3-day deadline, text and media alike). Keyed
+        // by `messages.id`; drives the "failed" badge in the render loop below.
         let me_peer_self = client.peer_base58();
         let failed_msg_ids: std::collections::HashSet<i64> =
             match sqlite::messages::failed_outbound_ids(&pool, &chat_id, &me_peer_self).await {

@@ -808,10 +808,13 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
 
     /// Start the DM redelivery loop: a tokio task (on a dedicated thread with
     /// its own `current_thread` runtime) that scans `dm_send_queue` for due
-    /// rows (~1.5 s cadence) and reuses [`Self::try_send_dm_once`] to push
-    /// them. Bumps the row's attempt counter on failure (or marks the message
-    /// row `failed` when the 12 attempt budget is exhausted), and removes the
-    /// row on success.
+    /// rows (~1.5 s cadence) and pushes them over the inbound link (the loop
+    /// is passive — it only fires when the peer is already connected). On
+    /// success the row is removed; on failure the pair's retry cooldown is
+    /// bumped so a half-dead link is not re-hit every tick. Termination is by
+    /// the 3-day deadline sweep (`sweep_expired`), not an attempt budget: the
+    /// peer may be offline for days and still valid, so we keep deferring
+    /// rather than giving up.
     ///
     /// The thread runs because the login flow invokes this from the Slint UI
     /// thread, which has no ambient tokio context (so `Handle::current()`
@@ -989,10 +992,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     /// One redelivery round. Two always-run steps, then per-row dispatch:
-    ///  1. **Sweep expired media** — any row past its 3-day `deadline_ms`
-    ///     (media only; text is `None` and lives forever) is dropped and its
-    ///     local `messages` row flipped to `FAILED`, which the app's badge
-    ///     reads as "failed".
+    ///  1. **Sweep expired rows** — any row past its 3-day `deadline_ms` (text
+    ///     **and** media) is dropped and its local `messages` row flipped to
+    ///     `FAILED`, which the app's badge reads as "failed".
     ///  2. **Dispatch due rows** — for each due row, send it **only if the peer
     ///     is already connected inbound** (never dials outbound). This loop is
     ///     purely passive: delivery to an offline peer is deferred until that
@@ -1142,8 +1144,16 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 tracing::warn!(
                     msg_id = row.msg_id,
                     peer = %row.peer_base58,
-                    "[redeliver] send failed, leaving queued ({why})"
+                    attempts = row.attempts + 1,
+                    "[redeliver] send failed, cooling down ({why})"
                 );
+                // Push this pair's next attempt back by the next backoff step
+                // (5s→15s→…→1h) so a half-dead link is not re-hit on every
+                // redelivery tick (~1.5s). We never give up here — the peer may
+                // simply be offline for days and still valid; termination is the
+                // deadline sweep's job (see `sweep_expired` / `DM_DEADLINE_MS`).
+                // A reconnection ignores this cooldown and drains immediately.
+                let _ = sqlite::queue::bump(pool, row.msg_id, &row.peer_base58).await;
             }
         }
     }
@@ -2683,8 +2693,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let chat = store::dm_chat_id(username);
         let msg_id = self.store.insert_mine_sending(&chat, text).await?;
         if let Some(pool) = self.store.pool() {
+            let deadline = sqlite::now_ms() + sqlite::queue::DM_DEADLINE_MS;
             for dev in &dev_set {
-                let _ = sqlite::queue::enqueue(&pool, msg_id, dev, &chat, None).await;
+                let _ = sqlite::queue::enqueue(&pool, msg_id, dev, &chat, Some(deadline)).await;
             }
         }
         tracing::debug!(
@@ -3235,12 +3246,12 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
     }
 
-    /// Enqueue an outbound message (a voice / image / file row created via the
-    /// `persist_*` helpers) for passive redelivery to `peer_base58`, with a hard
-    /// 3-day deadline. Text rows enqueue with `deadline_ms = None` (indefinite);
-    /// media rows use this helper. On deadline the background loop drops the
-    /// queue row and flips the local `messages` row to `FAILED` so the app's
-    /// queue/status-driven badge can render "failed".
+    /// Enqueue an outbound media message (voice / image / file row created via
+    /// the `persist_*` helpers) for passive redelivery to `peer_base58`, with a
+    /// hard 3-day deadline. Text rows set their deadline at enqueue in
+    /// `queue_dm_text_ex`; media rows use this helper. On deadline the
+    /// background loop drops the queue row and flips the local `messages` row
+    /// to `FAILED` so the app's queue/status-driven badge can render "failed".
     pub async fn enqueue_media_deadline(
         &self,
         msg_id: i64,
@@ -3248,7 +3259,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         chat_id: &str,
     ) -> anyhow::Result<()> {
         let pool = self.store.pool().ok_or_else(|| anyhow::anyhow!("no pool"))?;
-        let deadline = sqlite::now_ms() + sqlite::queue::MEDIA_DEADLINE_MS;
+        let deadline = sqlite::now_ms() + sqlite::queue::DM_DEADLINE_MS;
         sqlite::queue::enqueue(&pool, msg_id, peer_base58, chat_id, Some(deadline)).await
     }
 

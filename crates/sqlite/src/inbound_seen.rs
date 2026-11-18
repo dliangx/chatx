@@ -9,8 +9,8 @@ use crate::{now_ms, Pool};
 
 /// Prune markers older than this so the table stays bounded even though one
 /// row is inserted per unique inbound message. 7 days >> the sender's max
-/// retry window (~10h over 12 attempts), so a legitimate redelivery can never
-/// be pruned mid-flight and mistakenly let a duplicate through.
+/// retry window (3-day deadline), so a legitimate redelivery can never be
+/// pruned mid-flight and mistakenly let a duplicate through.
 const PRUNE_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 /// Record `client_id` as seen. Returns `true` if this was the FIRST time we've

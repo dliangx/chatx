@@ -189,11 +189,11 @@ export component ChatView inherits Rectangle {
             running: ChatSession.conn == "dialing";
             triggered => { blink = !blink; }
         }
-        opacity: blink ? 1.0 : 0.3;
+
         background:
-            ChatSession.conn == "dialing" ? Theme.fg-muted
+            ChatSession.conn == "dialing" ? (blink? Theme.fg-muted:Theme.fg-strong)
           : ChatSession.conn == "direct"  ? Theme.success
-          : ChatSession.conn == "relay"   ? Theme.warning
+           : ChatSession.conn == "relay"   ?Theme.info
           : Theme.danger;
     }
 
