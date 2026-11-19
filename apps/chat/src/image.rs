@@ -2,8 +2,8 @@ use slint::Image as SlintImage;
 use slint::{SharedPixelBuffer, SharedString};
 
 use render::Renderer;
-use render::bubble::parse::parse_text;
 use render::bubble::Side;
+use render::bubble::parse::parse_text;
 use render::canvas::Image;
 
 pub(crate) static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> =
@@ -329,8 +329,9 @@ pub fn ensure_renderer() {
 /// every call — for a 200-row chat the same peer/sender id would otherwise
 /// re-render its gradient 200×. Caching means each distinct seed is generated
 /// once and cloned (a single `Vec<u8>` copy) thereafter.
-static AVATAR_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(String, u32), Image>>> =
-    std::sync::OnceLock::new();
+static AVATAR_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<(String, u32), Image>>,
+> = std::sync::OnceLock::new();
 
 /// Like [`make_avatar`], but memoised per `(seed, size)`: the first call
 /// generates the gradient, later calls for the same seed return a clone of the
@@ -351,7 +352,14 @@ pub fn make_avatar_cached(seed: &str, size: u32) -> Image {
     let w = img.w;
     let h = img.h;
     let rgba = img.rgba.clone();
-    map.insert(key, Image { w, h, rgba: rgba.clone() });
+    map.insert(
+        key,
+        Image {
+            w,
+            h,
+            rgba: rgba.clone(),
+        },
+    );
     Image { w, h, rgba }
 }
 
@@ -450,7 +458,9 @@ pub fn to_rich(text: &str) -> slint::StyledText {
     for seg in parse_text(text) {
         match seg {
             render::bubble::Segment::Link(l) => {
-                let u = l.trim().trim_end_matches(['.', ',', '!', '?', ')', ']', '"', '\'']);
+                let u = l
+                    .trim()
+                    .trim_end_matches(['.', ',', '!', '?', ')', ']', '"', '\'']);
                 let target = if u.starts_with("http://") || u.starts_with("https://") {
                     u.to_string()
                 } else {
@@ -473,7 +483,9 @@ pub fn to_rich(text: &str) -> slint::StyledText {
 pub fn first_link(text: &str) -> Option<String> {
     for seg in parse_text(text) {
         if let render::bubble::Segment::Link(l) = seg {
-            let u = l.trim().trim_end_matches(['.', ',', '!', '?', ')', ']', '"', '\'']);
+            let u = l
+                .trim()
+                .trim_end_matches(['.', ',', '!', '?', ')', ']', '"', '\'']);
             if !u.is_empty() {
                 return Some(if u.starts_with("http://") || u.starts_with("https://") {
                     u.to_string()
@@ -511,7 +523,7 @@ pub struct ChatMsg {
 
 pub fn render_msg(
     _r: &mut Renderer,
-    id: u64,
+    _id: u64,
     msg: &ChatMsg,
     available_w: u32,
     scale: f32,
@@ -689,6 +701,9 @@ pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageDa
         // with the in-flight send state for self image rows.
         send_state: 0,
         link: m.link.clone().map(SharedString::from).unwrap_or_default(),
+        // Auto-translation is stamped later by `load_chat_messages` (the
+        // translation pass runs on the caller side, not here).
+        translation: SharedString::new(),
     }
 }
 

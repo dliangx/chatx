@@ -22,6 +22,11 @@ use crate::{AiAssistantState, AiMessageRow, MainWindow};
 const SYSTEM_PROMPT: &str = "You are ChatX's built-in assistant. Be concise and helpful. \
      You are running fully locally; you have no network access.";
 
+const TRANSLATE_SYSTEM_PROMPT: &str =
+    "You are a precise translator. You translate the user's text into the requested \
+     target language and reply with the translation only — no preamble, no quotation, \
+     no notes. Preserve line breaks, links and emoji.";
+
 /// A single item pushed from the actor to the UI.
 #[derive(Clone)]
 enum UiEvent {
@@ -56,6 +61,15 @@ enum Cmd {
         /// Prior turns: `(is_assistant, text)` in chronological order.
         context: Vec<(bool, String)>,
         question: String,
+        reply: std::sync::mpsc::Sender<String>,
+    },
+    /// One-shot translation: translate `text` into the `target` language.
+    /// The answer is delivered to the provided oneshot channel. A separate
+    /// actor path (no running AI-assistant conversation is touched) with a
+    /// translation-dedicated system prompt.
+    Translate {
+        text: String,
+        target: String,
         reply: std::sync::mpsc::Sender<String>,
     },
 }
@@ -135,6 +149,26 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
                     }
                 }
                 c.user(question);
+                let mut collected = String::new();
+                match backend.generate(&c, &mut |tok| collected.push_str(&tok)) {
+                    Ok(full) => {
+                        collected = full;
+                    }
+                    Err(e) => {
+                        collected = format!("(AI error: {e})");
+                    }
+                }
+                let _ = reply.send(collected);
+            }
+            Cmd::Translate { text, target, reply } => {
+                // One-shot translation. The conversation is seeded with a
+                // translation-dedicated system prompt so the model answers
+                // with the translation (and nothing else).
+                let mut c =
+                    chatx_agent::Conversation::new(TRANSLATE_SYSTEM_PROMPT);
+                c.user(format!(
+                    "Translate the following text into {target}. Reply with the translation only.\n\n{text}"
+                ));
                 let mut collected = String::new();
                 match backend.generate(&c, &mut |tok| collected.push_str(&tok)) {
                     Ok(full) => {
@@ -228,6 +262,27 @@ pub fn ask_on(
         .map_err(|e| e.to_string())?;
     rx.recv_timeout(std::time::Duration::from_secs(120))
         .map_err(|e| format!("AI reply timed out: {e}"))
+}
+
+/// One-shot translation (the chat "translate" header button path). Asks the
+/// actor to translate `text` into `target` and blocks until the full answer is
+/// ready (or a 120s timeout). The actor's running AI-assistant conversation is
+/// left untouched — the translation uses its own dedicated system prompt.
+pub fn translate(text: &str, target: &str) -> Result<String, String> {
+    ensure_actor();
+    let Some(cmd_tx) = CMD.lock().unwrap().clone() else {
+        return Err("AI actor unavailable".to_string());
+    };
+    let (tx, rx) = channel::<String>();
+    cmd_tx
+        .send(Cmd::Translate {
+            text: text.to_string(),
+            target: target.to_string(),
+            reply: tx,
+        })
+        .map_err(|e| e.to_string())?;
+    rx.recv_timeout(std::time::Duration::from_secs(120))
+        .map_err(|e| format!("AI translate timed out: {e}"))
 }
 
 pub fn reset(weak: slint::Weak<MainWindow>) {

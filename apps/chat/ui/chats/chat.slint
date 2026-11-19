@@ -49,6 +49,10 @@ export struct MessageData {
     /// Empty unless the row's text contains a link (http / https / www.);
     /// the first detected URL — tapping the bubble opens it in the browser.
     link: string,
+    /// Empty unless the translate button is on and the row's text was
+    /// auto-translated into the app's language. Drawn below the original
+    /// text in the bubble. Own rows and same-language rows stay empty.
+    translation: string,
 }
 
 export global ChatSession {
@@ -67,6 +71,15 @@ export global ChatSession {
 
     in property <length> scroll-dist: 0px;
     in property <int> scroll-token: 0;
+    /// True while the header translate button is "on". When on, incoming
+    /// (non-self) text rows whose language differs from the app's are
+    /// auto-translated by the local AI and shown under the original. Own rows
+    /// and same-language rows are left untouched.
+    in-out property <bool> translate-enabled: false;
+    /// Fired whenever the translate button is toggled. Rust re-renders the
+    /// current chat: on → run the auto-translation pass; off → clear the
+    /// existing translations.
+    callback translate-toggled();
     /// Index into `messages` of the currently-playing voice bubble; -1 = none.
     in property <int> playing-idx: -1;
     /// Continuous rotation angle (degrees) of the playing record icon.
@@ -174,6 +187,38 @@ export component ChatView inherits Rectangle {
                         ? GlobalOverlayType.None
                         : GlobalOverlayType.AddMenu;
                 }
+            }
+        }
+    }
+
+    // Translate toggle — top-level (above the list), sitting in the header's
+    // right zone beside the DM connection dot / the group setting icon and the
+    // call icon. Off by default; tapping flips `ChatSession.translate-enabled`
+    // and the icon's colours (grey glyph on transparent → white glyph on the
+    // brand chip), the requested "background + foreground change".
+    //
+    // Position: for a DM the only right-zone element is the connection dot
+    // (parent.width-60), so the button sits flush left of it (parent.width-108
+    // → spans to parent.width-60). For a group the right zone is empty (the
+    // setting / call icons are on the left), so the button sits flush against
+    // the right edge (parent.width-60).
+    Icon {
+        x: AppState.current-chat-is-group
+            ? parent.width - 64px
+            : parent.width - 102px;
+        y: 10px;
+        width: 30px;
+        height: 30px;
+        size: 18px;
+        glyph: Glyph.translate;
+        background: ChatSession.translate-enabled ? Theme.brand : transparent;
+        tint: ChatSession.translate-enabled ? Theme.fg-on-accent : Theme.fg;
+        TouchArea {
+            width: 18px;
+            height: 18px;
+            clicked => {
+                ChatSession.translate-enabled = !ChatSession.translate-enabled;
+                ChatSession.translate-toggled();
             }
         }
     }
@@ -297,7 +342,7 @@ export component ChatView inherits Rectangle {
                 out property <length> bubble-cap: parent.width * 0.8;
                 measure := Text {
                     width: card.bubble-cap - 2 * card.bubble-pad;
-                    text: msg.text;
+                    text: msg.translation != "" ? msg.text + "\n" + msg.translation : msg.text;
                     font-size: 14px;
                     wrap: word-wrap;
                     visible: false;
@@ -579,19 +624,38 @@ export component ChatView inherits Rectangle {
                     background: msg.is_self ? Theme.brand : Theme.surface;
                     clip: true;
 
-                    Text {
+                    VerticalLayout {
                         x: card.bubble-pad;
                         y: card.bubble-pad;
                         width: parent.width - 2 * card.bubble-pad;
                         height: parent.height - 2 * card.bubble-pad;
-                        text: msg.text;
-                        wrap: word-wrap;
-                        overflow: clip;
-                        font-size: 14px;
-                        color: msg.is_self ? Theme.fg-on-accent : Theme.fg;
-                        horizontal-alignment: left;
-                        vertical-alignment: top;
-                        line-height-factor: 1.5;
+                        spacing: 4px;
+
+                        Text {
+                            text: msg.text;
+                            wrap: word-wrap;
+                            overflow: clip;
+                            font-size: 14px;
+                            color: msg.is_self ? Theme.fg-on-accent : Theme.fg;
+                            horizontal-alignment: left;
+                            vertical-alignment: top;
+                            line-height-factor: 1.5;
+                        }
+
+                        // Auto-translation (when the header translate button is
+                        // on): shown under the original in a muted, slightly
+                        // smaller type so the original stays primary.
+                        if msg.translation != "":
+                        Text {
+                            text: msg.translation;
+                            wrap: word-wrap;
+                            overflow: clip;
+                            font-size: 12px;
+                            color: msg.is_self ? Theme.fg-on-accent : Theme.fg;
+                            horizontal-alignment: left;
+                            vertical-alignment: top;
+                            line-height-factor: 1.4;
+                        }
                     }
 
                     TouchArea {

@@ -357,6 +357,103 @@ static CURRENT_CHAT: std::sync::LazyLock<std::sync::RwLock<Option<String>>> =
 fn set_current_chat_id(chat_id: &str) {
     *CURRENT_CHAT.write().unwrap() = Some(chat_id.to_string());
 }
+
+// ── Chat auto-translation (header "translate" button) ──────────────────────
+//
+// When the user flips the header translate button on, every incoming
+// (non-self) text row whose language differs from the app's language is
+// translated by the local AI and shown under the original. Own rows and rows
+// already in the app's language are left untouched.
+//
+// Translations are cached by `(chat_id, message_id, target_lang)` so reopening
+// a chat or a re-render never re-asks the model.
+
+static TRANSLATION_CACHE: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashMap<(String, i64, String), Option<String>>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+
+/// True when the app's UI language is one of the bundled codes and `text` is
+/// written in that same script — in which case translating would be a no-op.
+/// Used to skip the AI call when the incoming text is already in the app's
+/// language ("如果语言相同不用动").
+fn same_language_as_app(lang: &str, text: &str) -> bool {
+    let script = dominant_script(text);
+    match lang {
+        "en" => matches!(script, Some(Scr::Latin)),
+        "zh_CN" => matches!(script, Some(Scr::Han)),
+        "ja" => matches!(script, Some(Scr::Kana) | Some(Scr::Han)),
+        "ar" => matches!(script, Some(Scr::Arabic)),
+        "ru" => matches!(script, Some(Scr::Cyrillic)),
+        "de" | "es" | "fr" => matches!(script, Some(Scr::Latin)),
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Scr {
+    Latin,
+    Han,
+    Kana,
+    Arabic,
+    Cyrillic,
+}
+
+/// Detect the dominant writing system of `text` by Unicode range. Returns
+/// `None` when the text is empty or has no recognisable letters (numbers,
+/// punctuation only) — in which case the caller should attempt translation.
+fn dominant_script(text: &str) -> Option<Scr> {
+    let mut counts: [u32; 5] = [0; 5];
+    for c in text.chars() {
+        let cp = c as u32;
+        match cp {
+            0x0041..=0x005A | 0x0061..=0x007A
+            | 0x00C0..=0x024F   // Latin + Latin-1/Supplement + extended
+            | 0x1E00..=0x1EFF   // Latin Extended Additional
+            => counts[0] += 1,
+            0x4E00..=0x9FFF
+            | 0x3400..=0x4DBF
+            | 0x20000..=0x2A6DF => counts[1] += 1, // CJK Han
+            0x3040..=0x30FF
+            | 0x31F0..=0x31FF => counts[2] += 1,   // Hiragana + Katakana
+            0x0600..=0x06FF
+            | 0x0750..=0x077F => counts[3] += 1,   // Arabic
+            0x0400..=0x052F => counts[4] += 1,   // Cyrillic
+            _ => {}
+        }
+    }
+    let max = counts.iter().copied().max().unwrap_or(0);
+    if max == 0 {
+        return None;
+    }
+    match counts.iter().position(|&v| v == max) {
+        Some(0) => Some(Scr::Latin),
+        Some(1) => Some(Scr::Han),
+        Some(2) => Some(Scr::Kana),
+        Some(3) => Some(Scr::Arabic),
+        Some(4) => Some(Scr::Cyrillic),
+        _ => None,
+    }
+}
+
+/// Read a cached translation entry for `(chat_id, msg_id, target)`. The outer
+/// `None` means "not in cache yet" (translate it); `Some(None)` means "we
+/// already tried and got nothing usable" (don't retry); `Some(Some(t))` is a
+/// ready translation.
+fn cached_translation(chat_id: &str, msg_id: i64, target: &str) -> Option<Option<String>> {
+    TRANSLATION_CACHE
+        .read()
+        .unwrap()
+        .get(&(chat_id.to_string(), msg_id, target.to_string()))
+        .cloned()
+}
+
+/// Persist a (possibly empty) translation result into the cache.
+fn store_translation(chat_id: &str, msg_id: i64, target: &str, value: Option<String>) {
+    TRANSLATION_CACHE.write().unwrap().insert(
+        (chat_id.to_string(), msg_id, target.to_string()),
+        value,
+    );
+}
 static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PROFILE_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PICKING_AVATAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -2108,6 +2205,24 @@ pub fn run_app() {
                 let cs = ui.global::<ChatSession>();
                 cs.set_scroll_dist(dist);
                 cs.set_scroll_token(cs.get_scroll_token() + 1);
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        // Translate button toggled: re-render the current chat so the
+        // auto-translation pass runs (on) or the existing translations are
+        // dropped (off).
+        ui.global::<ChatSession>().on_translate_toggled(move || {
+            let key = {
+                let ui = weak.upgrade();
+                ui.map(|ui| ui.global::<AppState>().get_current_chat_key())
+            };
+            if let Some(k) = key {
+                if let Some(ui) = weak.upgrade() {
+                    load_chat_messages(ui.as_weak(), k);
+                }
             }
         });
     }
@@ -4920,6 +5035,15 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
     } else {
         (390, 2.0, None, std::collections::HashMap::new())
     };
+    // Translation state (UI thread): capture the app's language and whether
+    // the translate button is on so the async block can decide per-row.
+    let (app_lang, translate_on) = if let Some(ui) = ui_weak2.upgrade() {
+        let lang = ui.global::<AppState>().get_lang().to_string();
+        let on = ui.global::<ChatSession>().get_translate_enabled();
+        (lang, on)
+    } else {
+        ("en".to_string(), false)
+    };
     rt.spawn(async move {
         let rows = match client.store().load(&chat_id, 200, 0).await {
             Ok(rows) => rows,
@@ -5118,6 +5242,61 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 })
                 .collect()
         };
+        // ── Auto-translation pass ──────────────────────────────────────────
+        // When the header translate button is on, every incoming (non-self)
+        // text row whose language differs from the app's is translated by the
+        // local AI. Own rows and same-language rows are left untouched.
+        // Results are cached so reopening a chat is instant.
+        let mut translations: Vec<Option<String>> = Vec::with_capacity(rendered.len());
+        if translate_on {
+            for (i, r) in rendered.iter().enumerate() {
+                let src = rows.get(i);
+                let is_self = src.map(|s| s.sender == me_peer || s.sender == me).unwrap_or(false);
+                let is_text = !r.voice.is_some() && !r.image.is_some() && !r.file.is_some();
+                if !is_self && is_text && !r.text.trim().is_empty() {
+                    let msg_id = src.map(|s| s.id).unwrap_or(0);
+                    // Same language as the app → do nothing ("如果语言相同不用动").
+                    if same_language_as_app(&app_lang, &r.text) {
+                        translations.push(None);
+                        continue;
+                    }
+                    match cached_translation(&chat_id, msg_id, &app_lang) {
+                        // Already in cache (a value or a "no usable result"
+                        // marker) — use it as-is, never re-ask the model.
+                        Some(cached) => translations.push(cached),
+                        // Not in cache yet: ask the model, then cache the result.
+                        None => {
+                            let text_for_call = r.text.clone();
+                            let lang_for_call = app_lang.clone();
+                            let chat_id_owned = chat_id.clone();
+                            let lang_owned = app_lang.clone();
+                            let result = tokio::task::spawn_blocking(move || {
+                                crate::ai::translate(&text_for_call, &lang_for_call)
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(|r| r);
+                            let cleaned = match result {
+                                Ok(t) => t.trim().trim_matches('"').to_string(),
+                                Err(e) => {
+                                    tracing::warn!("[translate] failed: {e}");
+                                    String::new()
+                                }
+                            };
+                            let value = if cleaned.is_empty() || cleaned == r.text {
+                                None
+                            } else {
+                                Some(cleaned.clone())
+                            };
+                            store_translation(&chat_id_owned, msg_id, &lang_owned, value.clone());
+                            translations.push(value);
+                        }
+                    }
+                } else {
+                    translations.push(None);
+                }
+            }
+        }
         let dist: f32 = {
             CHAT_SCROLL_POS
                 .read()
@@ -5148,6 +5327,10 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                 .enumerate()
                 .map(|(i, m)| {
                     let mut md = to_message_data(m, scale, 0.0);
+                    // Stamp the auto-translation (if any) onto the row.
+                    if let Some(t) = translations.get(i).cloned().flatten() {
+                        md.translation = SharedString::from(t);
+                    }
                     // Stamp the per-row send badge onto self media rows (image /
                     // voice / file) from the in-flight registry. A self media row
                     // NOT in the registry is a settled/delivered row -> "sent";

@@ -209,7 +209,8 @@ export component AiAssistantView inherits Rectangle {
                 // gets clipped. `preferred-width` is the full unwrapped width and
                 // is independent of this binding, so the width logic below is
                 // unchanged — one measurement yields the correct width *and* height.
-                measure := Text {
+                measure := TextInput {
+                    read-only: true;
                     width: card.bubble-cap - 2 * root.bubble-pad;
                     text: row.text;
                     font-size: 14px;
@@ -237,19 +238,28 @@ export component AiAssistantView inherits Rectangle {
                     background: row.side == 0 ? Theme.brand : Theme.surface;
                     clip: true;
 
-                    Text {
+                    TextInput {
                         x: root.bubble-pad;
                         y: root.bubble-pad;
                         width: parent.width - 2 * root.bubble-pad;
                         height: parent.height - 2 * root.bubble-pad;
                         text: row.text;
                         wrap: word-wrap;
-                        overflow: clip;
                         font-size: 14px;
                         color: row.side == 0 ? Theme.fg-on-accent : Theme.fg;
                         horizontal-alignment: left;
                         vertical-alignment: top;
                         line-height-factor: 1.5;
+                        selection-background-color: Theme.success;
+                        private property <length> margin: 1rem;
+
+                        cursor-position-changed(cursor-position) => {
+                            if cursor-position.x + self.x < margin {
+                                self.x = - cursor-position.x + margin;
+                            } else if cursor-position.x + self.x > parent.width - margin - self.text-cursor-width {
+                                self.x = parent.width - cursor-position.x - margin - self.text-cursor-width;
+                            }
+                        }
                     }
 
                     // Long-press to open the bubble menu (same effect as chat.slint).
