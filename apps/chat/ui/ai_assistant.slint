@@ -27,39 +27,6 @@ export component AiAssistantView inherits Rectangle {
         }
     }
 
-    // ── long-press detection (same as chat.slint) ───────────────────────────
-    // `lp-armed` is the index a pointer is currently pressing; after 1s it
-    // becomes `lp-active`, which opens the bubble menu. `lp-text` holds the
-    // pressed row's text for the copy / collect / forward actions; the `lp-*`
-    // length fields are the pressed bubble's rect in *view* coordinates (used
-    // to anchor the menu above/below the bubble, exactly like chat.slint).
-    in-out property <int> lp-armed: -1;
-    in-out property <duration> lp-elapsed: 0s;
-    in-out property <int> lp-active: -1;
-    in-out property <string> lp-text: "";
-    in-out property <length> lp-cx: 0px;
-    in-out property <length> lp-by: 0px;
-    in-out property <length> lp-bw: 0px;
-    in-out property <length> lp-bh: 0px;
-
-    Timer {
-        interval: 16ms;
-        running: root.lp-armed >= 0 && root.lp-active < 0;
-        triggered => {
-            root.lp-elapsed += 16ms;
-            if (root.lp-elapsed >= 1s) {
-                root.lp-active = root.lp-armed;
-                root.lp-armed = -1;
-                root.lp-elapsed = 0s;
-            }
-        }
-    }
-
-    // ── input box sizing (grows with the draft, like `chat_input.slint`) ──
-    // A hidden `imeasure` Text (same font/width/wrap as the input) measures the
-    // draft's laid-out height; the box grows to fit it, clamped to [box-h-min,
-    // box-h-max]. Past the cap the input scrolls internally (Flickable) instead
-    // of growing the page.
     out property <length> in-pad: 10px;
     out property <length> box-top-pad: 6px;
     out property <length> box-bottom-pad: 8px;
@@ -202,13 +169,6 @@ export component AiAssistantView inherits Rectangle {
 
             for row[i] in AiAssistantState.messages: card := Rectangle {
                 in property <length> bubble-cap: parent.width * 0.8;
-                // Measure at the bubble's ACTUAL text-area width
-                // (`bubble-cap - 2*pad`), not `bubble-cap`: a wrapping bubble
-                // renders at `bubble-cap - 2*pad`, so measuring the height at the
-                // wider `bubble-cap` under-counts the line count and the last line
-                // gets clipped. `preferred-width` is the full unwrapped width and
-                // is independent of this binding, so the width logic below is
-                // unchanged — one measurement yields the correct width *and* height.
                 measure := TextInput {
                     read-only: true;
                     width: card.bubble-cap - 2 * root.bubble-pad;
@@ -226,19 +186,39 @@ export component AiAssistantView inherits Rectangle {
                 out property <length> bubble-h:
                     max(root.bubble-min-h, measure.preferred-height + 2 * root.bubble-pad);
 
+                out property <bool> has-selection:
+                    binput.anchor-position-byte-offset != binput.cursor-position-byte-offset;
+
+                in-out property <bool> selection-done: false;
+                in-out property <int>  sel-debounce: 0;
+
+                Timer {
+                    interval: 50ms;
+                    running: card.sel-debounce > 0;
+                    triggered => {
+                        if (card.sel-debounce > 0) {
+                            card.sel-debounce -= 1;
+                            if (card.sel-debounce == 0) {
+                                card.selection-done = true;
+                            }
+                        }
+                    }
+                }
+
                 width: 100%;
                 height: card.bubble-h;
 
-                // user (side 0) → right + brand; assistant (side 1) → left + surface.
                 bubble := Rectangle {
                     width: card.bubble-w;
                     height: parent.height;
                     x: row.side == 0 ? parent.width - 16px - self.width : 16px;
                     border-radius: 14px;
                     background: row.side == 0 ? Theme.brand : Theme.surface;
-                    clip: true;
+                    in-out property <length> sel-x: 0px;
+                    in-out property <length> sel-y: 0px;
 
-                    TextInput {
+                    binput := TextInput {
+                        read-only: true;
                         x: root.bubble-pad;
                         y: root.bubble-pad;
                         width: parent.width - 2 * root.bubble-pad;
@@ -251,9 +231,15 @@ export component AiAssistantView inherits Rectangle {
                         vertical-alignment: top;
                         line-height-factor: 1.5;
                         selection-background-color: Theme.success;
+                        selection-foreground-color: white;
                         private property <length> margin: 1rem;
 
                         cursor-position-changed(cursor-position) => {
+                            card.selection-done = false;
+                            card.sel-debounce = 5; // 5 × 50 ms = 250 ms
+                            // Record the cursor in bubble coordinates.
+                            bubble.sel-x = self.x + cursor-position.x;
+                            bubble.sel-y = self.y + cursor-position.y;
                             if cursor-position.x + self.x < margin {
                                 self.x = - cursor-position.x + margin;
                             } else if cursor-position.x + self.x > parent.width - margin - self.text-cursor-width {
@@ -262,26 +248,50 @@ export component AiAssistantView inherits Rectangle {
                         }
                     }
 
-                    // Long-press to open the bubble menu (same effect as chat.slint).
-                    // While armed, capture the bubble's rect in *view* coordinates
-                    // (list origin + laid-out offsets, minus scroll) so the menu
-                    // can be anchored directly above/below the pressed bubble.
-                    TouchArea {
-                        width: 100%;
-                        height: 100%;
-                        pointer-event(e) => {
-                            if (e.kind == PointerEventKind.down) {
-                                root.lp-armed = i;
-                                root.lp-elapsed = 0s;
-                                root.lp-text = row.text;
-                                root.lp-bw = bubble.width;
-                                root.lp-bh = bubble.height;
-                                root.lp-cx = card.x + bubble.x + bubble.width / 2;
-                                root.lp-by = card.y + bubble.y;
-                            } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
-                                if (root.lp-armed == i) {
-                                    root.lp-armed = -1;
-                                }
+                    if card.has-selection && card.selection-done:
+                    seld := Rectangle {
+                        out property <length> menu-w: 168px;
+                        out property <length> menu-h: 50px;
+                        out property <length> slot-w: seld.menu-w / 3;
+                        out property <length> cursor-x: 12px + bubble.x + bubble.sel-x;
+                        x: max(6px, min(seld.cursor-x - seld.menu-w / 2,
+                                       root.width - 6px - seld.menu-w))
+                            - (12px + bubble.x);
+                        y: bubble.sel-y - seld.menu-h - 6px >= 0px
+                            ? bubble.sel-y - seld.menu-h - 6px
+                            : bubble.sel-y + 6px;
+                        width: seld.menu-w;
+                        height: seld.menu-h;
+                        border-radius: seld.menu-h / 2;
+                        background: Theme.surface;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        Icon { x: 12px; y: (seld.menu-h - 26px) / 2; size: 26px; glyph: Glyph.copy; tint: Theme.fg; }
+                        TouchArea {
+                            x: 0px; width: seld.slot-w; height: 100%;
+                            clicked => { card.selection-done = false; binput.copy(); binput.clear-selection(); }
+                        }
+
+                        Icon { x: seld.slot-w + 12px; y: (seld.menu-h - 26px) / 2; size: 26px; glyph: Glyph.collection; tint: Theme.fg; }
+                        TouchArea {
+                            x: seld.slot-w; width: seld.slot-w; height: 100%;
+                            clicked => { let t = AppState.selected-text(row.text, binput.anchor-position-byte-offset, binput.cursor-position-byte-offset); card.selection-done = false; AppState.save-note(t); binput.clear-selection(); }
+                        }
+
+                        Icon { x: seld.slot-w * 2 + 12px; y: (seld.menu-h - 26px) / 2; size: 26px; glyph: Glyph.forward; tint: Theme.fg; }
+                        TouchArea {
+                            x: seld.slot-w * 2; width: seld.slot-w; height: 100%;
+                            clicked => {
+                                let t = AppState.selected-text(row.text, binput.anchor-position-byte-offset, binput.cursor-position-byte-offset);
+                                card.selection-done = false;
+                                AppState.forward-target = t;
+                                AppState.nav-state = {
+                                    active-tab: 1,
+                                    tabs: AppState.nav-state.tabs,
+                                    global-overlay: AppState.nav-state.global-overlay,
+                                };
+                                binput.clear-selection();
                             }
                         }
                     }
@@ -630,105 +640,4 @@ export component AiAssistantView inherits Rectangle {
         }
     }
 
-    // ── long-press bubble menu (same effect as chat.slint) ──────────────────
-    // Dim overlay + tap-anywhere-to-close. Rendered last so it sits above the
-    // list, input bar, and model picker; the menu is rendered after it so the
-    // menu stays clickable on top.
-    if root.lp-active >= 0:
-    Rectangle {
-        width: 100%;
-        height: 100%;
-        background: transparent;
-        clip: true;
-        TouchArea {
-            width: 100%;
-            height: 100%;
-            clicked => { root.lp-active = -1; }
-        }
-    }
-
-    if root.lp-active >= 0:
-    menu := Rectangle {
-        out property <length> menu-w: 168px;
-        out property <length> menu-h: 50px;
-        out property <length> slot-w: menu.menu-w / 3;
-        // `lp-cx` / `lp-by` are the pressed bubble's center-x / top in *content*
-        // coordinates. Adding `list.content-y` makes these LIVE bindings, so
-        // the pill stays glued to the bubble while the list scrolls (it no
-        // longer freezes at the position captured on press).
-        out property <length> vp-top: root.list-top;
-        out property <length> vp-bottom: root.height - root.input-h;
-        out property <length> menu-x:
-            max(6px, min(root.lp-cx - menu.menu-w / 2, root.width - menu.menu-w - 6px));
-        out property <length> y-above: root.list-top + root.lp-by + list.content-y - menu.menu-h - 8px;
-        out property <length> y-below: root.list-top + root.lp-by + list.content-y + root.lp-bh + 8px;
-        x: menu.menu-x;
-        y: max(menu.vp-top, min(
-            menu.y-above >= menu.vp-top ? menu.y-above
-                : (menu.y-below + menu.menu-h <= menu.vp-bottom ? menu.y-below : menu.y-above),
-            menu.vp-bottom - menu.menu-h));
-        width: menu.menu-w;
-        height: menu.menu-h;
-        border-radius: menu.menu-h / 2;
-        background: Theme.surface;
-        border-width: 1px;
-        border-color: Theme.border;
-
-        TouchArea {
-            width: root.width;
-            height: root.height;
-            clicked => { root.lp-active = -1; }
-        }
-
-        Icon {
-            x: 12px;
-            y: (menu.menu-h - 26px) / 2;
-            size: 26px;
-            glyph: Glyph.copy;
-            tint: Theme.fg;
-        }
-        TouchArea {
-            x: 0px;
-            width: menu.slot-w;
-            height: 100%;
-            clicked => { let t = root.lp-text; root.lp-active = -1; AppState.copy-note(t); }
-        }
-
-        Icon {
-            x: menu.slot-w + 12px;
-            y: (menu.menu-h - 26px) / 2;
-            size: 26px;
-            glyph: Glyph.collection;
-            tint: Theme.fg;
-        }
-        TouchArea {
-            x: menu.slot-w;
-            width: menu.slot-w;
-            height: 100%;
-            clicked => { let t = root.lp-text; root.lp-active = -1; AppState.save-note(t); }
-        }
-
-        Icon {
-            x: menu.slot-w * 2 + 12px;
-            y: (menu.menu-h - 26px) / 2;
-            size: 26px;
-            glyph: Glyph.forward;
-            tint: Theme.fg;
-        }
-        TouchArea {
-            x: menu.slot-w * 2;
-            width: menu.slot-w;
-            height: 100%;
-            clicked => {
-                let t = root.lp-text;
-                root.lp-active = -1;
-                AppState.forward-target = t;
-                AppState.nav-state = {
-                    active-tab: 1,
-                    tabs: AppState.nav-state.tabs,
-                    global-overlay: AppState.nav-state.global-overlay,
-                };
-            }
-        }
-    }
 }

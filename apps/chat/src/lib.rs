@@ -928,6 +928,16 @@ pub fn run_app() {
                 AI_SCROLL_POS.write().unwrap().insert(name, d);
             }
         });
+        ui.global::<AppState>().on_selected_text(|text, anchor, cursor| {
+            let t = text.as_str();
+            let len = t.len();
+            let lo = (anchor as usize).min(len);
+            let hi = (cursor as usize).min(len);
+            let (s, e) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+            // `s..e` is always on char boundaries (the offsets come from Slint's
+            // byte-offset selection API and are within the string), so indexing is safe.
+            t[s..e].to_string().into()
+        });
         ui.global::<AiAssistantState>().on_scroll_request({
             let wr = weak.clone();
             move || {

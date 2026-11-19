@@ -71,14 +71,7 @@ export global ChatSession {
 
     in property <length> scroll-dist: 0px;
     in property <int> scroll-token: 0;
-    /// True while the header translate button is "on". When on, incoming
-    /// (non-self) text rows whose language differs from the app's are
-    /// auto-translated by the local AI and shown under the original. Own rows
-    /// and same-language rows are left untouched.
     in-out property <bool> translate-enabled: false;
-    /// Fired whenever the translate button is toggled. Rust re-renders the
-    /// current chat: on → run the auto-translation pass; off → clear the
-    /// existing translations.
     callback translate-toggled();
     /// Index into `messages` of the currently-playing voice bubble; -1 = none.
     in property <int> playing-idx: -1;
@@ -109,35 +102,10 @@ export global ChatSession {
 export component ChatView inherits Rectangle {
     in property <int> chat-id;
     callback open-setting();
-    callback copy-text(string);
 
     width: 100%;
     height: 100%;
     background: Theme.bg;
-
-    // ── long-press detection ───────────────────────────────────────────────
-    in-out property <int> lp-armed: -1;
-    in-out property <duration> lp-elapsed: 0s;
-    in-out property <int> lp-active: -1;
-    // Pressed bubble's rect in *content* coordinates (captured on pointer-down),
-    // used to anchor the long-press menu above/below the bubble (ai_assistant pattern).
-    in-out property <length> lp-cx: 0px;
-    in-out property <length> lp-by: 0px;
-    in-out property <length> lp-bw: 0px;
-    in-out property <length> lp-bh: 0px;
-
-    Timer {
-        interval: 16ms;
-        running: root.lp-armed >= 0 && root.lp-active < 0;
-        triggered => {
-            root.lp-elapsed += 16ms;
-            if (root.lp-elapsed >= 1s) {
-                root.lp-active = root.lp-armed;
-                root.lp-armed = -1;
-                root.lp-elapsed = 0s;
-            }
-        }
-    }
 
     out property <length> msg-row-h: 56px;
     out property <length> row-h: 54px;
@@ -191,17 +159,6 @@ export component ChatView inherits Rectangle {
         }
     }
 
-    // Translate toggle — top-level (above the list), sitting in the header's
-    // right zone beside the DM connection dot / the group setting icon and the
-    // call icon. Off by default; tapping flips `ChatSession.translate-enabled`
-    // and the icon's colours (grey glyph on transparent → white glyph on the
-    // brand chip), the requested "background + foreground change".
-    //
-    // Position: for a DM the only right-zone element is the connection dot
-    // (parent.width-60), so the button sits flush left of it (parent.width-108
-    // → spans to parent.width-60). For a group the right zone is empty (the
-    // setting / call icons are on the left), so the button sits flush against
-    // the right edge (parent.width-60).
     Icon {
         x: AppState.current-chat-is-group
             ? parent.width - 64px
@@ -223,21 +180,6 @@ export component ChatView inherits Rectangle {
         }
     }
 
-    // DM connection status dot (6px / 3px radius), drawn in the header's right
-    // zone beside the call/add icon, vertically centred on the 48px bar.
-    //   red      "offline"  — not connected yet (baseline)
-    //   yellow   "relay"    — connected via a relay circuit
-    //   green    "direct"   — direct QUIC/TCP transport
-    //   pulsing  "dialing"  — connecting / hole-punch in flight
-    //
-    // `dialing` deliberately uses a **neutral grey + pulse** (opacity toggled
-    // by a 1 Hz Timer) rather than a "success-ish" green/yellow: a peer whose
-    // every candidate address is failing (offline) would otherwise look
-    // "connected" for 5–60s at a time — the "red→green→red on switch chat"
-    // confusion. Grey + motion is the universal "pending / in progress" cue
-    // and is never mistaken for an established link.
-    // DM only; the dot is a top-level absolute element so it does not get
-    // reflowed by the Header (a VerticalLayout) like children do.
     if !AppState.current-chat-is-group:
     Rectangle {
         x: parent.width - 60px;
@@ -271,9 +213,6 @@ export component ChatView inherits Rectangle {
         sent-file(id) => { ChatSession.sent-file(id); }
     }
 
-    // "Sending…" indicator (transient, shown only while a send is in flight) —
-    // replaces the old always-present status text above the input. Failures
-    // surface elsewhere as a transient toast (not pinned here).
     if ChatSession.send-busy:
     Spinner {
         x: (parent.width - 22px) / 2;
@@ -293,9 +232,6 @@ export component ChatView inherits Rectangle {
         }
     }
 
-    // Rows stack in a Slint `VerticalLayout` inside a `ScrollView` (like
-    // ai_assistant.slint) — `content-height` is derived from the laid-out rows,
-    // so there is no Rust `msg.top` / `ChatSession.content-h` anymore.
     fk := ScrollView {
         x: 0px;
         y: 48px;
@@ -390,8 +326,6 @@ export component ChatView inherits Rectangle {
                     background: msg.is_self ? Theme.brand : Theme.surface;
                     clip: true;
 
-                    // record icon: 24×24, rotates (rotation-angle) while this row
-                    // is playing, frozen at current angle otherwise.
                     Icon {
                         x: 4px;
                         y: 6px;
@@ -550,9 +484,6 @@ export component ChatView inherits Rectangle {
                     x: parent.width - 6px - 36px - 8px - bsz - 4px;
                     y: msg.height - bsz - 4px;
                     border-radius: 8px;
-                    // "sent" (2): white chip with a dark check ·
-                    // "sending" (1): same chip, faded to read as in-flight ·
-                    // "failed" (3): dark chip with a red "!".
                     background: msg.send_state == 3 ? Theme.bg : Theme.surface;
                     border-width: 1px;
                     border-color: Theme.border;
@@ -580,10 +511,6 @@ export component ChatView inherits Rectangle {
             }
 
             // ── text bubble (only for non-voice / non-image / non-file rows) ─
-            // Same structure as ai_assistant.slint: sender name (group rows)
-            // above a rounded `StyledText` bubble, plus the avatar on the outer
-            // edge. Bubble size comes straight from the single `measure` on the
-            // enclosing `card`.
             if msg.voice_path == "" && msg.image_path == "" && msg.file_path == "":
             row := Rectangle {
                 width: parent.width;
@@ -622,62 +549,112 @@ export component ChatView inherits Rectangle {
                     y: card.name-h;
                     border-radius: 14px;
                     background: msg.is_self ? Theme.brand : Theme.surface;
-                    clip: true;
+                    // `has-selection` mirrors ai_assistant: live binding to
+                    // `binput`'s anchor/cursor offsets drives the 3-icon menu.
+                    out property <bool> has-selection:
+                        binput.anchor-position-byte-offset != binput.cursor-position-byte-offset;
+                    in-out property <bool> selection-done: false;
+                    in-out property <int>  sel-debounce: 0;
+                    in-out property <length> sel-x: 0px;
+                    in-out property <length> sel-y: 0px;
 
-                    VerticalLayout {
+                    Timer {
+                        interval: 50ms;
+                        running: tbubble.sel-debounce > 0;
+                        triggered => {
+                            if (tbubble.sel-debounce > 0) {
+                                tbubble.sel-debounce -= 1;
+                                if (tbubble.sel-debounce == 0) {
+                                    tbubble.selection-done = true;
+                                }
+                            }
+                        }
+                    }
+
+
+                    binput := TextInput {
+                        read-only: true;
                         x: card.bubble-pad;
                         y: card.bubble-pad;
                         width: parent.width - 2 * card.bubble-pad;
                         height: parent.height - 2 * card.bubble-pad;
-                        spacing: 4px;
+                        text: msg.translation != "" ? msg.text + "\n" + msg.translation : msg.text;
+                        wrap: word-wrap;
+                        font-size: 14px;
+                        color: msg.is_self ? Theme.fg-on-accent : Theme.fg;
+                        horizontal-alignment: left;
+                        vertical-alignment: top;
+                        line-height-factor: 1.5;
+                        selection-background-color: Theme.success;
+                        selection-foreground-color: white;
+                        private property <length> margin: 1rem;
 
-                        Text {
-                            text: msg.text;
-                            wrap: word-wrap;
-                            overflow: clip;
-                            font-size: 14px;
-                            color: msg.is_self ? Theme.fg-on-accent : Theme.fg;
-                            horizontal-alignment: left;
-                            vertical-alignment: top;
-                            line-height-factor: 1.5;
-                        }
-
-                        // Auto-translation (when the header translate button is
-                        // on): shown under the original in a muted, slightly
-                        // smaller type so the original stays primary.
-                        if msg.translation != "":
-                        Text {
-                            text: msg.translation;
-                            wrap: word-wrap;
-                            overflow: clip;
-                            font-size: 12px;
-                            color: msg.is_self ? Theme.fg-on-accent : Theme.fg;
-                            horizontal-alignment: left;
-                            vertical-alignment: top;
-                            line-height-factor: 1.4;
+                        cursor-position-changed(cursor-position) => {
+                            tbubble.selection-done = false;
+                            tbubble.sel-debounce = 5;
+                            tbubble.sel-x = self.x + cursor-position.x;
+                            tbubble.sel-y = self.y + cursor-position.y;
+                            if cursor-position.x + self.x < margin {
+                                self.x = - cursor-position.x + margin;
+                            } else if cursor-position.x + self.x > parent.width - margin - self.text-cursor-width {
+                                self.x = parent.width - cursor-position.x - margin - self.text-cursor-width;
+                            }
                         }
                     }
 
+                    // Link tap (only for link-bearing rows; this TouchArea
+                    // blocks the TextInput's selection on those rows).
+                    if msg.link != "":
                     TouchArea {
                         width: 100%;
                         height: 100%;
-                        clicked => {
-                            if (msg.link != "") {
-                                AppState.open-link(msg.link);
-                            }
+                        clicked => { AppState.open-link(msg.link); }
+                    }
+
+                    if tbubble.has-selection && tbubble.selection-done:
+                    seld := Rectangle {
+                        out property <length> menu-w: 168px;
+                        out property <length> menu-h: 50px;
+                        out property <length> slot-w: seld.menu-w / 3;
+                        out property <length> cursor-x: tbubble.x + tbubble.sel-x;
+                        x: max(6px, min(seld.cursor-x - seld.menu-w / 2,
+                                       root.width - 6px - seld.menu-w))
+                            - tbubble.x;
+                        y: tbubble.sel-y - seld.menu-h - 6px >= 0px
+                            ? tbubble.sel-y - seld.menu-h - 6px
+                            : tbubble.sel-y + 6px;
+                        width: seld.menu-w;
+                        height: seld.menu-h;
+                        border-radius: seld.menu-h / 2;
+                        background: Theme.surface;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        Icon { x: 12px; y: (seld.menu-h - 26px) / 2; size: 26px; glyph: Glyph.copy; tint: Theme.fg; }
+                        TouchArea {
+                            x: 0px; width: seld.slot-w; height: 100%;
+                            clicked => { tbubble.selection-done = false; binput.copy(); binput.clear-selection(); }
                         }
-                        pointer-event(e) => {
-                            if (e.kind == PointerEventKind.down) {
-                                root.lp-armed = i;
-                                root.lp-elapsed = 0s;
-                                root.lp-cx = card.x + tbubble.x + tbubble.width / 2;
-                                root.lp-by = card.y + tbubble.y;
-                                root.lp-bw = tbubble.width;
-                                root.lp-bh = tbubble.height;
-                            } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
-                                if (root.lp-armed == i) {
-                                    root.lp-armed = -1;
-                                }
+
+                        Icon { x: seld.slot-w + 12px; y: (seld.menu-h - 26px) / 2; size: 26px; glyph: Glyph.collection; tint: Theme.fg; }
+                        TouchArea {
+                            x: seld.slot-w; width: seld.slot-w; height: 100%;
+                            clicked => { let t = AppState.selected-text(binput.text, binput.anchor-position-byte-offset, binput.cursor-position-byte-offset); tbubble.selection-done = false; AppState.save-note(t); binput.clear-selection(); }
+                        }
+
+                        Icon { x: seld.slot-w * 2 + 12px; y: (seld.menu-h - 26px) / 2; size: 26px; glyph: Glyph.forward; tint: Theme.fg; }
+                        TouchArea {
+                            x: seld.slot-w * 2; width: seld.slot-w; height: 100%;
+                            clicked => {
+                                let t = AppState.selected-text(binput.text, binput.anchor-position-byte-offset, binput.cursor-position-byte-offset);
+                                tbubble.selection-done = false;
+                                AppState.forward-target = t;
+                                AppState.nav-state = {
+                                    active-tab: 1,
+                                    tabs: AppState.nav-state.tabs,
+                                    global-overlay: AppState.nav-state.global-overlay,
+                                };
+                                binput.clear-selection();
                             }
                         }
                     }
@@ -687,114 +664,4 @@ export component ChatView inherits Rectangle {
     }
     }
 
-    // Dimming overlay + tap-anywhere-to-close. Top-level (above the list),
-    // rendered AFTER the rows so it sits on top; the menu is rendered after it
-    // so the menu stays clickable on top.
-    if root.lp-active >= 0:
-    Rectangle {
-        width: 100%;
-        height: 100%;
-        background: transparent;
-        clip: true;
-        TouchArea {
-            width: 100%;
-            height: 100%;
-            clicked => { root.lp-active = -1; }
-        }
-    }
-
-    // Long-press icon menu. Top-level (above list + overlay), anchored from the
-    // pressed bubble's captured content-coord rect (lp-cx/lp-by/lp-bw/lp-bh),
-    // the same ai_assistant pattern as chat's old absolute layout.
-    if root.lp-active >= 0:
-    menu := Rectangle {
-        out property <length> menu-w: 168px;
-        out property <length> menu-h: 50px;
-        out property <length> slot-w: menu.menu-w / 3;
-        in property <MessageData> msg: ChatSession.messages[root.lp-active];
-        out property <length> menu-x:
-            max(6px, min(root.lp-cx - menu.menu-w / 2, root.width - menu.menu-w - 6px));
-        x: menu.menu-x;
-
-        out property <length> vp-top: 48px;
-        out property <length> vp-bottom: root.height - root.input-h;
-        out property <length> y-above: 48px + root.lp-by + fk.content-y - menu.menu-h - 8px;
-        out property <length> y-below: 48px + root.lp-by + fk.content-y + root.lp-bh + 8px;
-        y: max(menu.vp-top, min(
-            (menu.y-above >= menu.vp-top)
-            ? menu.y-above
-            : (menu.y-below + menu.menu-h <= menu.vp-bottom ? menu.y-below : menu.y-above),
-            menu.vp-bottom - menu.menu-h));
-        width: menu.menu-w;
-        height: menu.menu-h;
-        border-radius: 8px;
-        background: Theme.surface;
-        border-width: 1px;
-        border-color: Theme.border;
-
-        TouchArea {
-            width: root.width;
-            height: root.height;
-            clicked => { root.lp-active = -1; }
-        }
-
-        Icon {
-            x: 12px;
-            y: (menu.menu-h - 26px) / 2;
-            size: 26px;
-            glyph: Glyph.copy;
-            tint: Theme.fg;
-        }
-
-        TouchArea {
-            x: 0px;
-            width: menu.slot-w;
-            height: 100%;
-            // Read the row's text BEFORE closing the menu: `menu.msg` is bound
-            // to `ChatSession.messages[root.lp-active]`, so setting lp-active
-            // to -1 first would re-resolve it to an out-of-bounds (empty) row.
-            clicked => { let t = menu.msg.text; root.lp-active = -1; AppState.copy-note(t); }
-        }
-
-        Icon {
-            x: menu.slot-w + 12px;
-            y: (menu.menu-h - 26px) / 2;
-            size: 26px;
-            glyph: Glyph.collection;
-            tint: Theme.fg;
-        }
-
-        TouchArea {
-            x: menu.slot-w;
-            width: menu.slot-w;
-            height: 100%;
-            // Read the row's text BEFORE closing the menu (same reason as copy).
-            clicked => { let t = menu.msg.text; root.lp-active = -1; AppState.save-note(t); }
-        }
-
-        Icon {
-            x: menu.slot-w * 2 + 12px;
-            y: (menu.menu-h - 26px) / 2;
-            size: 26px;
-            glyph: Glyph.forward;
-            tint: Theme.fg;
-        }
-
-        TouchArea {
-            x: menu.slot-w * 2;
-            width: menu.slot-w;
-            height: 100%;
-            clicked => {
-                // Read the row's text BEFORE closing the menu (same reason as copy).
-                let t = menu.msg.text;
-                root.lp-active = -1;
-                AppState.forward-target = t;
-                AppState.nav-state = {
-                    active-tab: 1,
-                    tabs: AppState.nav-state.tabs,
-                    global-overlay: AppState.nav-state.global-overlay,
-                };
-            }
-        }
-    }
 }
