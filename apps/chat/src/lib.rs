@@ -23,7 +23,7 @@ pub mod record;
 pub mod time;
 use image::{
     ChatMsg, RENDERER, RenderedMsg, ensure_renderer, load_avatar_path_capped, load_image_cached,
-    make_avatar, make_preview_image, qr_image, render_msg, to_message_data,
+    make_avatar, make_avatar_cached, make_preview_image, qr_image, render_msg, to_message_data,
 };
 pub mod doc_viewer;
 pub mod pdfrs;
@@ -100,12 +100,21 @@ fn open_ai_conv(weak: &slint::Weak<MainWindow>, name: &str) {
                         })
                         .collect();
                     ai::load(turns);
+                    let dist = AI_SCROLL_POS
+                        .read()
+                        .unwrap()
+                        .get(&conv)
+                        .copied()
+                        .unwrap_or(0.0);
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak2.upgrade() {
                             let a = ui.global::<AiAssistantState>();
                             a.set_messages(slint::ModelRc::new(slint::VecModel::from(rows)));
                             a.set_error(SharedString::new());
                             a.set_busy(false);
+                            // Restore the saved scroll position for this conversation.
+                            a.set_scroll_dist(dist);
+                            a.set_scroll_token(a.get_scroll_token() + 1);
                         }
                     });
                 }
@@ -203,6 +212,13 @@ fn device_is_approved() -> bool {
 
 static CHAT_SCROLL_POS: std::sync::LazyLock<
     std::sync::RwLock<std::collections::HashMap<i32, f32>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+
+/// AI-assistant list scroll position (distance from the bottom, px), keyed by
+/// the conversation name. Restored on `open_ai_conv` so re-entering a
+/// conversation lands where the user left off.
+static AI_SCROLL_POS: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashMap<String, f32>>,
 > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
 
 static CURRENT_ME: std::sync::LazyLock<std::sync::RwLock<String>> =
@@ -804,6 +820,33 @@ pub fn run_app() {
         ui.global::<AiAssistantState>().on_pump({
             let wp = weak.clone();
             move || ai::pump(wp.clone())
+        });
+        ui.global::<AiAssistantState>().on_scroll_save({
+            move |dist| {
+                let d = dist as f32;
+                let name = ai_conv_name();
+                if name.is_empty() {
+                    return;
+                }
+                AI_SCROLL_POS.write().unwrap().insert(name, d);
+            }
+        });
+        ui.global::<AiAssistantState>().on_scroll_request({
+            let wr = weak.clone();
+            move || {
+                let name = ai_conv_name();
+                let dist = AI_SCROLL_POS
+                    .read()
+                    .unwrap()
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(0.0);
+                if let Some(ui) = wr.upgrade() {
+                    let a = ui.global::<AiAssistantState>();
+                    a.set_scroll_dist(dist);
+                    a.set_scroll_token(a.get_scroll_token() + 1);
+                }
+            }
         });
     }
 
@@ -5023,7 +5066,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                                 h: *h,
                                 rgba: rgba.clone(),
                             },
-                            None => make_avatar(&m.sender, 80),
+                            None => make_avatar_cached(&m.sender, 80),
                         }
                     } else {
                         match contacts.get(&m.sender) {
@@ -5032,7 +5075,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                                 h: *h,
                                 rgba: rgba.clone(),
                             },
-                            None => make_avatar(&m.sender, 80),
+                            None => make_avatar_cached(&m.sender, 80),
                         }
                     };
                     let voice = match &m.kind {
@@ -5090,32 +5133,21 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             };
             let cs = ui.global::<ChatSession>();
 
-            const PAD: f32 = 12.0;
-            const GAP: f32 = 12.0;
-            const VOICE_H: f32 = 54.0;
-            let n = rendered.len();
-            let heights: Vec<f32> = rendered
-                .iter()
-                .map(|m| {
-                    if m.voice.is_some() || m.file.is_some() {
-                        VOICE_H
-                    } else {
-                        m.height as f32 / scale
-                    }
-                })
-                .collect();
-            let sum_all: f32 = heights.iter().sum();
-            // `to_message_data` already fills `image_img` from each photo's small
-            // cached preview (a memory hit after the first switch), so the full
-            // original is never decoded here — only in the viewer on tap.
-            let messages: Vec<crate::MessageData> = rendered
+            // Row geometry is fully Slint-side: the rows stack in a
+            // `VerticalLayout`, so Rust no longer computes per-row `top` or the
+            // list's `content-h`. `top` is passed as 0 (unused by the UI now).
+            //
+            // `rendered` / `rows` are ordered index 0 = newest → index n-1 =
+            // oldest. The old absolute layout put index 0 at the bottom; the
+            // `VerticalLayout` renders index 0 at the top. We reverse the final
+            // list so oldest is on top and newest sits at the bottom, matching
+            // the previous order. The stamping loop still indexes into `rows`
+            // (unchanged), so it must run before the reverse.
+            let mut messages: Vec<crate::MessageData> = rendered
                 .into_iter()
                 .enumerate()
                 .map(|(i, m)| {
-                    let older_sum: f32 = heights.iter().skip(i + 1).sum();
-                    let rows_above = (n.saturating_sub(1).saturating_sub(i)) as f32;
-                    let top = PAD + rows_above * GAP + older_sum;
-                    let mut md = to_message_data(m, scale, top);
+                    let mut md = to_message_data(m, scale, 0.0);
                     // Stamp the per-row send badge onto self media rows (image /
                     // voice / file) from the in-flight registry. A self media row
                     // NOT in the registry is a settled/delivered row -> "sent";
@@ -5163,14 +5195,11 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                     md
                 })
                 .collect();
-            let content_h = if n == 0 {
-                0.0
-            } else {
-                (n - 1) as f32 * GAP + sum_all + 2.0 * PAD
-            };
+            // Newest (index 0 in `rows`) to the bottom: flip to oldest→newest for
+            // the top→bottom `VerticalLayout`.
+            messages.reverse();
             cs.set_scroll_dist(dist);
             cs.set_scroll_token(cs.get_scroll_token() + 1);
-            cs.set_content_h(content_h);
             cs.set_messages(slint::ModelRc::new(slint::VecModel::from(messages)));
             cs.set_send_busy(false);
         });

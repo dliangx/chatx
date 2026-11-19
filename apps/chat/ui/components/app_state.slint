@@ -368,6 +368,16 @@ export global AiAssistantState {
     callback model-source(bool);
     /// Cancel an in-flight download of `name`.
     callback model-cancel(string);
-    /// Pause / resume an in-flight download of `name`.
+    /// Pause / resume the in-flight download.
     callback model-pause(string);
+    /// Persisted list scroll position (distance from the bottom, px). Restored
+    /// on load so re-entering a conversation lands where the user left off.
+    in property <length> scroll-dist: 0px;
+    /// Bumped by Rust after (re)loading messages to tell the view to re-apply
+    /// `scroll-dist` (same pattern as `ChatSession.scroll-token`).
+    in property <int> scroll-token: 0;
+    /// User released a drag: remember the current scroll position.
+    callback scroll-save(length);
+    /// View mounted / conversation re-opened: pull the saved position back in.
+    callback scroll-request();
 }

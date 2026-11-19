@@ -9,11 +9,23 @@ export component AiAssistantView inherits Rectangle {
     height: 100%;
     background: Theme.bg;
 
-    out property <length> row-gap: 10px;
+    out property <length> row-gap: 16px;
     out property <length> list-top: 48px;
     out property <length> bubble-pad: 12px;
     out property <length> bubble-min-h: 38px;
     out property <bool> can-send: !AiAssistantState.busy && AiAssistantState.draft != "";
+
+    // ── scroll position restore (same pattern as chat.slint) ─────────────────
+    in-out property <bool> requested: false;
+    in-out property <int> my-token: 0;
+    Timer {
+        interval: 16ms;
+        running: !root.requested;
+        triggered => {
+            root.requested = true;
+            AiAssistantState.scroll-request();
+        }
+    }
 
     // ── long-press detection (same as chat.slint) ───────────────────────────
     // `lp-armed` is the index a pointer is currently pressing; after 1s it
@@ -158,6 +170,28 @@ export component AiAssistantView inherits Rectangle {
             }
         }
 
+        scrolled => {
+            // User released a drag: remember where it landed (bottom=0, top=max)
+            // so re-entering the conversation restores the same position.
+            AiAssistantState.scroll-save(
+                (list.content-height - list.visible-height) + list.content-y);
+            if (root.my-token != AiAssistantState.scroll-token) {
+                root.my-token = AiAssistantState.scroll-token;
+            }
+        }
+
+        // After a (re)load, restore the saved position (token bump → re-apply).
+        Timer {
+            interval: 16ms;
+            running: root.my-token != AiAssistantState.scroll-token
+                && list.visible-height > 0 && AiAssistantState.messages.length > 0;
+            triggered => {
+                root.my-token = AiAssistantState.scroll-token;
+                let max = list.content-height - list.visible-height;
+                list.content-y = (max > 0px) ? (AiAssistantState.scroll-dist - max) : 0px;
+            }
+        }
+
         VerticalLayout {
             width: 100%;
             padding-left: 12px;
@@ -168,29 +202,28 @@ export component AiAssistantView inherits Rectangle {
 
             for row[i] in AiAssistantState.messages: card := Rectangle {
                 in property <length> bubble-cap: parent.width * 0.8;
+                // Measure at the bubble's ACTUAL text-area width
+                // (`bubble-cap - 2*pad`), not `bubble-cap`: a wrapping bubble
+                // renders at `bubble-cap - 2*pad`, so measuring the height at the
+                // wider `bubble-cap` under-counts the line count and the last line
+                // gets clipped. `preferred-width` is the full unwrapped width and
+                // is independent of this binding, so the width logic below is
+                // unchanged — one measurement yields the correct width *and* height.
                 measure := Text {
-                    width: card.bubble-cap;
+                    width: card.bubble-cap - 2 * root.bubble-pad;
                     text: row.text;
-                    font-size: 13px;
+                    font-size: 14px;
                     wrap: word-wrap;
                     visible: false;
+                    line-height-factor: 1.5;
                     accessible-role: none;
                 }
 
                 out property <length> bubble-w:
                     max(2 * root.bubble-pad, min(measure.preferred-width + 2 * root.bubble-pad, card.bubble-cap));
 
-                hmeasure := Text {
-                    width: max(0px, min(measure.preferred-width + 2 * root.bubble-pad, card.bubble-cap) - 2 * root.bubble-pad);
-                    text: row.text;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                    visible: false;
-                    accessible-role: none;
-                }
-
                 out property <length> bubble-h:
-                    max(root.bubble-min-h, hmeasure.preferred-height + 2 * root.bubble-pad);
+                    max(root.bubble-min-h, measure.preferred-height + 2 * root.bubble-pad);
 
                 width: 100%;
                 height: card.bubble-h;
@@ -212,10 +245,11 @@ export component AiAssistantView inherits Rectangle {
                         text: row.text;
                         wrap: word-wrap;
                         overflow: clip;
-                        font-size: 13px;
+                        font-size: 14px;
                         color: row.side == 0 ? Theme.fg-on-accent : Theme.fg;
                         horizontal-alignment: left;
                         vertical-alignment: top;
+                        line-height-factor: 1.5;
                     }
 
                     // Long-press to open the bubble menu (same effect as chat.slint).

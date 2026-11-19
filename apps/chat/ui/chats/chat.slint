@@ -1,4 +1,4 @@
-import { Button, Spinner } from "std-widgets.slint";
+import { Button, Spinner, ScrollView } from "std-widgets.slint";
 import { ChatInputView } from "chat_input.slint";
 import { Icon, Glyph } from "../components/icon.slint";
 import { Theme } from "../theme.slint";
@@ -10,11 +10,16 @@ import {
 import { Header } from "../components/header.slint";
 
 export struct MessageData {
-    bubble: image,
     width: length,
     height: length,
     is_self: bool,
     text: string,
+    /// Sender name (group "other" rows); empty for DMs / own rows. Drawn as a
+    /// native `Text` above the bubble.
+    name: string,
+    /// Body as native Slint rich text (colored + underlined + tappable links),
+    /// replacing the old rasterised `bubble` bitmap.
+    rich: styled-text,
     selected: bool,
     top: length,
     /// Empty for text rows; the local s16le clip path for voice rows.
@@ -62,7 +67,6 @@ export global ChatSession {
 
     in property <length> scroll-dist: 0px;
     in property <int> scroll-token: 0;
-    in property <length> content-h: 0px;
     /// Index into `messages` of the currently-playing voice bubble; -1 = none.
     in property <int> playing-idx: -1;
     /// Continuous rotation angle (degrees) of the playing record icon.
@@ -102,6 +106,12 @@ export component ChatView inherits Rectangle {
     in-out property <int> lp-armed: -1;
     in-out property <duration> lp-elapsed: 0s;
     in-out property <int> lp-active: -1;
+    // Pressed bubble's rect in *content* coordinates (captured on pointer-down),
+    // used to anchor the long-press menu above/below the bubble (ai_assistant pattern).
+    in-out property <length> lp-cx: 0px;
+    in-out property <length> lp-by: 0px;
+    in-out property <length> lp-bw: 0px;
+    in-out property <length> lp-bh: 0px;
 
     Timer {
         interval: 16ms;
@@ -117,6 +127,7 @@ export component ChatView inherits Rectangle {
     }
 
     out property <length> msg-row-h: 56px;
+    out property <length> row-h: 54px;
     out property <length> input-h: input-bar.view-h;
     out property <length> _bottom: root.input-h;
 
@@ -237,22 +248,22 @@ export component ChatView inherits Rectangle {
         }
     }
 
-    fk := Flickable {
+    // Rows stack in a Slint `VerticalLayout` inside a `ScrollView` (like
+    // ai_assistant.slint) — `content-height` is derived from the laid-out rows,
+    // so there is no Rust `msg.top` / `ChatSession.content-h` anymore.
+    fk := ScrollView {
         x: 0px;
         y: 48px;
         width: parent.width;
         height: parent.height - root._bottom - 48px;
-        content-height: ChatSession.content-h;
-        interactive: ChatSession.messages.length > 0;
 
-        flicked => {
+        scrolled => {
             // User released a drag: remember where it landed (bottom=0, top=max).
             // Persisting only on real user drags keeps the "stuck to bottom"
-            // memory intact across new messages, which the old per-frame report
-            // used to clobber mid-re-layout and stall auto-scroll.
+            // memory intact across new messages.
             ChatSession.update-scroll(
                 root.chat-id,
-                (fk.content-height - fk.height) + fk.content-y);
+                (fk.content-height - fk.visible-height) + fk.content-y);
             if (root.my-token != ChatSession.scroll-token) {
                 root.my-token = ChatSession.scroll-token;
             }
@@ -261,19 +272,49 @@ export component ChatView inherits Rectangle {
         Timer {
             interval: 16ms;
             running: root.my-token != ChatSession.scroll-token
-                && fk.height > 0 && ChatSession.messages.length > 0;
+                && fk.visible-height > 0 && ChatSession.messages.length > 0;
             triggered => {
                 root.my-token = ChatSession.scroll-token;
-                let max = fk.content-height - fk.height;
+                let max = fk.content-height - fk.visible-height;
                 fk.content-y = (max > 0px) ? (ChatSession.scroll-dist - max) : 0px;
             }
         }
 
-        for msg[i] in ChatSession.messages: Rectangle {
-            x: 0px;
-            y: msg.top;
-            width: parent.width;
-            height: msg.height;
+        VerticalLayout {
+            width: 100%;
+            padding-left: 0px;
+            padding-right: 0px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            spacing: 16px;
+
+            for msg[i] in ChatSession.messages: card := Rectangle {
+                out property <bool> is-text:
+                    msg.voice_path == "" && msg.image_path == "" && msg.file_path == "";
+                out property <length> name-h: msg.name != "" ? 14px : 0px;
+                out property <length> bubble-pad: 12px;
+                out property <length> bubble-min-h: 38px;
+                out property <length> bubble-cap: parent.width * 0.8;
+                measure := Text {
+                    width: card.bubble-cap - 2 * card.bubble-pad;
+                    text: msg.text;
+                    font-size: 14px;
+                    wrap: word-wrap;
+                    visible: false;
+                    line-height-factor: 1.5;
+                    accessible-role: none;
+                }
+
+                out property <length> bubble-w:
+                    max(2 * card.bubble-pad, min(measure.preferred-width + 2 * card.bubble-pad, card.bubble-cap));
+
+                out property <length> bubble-h:
+                    max(card.bubble-min-h, measure.preferred-height + 2 * card.bubble-pad);
+
+                width: 100%;
+                height: card.is-text
+                    ? (card.name-h + card.bubble-h)
+                    : (msg.image_path != "" ? msg.height : root.row-h);
 
             // ── voice bubble (matching text-bubble proportions) ──────────
             if msg.voice_path != "":
@@ -300,7 +341,7 @@ export component ChatView inherits Rectangle {
                     y: 0px;
                     width: 72px;
                     height: 36px;
-                    border-radius: 12px;
+                    border-radius: 8px;
                     background: msg.is_self ? Theme.brand : Theme.surface;
                     clip: true;
 
@@ -375,7 +416,7 @@ export component ChatView inherits Rectangle {
                     width: min(max(43px + filename.preferred-width, 78px), cap-w);
                     x: msg.is_self ? parent.width - 50px - self.width : 50px;
                     height: 36px;
-                    border-radius: 12px;
+                    border-radius: 8px;
                     background: msg.is_self ? Theme.brand : Theme.surface;
                     clip: true;
 
@@ -463,7 +504,7 @@ export component ChatView inherits Rectangle {
                     height: bsz;
                     x: parent.width - 6px - 36px - 8px - bsz - 4px;
                     y: msg.height - bsz - 4px;
-                    border-radius: bsz / 2;
+                    border-radius: 8px;
                     // "sent" (2): white chip with a dark check ·
                     // "sending" (1): same chip, faded to read as in-flight ·
                     // "failed" (3): dark chip with a red "!".
@@ -494,147 +535,201 @@ export component ChatView inherits Rectangle {
             }
 
             // ── text bubble (only for non-voice / non-image / non-file rows) ─
+            // Same structure as ai_assistant.slint: sender name (group rows)
+            // above a rounded `StyledText` bubble, plus the avatar on the outer
+            // edge. Bubble size comes straight from the single `measure` on the
+            // enclosing `card`.
             if msg.voice_path == "" && msg.image_path == "" && msg.file_path == "":
-            TouchArea {
-                x: msg.is_self ? parent.width - msg.width - 6px : 6px;
-                y: 0px;
-                width: msg.width;
-                height: msg.height;
-                clicked => {
-                    if (msg.link != "") {
-                        AppState.open-link(msg.link);
-                    }
+            row := Rectangle {
+                width: parent.width;
+                height: parent.height;
+
+                // Avatar (36×36) on the outer edge, bottom-aligned.
+                Image {
+                    width: 36px;
+                    height: 36px;
+                    x: msg.is_self ? row.width - 6px - 36px : 6px;
+                    y: row.height - 6px - 36px;
+                    source: msg.avatar;
                 }
-                pointer-event(e) => {
-                    if (e.kind == PointerEventKind.down) {
-                        root.lp-armed = i;
-                        root.lp-elapsed = 0s;
-                    } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
-                        if (root.lp-armed == i) {
-                            root.lp-armed = -1;
+
+                // Group-chat sender name (other rows; empty for DMs / own) — above
+                // the bubble.
+                if msg.name != "":
+                Text {
+                    x: msg.is_self ? row.width - 46px - 160px : 46px;
+                    y: 0px;
+                    width: 160px;
+                    height: 14px;
+                    text: msg.name + "/" + msg.voice-time;
+                    font-size: 11px;
+                    color: Theme.fg-muted;
+                    horizontal-alignment: msg.is_self ? right : left;
+                    vertical-alignment: center;
+                }
+
+                // Rounded bubble body. Sized by the card's measure (which is
+                // already at the real text width `bubble-cap - 2*pad`).
+                tbubble := Rectangle {
+                    width: card.bubble-w;
+                    height: card.bubble-h;
+                    x: msg.is_self ? row.width - 46px - tbubble.width : 46px;
+                    y: card.name-h;
+                    border-radius: 14px;
+                    background: msg.is_self ? Theme.brand : Theme.surface;
+                    clip: true;
+
+                    Text {
+                        x: card.bubble-pad;
+                        y: card.bubble-pad;
+                        width: parent.width - 2 * card.bubble-pad;
+                        height: parent.height - 2 * card.bubble-pad;
+                        text: msg.text;
+                        wrap: word-wrap;
+                        overflow: clip;
+                        font-size: 14px;
+                        color: msg.is_self ? Theme.fg-on-accent : Theme.fg;
+                        horizontal-alignment: left;
+                        vertical-alignment: top;
+                        line-height-factor: 1.5;
+                    }
+
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => {
+                            if (msg.link != "") {
+                                AppState.open-link(msg.link);
+                            }
+                        }
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down) {
+                                root.lp-armed = i;
+                                root.lp-elapsed = 0s;
+                                root.lp-cx = card.x + tbubble.x + tbubble.width / 2;
+                                root.lp-by = card.y + tbubble.y;
+                                root.lp-bw = tbubble.width;
+                                root.lp-bh = tbubble.height;
+                            } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                                if (root.lp-armed == i) {
+                                    root.lp-armed = -1;
+                                }
+                            }
                         }
                     }
                 }
-                Image {
-                    source: msg.bubble;
-                    width: msg.width;
-                    height: msg.height;
-                }
             }
         }
+    }
+    }
 
-        // Dimming overlay + tap-anywhere-to-close. Rendered AFTER the message
-        // rows (so it sits on top of the bubbles) but BEFORE the menu (so the
-        // menu stays clickable on top). Tapping a bubble while the menu is open
-        // therefore closes it instead of triggering the bubble's own action.
-        if root.lp-active >= 0:
-        Rectangle {
+    // Dimming overlay + tap-anywhere-to-close. Top-level (above the list),
+    // rendered AFTER the rows so it sits on top; the menu is rendered after it
+    // so the menu stays clickable on top.
+    if root.lp-active >= 0:
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        clip: true;
+        TouchArea {
             width: 100%;
             height: 100%;
-            background: transparent;
-            clip: true;
-            TouchArea {
-                width: 100%;
-                height: 100%;
-                clicked => { root.lp-active = -1; }
-            }
+            clicked => { root.lp-active = -1; }
+        }
+    }
+
+    // Long-press icon menu. Top-level (above list + overlay), anchored from the
+    // pressed bubble's captured content-coord rect (lp-cx/lp-by/lp-bw/lp-bh),
+    // the same ai_assistant pattern as chat's old absolute layout.
+    if root.lp-active >= 0:
+    menu := Rectangle {
+        out property <length> menu-w: 168px;
+        out property <length> menu-h: 50px;
+        out property <length> slot-w: menu.menu-w / 3;
+        in property <MessageData> msg: ChatSession.messages[root.lp-active];
+        out property <length> menu-x:
+            max(6px, min(root.lp-cx - menu.menu-w / 2, root.width - menu.menu-w - 6px));
+        x: menu.menu-x;
+
+        out property <length> vp-top: 48px;
+        out property <length> vp-bottom: root.height - root.input-h;
+        out property <length> y-above: 48px + root.lp-by + fk.content-y - menu.menu-h - 8px;
+        out property <length> y-below: 48px + root.lp-by + fk.content-y + root.lp-bh + 8px;
+        y: max(menu.vp-top, min(
+            (menu.y-above >= menu.vp-top)
+            ? menu.y-above
+            : (menu.y-below + menu.menu-h <= menu.vp-bottom ? menu.y-below : menu.y-above),
+            menu.vp-bottom - menu.menu-h));
+        width: menu.menu-w;
+        height: menu.menu-h;
+        border-radius: 8px;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        TouchArea {
+            width: root.width;
+            height: root.height;
+            clicked => { root.lp-active = -1; }
         }
 
-        // Long-press icon menu. Rendered as the last child of the Flickable
-        // (i.e. on top of the overlay + every message row) so adjacent bubbles
-        // can never cover it; positioned from the active row's geometry in
-        // content coordinates.
-        if root.lp-active >= 0:
-        menu := Rectangle {
-            out property <length> menu-w: 168px;
-            out property <length> menu-h: 50px;
-            out property <length> slot-w: menu.menu-w / 3;
-            in property <MessageData> msg: ChatSession.messages[root.lp-active];
-            out property <length> center-x:
-                menu.msg.is_self ? parent.width - 6px - menu.msg.width / 2 : 6px + menu.msg.width / 2;
-            out property <length> menu-x:
-                max(6px, min(menu.center-x - menu.menu-w / 2, parent.width - menu.menu-w - 6px));
-            x: menu.menu-x;
+        Icon {
+            x: 12px;
+            y: (menu.menu-h - 26px) / 2;
+            size: 26px;
+            glyph: Glyph.copy;
+            tint: Theme.fg;
+        }
 
-            out property <length> vp-top: -fk.content-y;
-            out property <length> vp-bottom: fk.height - fk.content-y;
-            out property <length> y-above: menu.msg.top - menu.menu-h - 8px;
-            out property <length> y-below: menu.msg.top + menu.msg.height + 8px;
-            y: max(menu.vp-top, min(
-                (menu.y-above >= menu.vp-top)
-                ? menu.y-above
-                : (menu.y-below + menu.menu-h <= menu.vp-bottom ? menu.y-below : menu.y-above),
-                menu.vp-bottom - menu.menu-h));
-            width: menu.menu-w;
-            height: menu.menu-h;
-            border-radius: menu.menu-h / 2;
-            background: Theme.surface;
-            border-width: 1px;
-            border-color: Theme.border;
+        TouchArea {
+            x: 0px;
+            width: menu.slot-w;
+            height: 100%;
+            // Read the row's text BEFORE closing the menu: `menu.msg` is bound
+            // to `ChatSession.messages[root.lp-active]`, so setting lp-active
+            // to -1 first would re-resolve it to an out-of-bounds (empty) row.
+            clicked => { let t = menu.msg.text; root.lp-active = -1; AppState.copy-note(t); }
+        }
 
-            TouchArea {
-                width: root.width;
-                height: root.height;
-                clicked => { root.lp-active = -1; }
-            }
+        Icon {
+            x: menu.slot-w + 12px;
+            y: (menu.menu-h - 26px) / 2;
+            size: 26px;
+            glyph: Glyph.collection;
+            tint: Theme.fg;
+        }
 
-            Icon {
-                x: 12px;
-                y: (menu.menu-h - 26px) / 2;
-                size: 26px;
-                glyph: Glyph.copy;
-                tint: Theme.fg;
-            }
+        TouchArea {
+            x: menu.slot-w;
+            width: menu.slot-w;
+            height: 100%;
+            // Read the row's text BEFORE closing the menu (same reason as copy).
+            clicked => { let t = menu.msg.text; root.lp-active = -1; AppState.save-note(t); }
+        }
 
-            TouchArea {
-                x: 0px;
-                width: menu.slot-w;
-                height: 100%;
-                // Read the row's text BEFORE closing the menu: `menu.msg` is bound
-                // to `ChatSession.messages[root.lp-active]`, so setting lp-active
-                // to -1 first would re-resolve it to an out-of-bounds (empty) row.
-                clicked => { let t = menu.msg.text; root.lp-active = -1; AppState.copy-note(t); }
-            }
+        Icon {
+            x: menu.slot-w * 2 + 12px;
+            y: (menu.menu-h - 26px) / 2;
+            size: 26px;
+            glyph: Glyph.forward;
+            tint: Theme.fg;
+        }
 
-            Icon {
-                x: menu.slot-w + 12px;
-                y: (menu.menu-h - 26px) / 2;
-                size: 26px;
-                glyph: Glyph.collection;
-                tint: Theme.fg;
-            }
-
-            TouchArea {
-                x: menu.slot-w;
-                width: menu.slot-w;
-                height: 100%;
+        TouchArea {
+            x: menu.slot-w * 2;
+            width: menu.slot-w;
+            height: 100%;
+            clicked => {
                 // Read the row's text BEFORE closing the menu (same reason as copy).
-                clicked => { let t = menu.msg.text; root.lp-active = -1; AppState.save-note(t); }
-            }
-
-            Icon {
-                x: menu.slot-w * 2 + 12px;
-                y: (menu.menu-h - 26px) / 2;
-                size: 26px;
-                glyph: Glyph.forward;
-                tint: Theme.fg;
-            }
-
-            TouchArea {
-                x: menu.slot-w * 2;
-                width: menu.slot-w;
-                height: 100%;
-                clicked => {
-                    // Read the row's text BEFORE closing the menu (same reason as copy).
-                    let t = menu.msg.text;
-                    root.lp-active = -1;
-                    AppState.forward-target = t;
-                    AppState.nav-state = {
-                        active-tab: 1,
-                        tabs: AppState.nav-state.tabs,
-                        global-overlay: AppState.nav-state.global-overlay,
-                    };
-                }
+                let t = menu.msg.text;
+                root.lp-active = -1;
+                AppState.forward-target = t;
+                AppState.nav-state = {
+                    active-tab: 1,
+                    tabs: AppState.nav-state.tabs,
+                    global-overlay: AppState.nav-state.global-overlay,
+                };
             }
         }
     }

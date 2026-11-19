@@ -3,7 +3,7 @@ use slint::{SharedPixelBuffer, SharedString};
 
 use render::Renderer;
 use render::bubble::parse::parse_text;
-use render::bubble::{Bubble, GroupPos, Side};
+use render::bubble::Side;
 use render::canvas::Image;
 
 pub(crate) static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> =
@@ -324,6 +324,37 @@ pub fn ensure_renderer() {
     let _ = RENDERER.get_or_init(|| std::sync::Mutex::new(renderer()));
 }
 
+/// Process-wide cache for generated placeholder avatars, keyed by
+/// `(seed, size)`. `make_avatar` allocates and fills an `n*n*4` pixel buffer on
+/// every call — for a 200-row chat the same peer/sender id would otherwise
+/// re-render its gradient 200×. Caching means each distinct seed is generated
+/// once and cloned (a single `Vec<u8>` copy) thereafter.
+static AVATAR_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(String, u32), Image>>> =
+    std::sync::OnceLock::new();
+
+/// Like [`make_avatar`], but memoised per `(seed, size)`: the first call
+/// generates the gradient, later calls for the same seed return a clone of the
+/// cached pixel buffer. Use this for chat rows where many messages share a
+/// sender.
+pub fn make_avatar_cached(seed: &str, size: u32) -> Image {
+    let cache = AVATAR_CACHE.get_or_init(Default::default);
+    let mut map = cache.lock().unwrap();
+    let key = (seed.to_string(), size);
+    if let Some(img) = map.get(&key) {
+        return Image {
+            w: img.w,
+            h: img.h,
+            rgba: img.rgba.clone(),
+        };
+    }
+    let img = make_avatar(seed, size);
+    let w = img.w;
+    let h = img.h;
+    let rgba = img.rgba.clone();
+    map.insert(key, Image { w, h, rgba: rgba.clone() });
+    Image { w, h, rgba }
+}
+
 pub fn make_avatar(seed: &str, size: u32) -> Image {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in seed.as_bytes() {
@@ -406,6 +437,35 @@ pub struct RenderedMsg {
     /// First link (http/https/www.) detected in a text bubble — the tap
     /// target for the default browser; `None` for non-link text rows.
     pub link: Option<String>,
+    /// Sender display name (group "other" rows); empty for DMs / own rows.
+    /// Drawn as a native `Text` above the bubble.
+    pub name: String,
+}
+
+/// Build a Slint `StyledText` for a message body: plain text as-is, with each
+/// detected URL as a colored + underlined, tappable markdown link `[url](url)`.
+/// Replaces the old per-glyph underline that was drawn into the bitmap.
+pub fn to_rich(text: &str) -> slint::StyledText {
+    let mut md = String::new();
+    for seg in parse_text(text) {
+        match seg {
+            render::bubble::Segment::Link(l) => {
+                let u = l.trim().trim_end_matches(['.', ',', '!', '?', ')', ']', '"', '\'']);
+                let target = if u.starts_with("http://") || u.starts_with("https://") {
+                    u.to_string()
+                } else {
+                    format!("https://{u}")
+                };
+                md.push_str(&format!("[{u}]({target})"));
+            }
+            render::bubble::Segment::Mention(mn) => md.push_str(&mn),
+            render::bubble::Segment::Emoji(c) => md.push(c),
+            render::bubble::Segment::Image(_) => {}
+            render::bubble::Segment::Text(t) => md.push_str(&t),
+        }
+    }
+    slint::StyledText::from_markdown(&md)
+        .unwrap_or_else(|_| slint::StyledText::from_plain_text(text))
 }
 
 /// First http / https / www. URL found in `text` (whole trimmed word); used to
@@ -450,7 +510,7 @@ pub struct ChatMsg {
 }
 
 pub fn render_msg(
-    r: &mut Renderer,
+    _r: &mut Renderer,
     id: u64,
     msg: &ChatMsg,
     available_w: u32,
@@ -471,6 +531,7 @@ pub fn render_msg(
             avatar: msg.avatar.clone(),
             time: msg.time.clone(),
             link: None,
+            name: String::new(),
         };
     }
     // Voice bubbles are drawn by Slint (icon + duration + play state), so the
@@ -490,6 +551,7 @@ pub fn render_msg(
             avatar: msg.avatar.clone(),
             time: msg.time.clone(),
             link: None,
+            name: String::new(),
         };
     }
     if let Some(path) = &msg.image {
@@ -518,31 +580,26 @@ pub fn render_msg(
             avatar: msg.avatar.clone(),
             time: msg.time.clone(),
             link: None,
+            name: String::new(),
         };
     }
-    let segs = parse_text(&msg.text);
-    let bubble = Bubble {
-        segments: &segs,
-        sender: msg.sender.as_str(),
-        time: msg.time.as_str(),
-        side: msg.side,
-        group: GroupPos::Single,
-        avatar: msg.avatar.as_ref(),
-    };
-    let out = r.render(id, &bubble, available_w, scale).clone();
+    // Text rows are laid out entirely in Slint (hidden `Text` measures in
+    // chat.slint), so there is no Rust font-measurement pass here. The pixel
+    // buffer and `width`/`height` are dummies — Slint never reads them.
     RenderedMsg {
-        rgba: out.to_straight_rgba(),
-        width: out.width,
-        height: out.height,
+        rgba: vec![255u8, 255, 255, 255],
+        width: 1,
+        height: 1,
         is_self: msg.side == Side::SelfSide,
         text: msg.text.clone(),
         voice: None,
         image: None,
         file: None,
         preview: None,
-        avatar: None,
+        avatar: msg.avatar.clone(),
         time: msg.time.clone(),
         link: first_link(&msg.text),
+        name: msg.sender.clone(),
     }
 }
 
@@ -566,7 +623,6 @@ fn file_kind(path: &str) -> i32 {
 
 pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageData {
     let is_voice = m.voice.is_some();
-    let is_image = m.image.is_some();
     let is_file = m.file.is_some();
     let (w, h) = if is_voice {
         (72.0, 54.0)
@@ -580,26 +636,12 @@ pub fn to_message_data(m: RenderedMsg, scale: f32, top: f32) -> crate::MessageDa
         )
     };
     crate::MessageData {
-        bubble: {
-            // Image / file rows carry a 1x1 dummy raster (Slint draws them, sized by `width`/`height`), so keep the buffer 1x1 = the 4-byte `rgba`.
-            let bw = if is_image || is_file {
-                1
-            } else {
-                m.width.max(1)
-            };
-            let bh = if is_image || is_file {
-                1
-            } else {
-                m.height.max(1)
-            };
-            let mut buf = SharedPixelBuffer::<slint::Rgba8Pixel>::new(bw, bh);
-            buf.make_mut_bytes().copy_from_slice(&m.rgba);
-            SlintImage::from_rgba8(buf)
-        },
         width: w as f32,
         height: h as f32,
         is_self: m.is_self,
-        text: SharedString::from(m.text),
+        text: SharedString::from(m.text.clone()),
+        name: SharedString::from(m.name),
+        rich: to_rich(&m.text),
         selected: false,
         top,
         voice_path: m

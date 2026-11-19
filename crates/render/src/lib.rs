@@ -84,6 +84,27 @@ impl Renderer {
         self.theme_version = self.theme_version.wrapping_add(1);
     }
 
+    /// Layout-only pass: compute the bubble's box geometry (row size + the
+    /// body / avatar / name / time / content rects) WITHOUT shaping or
+    /// rasterizing any glyphs. Cheaper than [`Self::render`], which additionally
+    /// rasterizes every glyph into a bitmap — use this when the text is drawn
+    /// natively (Slint) and only the box positions are needed.
+    pub fn layout(
+        &self,
+        bubble: &Bubble,
+        available_w: u32,
+        scale: f32,
+    ) -> bubble::draw::Frame {
+        bubble::draw::compute_frame(
+            &self.fonts,
+            &self.emoji,
+            bubble,
+            &self.theme,
+            available_w as f32,
+            scale,
+        )
+    }
+
     pub fn render(
         &mut self,
         id: u64,
