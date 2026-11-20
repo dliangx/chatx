@@ -8,22 +8,21 @@ use chatx_core::group::MemberInfo;
 use chatx_core::signal::{DirectoryClient, HttpDirectory};
 use chatx_core::store::dm_chat_id;
 
-
 pub mod data;
 use data::ArcBackend;
+pub mod ai;
 pub mod call;
 pub mod call_dispatcher;
-pub mod ai;
-pub mod models;
 pub mod chat;
 pub mod image;
+pub mod models;
 pub mod moment;
 pub mod process;
 pub mod record;
 pub mod time;
 use image::{
-    ChatMsg, Image, RenderedMsg, Side, load_avatar_path_capped, load_image_cached,
-    make_avatar, make_avatar_cached, make_preview_image, qr_image, render_msg, to_message_data,
+    ChatMsg, Image, RenderedMsg, Side, load_avatar_path_capped, load_image_cached, make_avatar,
+    make_avatar_cached, make_preview_image, qr_image, render_msg, to_message_data,
 };
 pub mod doc_viewer;
 pub mod pdfrs;
@@ -438,10 +437,10 @@ fn cached_translation(chat_id: &str, msg_id: i64, target: &str) -> Option<Option
 
 /// Persist a (possibly empty) translation result into the cache.
 fn store_translation(chat_id: &str, msg_id: i64, target: &str, value: Option<String>) {
-    TRANSLATION_CACHE.write().unwrap().insert(
-        (chat_id.to_string(), msg_id, target.to_string()),
-        value,
-    );
+    TRANSLATION_CACHE
+        .write()
+        .unwrap()
+        .insert((chat_id.to_string(), msg_id, target.to_string()), value);
 }
 static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PROFILE_LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -917,16 +916,17 @@ pub fn run_app() {
                 AI_SCROLL_POS.write().unwrap().insert(name, d);
             }
         });
-        ui.global::<AppState>().on_selected_text(|text, anchor, cursor| {
-            let t = text.as_str();
-            let len = t.len();
-            let lo = (anchor as usize).min(len);
-            let hi = (cursor as usize).min(len);
-            let (s, e) = if lo <= hi { (lo, hi) } else { (hi, lo) };
-            // `s..e` is always on char boundaries (the offsets come from Slint's
-            // byte-offset selection API and are within the string), so indexing is safe.
-            t[s..e].to_string().into()
-        });
+        ui.global::<AppState>()
+            .on_selected_text(|text, anchor, cursor| {
+                let t = text.as_str();
+                let len = t.len();
+                let lo = (anchor as usize).min(len);
+                let hi = (cursor as usize).min(len);
+                let (s, e) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+                // `s..e` is always on char boundaries (the offsets come from Slint's
+                // byte-offset selection API and are within the string), so indexing is safe.
+                t[s..e].to_string().into()
+            });
         ui.global::<AiAssistantState>().on_scroll_request({
             let wr = weak.clone();
             move || {
@@ -968,7 +968,9 @@ pub fn run_app() {
                         .map(|s| s.to_string())
                         .unwrap_or_default()
                 } else {
-                    g.chat_id_for(key).map(|s| s.to_string()).unwrap_or_default()
+                    g.chat_id_for(key)
+                        .map(|s| s.to_string())
+                        .unwrap_or_default()
                 }
             };
             open_ai_conv(&w0, &conv);
@@ -2496,6 +2498,8 @@ pub fn run_app() {
     }
 
     ui.run().expect("window run failed");
+
+    ai::shutdown();
 }
 
 #[cfg(target_os = "android")]
@@ -3506,7 +3510,9 @@ fn send_chat_voice(
                 // ack so the window is short, but the same guard prevents the
                 // loop from re-sending while we have it on the wire.
                 c.media_claim(row_t, &cand);
-                let r = c.send_voice_cmd(&cand, data, rate, ch, duration_ms, Some(row_t as u64)).await;
+                let r = c
+                    .send_voice_cmd(&cand, data, rate, ch, duration_ms, Some(row_t as u64))
+                    .await;
                 if r.is_ok() {
                     let _ = c.media_delivered(row_t, &cand).await;
                 }
@@ -4234,7 +4240,9 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
                 // the claim still prevents the redelivery loop from racing a
                 // concurrent copy to the same device.
                 c.media_claim(row_t, &cand);
-                let r = c.send_file_cmd(&cand, name, bytes, Some(row_t as u64)).await;
+                let r = c
+                    .send_file_cmd(&cand, name, bytes, Some(row_t as u64))
+                    .await;
                 if r.is_ok() {
                     let _ = c.media_delivered(row_t, &cand).await;
                 }
@@ -5194,12 +5202,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         preview_dims,
                         image_preview: preview,
                     };
-                    render_msg(
-                        std::hash::Hasher::finish(&h),
-                        &msg,
-                        available_w,
-                        scale,
-                    )
+                    render_msg(std::hash::Hasher::finish(&h), &msg, available_w, scale)
                 })
                 .collect()
         };
@@ -5212,7 +5215,9 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
         if translate_on {
             for (i, r) in rendered.iter().enumerate() {
                 let src = rows.get(i);
-                let is_self = src.map(|s| s.sender == me_peer || s.sender == me).unwrap_or(false);
+                let is_self = src
+                    .map(|s| s.sender == me_peer || s.sender == me)
+                    .unwrap_or(false);
                 let is_text = !r.voice.is_some() && !r.image.is_some() && !r.file.is_some();
                 if !is_self && is_text && !r.text.trim().is_empty() {
                     let msg_id = src.map(|s| s.id).unwrap_or(0);
@@ -5356,9 +5361,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
 /// leading whole word (end-of-line, whitespace, or `:`/`,` boundary).
 fn parse_bot_trigger(body: &str) -> Option<String> {
     let t = body.trim_start();
-    let rest = t
-        .strip_prefix('@')
-        .or_else(|| t.strip_prefix('\u{ff20}'))?;
+    let rest = t.strip_prefix('@').or_else(|| t.strip_prefix('\u{ff20}'))?;
     let rest = rest.trim_start();
     // "bot" must be the leading word (ASCII, 3 bytes).
     if rest.len() < 3 || !rest[..3].eq_ignore_ascii_case("bot") {
@@ -5490,13 +5493,19 @@ fn save_chat_draft(key: i32, draft: &str) {
     if let Some(pool) = pool {
         let rt = runtime();
         rt.spawn(async move {
-            let Some(conv_id) =
-                sqlite::conversations::resolve_id(&pool, &chat_id).await.ok().flatten()
+            let Some(conv_id) = sqlite::conversations::resolve_id(&pool, &chat_id)
+                .await
+                .ok()
+                .flatten()
             else {
                 return;
             };
             // Empty draft → NULL so the row has no stored draft.
-            let d = if trimmed.is_empty() { None } else { Some(trimmed.as_str()) };
+            let d = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.as_str())
+            };
             if let Err(e) = sqlite::conversations::set_draft(&pool, conv_id, d).await {
                 tracing::warn!("[chat] set_draft({chat_id}) failed: {e}");
             }
@@ -5509,7 +5518,8 @@ fn save_chat_draft(key: i32, draft: &str) {
 fn clear_chat_draft(weak: slint::Weak<MainWindow>, key: i32) {
     save_chat_draft(key, "");
     if let Some(ui) = weak.upgrade() {
-        ui.global::<AppState>().set_active_draft(SharedString::new());
+        ui.global::<AppState>()
+            .set_active_draft(SharedString::new());
     }
 }
 
@@ -5672,10 +5682,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String, from
                 targets.push(primary.clone());
             }
         }
-        let (_chat, msg_id) = match client
-            .queue_dm_text_ex(&username, &targets, &body)
-            .await
-        {
+        let (_chat, msg_id) = match client.queue_dm_text_ex(&username, &targets, &body).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("[send] queue_dm_text_ex failed: {e}");
@@ -8138,7 +8145,8 @@ fn add_contact(weak: slint::Weak<MainWindow>, username_raw: String, peer_id_raw:
         let _ = sqlite::social::frq_upsert(&pool, &me_peer, &peer_id, Some(&sender_name)).await;
         {
             let mut g = backend.write().await;
-            if !g.friend_requests
+            if !g
+                .friend_requests
                 .iter()
                 .any(|r| r.peer_id == peer_id && r.dir == data::FrqDir::Sent)
             {
@@ -8407,7 +8415,11 @@ async fn handle_friend_action(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(String::from);
-    tracing::debug!("[friend-action] kind={kind} actor_user={:?} actor_peer={:?}", actor_user, actor_peer);
+    tracing::debug!(
+        "[friend-action] kind={kind} actor_user={:?} actor_peer={:?}",
+        actor_user,
+        actor_peer
+    );
     if actor_user.as_deref().map(str::is_empty).unwrap_or(true) {
         tracing::debug!("[friend-action] no actor_user — ignoring");
         return;
@@ -8444,7 +8456,8 @@ async fn handle_friend_action(
             )
             .await;
             let mut g = backend.write().await;
-            if !g.friend_requests
+            if !g
+                .friend_requests
                 .iter()
                 .any(|r| r.peer_id == their_id && r.dir == data::FrqDir::Inbox)
             {

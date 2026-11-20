@@ -77,6 +77,10 @@ enum Cmd {
 /// The actor's command sender (created once by [`ensure_actor`]).
 static CMD: std::sync::Mutex<Option<Sender<Cmd>>> = std::sync::Mutex::new(None);
 
+/// The actor thread's `JoinHandle`. `None` once [`shutdown`] has joined it.
+static ACTOR_THREAD: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(None);
+
 /// The app-lifetime output channel from the actor to the UI. One pair for the
 /// process lifetime. `OUT_TX` is moved into the actor at spawn time; `OUT_RX`
 /// is owned by this crate and drained on each `pump`.
@@ -101,7 +105,7 @@ fn ensure_actor() {
     let (cmd_tx, cmd_rx) = channel::<Cmd>();
     let (out_tx, out_rx) = channel::<UiEvent>();
     *OUT_RX.lock().unwrap() = Some(out_rx);
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name("chatx-ai-actor".into())
         .spawn(move || {
             *OUT_TX.lock().unwrap() = Some(out_tx);
@@ -109,6 +113,25 @@ fn ensure_actor() {
         })
         .expect("spawn ai actor");
     *CMD.lock().unwrap() = Some(cmd_tx);
+    *ACTOR_THREAD.lock().unwrap() = Some(handle);
+}
+
+/// Shut the actor down cleanly: end its command stream so the loop exits and
+/// the (thread-confined) LLM backend drops **on the actor thread**, then join
+/// the thread before returning.
+///
+/// The local GGUF backend owns Metal resources (GGUF residency sets) that
+/// must be released before llama.cpp's C++ static destructors run at process
+/// exit; otherwise `ggml_metal_rsets_free` hits `GGML_ASSERT([data count] ==
+/// 0)` and aborts the process. Joining the actor first guarantees the backend
+/// (and its Metal buffers) are freed before `main` returns, so the static
+/// destructors find empty residency sets.
+pub fn shutdown() {
+    // Drop the only sender so the actor's `for cmd in rx` iterator ends (the
+    // receiver becomes broken) and the loop returns, dropping the backend.
+    *CMD.lock().unwrap() = None;
+    let Some(handle) = ACTOR_THREAD.lock().unwrap().take() else { return };
+    let _ = handle.join();
 }
 
 fn actor_loop(cmd_rx: Receiver<Cmd>) {
