@@ -727,6 +727,7 @@ pub fn run_app() {
                 }
             });
             tray.on_quit(|| {
+                ai::shutdown();
                 let _ = slint::quit_event_loop();
             });
             Some(tray)
