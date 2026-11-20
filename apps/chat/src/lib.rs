@@ -25,6 +25,7 @@ use image::{
     make_avatar_cached, make_preview_image, qr_image, render_msg, to_message_data,
 };
 pub mod doc_viewer;
+pub mod drag_drop;
 pub mod pdfrs;
 pub mod xhost;
 // Desktop-only Office viewer glue re-exported so the slint callbacks below keep
@@ -707,6 +708,8 @@ pub fn run_app() {
     // ~/.chatx/chatx.log). Idempotent; cheap no-op if already initialised.
     let _ = chatx_core::logging::init_default();
 
+    drag_drop::install();
+
     #[cfg(any(target_os = "android", target_os = "ios"))]
     install_bridge_sinks();
 
@@ -751,6 +754,58 @@ pub fn run_app() {
                 let w3 = w2.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     refresh_theme_on_change(&w3);
+                });
+            }
+        });
+    }
+
+    {
+        let w2 = weak.clone();
+        runtime().spawn(async move {
+            let mut beat = tokio::time::interval(std::time::Duration::from_millis(250));
+            loop {
+                beat.tick().await;
+                let paths = drag_drop::take_pending();
+                if paths.is_empty() {
+                    continue;
+                }
+                tracing::warn!("[drag-drop] DRAIN {} path(s): {:?}", paths.len(), paths);
+                let w3 = w2.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = w3.upgrade() else {
+                        tracing::warn!("[drag-drop] window gone, dropping {} file(s)", paths.len());
+                        return;
+                    };
+                    let key = ui.global::<AppState>().get_current_chat_key();
+                    if key < 0 {
+                        tracing::warn!(
+                            "[drag-drop] no chat open, ignoring {} file(s)",
+                            paths.len()
+                        );
+                        return;
+                    }
+                    for p in paths {
+                        let ext = std::path::Path::new(&p)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .map(|s| s.to_ascii_lowercase())
+                            .unwrap_or_default();
+                        const IMAGE_EXTS: &[&str] = &[
+                            "png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif", "tiff",
+                            "tif", "svg",
+                        ];
+                        let is_image = IMAGE_EXTS.contains(&ext.as_str());
+                        tracing::warn!(
+                            "[drag-drop] dispatch {p} as {} (ext={ext:?}) chat-key={key}",
+                            if is_image { "image" } else { "file" }
+                        );
+                        let p2 = p.clone();
+                        if is_image {
+                            on_chat_image_picked(w3.clone(), key, Some(p2));
+                        } else {
+                            on_chat_file_picked(w3.clone(), key, Some(p));
+                        }
+                    }
                 });
             }
         });
