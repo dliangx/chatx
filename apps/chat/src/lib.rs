@@ -7,7 +7,7 @@ use chatx_core::friendq::{FriendQ, FriendQAction};
 use chatx_core::group::MemberInfo;
 use chatx_core::signal::{DirectoryClient, HttpDirectory};
 use chatx_core::store::dm_chat_id;
-use render::bubble::Side;
+
 
 pub mod data;
 use data::ArcBackend;
@@ -22,7 +22,7 @@ pub mod process;
 pub mod record;
 pub mod time;
 use image::{
-    ChatMsg, RENDERER, RenderedMsg, ensure_renderer, load_avatar_path_capped, load_image_cached,
+    ChatMsg, Image, RenderedMsg, Side, load_avatar_path_capped, load_image_cached,
     make_avatar, make_avatar_cached, make_preview_image, qr_image, render_msg, to_message_data,
 };
 pub mod doc_viewer;
@@ -317,17 +317,6 @@ fn apply_theme_mode(ui: &MainWindow, mode: ThemeMode) {
         t.set_mode(mode);
         t.set_system_dark(system_dark);
         t.set_dark(dark);
-    }
-    {
-        let palette = if dark {
-            render::theme::Theme::dark()
-        } else {
-            render::theme::Theme::default()
-        };
-        ensure_renderer();
-        if let Some(r) = RENDERER.get() {
-            r.lock().unwrap().set_theme(palette);
-        }
     }
     let active = ui.global::<AppState>().get_current_chat_peer_key();
     if active >= 0 {
@@ -2481,13 +2470,6 @@ pub fn run_app() {
                 let st = ui.global::<AppState>();
                 st.set_scan_preview(slint::Image::default());
             }
-        });
-    }
-
-    {
-        let rt = runtime();
-        rt.spawn(async move {
-            ensure_renderer();
         });
     }
 
@@ -5093,7 +5075,6 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                     std::collections::HashSet::new()
                 }
             };
-        ensure_renderer();
 
         let mut rows = rows;
         rows.sort_by(|a, b| b.t.cmp(&a.t).then(b.id.cmp(&a.id)));
@@ -5172,7 +5153,6 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             }
         }
         let rendered: Vec<RenderedMsg> = {
-            let mut r = RENDERER.get().unwrap().lock().unwrap();
             rows.iter()
                 .enumerate()
                 .map(|(i, m)| {
@@ -5201,7 +5181,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                     //  - last resort -> generated placeholder
                     let avatar = if is_self {
                         match own_avatar.as_ref() {
-                            Some((w, h, rgba)) => render::canvas::Image {
+                            Some((w, h, rgba)) => Image {
                                 w: *w,
                                 h: *h,
                                 rgba: rgba.clone(),
@@ -5210,7 +5190,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         }
                     } else {
                         match contacts.get(&m.sender) {
-                            Some((w, h, rgba)) => render::canvas::Image {
+                            Some((w, h, rgba)) => Image {
                                 w: *w,
                                 h: *h,
                                 rgba: rgba.clone(),
@@ -5249,7 +5229,6 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
                         image_preview: preview,
                     };
                     render_msg(
-                        &mut r,
                         std::hash::Hasher::finish(&h),
                         &msg,
                         available_w,

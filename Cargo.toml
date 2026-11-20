@@ -8,7 +8,6 @@ members = [
     "crates/camera",
     "crates/screen",
     "crates/core",
-    "crates/render",
     "apps/bot",
     "apps/nat-probe",
 ]
@@ -23,11 +22,6 @@ chatx-core = { path = "crates/core" }
 
 slint = "^1.18"
 slint-build = "^1.18"
-fontdue = "^0.9"
-rustybuzz = "^0.20"
-unicode-linebreak = "0.1"
-unicode-bidi = "0.3"
-emojis = "0.6"
 libp2p = { version = "0.56", features = [
     "tcp",
     "quic",

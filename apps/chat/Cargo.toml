@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-render = {path = "../../crates/render"}
 slint = {workspace = true}
 chatx-core = { path = "../../crates/core" }
 chatx-agent = { path = "../../crates/agent", features = ["llama"] }

@@ -1,13 +1,85 @@
 use slint::Image as SlintImage;
 use slint::{SharedPixelBuffer, SharedString};
 
-use render::Renderer;
-use render::bubble::Side;
-use render::bubble::parse::parse_text;
-use render::canvas::Image;
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Side {
+    SelfSide,
+    Other,
+}
 
-pub(crate) static RENDERER: std::sync::OnceLock<std::sync::Mutex<Renderer>> =
-    std::sync::OnceLock::new();
+pub enum Segment {
+    Text(String),
+    Emoji(char),
+    Image(Image),
+    Mention(String),
+    Link(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct Image {
+    pub rgba: Vec<u8>,
+    pub w: u32,
+    pub h: u32,
+}
+
+pub fn parse_text(text: &str) -> Vec<Segment> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '@' {
+            let mut j = i + 1;
+            while j < chars.len() && is_word_char(chars[j]) { j += 1; }
+            if j > i + 1 {
+                flush_text(&mut buf, &mut out);
+                out.push(Segment::Mention(chars[i..j].iter().collect()));
+                i = j;
+                continue;
+            }
+        }
+        if c == 'h' || c == 'w' {
+            let rest: String = chars[i..].iter().collect();
+            if rest.starts_with("http://") || rest.starts_with("https://") || rest.starts_with("www.") {
+                let link: String = rest.chars().take_while(|&x| !x.is_whitespace()).collect();
+                let len = link.chars().count();
+                flush_text(&mut buf, &mut out);
+                out.push(Segment::Link(link));
+                i += len;
+                continue;
+            }
+        }
+        if is_emoji_char(c) {
+            flush_text(&mut buf, &mut out);
+            out.push(Segment::Emoji(c));
+            i += 1;
+            while i < chars.len() && chars[i] == '\u{FE0F}' { i += 1; }
+            continue;
+        }
+        buf.push(c);
+        i += 1;
+    }
+    flush_text(&mut buf, &mut out);
+    out
+}
+
+fn flush_text(buf: &mut String, out: &mut Vec<Segment>) {
+    if !buf.is_empty() { out.push(Segment::Text(std::mem::take(buf))); }
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '.' || c == '-' || c == '/'
+}
+
+fn is_emoji_char(c: char) -> bool {
+    let cp = c as u32;
+    (0x1F300..=0x1FAFF).contains(&cp)
+        || (0x1F000..=0x1F0FF).contains(&cp)
+        || (0x2600..=0x27BF).contains(&cp)
+        || (0x1F1E6..=0x1F1FF).contains(&cp)
+        || matches!(cp, 0x00A9 | 0x00AE | 0x203C | 0x2049 | 0x2122 | 0x2139)
+}
 
 /// Bound the cache so pixel buffers for off-screen / old covers and avatars get
 /// reclaimed when the user navigates away (otherwise each `SlintImage` clone
@@ -291,45 +363,6 @@ pub fn ensure_preview(original: &str, cap: u32) -> std::io::Result<std::path::Pa
     Ok(dst)
 }
 
-const FONT_LATIN: &[u8] = include_bytes!("../fonts/NotoSans.ttf");
-const FONT_CJK: &[u8] = include_bytes!("../fonts/NotoSansSC.ttf");
-const FONT_EMOJI: &[u8] = include_bytes!("../fonts/NotoColorEmoji.ttf");
-
-fn renderer() -> Renderer {
-    let mut r = Renderer::new(render::theme::Theme::default());
-    for bytes in [FONT_LATIN, FONT_CJK] {
-        if let Some(id) = r.fonts.add_font(bytes) {
-            let chain = r.fonts.ltr_chain().to_vec();
-            r.fonts.set_ltr_chain(&{
-                let mut v = chain;
-                v.push(id);
-                v
-            });
-            let rchain = r.fonts.rtl_chain().to_vec();
-            r.fonts.set_rtl_chain(&{
-                let mut v = rchain;
-                v.push(id);
-                v
-            });
-        }
-    }
-    let px = r.theme.font_size.max(16.0);
-    r.emoji.add_color_font_bytes(
-        FONT_EMOJI,
-        0,
-        &[
-            '😀', '😂', '😅', '😉', '😊', '😍', '😘', '😜', '😎', '😢', '😭', '😡', '👍', '👎',
-            '🙏', '👏', '🎉', '🔥', '💯', '🚀',
-        ],
-        px,
-    );
-    r
-}
-
-pub fn ensure_renderer() {
-    let _ = RENDERER.get_or_init(|| std::sync::Mutex::new(renderer()));
-}
-
 /// Process-wide cache for generated placeholder avatars, keyed by
 /// `(seed, size)`. `make_avatar` allocates and fills an `n*n*4` pixel buffer on
 /// every call — for a 200-row chat the same peer/sender id would otherwise
@@ -445,7 +478,7 @@ pub struct RenderedMsg {
     pub preview: Option<String>,
     /// Sender avatar (right for own, left for theirs) shown beside a voice
     /// bubble, mirroring the rasterised text-bubble avatar.
-    pub avatar: Option<render::canvas::Image>,
+    pub avatar: Option<Image>,
     /// Time label (e.g. "14:32") — displayed under the voice bubble body.
     pub time: String,
     /// First link (http/https/www.) detected in a text bubble — the tap
@@ -463,7 +496,7 @@ pub fn to_rich(text: &str) -> slint::StyledText {
     let mut md = String::new();
     for seg in parse_text(text) {
         match seg {
-            render::bubble::Segment::Link(l) => {
+            Segment::Link(l) => {
                 let u = l
                     .trim()
                     .trim_end_matches(['.', ',', '!', '?', ')', ']', '"', '\'']);
@@ -474,10 +507,10 @@ pub fn to_rich(text: &str) -> slint::StyledText {
                 };
                 md.push_str(&format!("[{u}]({target})"));
             }
-            render::bubble::Segment::Mention(mn) => md.push_str(&mn),
-            render::bubble::Segment::Emoji(c) => md.push(c),
-            render::bubble::Segment::Image(_) => {}
-            render::bubble::Segment::Text(t) => md.push_str(&t),
+            Segment::Mention(mn) => md.push_str(&mn),
+            Segment::Emoji(c) => md.push(c),
+            Segment::Image(_) => {}
+            Segment::Text(t) => md.push_str(&t),
         }
     }
     slint::StyledText::from_markdown(&md)
@@ -488,7 +521,7 @@ pub fn to_rich(text: &str) -> slint::StyledText {
 /// decide whether tapping a text bubble opens the default browser.
 pub fn first_link(text: &str) -> Option<String> {
     for seg in parse_text(text) {
-        if let render::bubble::Segment::Link(l) = seg {
+        if let Segment::Link(l) = seg {
             let u = l
                 .trim()
                 .trim_end_matches(['.', ',', '!', '?', ')', ']', '"', '\'']);
@@ -528,7 +561,6 @@ pub struct ChatMsg {
 }
 
 pub fn render_msg(
-    _r: &mut Renderer,
     _id: u64,
     msg: &ChatMsg,
     available_w: u32,
