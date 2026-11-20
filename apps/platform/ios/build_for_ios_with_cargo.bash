@@ -55,8 +55,14 @@ fi
 
 BIN_SRC="$CARGO_TARGET_DIR/$TRIPLE/$MODE/chatx"
 OBJC_DIR="$ROOT/apps/platform/ios"
-OBJC_SHIM="$OBJC_DIR/Sources/ChatxScreenCapture.m"
-OBJC_OUT="$OBJC_DIR/build/chatx_screen_capture.o"
+OBJC_SHIMS=(
+  "$OBJC_DIR/Sources/ChatxScreenCapture.m"
+  "$OBJC_DIR/Sources/ChatxNotify.m"
+)
+OBJC_OUTS=(
+  "$OBJC_DIR/build/chatx_screen_capture.o"
+  "$OBJC_DIR/build/chatx_notify.o"
+)
 SHIM_O=""
 HAS_SHIM=0
 
@@ -65,23 +71,31 @@ CLANG_BIN="$(xcrun --find clang 2>/dev/null || true)"
 SDK_ROOT="$(xcrun --sdk "${SDK_NAME}" --show-sdk-path 2>/dev/null || true)"
 if [ -n "${CLANG_BIN}" ] && [ -n "${SDK_ROOT}" ] && [ -d "${SDK_ROOT}" ] \
    && [ -d "${SDK_ROOT}/System/Library/Frameworks/UIKit.framework" ]; then
-  # Framework is present → real SDK on this host. Compile the shim.
-  mkdir -p "$(dirname "$OBJC_OUT")"
-  if [ ! -x "$OBJC_OUT" ] || [ "$OBJC_SHIM" -nt "$OBJC_OUT" ]; then
-    echo "==> clang ${CLANG_TRIPLE}  ->  ${OBJC_OUT}"
-    "${CLANG_BIN}" \
-      -target "${CLANG_TRIPLE}" \
-      -isysroot "${SDK_ROOT}" \
-      -std=gnu11 \
-      -fobjc-arc \
-      -O2 \
-      -c \
-      -o "$OBJC_OUT" \
-      "$OBJC_SHIM" || { echo "✗ shim compile failed"; exit 1; }
-  fi
-  SHIM_O="$OBJC_OUT"
-  HAS_SHIM=1
-  echo "✓ shim at $OBJC_OUT (will link + enable bridge/has-ios-shim)"
+  # Framework is present → real SDK on this host. Compile every .m shim.
+  for i in "${!OBJC_SHIMS[@]}"; do
+    SRC="${OBJC_SHIMS[$i]}"
+    OUT="${OBJC_OUTS[$i]}"
+    mkdir -p "$(dirname "$OUT")"
+    if [ ! -e "$OUT" ] || [ "$SRC" -nt "$OUT" ]; then
+      echo "==> clang ${CLANG_TRIPLE}  ->  ${OUT}"
+      "${CLANG_BIN}" \
+        -target "${CLANG_TRIPLE}" \
+        -isysroot "${SDK_ROOT}" \
+        -std=gnu11 \
+        -fobjc-arc \
+        -O2 \
+        -c \
+        -o "$OUT" \
+        "$SRC" || { echo "✗ shim compile failed: $SRC"; exit 1; }
+    fi
+    if [ -z "$SHIM_O" ]; then
+      SHIM_O="$OUT"
+    else
+      SHIM_O="$SHIM_O $OUT"
+    fi
+    HAS_SHIM=1
+  done
+  echo "✓ shims at $SHIM_O (will link + enable bridge/has-ios-shim)"
 else
   echo "ℹ no real iOS SDK on this host — skipping ObjC shim, screen-share falls back to a no-op"
 fi
@@ -114,10 +128,17 @@ else
            "$ROOT/crates/bridge/src/lib.rs" \
            "$ROOT/crates/bridge/src/ffi.rs" \
            "$ROOT/crates/bridge/src/shim_impl.rs" \
-           "$ROOT/apps/chat/build.rs"; do
+           "$ROOT/apps/chat/build.rs" \
+           "$OBJC_DIR/Sources/ChatxScreenCapture.m" \
+           "$OBJC_DIR/Sources/ChatxNotify.m"; do
     if [ -e "$f" ] && [ "$f" -nt "$BIN_SRC" ]; then REBUILD=1; break; fi
   done
-  if [ -n "$SHIM_O" ] && [ "$SHIM_O" -nt "$BIN_SRC" ]; then REBUILD=1; fi
+  # Any of the ObjC shims newer than the binary → rebuild.
+  for OUT in "${OBJC_OUTS[@]}"; do
+    if [ -n "$OUT" ] && [ -e "$OUT" ] && [ "$OUT" -nt "$BIN_SRC" ]; then
+      REBUILD=1
+    fi
+  done
 fi
 
 if [ "$REBUILD" = "1" ]; then

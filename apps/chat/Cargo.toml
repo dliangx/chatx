@@ -41,6 +41,7 @@ arboard = "3"
 # reveal path, so the library never touches the `doc::` API on mobile.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 doc = { path = "../../crates/doc" }
+notify-rust = { workspace = true }
 
 [build-dependencies]
 slint-build = {workspace = true}

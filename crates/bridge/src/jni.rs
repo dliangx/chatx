@@ -218,6 +218,72 @@ fn call_native_bridge_string(method: &str, value: &str) -> bool {
     }
 }
 
+/// Call a static `void (String, String)` method on the cached
+/// `NativeBridge` class. Returns `true` on success. Used for
+/// `notifyMessage(title, body)`.
+fn call_native_bridge_two_strings(method: &str, a: &str, b: &str) -> bool {
+    let bridged = match BRIDGE_CLASS.get() {
+        Some(c) => c,
+        None => {
+            tracing::warn!("[bridge] {method}: NativeBridge class not yet cached — bailing");
+            return false;
+        }
+    };
+    let vm = match VM.get() {
+        Some(v) => v,
+        None => {
+            tracing::warn!("[bridge] {method}: no JVM handle cached yet; skipping");
+            return false;
+        }
+    };
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("[bridge] {method}: attach current thread failed: {e}");
+            return false;
+        }
+    };
+    let sa = match env.new_string(a) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("[bridge] {method}: new_string (arg1) failed: {e}");
+            return false;
+        }
+    };
+    let sb = match env.new_string(b) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("[bridge] {method}: new_string (arg2) failed: {e}");
+            return false;
+        }
+    };
+    match env.call_static_method::<_, _, _>(
+        bridged,
+        method,
+        "(Ljava/lang/String;Ljava/lang/String;)V",
+        &[(&sa).into(), (&sb).into()],
+    ) {
+        Ok(_) => {
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+            }
+            true
+        }
+        Err(e) => {
+            tracing::warn!("[bridge] {method}: Java static call failed: {e}");
+            false
+        }
+    }
+}
+
+/// Ask the Java shell to post a system notification with `title` / `body`.
+/// The shell wraps it in `NotificationCompat` via `com.chatx.Notify` and
+/// fires the POST_NOTIFICATIONS prompt on Android 13+ if needed.
+pub fn notify_message(title: &str, body: &str) {
+    _ = call_native_bridge_two_strings("notifyMessage", title, body);
+}
+
 /// Ask the Java shell to (start | stop) an in-app screen capture.
 pub fn request_screen_share_start() {
     call_native_bridge_void("startScreenShare");

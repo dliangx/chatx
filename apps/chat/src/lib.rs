@@ -20,6 +20,7 @@ pub mod moment;
 pub mod process;
 pub mod record;
 pub mod time;
+pub mod trans;
 use image::{
     ChatMsg, Image, RenderedMsg, Side, load_avatar_path_capped, load_image_cached, make_avatar,
     make_avatar_cached, make_preview_image, qr_image, render_msg, to_message_data,
@@ -36,7 +37,8 @@ use doc_viewer::{doc_page_get, open_doc_page, xl_sheet_get, xl_slint_rows};
 use doc_viewer::{doc_pages_clear, is_office_ext, xl_sheets_clear};
 
 use process::{group_conn_enter, start_group_conn_sweeper, touch_chat_activity};
-use time::{fmt_profile_date, fmt_time, set_lang as set_time_lang, time_label};
+use time::{fmt_profile_date, fmt_time, time_label};
+use trans::{set_lang as set_time_lang, translate_notify_body};
 
 use camera::Camera;
 use screen::Screen;
@@ -3118,6 +3120,37 @@ fn apply_result(
     }
 }
 
+/// Raise an OS system notification for an inbound DM message.
+/// `title` is the sender's username; `body` is a per-type summary:
+/// text → the message text, image → "Image", file → "File", voice → "Voice"
+/// (translated into the app's current language before being shown).
+///
+/// Desktop: `notify-rust` (D-Bus / winrt / mac-notification-sys backends).
+/// Android: JNI static call into `com.chatx.NativeBridge.notifyMessage`
+/// (see `apps/platform/android/java/com/chatx/Notify.java`).
+/// iOS: extern "C" call into `chatx_notify_show` (see
+/// `apps/platform/ios/Sources/ChatxNotify.m`); degrades to a no-op with a
+/// stderr note when the `has-ios-shim` feature is off (host without a real
+/// iOS SDK).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn notify_inbound_message(title: &str, body: &str) {
+    let _ = notify_rust::Notification::new()
+        .summary(title)
+        .body(body)
+        .icon("messaging")
+        .show();
+}
+
+#[cfg(target_os = "android")]
+fn notify_inbound_message(title: &str, body: &str) {
+    bridge::notify_message(title, body);
+}
+
+#[cfg(target_os = "ios")]
+fn notify_inbound_message(title: &str, body: &str) {
+    bridge::notify_message(title, body);
+}
+
 fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
     if PUMP_STARTED.get() {
         return;
@@ -3152,15 +3185,30 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                         });
                         continue;
                     }
-                    if let chatx_core::swarm::ChatEvent::Text { peer, req } = &evt {
-                        if let Some(text) = req.text.as_deref() {
-                            if let Some(q) = FriendQ::decode(text) {
-                                let peer_b58 = peer.to_base58();
-                                handle_inbound_friendq(weak.clone(), &peer_b58, q).await;
-                                continue;
-                            }
-                        }
-                    }
+                     if let chatx_core::swarm::ChatEvent::Text { peer, req } = &evt {
+                         if let Some(text) = req.text.as_deref() {
+                             if let Some(q) = FriendQ::decode(text) {
+                                 let peer_b58 = peer.to_base58();
+                                 handle_inbound_friendq(weak.clone(), &peer_b58, q).await;
+                                 continue;
+                             }
+                         }
+                         // Normal text message (not a friend-request): raise a
+                         // system notification with the sender name + text.
+                         // Only fire when the frame actually carries a text
+                         // payload (control frames like group-key exchange
+                         // have `text: None` and should not ping the user).
+                         if let Some(text) = req.text.as_deref() {
+                             let title = client.resolve_peer_username(&peer.to_base58());
+                             let body = text.trim().to_string();
+                             let body = if body.is_empty() {
+                                 translate_notify_body("text")
+                             } else {
+                                 body
+                             };
+                             notify_inbound_message(&title, &body);
+                         }
+                     }
                     if let chatx_core::swarm::ChatEvent::Voice {
                         peer,
                         rate,
@@ -3334,7 +3382,8 @@ async fn handle_inbound_voice(
             client
                 .persist_voice(&chat_id, peer_base58, &path_str, duration_ms)
                 .await;
-            refresh_inbound_chat(weak, chat_id).await;
+            notify_inbound_message(&username, &translate_notify_body("voice"));
+            refresh_inbound_chat(weak.clone(), chat_id).await;
         }
         Err(e) => {
             tracing::warn!("[voice] inbound write failed: {e}");
@@ -3394,7 +3443,8 @@ async fn handle_inbound_image(
             if let Err(e) = client.ack_image(peer_base58, id).await {
                 tracing::warn!("[chat-image] ack after persist failed: {e}");
             }
-            refresh_inbound_chat(weak, chat_id).await;
+            notify_inbound_message(&username, &translate_notify_body("image"));
+            refresh_inbound_chat(weak.clone(), chat_id).await;
         }
         Err(e) => {
             tracing::warn!("[chat-image] inbound write failed: {e}");
@@ -3442,7 +3492,8 @@ async fn handle_inbound_file(
             client
                 .persist_file(&chat_id, peer_base58, &name, &path_str)
                 .await;
-            refresh_inbound_chat(weak, chat_id).await;
+            notify_inbound_message(&username, &translate_notify_body("file"));
+            refresh_inbound_chat(weak.clone(), chat_id).await;
         }
         Err(e) => {
             tracing::warn!("[chat-file] inbound write failed: {e}");

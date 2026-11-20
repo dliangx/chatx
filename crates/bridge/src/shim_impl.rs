@@ -25,3 +25,20 @@ pub fn request_screen_share_stop() {
         chatx_screen_capture_stop();
     }
 }
+
+/// Ask the iOS shell to post a system notification with `title` / `body`.
+/// The shell wraps it in `UNUserNotificationCenter` (see
+/// `apps/platform/ios/Sources/ChatxNotify.m`).
+pub fn notify_message(title: &str, body: &str) {
+    unsafe extern "C" {
+        fn chatx_notify_show(title: *const i8, body: *const i8);
+    }
+    unsafe {
+        // Convert Rust `&str` (UTF-8) to a NUL-terminated C string for FFI.
+        let mut t = title.as_bytes().to_vec();
+        let mut b = body.as_bytes().to_vec();
+        t.push(0);
+        b.push(0);
+        chatx_notify_show(t.as_ptr() as *const i8, b.as_ptr() as *const i8);
+    }
+}

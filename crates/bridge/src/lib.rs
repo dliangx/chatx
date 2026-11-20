@@ -77,6 +77,18 @@ pub fn request_mic_stop() {
     jni::request_mic_stop();
 }
 
+/// Ask the Android shell to post a system notification with the given
+/// `title` and `body`. The shell wraps it in a `NotificationCompat` post via
+/// `com.chatx.Notify` (see `apps/platform/android/java/com/chatx/Notify.java`)
+/// and fires the POST_NOTIFICATIONS runtime prompt on Android 13+ if the
+/// permission is not yet granted.
+///
+/// No-op on non-Android targets.
+#[cfg(target_os = "android")]
+pub fn notify_message(title: &str, body: &str) {
+    jni::notify_message(title, body);
+}
+
 /// Ask the Android shell to open the system document picker
 /// (`SAF`/Storage Access Framework via `Intent.ACTION_OPEN_DOCUMENT`). The
 /// shell copies the chosen file to the app's private dir and calls back
@@ -204,6 +216,19 @@ pub fn request_screen_share_start() {
 #[cfg(all(target_os = "ios", not(feature = "has-ios-shim")))]
 pub fn request_screen_share_stop() {
     tracing::warn!("[bridge] screen-share stop: no iOS shim linked");
+}
+
+/// Ask the iOS shell to post a system notification with `title` / `body`.
+/// The shell wraps it in `UNUserNotificationCenter` (see
+/// `apps/platform/ios/Sources/ChatxNotify.m`) and fires the requestAuthorization
+/// prompt on first use.
+#[cfg(all(target_os = "ios", feature = "has-ios-shim"))]
+pub fn notify_message(title: &str, body: &str) {
+    shim_impl::notify_message(title, body);
+}
+#[cfg(all(target_os = "ios", not(feature = "has-ios-shim")))]
+pub fn notify_message(_title: &str, _body: &str) {
+    tracing::warn!("[bridge] notify_message: no iOS shim linked (enable feature `has-ios-shim`)");
 }
 
 /// Register the consumer that receives **incoming camera frames**.

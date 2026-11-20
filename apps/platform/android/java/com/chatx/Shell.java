@@ -28,6 +28,10 @@ public final class Shell extends android.app.NativeActivity {
         Manifest.permission.CAMERA,
         Manifest.permission.RECORD_AUDIO,
     };
+    // Inbound-message system notifications (runtime permission on Android 13+).
+    // Requested separately so a denial doesn't block the camera/mic auto-start
+    // retry path (which only cares about CAMERA + RECORD_AUDIO).
+    private static final String PERM_NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS";
     private static final int REQ = 0x4C;
     private static final int REQ_MEDIA = 0x5E; // matches ScreenShare.REQ_MEDIA
 
@@ -59,6 +63,14 @@ public final class Shell extends android.app.NativeActivity {
             NativeBridge.autoStart(this);
         } else {
             requestPermissions(PERMS, REQ);
+        }
+        // Inbound-message system notifications (Android 13+ runtime prompt).
+        // Independent of the camera/mic gate above — a denial here must not
+        // block capture auto-start. No-op on API < 33.
+        if (android.os.Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(PERM_NOTIFICATIONS)
+                        != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{PERM_NOTIFICATIONS}, 0x4E);
         }
     }
 

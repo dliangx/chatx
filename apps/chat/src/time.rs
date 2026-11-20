@@ -1,119 +1,16 @@
+//! Relative/absolute time formatting for the `chat` app.
+//!
+//! The localized "X ago" strings and the "desktop-only" notice live in
+//! [`crate::trans`] (the app's single translation catalog); this module only
+//! does the date math against the current catalog from [`crate::trans::cur_l10n`].
+
+use crate::trans;
 use chrono::TimeZone;
-use std::sync::{OnceLock, RwLock};
 
 fn local_datetime(ms: i64) -> Option<chrono::DateTime<chrono::Local>> {
     chrono::Local
         .timestamp_opt(ms / 1000, (ms % 1000) as u32 * 1_000_000)
         .single()
-}
-
-// ── Language bridge ───────────────────────────────────────────────
-// `lib.rs` mirrors the language it hands to Slint into this cell; the
-// five "X ago" labels then resolve against the same catalog on the fly.
-static LANG: OnceLock<RwLock<String>> = OnceLock::new();
-
-pub fn set_lang(code: &str) {
-    let cell = LANG.get_or_init(|| RwLock::new(String::new()));
-    let mut g = cell.write().unwrap();
-    *g = code.to_string();
-}
-
-#[derive(Copy, Clone)]
-struct L10n {
-    just_now: &'static str,
-    min_ago: &'static str,
-    h_ago: &'static str,
-    d_ago: &'static str,
-    y_ago: &'static str,
-    desktop_only: &'static str,
-}
-
-const EN: L10n = L10n {
-    just_now: "just now",
-    min_ago: "{} min ago",
-    h_ago: "{} hours ago",
-    d_ago: "{} days ago",
-    y_ago: "{} years ago",
-    desktop_only: "Documents can only be viewed on desktop",
-};
-const ZH_CN: L10n = L10n {
-    just_now: "刚刚",
-    min_ago: "{} 分钟前",
-    h_ago: "{} 小时前",
-    d_ago: "{} 天前",
-    y_ago: "{} 年前",
-    desktop_only: "文档只支持桌面端查看",
-};
-const DE: L10n = L10n {
-    just_now: "gerade eben",
-    min_ago: "vor {} Min",
-    h_ago: "vor {} Std",
-    d_ago: "vor {} T",
-    y_ago: "vor {} J",
-    desktop_only: "Dokumente können nur auf Desktop-Geräten angezeigt werden",
-};
-const ES: L10n = L10n {
-    just_now: "ahora mismo",
-    min_ago: "hace {} min",
-    h_ago: "hace {} h",
-    d_ago: "hace {} d",
-    y_ago: "hace {} a",
-    desktop_only: "Los documentos solo se pueden ver en escritorio",
-};
-const FR: L10n = L10n {
-    just_now: "à l'instant",
-    min_ago: "il y a {} min",
-    h_ago: "il y a {} h",
-    d_ago: "il y a {} j",
-    y_ago: "il y a {} a",
-    desktop_only: "Les documents ne peuvent être consultés que sur ordinateur de bureau",
-};
-const JA: L10n = L10n {
-    just_now: "たった今",
-    min_ago: "{} 分前",
-    h_ago: "{} 時間前",
-    d_ago: "{} 日前",
-    y_ago: "{} 年前",
-    desktop_only: "ドキュメントはデスクトップ版でのみ表示できます",
-};
-const RU: L10n = L10n {
-    just_now: "только что",
-    min_ago: "{} мин назад",
-    h_ago: "{} ч назад",
-    d_ago: "{} дн назад",
-    y_ago: "{} г назад",
-    desktop_only: "Документы можно просматривать только на настольной версии",
-};
-const AR: L10n = L10n {
-    just_now: "الآن",
-    min_ago: "قبل {} دقيقة",
-    h_ago: "قبل {} ساعة",
-    d_ago: "قبل {} يوم",
-    y_ago: "قبل {} سنة",
-    desktop_only: "يمكن عرض المستندات على سطح المكتب فقط",
-};
-
-fn table(code: &str) -> &'static L10n {
-    match code {
-        "zh_CN" => &ZH_CN,
-        "de" => &DE,
-        "es" => &ES,
-        "fr" => &FR,
-        "ja" => &JA,
-        "ru" => &RU,
-        "ar" => &AR,
-        _ => &EN,
-    }
-}
-
-fn cur_l10n() -> &'static L10n {
-    match LANG.get() {
-        Some(cell) => {
-            let g = cell.read().unwrap();
-            table(g.as_str())
-        }
-        None => &EN,
-    }
 }
 
 fn fill(tmpl: &str, n: i64) -> String {
@@ -124,11 +21,11 @@ fn fill(tmpl: &str, n: i64) -> String {
 
 pub fn time_label(ms: i64) -> String {
     if ms <= 0 {
-        return cur_l10n().just_now.into();
+        return trans::cur_l10n().just_now.into();
     }
     match local_datetime(ms) {
         Some(dt) => dt.format("%H:%M").to_string(),
-        None => cur_l10n().just_now.into(),
+        None => trans::cur_l10n().just_now.into(),
     }
 }
 
@@ -143,7 +40,7 @@ pub fn fmt_time(ms: i64) -> String {
     };
     let diff = (now - dt).num_milliseconds();
     let diff = diff.max(0);
-    let t = cur_l10n();
+    let t = trans::cur_l10n();
     if diff < 60_000 {
         t.just_now.into()
     } else if diff < 3_600_000 {
@@ -170,5 +67,5 @@ pub fn fmt_profile_date(ms: i64) -> String {
 /// The localized "documents are desktop-only" notice, for the app-layer
 /// notice when a mobile build tries to open an Office document.
 pub fn desktop_only_message() -> String {
-    cur_l10n().desktop_only.to_string()
+    trans::cur_l10n().desktop_only.to_string()
 }

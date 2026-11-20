@@ -73,6 +73,16 @@ public final class NativeBridge {
         Capture.stopMic();
     }
 
+    // ── System notifications ─────────────────────────────────────────────────
+    //
+    // Called from Rust (`bridge::jni::notify_message`) via
+    // `call_static_method("(Ljava/lang/String;Ljava/lang/String;)V")`. The
+    // shell wraps it in `NotificationCompat` via {@link Notify} — channel
+    // creation + POST_NOTIFICATIONS prompt on Android 13+ are handled there.
+    public static void notifyMessage(String title, String body) {
+        Notify.show(title, body);
+    }
+
     // ── File picker (SAF) ──────────────────────────────────────────────────
     //
     // Called from Rust. `bridge::jni::request_file_pick()` (see
