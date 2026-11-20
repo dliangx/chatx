@@ -7990,7 +7990,7 @@ fn search_users(weak: slint::Weak<MainWindow>, q_raw: String) {
             let rt = runtime();
             let q2 = q.clone();
             rt.spawn(async move {
-                let ur = client.resolve_user(&q);
+                let ur = client.resolve_user_registered(&q);
                 match &ur {
                     Ok(ur) => tracing::debug!("[search] resolve_user OK: user_id={} e2e_public={} sign_pk={} | peer_id={} label={} endpoints={:?}",
                         ur.user.user_id, ur.user.e2e_public, ur.user.sign_pk,
