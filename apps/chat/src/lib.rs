@@ -2054,40 +2054,6 @@ pub fn run_app() {
     {
         let weak = weak.clone();
         ui.global::<CallState>()
-            .on_toggle_record(move || match weak.upgrade() {
-                Some(ui) => {
-                    let st = ui.global::<CallState>();
-                    if st.get_recording() {
-                        match record::stop() {
-                            Ok(path) => {
-                                st.set_recording(false);
-                                st.set_status(SharedString::from(format!("Saved to {path}")));
-                            }
-                            Err(e) => {
-                                st.set_recording(false);
-                                tracing::warn!("[record] stop failed: {e}");
-                                st.set_status(SharedString::from(format!("Record failed: {e}")));
-                            }
-                        }
-                    } else {
-                        match record::start() {
-                            Ok(()) => {
-                                st.set_recording(true);
-                                st.set_status(SharedString::from("Recording… (tap to stop)"));
-                            }
-                            Err(e) => {
-                                tracing::warn!("[record] start failed: {e}");
-                                st.set_status(SharedString::from(format!("Record failed: {e}")));
-                            }
-                        }
-                    }
-                }
-                None => {}
-            });
-    }
-    {
-        let weak = weak.clone();
-        ui.global::<CallState>()
             .on_toggle_mute(move || match weak.upgrade() {
                 Some(ui) => {
                     let st = ui.global::<CallState>();
