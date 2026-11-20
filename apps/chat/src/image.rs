@@ -232,10 +232,16 @@ pub async fn store_file_bytes(name: &str, bytes: &[u8]) -> std::io::Result<std::
     let dir = chatx_core::identity::DeviceIdentity::home_dir().join("files");
     let path = dir.join(format!("{ts}__{stem}{ext}"));
     let owned = bytes.to_vec();
+    // Return a path RELATIVE to `home_dir()` (e.g. `files/123__a.pdf`) so the
+    // stored `media_path` doesn't embed the current iOS sandbox container UUID.
+    // That UUID is reassigned on every reinstall; a baked-in absolute path
+    // would dangle and the file would report "No such file or directory".
+    let home = chatx_core::identity::DeviceIdentity::home_dir();
+    let rel = path.strip_prefix(&home).unwrap_or(&path).to_path_buf();
     tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(&dir)?;
         std::fs::write(&path, &owned)?;
-        Ok::<_, std::io::Error>(path)
+        Ok::<_, std::io::Error>(rel)
     })
     .await
     .map_err(std::io::Error::other)?

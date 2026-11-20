@@ -4346,7 +4346,13 @@ fn open_chat_file_from_index(weak: slint::Weak<MainWindow>, idx: i32) {
         tracing::debug!("[chat-file] row {idx} has no file path");
         return;
     }
-    let file_path = row.file_path.clone();
+    // `row.file_path` is stored relative to `home_dir()` (or, for older rows,
+    // an absolute path into a possibly-wiped sandbox container). Resolve it to
+    // a live on-disk path — this also relocates files that moved when the iOS
+    // container was reassigned on reinstall.
+    let file_path = chatx_core::resolve_media_path(&row.file_path)
+        .to_string_lossy()
+        .into_owned();
     let ext = std::path::Path::new(&file_path)
         .extension()
         .and_then(|e| e.to_str())

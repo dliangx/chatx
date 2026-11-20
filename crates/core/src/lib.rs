@@ -192,6 +192,48 @@ pub enum InboundGroup {
     },
 }
 
+/// Resolve a stored media path to a live on-disk file. Newer rows store a path
+/// relative to [`crate::identity::DeviceIdentity::home_dir()`] (so an iOS
+/// sandbox container UUID reassigned on reinstall doesn't dangle it); older
+/// rows hold an absolute path from a possibly-wiped container. Absolute+existing
+/// paths are returned unchanged (a no-op for voice/image); otherwise resolve
+/// against the current `home_dir()`, with a same-basename fallback that locates
+/// the file anywhere under it.
+pub fn resolve_media_path(stored: &str) -> std::path::PathBuf {
+    use std::path::Path;
+    let p = Path::new(stored);
+    if p.is_absolute() && p.exists() {
+        return p.to_path_buf();
+    }
+    let home = crate::identity::DeviceIdentity::home_dir();
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        home.join(p)
+    };
+    if abs.exists() {
+        return abs;
+    }
+    if let Some(bn) = p.file_name().and_then(|s| s.to_str()) {
+        if !bn.is_empty() {
+            let mut stack = vec![home.clone()];
+            while let Some(dir) = stack.pop() {
+                if let Ok(rd) = std::fs::read_dir(&dir) {
+                    for entry in rd.flatten() {
+                        let fp = entry.path();
+                        if fp.is_dir() {
+                            stack.push(fp);
+                        } else if fp.file_name().and_then(|s| s.to_str()) == Some(bn) {
+                            return fp;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    abs
+}
+
 impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     pub async fn from_parts(
         account: Account,
@@ -1094,20 +1136,30 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             return;
         }
 
+        // Resolve the stored media path to a live on-disk file before reading
+        // it back. Newer rows store a path RELATIVE to `home_dir()` (so a
+        // reassigned iOS sandbox container UUID doesn't dangle the path); older
+        // rows may hold an absolute path from a wiped container. `resolve_media_path`
+        // handles both and falls back to a same-basename file under the current
+        // `home_dir()`. Absolute+existing paths (e.g. voice/image) are returned
+        // unchanged, so this is a no-op for those.
         // Send is async; the per-kind payload is already a local value. Each
         // arm returns `anyhow::Result<()>` (file read + nodial send).
         let outcome: anyhow::Result<()> = async {
             match (msg_type, media_path.clone()) {
                 (sqlite::MSG_TYPE_VOICE, Some(path)) => {
-                    let buf = std::fs::read(&path).map_err(|e| anyhow::anyhow!("read voice {path}: {e}"))?;
+                    let p = resolve_media_path(&path);
+                    let buf = std::fs::read(&p).map_err(|e| anyhow::anyhow!("read voice {p:?}: {e}"))?;
                     self.send_voice_nodial_from_buffer(&row.peer_base58, &buf, Some(row.msg_id as u64)).await
                 }
                 (sqlite::MSG_TYPE_IMAGE, Some(path)) => {
-                    let buf = std::fs::read(&path).map_err(|e| anyhow::anyhow!("read image {path}: {e}"))?;
+                    let p = resolve_media_path(&path);
+                    let buf = std::fs::read(&p).map_err(|e| anyhow::anyhow!("read image {p:?}: {e}"))?;
                     self.send_image_nodial(&row.peer_base58, buf, Some(row.msg_id as u64)).await
                 }
                 (sqlite::MSG_TYPE_FILE, Some(path)) => {
-                    let buf = std::fs::read(&path).map_err(|e| anyhow::anyhow!("read file {path}: {e}"))?;
+                    let p = resolve_media_path(&path);
+                    let buf = std::fs::read(&p).map_err(|e| anyhow::anyhow!("read file {p:?}: {e}"))?;
                     self.send_file_nodial(&row.peer_base58, text_content.unwrap_or_default(), buf, Some(row.msg_id as u64)).await
                 }
                 _ => self
