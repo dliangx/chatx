@@ -717,8 +717,25 @@ pub fn run_app() {
     let state = ui.global::<AppState>();
     let weak = ui.as_weak();
 
-    // Default language is English. Bundled translations become active once a
-    // component exists (created above), so we can select the initial language now.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let _tray: Option<AppTray> = {
+        if let Ok(tray) = AppTray::new() {
+            let w = weak.clone();
+            tray.on_restore(move || {
+                if let Some(ui) = w.upgrade() {
+                    let _ = ui.show();
+                }
+            });
+            tray.on_quit(|| {
+                let _ = slint::quit_event_loop();
+            });
+            Some(tray)
+        } else {
+            tracing::warn!("[tray] failed to create system tray icon");
+            None
+        }
+    };
+
     let _ = slint::select_bundled_translation(&state.get_lang());
 
     // Restore the persisted appearance preference before the login block

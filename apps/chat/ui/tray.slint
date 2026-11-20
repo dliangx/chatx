@@ -1,0 +1,33 @@
+// System-tray icon: "close to tray" — hiding the main window does NOT quit the
+// app, because a visible `SystemTrayIcon` is a Slint keep-alive (exactly like a
+// visible window). `run_event_loop()` (the loop `ui.run()` drives) stays up
+// while the tray is visible.
+//
+// `SystemTrayIcon` is a top-level component (no window, no shared globals). The
+// only callbacks reachable from Rust are the ones declared here — `restore` /
+// `quit` — wired in apps/chat/src/lib.rs to `window.show()` /
+// `slint::quit_event_loop()`. The menu items call those callbacks, so the UX is
+// identical on Windows (right-click menu), macOS (menu bar menu) and Linux
+// (StatusNotifier menu). The icon is embedded at compile time (so it shows
+// regardless of the runtime working directory) and is non-empty, which is what
+// triggers the native tray handle to be created and its keep-alive acquired.
+export component AppTray inherits SystemTrayIcon {
+    icon: @image-url("./tray.png");
+    tooltip: "ChatX";
+
+    // Bring the main window back to the foreground.
+    callback restore;
+    // Leave the app entirely.
+    callback quit;
+
+    Menu {
+        MenuItem {
+            title: "Show ChatX";
+            activated => { restore(); }
+        }
+        MenuItem {
+            title: "Quit";
+            activated => { quit(); }
+        }
+    }
+}

@@ -14,6 +14,10 @@ export { DocHost } from "global/doc.slint";
 import { AuthView } from "components/auth.slint";
 import { Theme } from "./theme.slint";
 export { Theme } from "./theme.slint";
+// System-tray icon ("close to tray" keep-alive). Top-level component, not a
+// child of the window; the Rust side instantiates it (see run_app).
+import { AppTray } from "./tray.slint";
+export { AppTray } from "./tray.slint";
  import {
     NavigationState,
     TabState,
