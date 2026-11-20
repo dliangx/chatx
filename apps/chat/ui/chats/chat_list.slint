@@ -42,17 +42,19 @@ export component ChatListView inherits Rectangle {
             height: 100%;
             background: Theme.bg;
             Rectangle {
-                x: 0px; y: 0px; width: 100%; height: 1px; background: Theme.border;
+                x: 12px;
+                y: 12px;
+                height: 32px;
+                width: 32px;
+                Image {
+                    width: 32px;
+                    height: 32px;
+                    source: @image-url("../../../bot/robot.png");
+                }
             }
-            Icon {
-                x: 14px;
-                y: (parent.height - 24px) / 2;
-                size: 24px;
-                glyph: Glyph.siri;
-                tint: Theme.brand;
-            }
+
             Text {
-                x: 48px;
+                x: 56px;
                 y: 0px;
                 width: parent.width - 80px;
                 height: 100%;
@@ -62,6 +64,9 @@ export component ChatListView inherits Rectangle {
                 color: Theme.fg;
                 horizontal-alignment: left;
                 vertical-alignment: center;
+            }
+            Rectangle {
+                x: 56px; y: 52px; width: 100%; height: 1px; background: Theme.border;
             }
         }
     }
