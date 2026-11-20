@@ -5732,6 +5732,7 @@ fn send_chat_message(weak: slint::Weak<MainWindow>, key: i32, body: String, from
                     ui.global::<ChatSession>().set_send_busy(false);
                 }
             });
+            CHAT_SCROLL_POS.write().unwrap().insert(key, 0.0);
             load_chat_messages(weak2.clone(), key);
         }
 

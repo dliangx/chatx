@@ -222,6 +222,12 @@ export component ChatView inherits Rectangle {
     }
     in-out property <bool> requested: false;
     in-out property <int> my-token: 0;
+    /// Frames left to keep re-asserting the bottom after a messages change.
+    /// The new bubble's height often settles a frame or two after Rust pushes
+    /// the model, so we keep snapping to the (ever-growing) bottom until the
+    /// content height stops changing.
+    in-out property <int> settle-ticks: 0;
+    out property <length> last-content-h: 0px;
 
     Timer {
         interval: 16ms;
@@ -238,26 +244,44 @@ export component ChatView inherits Rectangle {
         width: parent.width;
         height: parent.height - root._bottom - 48px;
 
+        // Flickable fires `flicked` (exposed as `scrolled`) on user input
+        // (wheel / drag / pinch). Persist the resting offset (bottom=0, top=max)
+        // so reopening the chat restores where the user left it.
         scrolled => {
-            // User released a drag: remember where it landed (bottom=0, top=max).
-            // Persisting only on real user drags keeps the "stuck to bottom"
-            // memory intact across new messages.
             ChatSession.update-scroll(
                 root.chat-id,
                 (fk.content-height - fk.visible-height) + fk.content-y);
-            if (root.my-token != ChatSession.scroll-token) {
-                root.my-token = ChatSession.scroll-token;
-            }
         }
 
+        // After Rust pushes new messages it bumps `scroll-token`. We snap to the
+        // bottom and keep re-asserting for a few frames: the new bubble's height
+        // usually settles 1-2 frames AFTER the model update, so a single
+        // snap lands short (the "not quite at the bottom" symptom). Once the
+        // content height is stable we stop, so we never fight a user drag.
+        //
+        // Bottom == content-y = -(content-height - visible-height). (content-y
+        // is the negative view-origin: 0 = top, -max = bottom.)
         Timer {
             interval: 16ms;
-            running: root.my-token != ChatSession.scroll-token
-                && fk.visible-height > 0 && ChatSession.messages.length > 0;
+            running:
+                (root.my-token != ChatSession.scroll-token
+                    && fk.visible-height > 0 && ChatSession.messages.length > 0)
+                || (root.settle-ticks > 0 && fk.visible-height > 0);
             triggered => {
-                root.my-token = ChatSession.scroll-token;
+                if root.my-token != ChatSession.scroll-token {
+                    root.my-token = ChatSession.scroll-token;
+                    root.settle-ticks = 12;
+                }
                 let max = fk.content-height - fk.visible-height;
                 fk.content-y = (max > 0px) ? (ChatSession.scroll-dist - max) : 0px;
+                // Stop once the layout is stable (height unchanged for a frame).
+                if root.settle-ticks > 0 {
+                    if (root.last-content-h == fk.content-height) {
+                        root.settle-ticks = 0;
+                    }
+                    root.settle-ticks -= 1;
+                }
+                root.last-content-h = fk.content-height;
             }
         }
 
