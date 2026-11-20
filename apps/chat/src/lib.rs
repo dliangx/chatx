@@ -3485,11 +3485,6 @@ fn send_chat_voice(
             }
         }
         load_chat_messages(weak2.clone(), key);
-        let mut last_err = if my_peers.is_empty() {
-            "Cannot determine peer".to_string()
-        } else {
-            String::new()
-        };
         // Attempt live delivery to EVERY approved device (concurrently). A
         // device that is already connected (or dials over) acks and is flushed
         // out of the queue via `media_delivered`; one that can't be reached now
@@ -3527,11 +3522,9 @@ fn send_chat_voice(
                 }
                 Ok(Err(e)) => {
                     tracing::warn!("[voice] device failed: {e}");
-                    last_err = e.to_string();
                 }
                 Err(e) => {
                     tracing::warn!("[voice] device task join failed: {e}");
-                    last_err = e.to_string();
                 }
             }
         }
@@ -3539,18 +3532,11 @@ fn send_chat_voice(
             touch_chat_activity(&chat_id);
             load_chat_messages(weak2.clone(), key);
         }
-        let msg = if !any_ok {
-            if last_err.trim().is_empty() {
-                "Peer is offline".to_string()
-            } else {
-                last_err
-            }
-        } else {
-            String::new()
-        };
-        if !msg.is_empty() {
-            cs_set_send_status(weak3, msg);
-        }
+        // First-attempt failures are NOT final: this send is backed by the
+        // passive-redelivery queue (3-day deadline), so we stay silent here and
+        // let the loop retry; the deadline sweep is the source of truth for a
+        // real failure. (See `cs_clear_media_send`.)
+        cs_clear_media_send(weak3);
         load_chat_messages(weak2, key);
     });
 }
@@ -3734,6 +3720,19 @@ fn cs_set_send_status(weak: slint::Weak<MainWindow>, msg: String) {
         };
         show_app_notice(weak.clone(), e, false);
     }
+    chat_set_send_busy(weak, false);
+}
+
+/// End a DM media send (voice / image / file) that failed on a *first* attempt.
+/// These sends are backed by the 3-day passive-redelivery queue, so a single
+/// transport error is NOT a real failure — the background loop keeps retrying
+/// until the peer's device acks. A false "Send failed" toast (raised here for
+/// a momentary yamux `OutboundFailure` even though the receiver already got
+/// the message) is worse than silence, so we only clear the in-flight spinner
+/// and stay quiet; the deadline sweep is the single source of truth for a
+/// genuine failure.
+#[inline]
+fn cs_clear_media_send(weak: slint::Weak<MainWindow>) {
     chat_set_send_busy(weak, false);
 }
 
@@ -3997,11 +3996,6 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
             }
         }
         load_chat_messages(weak2.clone(), key);
-        let mut last_err = if my_peers.is_empty() {
-            "Cannot determine peer".to_string()
-        } else {
-            String::new()
-        };
         // Wire payload = the ORIGINAL (HD) bytes, sent raw. Fan out to
         // EVERY approved device (B+C clients). A device that is connected (or
         // dials over) acks and is flushed via `media_delivered`; one that
@@ -4041,11 +4035,9 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
                 }
                 Ok(Err(e)) => {
                     tracing::warn!("[chat-image] device failed: {e}");
-                    last_err = e.to_string();
                 }
                 Err(e) => {
                     tracing::warn!("[chat-image] device task join failed: {e}");
-                    last_err = e.to_string();
                 }
             }
         }
@@ -4053,16 +4045,11 @@ fn on_chat_image_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<St
             touch_chat_activity(&chat_id);
             load_chat_messages(weak2.clone(), key);
         }
-        let msg = if any_ok {
-            String::new()
-        } else if last_err.trim().is_empty() {
-            "Peer is offline".to_string()
-        } else {
-            last_err
-        };
-        if !msg.is_empty() {
-            set_chat_status(weak3, msg);
-        }
+        // First-attempt failures are NOT final: this send is backed by the
+        // passive-redelivery queue (3-day deadline), so we stay silent here and
+        // let the loop retry; the deadline sweep is the source of truth for a
+        // real failure. (See `cs_clear_media_send`.)
+        cs_clear_media_send(weak3);
         load_chat_messages(weak2, key);
     });
 }
@@ -4216,11 +4203,6 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
             }
         }
         load_chat_messages(weak2.clone(), key);
-        let mut last_err = if my_peers.is_empty() {
-            "Cannot determine peer".to_string()
-        } else {
-            String::new()
-        };
         // Fan out the file to EVERY approved device. A connected (or dialed)
         // device acks and is flushed via `media_delivered`; an unreachable one
         // stays queued for passive redelivery. No FAILED here — the 3-day
@@ -4257,11 +4239,9 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
                 }
                 Ok(Err(e)) => {
                     tracing::warn!("[chat-file] device failed: {e}");
-                    last_err = e.to_string();
                 }
                 Err(e) => {
                     tracing::warn!("[chat-file] device task join failed: {e}");
-                    last_err = e.to_string();
                 }
             }
         }
@@ -4269,16 +4249,11 @@ fn on_chat_file_picked(weak: slint::Weak<MainWindow>, key: i32, path: Option<Str
             touch_chat_activity(&chat_id);
             load_chat_messages(weak2.clone(), key);
         }
-        let msg = if any_ok {
-            String::new()
-        } else if last_err.trim().is_empty() {
-            "Peer is offline".to_string()
-        } else {
-            last_err
-        };
-        if !msg.is_empty() {
-            set_chat_status(weak3, msg);
-        }
+        // First-attempt failures are NOT final: this send is backed by the
+        // passive-redelivery queue (3-day deadline), so we stay silent here and
+        // let the loop retry; the deadline sweep is the source of truth for a
+        // real failure. (See `cs_clear_media_send`.)
+        cs_clear_media_send(weak3);
         load_chat_messages(weak2, key);
     });
 }
