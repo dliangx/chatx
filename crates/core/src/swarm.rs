@@ -45,11 +45,11 @@ pub const FILE_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/file/1");
 /// Hard ceiling for a single inbound (or outbound) voice request. ~64 MiB
 /// covers the 5-minute capture cap (`MAX_FRAMES`, ~4.9 MB raw) with wide
 /// margin while still bounding the receiver's read buffer.
-const VOICE_REQ_MAX: u64 = 64 * 1024 * 1024;
+const VOICE_REQ_MAX: u64 = 32 * 1024 * 1024;
 
 /// Ceiling for a single inbound photo request (photos are capped server-side
 /// before sending, but keep a generous margin for large originals).
-const IMAGE_REQ_MAX: u64 = 64 * 1024 * 1024;
+const IMAGE_REQ_MAX: u64 = 10 * 1024 * 1024;
 
 /// Ceiling for one inbound document-file request (app-side caps picked files well below this; mirrors the wasm sandbox's `MAX_FILE_BYTES`).
 const FILE_REQ_MAX: u64 = 64 * 1024 * 1024;
@@ -733,12 +733,15 @@ pub async fn boot(
             .set_response_size_maximum(10 * 1024 * 1024);
         Blob::with_codec(codec, [(IMAGE_PROTOCOL, ProtocolSupport::Full)], RrConfig::default())
     };
-    // Binary (CBOR) document-file channel — raw file bytes + name.
+    // Binary (CBOR) document-file channel — raw file bytes + name. Files can be
+    // large and peers may relay, so allow a generous 120s for the request→ack
+    // round trip (the rr default is 10s, which trips on slow/relay paths).
     let file: Blob<FileRequest, FileAck> = {
         let codec = cbor::codec::Codec::<FileRequest, FileAck>::default()
             .set_request_size_maximum(FILE_REQ_MAX)
             .set_response_size_maximum(10 * 1024 * 1024);
-        Blob::with_codec(codec, [(FILE_PROTOCOL, ProtocolSupport::Full)], RrConfig::default())
+        let cfg = RrConfig::default().with_request_timeout(std::time::Duration::from_secs(120));
+        Blob::with_codec(codec, [(FILE_PROTOCOL, ProtocolSupport::Full)], cfg)
     };
     let group: libp2p::gossipsub::Behaviour = libp2p::gossipsub::Behaviour::new(
         libp2p::gossipsub::MessageAuthenticity::Signed(device.keypair()),

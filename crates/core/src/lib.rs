@@ -3277,7 +3277,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
         let peer: PeerId = peer_base58.parse()?;
         let from = self.peer_base58();
-        let timeout = std::time::Duration::from_secs(15);
+        // Match the file channel's 120s rr timeout (`swarm.rs`); large files or
+        // a relayed peer can exceed 15s.
+        let timeout = std::time::Duration::from_secs(120);
         let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
         self.running
             .cmd_tx
@@ -3639,7 +3641,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             anyhow::bail!("device {peer_base58} is offline (no endpoints)");
         }
         let from = self.peer_base58();
-        let timeout = std::time::Duration::from_secs(15);
+        // Match the file channel's 120s rr timeout (`swarm.rs`); large files or a
+        // relayed peer can exceed 15s.
+        let timeout = std::time::Duration::from_secs(120);
         let candidates: Vec<Multiaddr> = endpoints
             .iter()
             .filter_map(|s| s.parse::<Multiaddr>().ok())
