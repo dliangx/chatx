@@ -4761,6 +4761,7 @@ fn publish_to_views(state: &AppState, backend: ArcBackend) {
             is_pinned: r.is_pinned,
             conv_type: r.conv_type,
             draft: SharedString::from(r.draft.clone()),
+            unread: r.unread as i32,
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
@@ -4976,6 +4977,7 @@ fn publish_chat_rows(state: &AppState, backend: ArcBackend) {
             is_pinned: r.is_pinned,
             conv_type: r.conv_type,
             draft: SharedString::from(r.draft.clone()),
+            unread: r.unread as i32,
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(chats)));
@@ -5116,6 +5118,46 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
         ("en".to_string(), false)
     };
     rt.spawn(async move {
+        // Opening a conversation (or re-rendering it while it stays open and a
+        // new inbound message lands) marks every pending message read: clear
+        // the counter in SQLite AND in the in-memory row so the chat list's
+        // red dot drops immediately without a republish.
+        let cleared_unread = if let Ok(Some(conv_id)) =
+            sqlite::conversations::resolve_id(&pool, &chat_id).await
+        {
+            let _ = sqlite::messages::clear_unread_for(&pool, conv_id).await;
+            let b = BACKEND.lock().unwrap().clone();
+            let mut had = false;
+            if let Some(b) = b {
+                let mut g = b.write().await;
+                had = g
+                    .chats
+                    .iter_mut()
+                    .find(|r| r.chat_id == chat_id)
+                    .map(|r| {
+                        let was = r.unread > 0;
+                        r.unread = 0;
+                        was
+                    })
+                    .unwrap_or(false);
+            }
+            had
+        } else {
+            false
+        };
+        // The inbound path publishes the list row *before* this async clear
+        // runs, so without a follow-up publish the freshly-cleared dot would
+        // stay painted until the next unrelated refresh.
+        if cleared_unread {
+            let ui_weak_c = ui_weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_weak_c.upgrade() {
+                    if let Some(backend) = BACKEND.lock().unwrap().clone() {
+                        publish_to_views(&ui.global::<AppState>(), backend);
+                    }
+                }
+            });
+        }
         let rows = match client.store().load(&chat_id, 200, 0).await {
             Ok(rows) => rows,
             Err(e) => {
@@ -7886,6 +7928,7 @@ fn publish_chat_searched(state: &AppState, rows: &[data::ChatRow]) {
             is_pinned: r.is_pinned,
             conv_type: r.conv_type,
             draft: SharedString::from(r.draft.clone()),
+            unread: r.unread as i32,
         })
         .collect();
     state.set_chats(slint::ModelRc::new(slint::VecModel::from(out)));

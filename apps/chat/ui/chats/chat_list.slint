@@ -35,6 +35,7 @@ export component ChatListView inherits Rectangle {
         clicked => {
             AppState.open-ai-chat(-1);
             AppState.push-sub(SubPageType.AiAssistant, 0);
+            root.selected-key = -1;
         }
 
         Rectangle {
@@ -126,6 +127,7 @@ export component ChatListView inherits Rectangle {
             title: row.title;
             content: row.preview;
             time: row.time-label;
+            unread: row.unread;
             selected: row.chat-id == root.selected-key;
             clicked(id) => {
                 root.selected-key = id;

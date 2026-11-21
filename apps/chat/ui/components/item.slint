@@ -109,6 +109,7 @@ export component ChatListItem inherits Rectangle {
     in property <string> time;
     in property <string> content;
     in property <bool> selected: false;
+    in property <int> unread: 0;
     callback clicked(int);
 
     out property <length> swipe: 0px;
@@ -182,6 +183,18 @@ export component ChatListItem inherits Rectangle {
             vertical-alignment: center;
             color: (!AppState.is-mobile && (ta.pressed || root.selected)) ? Theme.brand-soft : Theme.fg-muted;
         }
+    }
+
+    // Unread indicator: an 8×8 red dot on the avatar's top-right corner.
+    // Avatar box is x=8px, 48×48 (x=8..56), vertically centred (top y = height/2 - 24px).
+    if root.unread > 0:
+    Rectangle {
+        x: 48px;
+        y: root.height / 2 - 24px;
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: Theme.danger;
     }
 
     Rectangle {
