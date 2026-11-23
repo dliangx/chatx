@@ -43,7 +43,7 @@ targets:
   Chatx:
     type: application
     platform: iOS
-    deploymentTarget: "16.0"
+    deploymentTarget: "17.0"
     info:
       # xcodegen synthesises Info.plist from these keys. See `Info.plist`
       # after `xcodegen generate`.

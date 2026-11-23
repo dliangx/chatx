@@ -33,13 +33,13 @@ esac
 if [ "${IS_SIM}" = "1" ]; then
   # rustc triple for cargo; clang needs the `-simulator` spelling (not `-sim`).
   case "${ARCHS}" in
-    *arm64*)  TRIPLE="aarch64-apple-ios-sim";   CLANG_TRIPLE="arm64-apple-ios16.0-simulator" ;;
-    *x86_64*) TRIPLE="x86_64-apple-ios-sim";    CLANG_TRIPLE="x86_64-apple-ios16.0-simulator" ;;
-    *)        TRIPLE="aarch64-apple-ios-sim";   CLANG_TRIPLE="arm64-apple-ios16.0-simulator" ;;
+    *arm64*)  TRIPLE="aarch64-apple-ios-sim";   CLANG_TRIPLE="arm64-apple-ios17.0-simulator" ;;
+    *x86_64*) TRIPLE="x86_64-apple-ios-sim";    CLANG_TRIPLE="x86_64-apple-ios17.0-simulator" ;;
+    *)        TRIPLE="aarch64-apple-ios-sim";   CLANG_TRIPLE="arm64-apple-ios17.0-simulator" ;;
   esac
 else
   TRIPLE="aarch64-apple-ios"
-  CLANG_TRIPLE="arm64-apple-ios16.0"
+  CLANG_TRIPLE="arm64-apple-ios17.0"
 fi
 echo "==> rust target: ${TRIPLE}   clang target: ${CLANG_TRIPLE}  (SDK_NAME=${SDK_FAMILY}, ARCHS=${ARCHS:-arm64})"
 

@@ -43,10 +43,14 @@ fn main() {
         // modern, stable API.
         t if t.ends_with("aarch64-apple-darwin") => ("arm64-apple-macos14.0", "macosx"),
         t if t.ends_with("x86_64-apple-darwin") => ("x86_64-apple-macos14.0", "macosx"),
-        "aarch64-apple-ios" => ("arm64-apple-ios16.0", "iphoneos"),
-        "x86_64-apple-ios" => ("x86_64-apple-ios16.0", "iphoneos"),
-        "aarch64-apple-ios-sim" => ("arm64-apple-ios16.0-simulator", "iphonesimulator"),
-        "x86_64-apple-ios-sim" => ("x86_64-apple-ios16.0-simulator", "iphonesimulator"),
+        // iOS 17+: the modern `VTDecompressionSessionCreate` /
+        // `VTDecompressionSessionDecodeFrame` Swift surface is gated to
+        // `iOS 17.0` / `macOS 14.0` in the SDK overlay, so the iOS target must
+        // match (the macOS arm already targets macos14.0).
+        "aarch64-apple-ios" => ("arm64-apple-ios17.0", "iphoneos"),
+        "x86_64-apple-ios" => ("x86_64-apple-ios17.0", "iphoneos"),
+        "aarch64-apple-ios-sim" => ("arm64-apple-ios17.0-simulator", "iphonesimulator"),
+        "x86_64-apple-ios-sim" => ("x86_64-apple-ios17.0-simulator", "iphonesimulator"),
         other => {
             eprintln!("error: unsupported target for Swift video-decode shim: {other}");
             std::process::exit(1);

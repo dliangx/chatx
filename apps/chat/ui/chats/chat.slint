@@ -160,9 +160,11 @@ export component ChatView inherits Rectangle {
     }
 
     Icon {
-        x: AppState.current-chat-is-group
-            ? parent.width - 64px
-            : parent.width - 102px;
+        // The group header reserves its right cluster (settings + call icons)
+        // at x ∈ [width-96, width] (see header.slint), so the translate icon
+        // sits just left of that block to avoid any overlap. DMs have no such
+        // cluster (only the connection dot at width-60), keeping width-102.
+        x: parent.width - 112px;
         y: 10px;
         width: 30px;
         height: 30px;
@@ -171,8 +173,8 @@ export component ChatView inherits Rectangle {
         background: ChatSession.translate-enabled ? Theme.brand : transparent;
         tint: ChatSession.translate-enabled ? Theme.fg-on-accent : Theme.fg;
         TouchArea {
-            width: 18px;
-            height: 18px;
+            width: 30px;
+            height: 30px;
             clicked => {
                 ChatSession.translate-enabled = !ChatSession.translate-enabled;
                 ChatSession.translate-toggled();
