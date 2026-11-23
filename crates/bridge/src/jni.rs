@@ -321,6 +321,257 @@ pub fn request_file_pick() {
     _ = call_native_bridge_void("openFilePicker");
 }
 
+// ── H.264 video decode (MediaCodec) — remote video in a call ──────────────
+//
+// Rust → Java: `NativeBridge.h264Init() : boolean`,
+//   `NativeBridge.h264Feed(byte[]) : boolean`,
+//   `NativeBridge.h264Out(byte[] dst, int[] dims) : int`,
+//   `NativeBridge.h264Close() : void`.
+//
+// The Java shell (`com.chatx.MediaCodecDecoder`) owns the `MediaCodec` and a
+// YUV→RGBA conversion (OpenGL). Rust (`media::android`) calls these through
+// the helpers below — they reuse the cached `NativeBridge` class + JVM, so no
+// `FindClass` classloader problems. Each helper returns `false` on any failure
+// so the caller can fall back to software decode.
+
+/// Open (or reuse) the MediaCodec decoder in the Java shell. `false` if the
+/// JVM isn't attached yet or the call failed (caller then uses software).
+pub fn h264_init() -> bool {
+    call_static_bool("h264Init", "()Z")
+}
+
+/// Feed one Annex-B NAL unit to the MediaCodec decoder. `false` on error.
+pub fn h264_feed(nal: &[u8]) -> bool {
+    let bridge = match BRIDGE_CLASS.get() {
+        Some(c) => c,
+        None => return false,
+    };
+    let vm = match VM.get() {
+        Some(v) => v,
+        None => return false,
+    };
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    let jarr = match env.new_byte_array(nal.len().try_into().unwrap()) {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let jarr_raw = jarr.as_raw();
+    let jbytes: Vec<jni::sys::jbyte> = nal.iter().map(|b| *b as jni::sys::jbyte).collect();
+    if env.set_byte_array_region(jarr, 0, &jbytes).is_err() {
+        return false;
+    }
+    // `set_byte_array_region` consumed the local-ref handle; re-wrap the same
+    // raw array for the method call and drop that extra handle afterwards.
+    let jarr2 = unsafe { jni::objects::JByteArray::from_raw(jarr_raw) };
+    let ok = match env.call_static_method::<_, _, _>(bridge, "h264Feed", "([B)Z", &[(&jarr2).into()]) {
+        Ok(v) => v.z().unwrap_or(false),
+        Err(_) => false,
+    };
+    let _ = env.delete_local_ref(jarr2);
+    ok
+}
+
+/// Pull the next decoded RGBA8888 frame into `dst` (up to its len). On
+/// success `dims[0]` = width, `dims[1]` = height, and the returned `usize` is
+/// the frame byte length. `None` if no frame is ready or on error.
+pub fn h264_out(dst: &mut [u8], dims: &mut [u32; 2]) -> Option<usize> {
+    let bridge = match BRIDGE_CLASS.get() {
+        Some(c) => c,
+        None => return None,
+    };
+    let vm = match VM.get() {
+        Some(v) => v,
+        None => return None,
+    };
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+    let jdst = match env.new_byte_array(dst.len().try_into().unwrap()) {
+        Ok(a) => a,
+        Err(_) => return None,
+    };
+    let jdims = match env.new_int_array(2) {
+        Ok(a) => a,
+        Err(_) => return None,
+    };
+    let len = match env.call_static_method::<_, _, _>(
+        bridge,
+        "h264Out",
+        "([B[I)I",
+        &[(&jdst).into(), (&jdims).into()],
+    ) {
+        Ok(v) => v.i().map(|n| n as i32).unwrap_or(-1),
+        Err(_) => return None,
+    };
+    if len <= 0 {
+        return None;
+    }
+    let len = (len as usize).min(dst.len());
+    let mut region: Vec<jni::sys::jbyte> = vec![0i8; len];
+    if env.get_byte_array_region(jdst, 0, region.as_mut_slice()).is_ok() {
+        let bytes: Vec<u8> = region.iter().map(|b| *b as u8).collect();
+        dst[..len].copy_from_slice(&bytes);
+    }
+    let mut dw: [jni::sys::jint; 2] = [0; 2];
+    if env.get_int_array_region(jdims, 0, &mut dw).is_ok() {
+        dims[0] = dw[0] as u32;
+        dims[1] = dw[1] as u32;
+    }
+    Some(len)
+}
+
+/// Release the MediaCodec decoder in the Java shell.
+pub fn h264_close() {
+    call_static_bool("h264Close", "()Z");
+}
+
+// ── H.264 video **encode** (MediaCodec) — local video out in a call ────────
+//
+// The symmetric encode side of the decoder above. Rust (`media::android`)
+// calls these; the Java shell (`com.chatx.MediaCodecEncoder`) owns a
+// `MediaCodec` encoder. The encoder consumes RGBA8888 and emits **avcC** NALs
+// (config + sample); the shell re-frames them into **Annex-B** (start-code
+// prefixed, SPS/PPS leading) so the wire format matches openh264 + the webrtc
+// `H264Payloader`. Any helper returns `false`/`None` on failure so the caller
+// falls back to software encode.
+
+/// Allocate + start a MediaCodec encoder in the Java shell. Returns the
+/// handle (>0) or `0` on failure (no H.264 encoder / JVM not ready — caller
+/// then uses software encode).
+pub fn h264enc_new() -> i32 {
+    let bridge = match BRIDGE_CLASS.get() {
+        Some(c) => c,
+        None => return 0,
+    };
+    let vm = match VM.get() {
+        Some(v) => v,
+        None => return 0,
+    };
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    match env.call_static_method::<_, _, _>(bridge, "h264EncNew", "()I", &[]) {
+        Ok(v) => v.i().unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+/// Feed one RGBA8888 frame to the MediaCodec encoder (by handle). `false` on error.
+pub fn h264enc_feed(handle: i32, rgba: &[u8], w: u32, h: u32) -> bool {
+    let bridge = match BRIDGE_CLASS.get() {
+        Some(c) => c,
+        None => return false,
+    };
+    let vm = match VM.get() {
+        Some(v) => v,
+        None => return false,
+    };
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    let jarr = match env.new_byte_array(rgba.len().try_into().unwrap()) {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let jarr_raw = jarr.as_raw();
+    let jbytes: Vec<jni::sys::jbyte> = rgba.iter().map(|b| *b as jni::sys::jbyte).collect();
+    if env.set_byte_array_region(jarr, 0, &jbytes).is_err() {
+        return false;
+    }
+    let jarr2 = unsafe { jni::objects::JByteArray::from_raw(jarr_raw) };
+    let args = [
+        jni::objects::JValue::Int(handle),
+        (&jarr2).into(),
+        jni::objects::JValue::Int(w as i32),
+        jni::objects::JValue::Int(h as i32),
+    ];
+    let ok = match env.call_static_method::<_, _, _>(bridge, "h264EncFeed", "(I[BII)Z", &args) {
+        Ok(v) => v.z().unwrap_or(false),
+        Err(_) => false,
+    };
+    let _ = env.delete_local_ref(jarr2);
+    ok
+}
+
+/// Pull the next encoded Annex-B NAL stream (by handle) into `dst` (up to its
+/// len). Returns the byte length, or `None` if no frame is ready / on error.
+pub fn h264enc_out(handle: i32, dst: &mut [u8]) -> Option<usize> {
+    let bridge = match BRIDGE_CLASS.get() {
+        Some(c) => c,
+        None => return None,
+    };
+    let vm = match VM.get() {
+        Some(v) => v,
+        None => return None,
+    };
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+    let jdst = match env.new_byte_array(dst.len().try_into().unwrap()) {
+        Ok(a) => a,
+        Err(_) => return None,
+    };
+    let args = [jni::objects::JValue::Int(handle), (&jdst).into()];
+    let len = match env.call_static_method::<_, _, _>(bridge, "h264EncOut", "(I[B)I", &args) {
+        Ok(v) => v.i().map(|n| n as i32).unwrap_or(-1),
+        Err(_) => return None,
+    };
+    if len <= 0 {
+        return None;
+    }
+    let len = (len as usize).min(dst.len());
+    let mut region: Vec<jni::sys::jbyte> = vec![0i8; len];
+    if env.get_byte_array_region(jdst, 0, region.as_mut_slice()).is_ok() {
+        let bytes: Vec<u8> = region.iter().map(|b| *b as u8).collect();
+        dst[..len].copy_from_slice(&bytes);
+    }
+    Some(len)
+}
+
+/// Release the MediaCodec encoder (by handle) in the Java shell.
+pub fn h264enc_close(handle: i32) {
+    let bridge = match BRIDGE_CLASS.get() {
+        Some(c) => c,
+        None => return,
+    };
+    let vm = match VM.get() {
+        Some(v) => v,
+        None => return,
+    };
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let _ = env.call_static_method::<_, _, _>(bridge, "h264EncClose", "(I)V", &[jni::objects::JValue::Int(handle)]);
+}
+
+/// Call a static `boolean()` method on the cached `NativeBridge` class.
+fn call_static_bool(method: &str, _sig: &str) -> bool {
+    let bridged = match BRIDGE_CLASS.get() {
+        Some(c) => c,
+        None => return false,
+    };
+    let vm = match VM.get() {
+        Some(v) => v,
+        None => return false,
+    };
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    match env.call_static_method::<_, _, _>(bridged, method, "()Z", &[]) {
+        Ok(v) => v.z().unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 /// Ask the Java shell to open the system photo picker
 /// (`Intent.ACTION_PICK` with `image/*`). On success the shell copies the chosen
 /// image(s) to the app's private dir and calls back into Rust via

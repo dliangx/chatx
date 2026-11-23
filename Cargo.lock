@@ -5934,6 +5934,7 @@ name = "media"
 version = "0.1.0"
 dependencies = [
  "async-broadcast",
+ "bridge",
  "bytes",
  "openh264",
  "serde",

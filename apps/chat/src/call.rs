@@ -236,7 +236,8 @@ pub fn start_call(
         e
     };
     let call_id = format!("call-{:x}", now_nanos());
-    let cfg = MediaConfig::from_env();
+    let cfg = MediaConfig::from_env()
+        .with_stun(chatx_core::stun::custom_servers());
     let call_id_c = call_id.clone();
     let aud2 = Arc::clone(&aud_src);
     let cam2 = cam_src.as_ref().cloned();
@@ -335,7 +336,8 @@ pub fn answer_offer(
         e
     };
     let offer_c = offer.clone();
-    let cfg = MediaConfig::from_env();
+    let cfg = MediaConfig::from_env()
+        .with_stun(chatx_core::stun::custom_servers());
     let aud2 = Arc::clone(&aud_src);
     let cam2 = cam_src.as_ref().cloned();
     let scr2 = scr_src.as_ref().cloned();

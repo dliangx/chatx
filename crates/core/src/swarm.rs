@@ -7,8 +7,6 @@ use crate::moment::{PostRequest, PostResponse};
 use anyhow::Result;
 use libp2p::futures::StreamExt as _;
 pub use libp2p::gossipsub::IdentTopic;
-use libp2p::mdns::tokio::Behaviour as Mdns;
-use libp2p::mdns::{Config as MdnsConfig, Event as MdnsEvent};
 use libp2p::request_response::cbor::{self, Behaviour as Blob};
 use libp2p::request_response::json::Behaviour as Chat;
 use libp2p::request_response::{
@@ -113,7 +111,6 @@ fn ack_fail_peer(
 #[derive(NetworkBehaviour)]
 #[behaviour(prelude = "libp2p::swarm::derive_prelude")]
 pub struct Net {
-    pub mdns: Mdns,
     pub upnp: Upnp,
     pub relay: libp2p::relay::client::Behaviour,
     /// `identify` exchanges observed local and external addresses with every
@@ -704,7 +701,6 @@ pub async fn boot(
         .max_transmit_size(IMAGE_REQ_MAX as usize)
         .build()
         .map_err(|e| anyhow::anyhow!("gossipsub config: {e}"))?;
-    let mdns = Mdns::new(MdnsConfig::default(), my_peer)?;
     // JSON channel is for small control frames (text / webrtc / realtime audio)
     // — its stock 1 MiB request cap is plenty, so we keep the default codec.
     // Large voice clips travel on the dedicated binary (CBOR) `voice` channel
@@ -799,7 +795,6 @@ pub async fn boot(
                 ),
             );
             Net {
-            mdns,
             upnp: Upnp::default(),
             relay,
             identify,
@@ -1613,18 +1608,7 @@ async fn swarm_loop(
                               tracing::debug!(?p, "[autonat] inbound probe (chatx is acting as probe server)");
                           }
                       }
-                     NetEvent::Mdns(m) => {
-                        if let MdnsEvent::Discovered(ips) = m {
-                            for (p, addr) in ips {
-                                swarm.add_peer_address(p, addr.clone());
-                                let _ = ev.send(ChatEvent::Discovered {
-                                    peer: p,
-                                    addr,
-                                });
-                            }
-                        }
-                    }
-                    NetEvent::Chat(c) => match c {
+                     NetEvent::Chat(c) => match c {
                         RrEvent::Message { peer, message, .. } => match message {
                             RrMessage::Request {
                                 request, channel, ..

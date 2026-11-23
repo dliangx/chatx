@@ -290,16 +290,11 @@ impl VidSource {
         } else {
             60.0
         };
-        let enc = if is_scr {
-            openh264::encoder::Encoder::with_api_config(
-                openh264::OpenH264API::from_source(),
-                openh264::encoder::EncoderConfig::new().bitrate(openh264::encoder::BitRate::from_bps(
-                    bitrate_bps,
-                )),
-            )?
-        } else {
-            openh264::encoder::Encoder::new()?
-        };
+        // Pick the best H.264 encoder for this target — VideoToolbox (GPU) on
+        // Apple, MediaCodec (GPU) on Android, pure-Rust openh264 elsewhere —
+        // with an automatic software fallback on any native failure. See
+        // `crate::encoder::create_encoder`.
+        let enc = crate::encoder::create_encoder(bitrate_bps, max_w);
         // Encode-rate cap: 1/fps.
         let tick = Duration::from_millis(((1000.0 / fps).round().clamp(1.0, 1000.0)) as u64);
         let tag = tag_of_kind(kind);
@@ -308,7 +303,7 @@ impl VidSource {
         let stopped2 = stopped.clone();
         std::thread::Builder::new()
             .name("chatx-venc".into())
-            .spawn(move || encode_loop(enc, track2, latest2, stopped2, tick, max_w, tag))
+            .spawn(move || encode_loop(enc, track2, latest2, stopped2, tick, max_w, bitrate_bps, tag))
             .map_err(|e| crate::error::Error::other(format!("spawn venc: {e}")))?;
         Ok(Self {
             track,
@@ -408,15 +403,15 @@ impl Drop for VidSource {
 }
 
 fn encode_loop(
-    mut enc: openh264::encoder::Encoder,
+    mut enc: Box<dyn crate::encoder::H264Encoder>,
     track: TrackArc,
     latest: Arc<std::sync::Mutex<Option<Frame>>>,
     stopped: Arc<AtomicBool>,
     tick: Duration,
     max_w: u32,
+    bitrate_bps: u32,
     tag: &'static str,
 ) {
-    use openh264::formats::{RgbaSliceU8, YUVBuffer};
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("venc rt");
     // Throttled send diagnostic (first sample + every 50th) written to
     // stderr/chatx.log: proves the sender actually produced + handed the
@@ -432,7 +427,11 @@ fn encode_loop(
             return;
         }
         std::thread::sleep(tick); // frame-rate cap (see `VidSource::new`)
-        let frame = latest.lock().unwrap().clone();
+        // Take the frame out (ownership transfer) rather than cloning the full
+        // RGBA `Vec` — a screen frame can be ~14 MB, and this runs every tick.
+        // Single-consumer ("latest wins"), so removing it from `latest` is safe;
+        // `stop`/`clear` already handle the `None` case.
+        let frame = latest.lock().unwrap().take();
         if frame.is_none() {
             let n = enc_tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if n == 1 || n % 50 == 0 {
@@ -452,49 +451,32 @@ fn encode_loop(
             continue;
         }
 
-        // Optional width cap (screen source): downscale to ≤ max_w so each
-        // encoded frame stays small enough for a live 1:1 over a relay. The
-        // cap is constant for the source's life, so the openh264 encoder always
-        // sees the same resolution (it hard-errors if the size changes
-        // mid-stream). `max_w == 0` means "no limit" (camera path).
-        //
-        // openh264 hard-limits the source to 3840×2160 (see `reinit` in
-        // openh264::encoder::Encoder — anything greater refuses to encode),
-        // so Retina / 5K displays MUST be downscaled before the call. This is
-        // the LAST clamp: effective ceiling is `min(max_w, 3840)` × 2160,
-        // preserving aspect ratio.
-        const H264_MAX_W: u32 = 3840;
-        const H264_MAX_H: u32 = 2160;
-        let cap_w = if max_w > 0 { max_w.min(H264_MAX_W) } else { H264_MAX_W };
-        let cap_h = H264_MAX_H;
-        let (rgba, w, h) = if frame.w > cap_w || frame.h > cap_h {
-            // Uniform scale: fit inside (cap_w, cap_h) while preserving aspect.
-            let scale = (cap_w as f32 / frame.w as f32).min(cap_h as f32 / frame.h as f32);
-            let dw = (frame.w as f32 * scale).round().max(1.0) as u32;
-            let dh = (frame.h as f32 * scale).round().max(1.0) as u32;
-            (downscale_rgba(&frame.rgba, frame.w, frame.h, dw, dh), dw, dh)
-        } else {
-            (frame.rgba, frame.w, frame.h)
-        };
-
-        let src = RgbaSliceU8::new(&rgba, (w as usize, h as usize));
-        let yuv = YUVBuffer::from_rgb_source(src);
-        let bs = match enc.encode(&yuv) {
+        // Encode this frame through whichever backend we picked
+        // (VideoToolbox / MediaCodec / openh264). The backend owns the
+        // width-cap downscale (to `max_w`, preserving aspect) and the H.264
+        // 3840×2160 ceiling clamp, and returns the full Annex-B NAL stream
+        // (SPS/PPS + the slice) — exactly the wire format the webrtc
+        // `H264Payloader` expects. `max_w == 0` = no limit (camera path).
+        let data = match enc.encode_rgba(&frame.rgba, frame.w, frame.h, bitrate_bps, max_w) {
             Ok(b) => b,
             Err(e) => {
                 let n = enc_tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 if n == 1 || n % 10 == 0 {
-                    tracing::warn!("[media] {tag} venc #{}: encode ERROR {e} ({}x{})", n, w, h);
+                    tracing::warn!(
+                        "[media] {tag} venc #{}: encode ERROR {e} ({}x{})",
+                        n,
+                        frame.w,
+                        frame.h
+                    );
                 }
                 tracing::warn!(err = %e, "{tag} h264 encode failed");
                 continue;
             }
         };
-        let data = bs.to_vec();
         if data.is_empty() {
             let n = enc_tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if n == 1 || n % 10 == 0 {
-                tracing::debug!("[media] {tag} venc #{}: encode EMPTY ({}x{})", n, w, h);
+                tracing::debug!("[media] {tag} venc #{}: encode EMPTY ({}x{})", n, frame.w, frame.h);
             }
             continue;
         }
@@ -511,45 +493,16 @@ fn encode_loop(
         if n_w == 1 || n_w % 50 == 0 {
             tracing::debug!(
                 "[media] {tag} before write_sample #{} enc={}B ({}x{})",
-                n_w, data_len, w, h
+                n_w, data_len, frame.w, frame.h
             );
         }
         if let Err(e) = rt.block_on(track.write_sample(&sample)) {
             tracing::warn!(err = %e, "{tag} write_sample video failed");
         }
         if n_w == 1 || n_w % 50 == 0 {
-            tracing::debug!("[media] {tag} video sent #{} enc={}B ({}x{})", n_w, data_len, w, h);
+            tracing::debug!("[media] {tag} video sent #{} enc={}B ({}x{})", n_w, data_len, frame.w, frame.h);
         }
     }
-}
-
-/// Nearest-neighbour downscale of an RGBA8888 buffer to exact `dw`x`dh`.
-/// Used to cap the screen-share encode width before the (fixed-resolution)
-/// openh264 encoder so each frame stays small on the wire. `dw`/`dh` only
-/// ever shrink (`dw < sw`, `dh < sh`).
-fn downscale_rgba(rgba: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
-    if dw == 0 || dh == 0 || sw == 0 || sh == 0 || rgba.is_empty() {
-        return Vec::new();
-    }
-    let src_w = sw as usize;
-    let mut out = vec![0u8; (dw as usize) * (dh as usize) * 4];
-    let mut j = 0usize;
-    while (j as u32) < dw {
-        let sx = ((j as u32) * sw / dw).min(sw - 1) as usize;
-        let mut i = 0usize;
-        while (i as u32) < dh {
-            let sy = ((i as u32) * sh / dh).min(sh - 1) as usize;
-            let s = sy * src_w + sx;
-            let d = (i * (dw as usize) + j) * 4;
-            out[d] = rgba[s * 4];
-            out[d + 1] = rgba[s * 4 + 1];
-            out[d + 2] = rgba[s * 4 + 2];
-            out[d + 3] = rgba[s * 4 + 3];
-            i += 1;
-        }
-        j += 1;
-    }
-    out
 }
 
 // ── Audio payload (PCMU track slot) ────────────────────────────────────────

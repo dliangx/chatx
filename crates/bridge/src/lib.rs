@@ -149,6 +149,87 @@ pub fn reveal_file(_path: &str) -> bool {
 pub fn request_photos_pick(max: u32) {
     jni::request_photos_pick(max);
 }
+
+// ── H.264 video decode (MediaCodec) — remote video in a call ───────────────
+//
+// These wrap the JNI statics on `com.chatx.NativeBridge` (see
+// `apps/platform/android/java/com/chatx/NativeBridge.java` +
+// `MediaCodecDecoder.java`). The `media` crate's Android decoder
+// (`media::android`) calls them; any returns `false`/`None` on failure so
+// the caller can fall back to software decode. No-op-ish (false/None) on
+// non-Android targets.
+#[cfg(target_os = "android")]
+pub fn h264_init() -> bool {
+    jni::h264_init()
+}
+#[cfg(not(target_os = "android"))]
+pub fn h264_init() -> bool {
+    false
+}
+
+#[cfg(target_os = "android")]
+pub fn h264_feed(nal: &[u8]) -> bool {
+    jni::h264_feed(nal)
+}
+#[cfg(not(target_os = "android"))]
+pub fn h264_feed(_nal: &[u8]) -> bool {
+    false
+}
+
+#[cfg(target_os = "android")]
+pub fn h264_out(dst: &mut [u8], dims: &mut [u32; 2]) -> Option<usize> {
+    jni::h264_out(dst, dims)
+}
+#[cfg(not(target_os = "android"))]
+pub fn h264_out(_dst: &mut [u8], _dims: &mut [u32; 2]) -> Option<usize> {
+    None
+}
+
+#[cfg(target_os = "android")]
+pub fn h264_close() {
+    jni::h264_close()
+}
+#[cfg(not(target_os = "android"))]
+pub fn h264_close() {}
+
+// ── H.264 video **encode** (MediaCodec) — local video out in a call ─────────
+//
+// Symmetric to the decode helpers above: wrap the JNI statics on
+// `com.chatx.NativeBridge` (see `MediaCodecEncoder.java`). Any returns
+// `false`/`None` on failure so the caller falls back to software encode.
+#[cfg(target_os = "android")]
+pub fn h264enc_new() -> i32 {
+    jni::h264enc_new()
+}
+#[cfg(not(target_os = "android"))]
+pub fn h264enc_new() -> i32 {
+    0
+}
+
+#[cfg(target_os = "android")]
+pub fn h264enc_feed(handle: i32, rgba: &[u8], w: u32, h: u32) -> bool {
+    jni::h264enc_feed(handle, rgba, w, h)
+}
+#[cfg(not(target_os = "android"))]
+pub fn h264enc_feed(_handle: i32, _rgba: &[u8], _w: u32, _h: u32) -> bool {
+    false
+}
+
+#[cfg(target_os = "android")]
+pub fn h264enc_out(handle: i32, dst: &mut [u8]) -> Option<usize> {
+    jni::h264enc_out(handle, dst)
+}
+#[cfg(not(target_os = "android"))]
+pub fn h264enc_out(_handle: i32, _dst: &mut [u8]) -> Option<usize> {
+    None
+}
+
+#[cfg(target_os = "android")]
+pub fn h264enc_close(handle: i32) {
+    jni::h264enc_close(handle)
+}
+#[cfg(not(target_os = "android"))]
+pub fn h264enc_close(_handle: i32) {}
 #[cfg(not(target_os = "android"))]
 pub fn request_photos_pick(_max: u32) {
     tracing::warn!("[bridge] photos_pick: not an Android target — no-op");

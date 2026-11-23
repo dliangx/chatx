@@ -21,13 +21,21 @@
 //! `slint::invoke_from_event_loop`) before touching UI widgets.
 
 mod config;
+mod decoder;
+mod encoder;
 mod error;
 mod media_source;
 mod session;
 mod signal;
 mod transport;
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod apple;
+#[cfg(target_os = "android")]
+mod android;
+
 pub use config::Config;
+pub use decoder::{H264Decoder, OpenH264Decoder};
 pub use error::{Error, Result};
 pub use media_source::{AudSource, VidSource};
 pub use session::{PeerCall, PeerEvent};
@@ -68,8 +76,5 @@ pub mod webrtc {
     pub use webrtc_rs::track::track_remote::TrackRemote;
 }
 
-/// Re-export openh264 encoder helpers.
-pub mod encoder {
-    pub use openh264::encoder::Encoder;
-    pub use openh264::Timestamp;
-}
+/// Re-export the pluggable H.264 encoder backend (see [`encoder`]).
+pub use encoder::{H264Encoder, OpenH264Encoder};

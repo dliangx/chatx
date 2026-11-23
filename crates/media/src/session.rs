@@ -741,20 +741,16 @@ impl PeerCall {
             track.kind()
         );
         runtime().spawn(async move {
-            // One LONG-LIVED H.264 stateful decoder per track. `openh264::Decoder`
-            // keeps motion/reference state across `decode` calls, which is
-            // required for P/B frames (which are >99% of a typical stream).
-            // Creating a fresh decoder per frame — the old approach — silently
-            // dropped every non-IDR frame so only keyframes rendered.
-            //
-            // We feed each RTP packet's NALs straight through the same decoder
-            // in arrival order. SPS/PPS arrive ahead of their IDR frame and are
-            // consumed (they return `None`); subsequent P/B NALs decode to
-            // pictures that we forward to the remote sink.
-            let mut decoder = openh264::decoder::Decoder::new().expect("h264 decoder alloc");
+            // One LONG-LIVED stateful decoder per track — H.264 P/B frames need
+            // motion/reference state retained across `feed` calls. The backend
+            // is chosen by `decoder::create()`: GPU (VideoToolbox on Apple,
+            // MediaCodec on Android) when available, pure-Rust openh264
+            // otherwise (or on fallback). Feeding each packet's NALs through
+            // the *same* decoder in arrival order is what makes P/B frames
+            // decode at all (a fresh decoder per frame silently drops them).
+            let mut decoder: Box<dyn crate::H264Decoder> = crate::decoder::create();
             let mut depack = H264DePacketizer::new();
             let mut buf: Vec<u8> = vec![0u8; 8192];
-            // let mut frames_decoded = 0u64;
             loop {
                 match track.read(&mut buf).await {
                     Ok((pkt, _)) => {
@@ -768,7 +764,9 @@ impl PeerCall {
                             // NAL unit(s), then feed the stateful decoder.
                             let annexb = depack.depacketize(&pkt.payload);
                             if !annexb.is_empty() {
-                                if let Some((rgba, w, h)) = decode_h264_seq(&mut decoder, &annexb) {
+                                if let Some((rgba, w, h)) =
+                                    crate::decoder::decode_one(decoder.as_mut(), &annexb)
+                                {
                                     // frames_decoded += 1;
                                     // if frames_decoded <= 3 || frames_decoded % 60 == 0 {
                                     //     tracing::debug!(
@@ -913,27 +911,6 @@ impl H264DePacketizer {
         }
         out
     }
-}
-
-/// Split an Annex-B stream into its NAL units and feed each — in order —
-/// through a long-lived stateful [`openh264::Decoder`]. Returns the last
-/// picture produced (RGBA8, w, h), if any (SPS/PPS-only NAL sets return
-/// `None`, which is normal).
-fn decode_h264_seq(
-    dec: &mut openh264::decoder::Decoder,
-    annexb: &[u8],
-) -> Option<(Vec<u8>, u32, u32)> {
-    let mut last = None;
-    for nal in openh264::nal_units(annexb) {
-        if let Ok(Some(yuv)) = dec.decode(nal) {
-            let (uw, uh) = yuv.dimensions_uv();
-            let (w, h) = (uw * 2, uh * 2);
-            let mut rgba = vec![0u8; w * h * 4];
-            yuv.write_rgba8(&mut rgba);
-            last = Some((rgba, w as u32, h as u32));
-        }
-    }
-    last
 }
 
 #[cfg(test)]

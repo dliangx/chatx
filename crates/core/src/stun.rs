@@ -90,6 +90,15 @@ pub fn set_custom_servers(servers: Vec<String>) {
         .collect();
 }
 
+/// The operator-provided STUN servers (as `host:port`) currently registered
+/// via [`set_custom_servers`] — i.e. what the directory advertised at login.
+/// Empty when the directory has no `/v1/stun` endpoint. Exposed so other
+/// subsystems (notably the WebRTC ICE stack) can prefer the operator's own
+/// STUN over the built-in public ones instead of reinventing the preference.
+pub fn custom_servers() -> Vec<String> {
+    CUSTOM_SERVERS.lock().unwrap().clone()
+}
+
 /// Resolve the ordered probe list: operator-discovered servers first, then the
 /// built-in public defaults. De-duplicated, empty entries dropped.
 fn effective_servers() -> Vec<String> {

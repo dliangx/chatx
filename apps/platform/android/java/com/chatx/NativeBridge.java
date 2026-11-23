@@ -250,6 +250,68 @@ public final class NativeBridge {
         }
     }
 
+    // ── H.264 video decode (remote video in a call) ─────────────────────────
+    //
+    // The MediaCodec decoder lives in {@link MediaCodecDecoder}. Rust
+    // (media::android) calls these as JNI statics via the bridge helpers in
+    // `crates/bridge/src/jni.rs` (h264_init / h264_feed / h264_out /
+    // h264_close). These are the Java-side entry points.
+
+    /** Open + start the MediaCodec H.264 decoder. Returns false if the
+     *  device can't (Rust then decodes in software). */
+    public static boolean h264Init() {
+        return MediaCodecDecoder.get().init();
+    }
+
+    /** Feed one Annex-B NAL chunk to the decoder. */
+    public static boolean h264Feed(byte[] annexb) {
+        return MediaCodecDecoder.get().feed(annexb);
+    }
+
+    /** Pop the last decoded RGBA8888 frame into {@code dst}; sets
+     *  {@code dims[0]}=width, {@code dims[1]}=height. Returns the frame byte
+     *  length, or 0 if none is ready. */
+    public static int h264Out(byte[] dst, int[] dims) {
+        return MediaCodecDecoder.get().out(dst, dims);
+    }
+
+    /** Release the decoder. */
+    public static void h264Close() {
+        MediaCodecDecoder.get().close();
+    }
+
+    // ── H.264 video **encode** (local video out in a call) ─────────────────
+    //
+    // The MediaCodec encoder lives in {@link MediaCodecEncoder}. Rust
+    // (media::android) calls these as JNI statics via the bridge helpers in
+    // `crates/bridge/src/jni.rs` (h264enc_init / h264enc_feed / h264enc_out /
+    // h264enc_close). The encoder consumes RGBA8888 and emits Annex-B NAL
+    // streams (SPS/PPS leading) for the webrtc track.
+
+    /** Allocate + start a MediaCodec H.264 encoder. Returns a handle (>0), or
+     *  0 if the device can't (Rust then encodes in software). */
+    public static int h264EncNew() {
+        return MediaCodecEncoder.newHandle();
+    }
+
+    /** Feed one RGBA8888 frame to the encoder (by handle). */
+    public static boolean h264EncFeed(int handle, byte[] rgba, int w, int h) {
+        MediaCodecEncoder e = MediaCodecEncoder.get(handle);
+        return e != null && e.feed(rgba, w, h);
+    }
+
+    /** Pop the last encoded Annex-B NAL stream (by handle) into {@code dst}.
+     *  Returns the stream byte length, or 0 if none is ready. */
+    public static int h264EncOut(int handle, byte[] dst) {
+        MediaCodecEncoder e = MediaCodecEncoder.get(handle);
+        return (e != null) ? e.out(dst) : 0;
+    }
+
+    /** Release the encoder (by handle). */
+    public static void h264EncClose(int handle) {
+        MediaCodecEncoder.close(handle);
+    }
+
     // ── Asset reading (X mini-app bridge) ─────────────────────────────────
     //
     // Called from Rust (`bridge::read_asset`) to load `x-t/...` plugin

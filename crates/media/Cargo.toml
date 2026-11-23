@@ -18,5 +18,9 @@ serde_json = "1"
 async-broadcast = "0.7"
 tracing = { workspace = true }
 
+# Android H.264 decode (MediaCodec) goes through the existing JNI bridge.
+[target.'cfg(target_os = "android")'.dependencies]
+bridge = { path = "../bridge" }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
