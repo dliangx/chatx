@@ -16,8 +16,8 @@
 //! and does the decoded-pixel → RGBA8888 conversion. Rust just streams NALs in
 //! arrival order and pulls decoded pictures out.
 
-use super::encoder::{prepare_rgba, H264Encoder, OpenH264Encoder};
-use super::{H264Decoder, OpenH264Decoder};
+use crate::encoder::{prepare_rgba, H264Encoder, OpenH264Encoder};
+use crate::{H264Decoder, OpenH264Decoder};
 use crate::error::Error;
 
 unsafe extern "C" {

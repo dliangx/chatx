@@ -13,8 +13,8 @@
 //! is fed whole to MediaCodec, which handles the codec state (SPS/PPS/IDR,
 //! P/B references) internally.
 
-use super::encoder::{prepare_rgba, H264Encoder, OpenH264Encoder};
-use super::{H264Decoder, OpenH264Decoder};
+use crate::encoder::{prepare_rgba, H264Encoder, OpenH264Encoder};
+use crate::{H264Decoder, OpenH264Decoder};
 use crate::error::Error;
 
 /// Upper bound on a decoded picture we pull (4K). The encoder caps output at

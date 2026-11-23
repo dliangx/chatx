@@ -66,7 +66,7 @@ pub fn create() -> Box<dyn H264Decoder> {
     }
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
-        return match crate::apple::AppleH264Decoder::new() {
+        return match crate::gpu::apple::AppleH264Decoder::new() {
             Ok(d) => {
                 tracing::debug!("[media] H.264 decoder: VideoToolbox (GPU)");
                 Box::new(d)
@@ -81,7 +81,21 @@ pub fn create() -> Box<dyn H264Decoder> {
     {
         // `AndroidH264Decoder::new` never hard-fails: if the MediaCodec can't
         // be opened it already wires in its openh264 software fallback.
-        return Box::new(crate::android::AndroidH264Decoder::new().expect("android decoder alloc"));
+        return Box::new(crate::gpu::android::AndroidH264Decoder::new().expect("android decoder alloc"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // `VAAPIH264Decoder::new` never hard-fails: if libva / the H.264 VLD
+        // entry point is unavailable it already wires in its openh264 software
+        // fallback. So a call always decodes — GPU (VAAPI) when available.
+        return Box::new(crate::gpu::linux::VAAPIH264Decoder::new().expect("linux decoder alloc"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // `WinH264Decoder::new` never hard-fails: it wraps the openh264
+        // software decoder (Media Foundation GPU decode is future work — see
+        // the module note in `crate::gpu::windows`).
+        return Box::new(crate::gpu::windows::WinH264Decoder::new().expect("windows decoder alloc"));
     }
     // No native backend on this target (or the build disabled one).
     #[allow(unreachable_code)]

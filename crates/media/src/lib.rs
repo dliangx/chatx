@@ -29,10 +29,8 @@ mod session;
 mod signal;
 mod transport;
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-mod apple;
-#[cfg(target_os = "android")]
-mod android;
+// GPU / hardware H.264 codec backends (per-platform) — see `src/gpu/`.
+pub mod gpu;
 
 pub use config::Config;
 pub use decoder::{H264Decoder, OpenH264Decoder};
