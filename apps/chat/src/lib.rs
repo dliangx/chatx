@@ -579,9 +579,12 @@ async fn handle_profile_update(weak: slint::Weak<MainWindow>, username: String) 
         Ok(Some(u)) => u.avatar_path.clone().unwrap_or_default(),
         _ => String::new(),
     };
-    // Lock the backend, patch the rows, unlock, then publish.
+    // Lock the backend, patch the rows, unlock, then publish. `write().await`
+    // (not `blocking_write`): this runs on a tokio worker thread, so blocking
+    // the thread to acquire the lock panics ("Cannot block the current thread
+    // from within a runtime").
     {
-        let mut g = backend.blocking_write();
+        let mut g = backend.write().await;
         let letter = data::contact_letter(&new_name);
         for c in g.contacts.iter_mut() {
             if c.name == username {
