@@ -4439,16 +4439,25 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     }
 
     /// Apply freshly-pulled group metadata (display name + member in-group
-    /// nicknames) to the local in-memory group and persist it. Used by the
-    /// receiver side after a `group_meta` notice: the sender already pushed the
-    /// new meta to the server, so we read it back via `resolve_group` and fold
-    /// it into our local `Group` here. No re-announce (we're not the change
-    /// originator). Unknown group is a no-op (we're not a member).
+    /// nicknames + the authoritative member set) to the local in-memory group
+    /// and persist it. Used by the receiver side after a `group_meta` notice:
+    /// the sender already pushed the new meta to the server, so we read it back
+    /// via `resolve_group` and fold it into our local `Group` here.
+    ///
+    /// Members: any member present in the server record but missing locally is
+    /// added (this is how a freshly-added member reaches the receiver — without
+    /// it the receiver's `group_members` table / member list would never learn
+    /// the new peer). Members the receiver already has are left untouched (we
+    /// don't drop local-only members here; removal is a separate, explicit flow).
+    ///
+    /// No re-announce (we're not the change originator). Unknown group is a
+    /// no-op (we're not a member).
     pub fn apply_group_meta(
         &self,
         group_id: &str,
         name: &str,
         nicknames: &std::collections::BTreeMap<String, String>,
+        members: &std::collections::BTreeMap<String, group::MemberInfo>,
     ) {
         if let Some(mut g) = self.get_group(group_id) {
             if !name.trim().is_empty() {
@@ -4456,6 +4465,12 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             for (peer_id, nick) in nicknames {
                 g.set_member_nickname(peer_id, nick);
+            }
+            // Add any members we don't have locally.
+            for (peer_id, info) in members {
+                if !g.has(peer_id) {
+                    g.set_member(info.clone());
+                }
             }
             let _ = self.save_group(&g);
         }

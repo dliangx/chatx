@@ -649,9 +649,10 @@ async fn handle_group_meta(weak: slint::Weak<MainWindow>, group_id: String) {
     };
     let name = pubinfo.name.clone();
     let nicknames = pubinfo.nicknames.clone();
-    // Fold the fresh meta into the local in-memory core group (so the member
-    // list — which reads core's group.nicknames — picks it up), and persist.
-    client.apply_group_meta(&group_id, &name, &nicknames);
+    let members = pubinfo.members.clone();
+    // Fold the fresh meta into the local in-memory core group (name,
+    // nicknames, and any newly-added members), and persist.
+    client.apply_group_meta(&group_id, &name, &nicknames, &members);
     // Persist locally.
     if let Some(num) = group_id.strip_prefix("grp-").and_then(|n| n.parse::<i64>().ok()) {
         if !name.is_empty() {
@@ -667,6 +668,16 @@ async fn handle_group_meta(weak: slint::Weak<MainWindow>, group_id: String) {
             if !peer_id.is_empty() {
                 let _ =
                     sqlite::groups::set_member_nickname(&pool, num, peer_id, Some(nick)).await;
+            }
+        }
+        // Mirror the authoritative member set into the local `group_members`
+        // table so the member list (and the per-group nickname rows) include
+        // freshly-added members. `add_member` upserts on (group_id, peer_id).
+        for peer_id in members.keys() {
+            if !peer_id.is_empty() {
+                let _ =
+                    sqlite::groups::add_member(&pool, num, peer_id, sqlite::groups::ROLE_MEMBER)
+                        .await;
             }
         }
     }
