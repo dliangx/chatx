@@ -1078,3 +1078,319 @@ async fn server_group_redelivery_is_deduped() {
         "redelivered envelope must be deduped, not stored twice"
     );
 }
+
+/// Unified dual-delivery integration test: a single `send_group_message` now
+/// goes BOTH live (gossipsub, for members online now) AND to the server inbox
+/// (offline catch-up). An ONLINE member therefore sees the same logical
+/// message twice — once over gossipsub (`GroupPacket`) and once via the server
+/// poll (`GroupMail`). The receiver-side `client_id` dedup must collapse both
+/// copies into a single stored row, in either arrival order.
+///
+/// This is the core guarantee that lets us drop the old "15-member P2P cap"
+/// AND the 2s inbox poll: live delivery stays instant, offline delivery stays
+/// durable, and online members never see duplicates.
+#[tokio::test(start_paused = false)]
+async fn dual_delivery_online_member_is_deduped() {
+    let base = TmpBase::new("dual-delivery");
+    let (dir_a, dir_b) = InMemoryDirectory::pair();
+
+    let (alice, _) = Client::bootstrap_in(base.path(), "dl-a", "alice", "p", dir_a.clone())
+        .await
+        .expect("bootstrap alice");
+    let alice = std::sync::Arc::new(alice);
+    let (mut bob, _) = Client::bootstrap_in(base.path(), "dl-b", "bob", "p", dir_b.clone())
+        .await
+        .expect("bootstrap bob");
+
+    let gid = "dual-team";
+    alice
+        .create_group(
+            gid,
+            vec![MemberInfo {
+                peer_id: bob.peer_base58(),
+                sign_pk: bob.my_sign_pk().to_string(),
+                e2e_public: bob.e2e_public().to_string(),
+            }],
+        )
+        .expect("create group");
+    alice.announce_group(gid).expect("announce");
+
+    // Establish the live link + give bob the group key (live push).
+    let (bob_peer, bob_addr) = peer_addr(&bob).await;
+    alice
+        .running()
+        .cmd_tx
+        .send(chatx_core::swarm::Cmd::Connect {
+            peer: bob_peer,
+            addr: bob_addr,
+        })
+        .expect("connect cmd");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    bob.join_group(gid).expect("bob joins topic");
+    alice.publish_group_key(gid).expect("publish key to bob");
+    for _ in 0..200 {
+        let _ = bob.drain_inbound().await;
+        if bob
+            .get_group(gid)
+            .map(|g| g.secret() == alice.get_group(gid).unwrap().secret())
+            .unwrap_or(false)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let bob_group = bob.get_group(gid).expect("bob has the group");
+    let bob_secret = bob_group.secret();
+    assert!(bob_group.has(&bob.peer_base58()), "bob is a member");
+
+    let count_bob = |c: &Client<InMemoryDirectory>| {
+        c.store()
+            .all()
+            .iter()
+            .filter(|m| m.chat_id == gid && m.sender == alice.peer_base58())
+            .count()
+    };
+
+    // Alice sends ONE message. It is dual-delivered: live gossipsub AND the
+    // server inbox.
+    alice
+        .send_group_message(gid, "once-please")
+        .await
+        .expect("alice sends (dual delivery)");
+
+    // Bob receives it LIVE over gossipsub first.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let b = &mut bob;
+        loop {
+            let _ = b.drain_inbound().await;
+            if count_bob(b) >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("bob receives the live (gossipsub) copy");
+    assert_eq!(count_bob(&bob), 1, "live copy stored once");
+
+    // Now bob ALSO polls the server inbox — the SAME message is there (offline
+    // catch-up path). This is the duplicate the dedup must absorb.
+    let _ = bob.poll_group_server_inbox().await;
+    let _ = bob.drain_inbound().await;
+    assert_eq!(
+        count_bob(&bob),
+        1,
+        "server-inbox copy of the same logical message must be deduped away"
+    );
+
+    // Round-trip the stored copy to confirm it is the right message (not a
+    // dropped/corrupted one).
+    let env_b64 = bob
+        .store()
+        .all()
+        .into_iter()
+        .find(|m| m.chat_id == gid && m.sender == alice.peer_base58())
+        .expect("bob stored the message")
+        .text;
+    use base64::Engine;
+    let env_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&env_b64)
+        .expect("b64");
+    let env: chatx_core::group::SealedGroupMsg = serde_json::from_slice(&env_bytes).expect("env");
+    assert_eq!(
+        chatx_core::group::open_message(&bob_secret, &env).unwrap().text,
+        "once-please"
+    );
+}
+
+/// Unified delivery: an OFFLINE member (Bob not polling / not subscribed)
+/// misses the live gossipsub copy, then comes "online" and pulls the server
+/// inbox — he must receive the message exactly once. This is the durable
+/// fallback that makes the 2s poll unnecessary.
+#[tokio::test(start_paused = false)]
+async fn dual_delivery_offline_member_catches_up() {
+    let base = TmpBase::new("dual-offline");
+    let (dir_a, dir_b) = InMemoryDirectory::pair();
+
+    let (alice, _) = Client::bootstrap_in(base.path(), "do-a", "alice", "p", dir_a.clone())
+        .await
+        .expect("bootstrap alice");
+    let alice = std::sync::Arc::new(alice);
+    let (bob, _) = Client::bootstrap_in(base.path(), "do-b", "bob", "p", dir_b.clone())
+        .await
+        .expect("bootstrap bob");
+
+    let gid = "dual-offline-team";
+    alice
+        .create_server_group(
+            gid,
+            vec![MemberInfo {
+                peer_id: bob.peer_base58(),
+                sign_pk: bob.my_sign_pk().to_string(),
+                e2e_public: bob.e2e_public().to_string(),
+            }],
+        )
+        .expect("create server group");
+    let bob_group = bob.join_server_group(gid).expect("bob claims key slot");
+    let bob_secret = bob_group.secret();
+    assert_eq!(bob_secret, alice.get_group(gid).unwrap().secret());
+
+    let count_bob = |gid: &str| {
+        bob.store()
+            .all()
+            .iter()
+            .filter(|m| m.chat_id == gid && m.sender == alice.peer_base58())
+            .count()
+    };
+
+    // Alice sends while bob is "offline" (no live link, no polling).
+    alice
+        .send_group_message(gid, "you-missed-this")
+        .await
+        .expect("alice sends (bob offline)");
+
+    // Bob has NOT polled, so he has nothing yet.
+    assert_eq!(count_bob(gid), 0, "offline bob has no copy yet");
+
+    // Bob comes back online: catch-up pulls deliver the message.
+    for _ in 0..100 {
+        let _ = bob.poll_group_server_inbox().await;
+        let _ = bob.drain_inbound().await;
+        if count_bob(gid) >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        count_bob(gid),
+        1,
+        "offline catch-up must deliver the message exactly once"
+    );
+
+    // A second catch-up (e.g. app restart re-polling) must NOT re-deliver.
+    let _ = bob.poll_group_server_inbox().await;
+    let _ = bob.drain_inbound().await;
+    assert_eq!(count_bob(gid), 1, "re-poll must not duplicate");
+
+    let env_b64 = bob
+        .store()
+        .all()
+        .into_iter()
+        .find(|m| m.chat_id == gid && m.sender == alice.peer_base58())
+        .expect("bob stored the message")
+        .text;
+    use base64::Engine;
+    let env_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&env_b64)
+        .expect("b64");
+    let env: chatx_core::group::SealedGroupMsg = serde_json::from_slice(&env_bytes).expect("env");
+    assert_eq!(
+        chatx_core::group::open_message(&bob_secret, &env).unwrap().text,
+        "you-missed-this"
+    );
+}
+
+/// Offline catch-up for a member who NEVER had a local group record: Bob is
+/// pre-listed as a member by Alice, but Bob was offline for the whole invite
+/// AND does not call `join_server_group` himself. When Bob later "comes
+/// online" and runs `poll_group_server_inbox`, the internal `sync_membership`
+/// step must (a) discover via the directory that Bob is a member of a group he
+/// has no local record for, (b) claim Bob's key slot, and (c) deliver the
+/// message(s) Bob missed while offline.
+///
+/// This is the end-to-end guarantee that makes the 2s poll unnecessary: no
+/// manual join, no live link required — just the inbox poll, which now
+/// self-discovers missing memberships first.
+#[tokio::test(start_paused = false)]
+async fn offline_member_autodiscovers_membership_and_catches_up() {
+    let base = TmpBase::new("auto-discov");
+    let (dir_a, dir_b) = InMemoryDirectory::pair();
+
+    let (alice, _) = Client::bootstrap_in(base.path(), "ad-a", "alice", "p", dir_a.clone())
+        .await
+        .expect("bootstrap alice");
+    let (bob, _) = Client::bootstrap_in(base.path(), "ad-b", "bob", "p", dir_b.clone())
+        .await
+        .expect("bootstrap bob");
+
+    let gid = "auto-discov-team";
+    // Alice creates the group pre-listing Bob, and announces it to the shared
+    // directory. Bob is fully offline for all of this.
+    alice
+        .create_server_group(
+            gid,
+            vec![MemberInfo {
+                peer_id: bob.peer_base58(),
+                sign_pk: bob.my_sign_pk().to_string(),
+                e2e_public: bob.e2e_public().to_string(),
+            }],
+        )
+        .expect("create server group (bob pre-listed)");
+
+    // Confirm bob has NO local group record yet — the precondition for the bug.
+    assert!(
+        bob.get_group(gid).is_none(),
+        "bob must have no local group record (was offline during invite)"
+    );
+
+    // Alice sends a message while bob is offline (dual-delivered: live + server).
+    alice
+        .send_group_message(gid, "you-slept-through-this")
+        .await
+        .expect("alice sends while bob offline");
+
+    // Bob has no local group → a naive poll would find nothing to pull.
+    assert_eq!(
+        bob.store().all().iter().filter(|m| m.chat_id == gid).count(),
+        0,
+        "bob has nothing yet"
+    );
+
+    // Bob comes online: ONE inbox poll must self-discover the membership,
+    // claim the key, and deliver the missed message — no manual join.
+    for _ in 0..100 {
+        let _ = bob.poll_group_server_inbox().await;
+        let _ = bob.drain_inbound().await;
+        if bob
+            .store()
+            .all()
+            .iter()
+            .any(|m| m.chat_id == gid && m.sender == alice.peer_base58())
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Bob now has the group record (claimed) with a matching secret…
+    let bob_group = bob
+        .get_group(gid)
+        .expect("bob must have claimed the group via sync_membership");
+    assert_eq!(
+        bob_group.secret(),
+        alice.get_group(gid).unwrap().secret(),
+        "bob's claimed secret must match alice's"
+    );
+    assert!(
+        bob_group.has(&bob.peer_base58()),
+        "bob is a member"
+    );
+
+    // …and has the message he missed.
+    let env_b64 = bob
+        .store()
+        .all()
+        .into_iter()
+        .find(|m| m.chat_id == gid && m.sender == alice.peer_base58())
+        .expect("bob must have the message he missed")
+        .text;
+    use base64::Engine;
+    let env_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&env_b64)
+        .expect("b64");
+    let env: chatx_core::group::SealedGroupMsg = serde_json::from_slice(&env_bytes).expect("env");
+    assert_eq!(
+        chatx_core::group::open_message(&bob_group.secret(), &env).unwrap().text,
+        "you-slept-through-this"
+    );
+}

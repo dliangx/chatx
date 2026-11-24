@@ -1,7 +1,11 @@
-use crate::{CLIENT, runtime};
+use crate::CLIENT;
 
-const GROUP_DISCONNECT_GRACE_MS: u64 = 10 * 60 * 1000;
-const GROUP_SWEEP_INTERVAL_MS: u64 = 15 * 1000;
+// Group messages are now dual-delivered (live gossipsub + server inbox), so
+// the old "10-minute grace / 15-second sweeper" bookkeeping that guarded the
+// P2P-only model is gone. We keep a light per-group "already dialed" memo so
+// `group_conn_enter` doesn't re-dial every member on every chat switch — but
+// there is no periodic sweep and no forced disconnect; libp2p's own
+// connection state (and the dual-delivery fallback) owns reachability.
 
 #[derive(Clone, Copy)]
 struct GroupConnSlot {
@@ -12,6 +16,10 @@ static GROUP_CONNS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, GroupConnSlot>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+/// Best-effort: when the user enters a group chat, warm-dial members that are
+/// already reachable so the live gossipsub path has a connection. Pure
+/// optimization — delivery is guaranteed by the server-inbox fallback, so a
+/// dial failure here never blocks sending.
 pub fn group_conn_enter(chat_id: &str) {
     if !chat_id.starts_with("grp-") {
         return;
@@ -60,36 +68,4 @@ pub fn touch_chat_activity(chat_id: &str) {
             }
         }
     }
-}
-
-pub fn start_group_conn_sweeper() {
-    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    if STARTED.set(()).is_err() {
-        return;
-    }
-    let rt = runtime().clone();
-    rt.spawn(async move {
-        let mut tick =
-            tokio::time::interval(std::time::Duration::from_millis(GROUP_SWEEP_INTERVAL_MS));
-        loop {
-            tick.tick().await;
-            let now = chatx_core::message::now_ms();
-            let expired: Vec<String> = {
-                let m = GROUP_CONNS.lock().unwrap();
-                m.iter()
-                    .filter(|(_, s)| {
-                        now.saturating_sub(s.last_enter_ms) >= GROUP_DISCONNECT_GRACE_MS
-                    })
-                    .map(|(g, _)| g.clone())
-                    .collect()
-            };
-            if expired.is_empty() {
-                continue;
-            }
-            for gid in &expired {
-                GROUP_CONNS.lock().unwrap().remove(gid);
-                tracing::warn!("[group] grace expired for {gid} — dropping bookkeeping (conn kept)");
-            }
-        }
-    });
 }

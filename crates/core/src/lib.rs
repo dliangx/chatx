@@ -24,8 +24,6 @@ use store::Store;
 use swarm::{self as sw, Cmd, Running};
 use tokio::sync::oneshot;
 
-pub const GROUP_P2P_MAX: usize = 15;
-
 pub struct Client<D: DirectoryClient + ?Sized> {
     account: Account,
     device: DeviceIdentity,
@@ -39,6 +37,10 @@ pub struct Client<D: DirectoryClient + ?Sized> {
     /// rate-limit wake requests to ~1 per 30 s, bounding server load from a
     /// flaky peer.
     wake_last: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    /// Last time we ran the "discover groups I'm a member of" sync (epoch ms).
+    /// Rate-limited so the per-event / 30s catch-up calls don't hammer the
+    /// directory's `list_groups` on every tick.
+    groups_sync_last: std::sync::Mutex<u64>,
     /// Set by `stop()` so this account's background loops (presence heartbeat,
     /// notify long-poll, DM redelivery) exit on their next tick. Per-instance
     /// (shared by every `Arc` clone via `Arc`), so logging out of one account
@@ -282,6 +284,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             groups: RwLock::new(groups),
             groups_dir,
             wake_last: std::sync::Mutex::new(std::collections::HashMap::new()),
+            groups_sync_last: std::sync::Mutex::new(0),
             loops: Arc::new(LoopsCtl::new()),
         };
 
@@ -1267,9 +1270,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let g = self
             .get_group(group_id)
             .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
-        if g.mode == crate::group::GroupMode::Server {
-            return Ok(());
-        }
         let me = self.peer_base58();
         let mut dials = 0usize;
         for pid_b58 in g.member_ids() {
@@ -1451,9 +1451,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             Some(g) => g,
             None => return,
         };
-        if g.mode == crate::group::GroupMode::Server {
-            return;
-        }
         let me = self.peer_base58();
         let mut n = 0usize;
         for pid_b58 in g.member_ids() {
@@ -3792,6 +3789,12 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     .resolve_group(&group_id)
                     .map_err(|e| anyhow::anyhow!("resolve group dir: {e}"))?;
                 let mut g = group::Group::with_secret(pubinfo.group_id, pubinfo.owner, secret);
+                // Carry the directory's mode over. Crucial: every group is now
+                // delivered dual-path (live + server inbox), so the member MUST
+                // be marked `Server` or `poll_group_server_inbox` (which filters
+                // on `mode == Server`) will skip this group and the offline
+                // catch-up messages will never be pulled.
+                g.set_mode(pubinfo.mode);
                 for (pid, mi) in pubinfo.members {
                     g.set_member(mi);
                     let _ = pid;
@@ -3841,15 +3844,47 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     ) -> anyhow::Result<group::Group> {
         let group_id = group_id.into();
         let me_peer = self.peer_base58();
-        let owner = me_peer.clone();
-        let mut g = group::Group::create(&group_id, owner);
+        let mut g = group::Group::create(&group_id, me_peer.clone());
+        g.set_mode(group::GroupMode::Server);
         g.set_member(MemberInfo {
             peer_id: me_peer.clone(),
             sign_pk: self.account.sign_pk().to_string(),
             e2e_public: self.account.e2e_public().to_string(),
         });
+        let secret = g.secret();
+        let my_e2e = self.account.e2e_public().to_string();
+        let mut last_err: Option<String> = None;
         for m in members {
-            g.set_member(m);
+            if m.peer_id == me_peer {
+                continue;
+            }
+            match group::seal_secret(&self.account, &m.e2e_public, &secret) {
+                Ok(bundle) => {
+                    let sealed = crate::account::b64(&bundle);
+                    if let Err(e) =
+                        self.dir.put_group_key_slot(&group_id, &m.peer_id, &my_e2e, &sealed)
+                    {
+                        tracing::warn!(
+                            peer = %m.peer_id,
+                            group = %group_id,
+                            err = %e,
+                            "create_group: key slot write failed for one member; continuing"
+                        );
+                        last_err = Some(format!("member {}: {e}", m.peer_id));
+                    }
+                    g.set_member(m);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        peer = %m.peer_id,
+                        group = %group_id,
+                        err = %e,
+                        "create_group: seal failed for one member; continuing"
+                    );
+                    last_err = Some(format!("member {}: seal — {e}", m.peer_id));
+                    g.set_member(m);
+                }
+            }
         }
         self.save_group(&g)?;
         if let Err(e) = self.running.cmd_tx.send(Cmd::GroupSubscribe {
@@ -3857,7 +3892,59 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }) {
             tracing::warn!("GroupSubscribe cmd failed: {e}");
         }
+        self.announce_group(&group_id)?;
+        if let Some(err) = last_err {
+            tracing::warn!(group = %group_id, "create_group completed with per-member errors: {err}");
+        }
         Ok(g)
+    }
+
+    /// Distribute the current group secret to each member via the server's
+    /// per-member key slots (E2E-sealed to the member's e2e public key).
+    /// Per-member isolation: one bad member must not abort the rest.
+    fn distribute_group_key_slots(&self, group_id: &str, members: &[(String, MemberInfo)]) {
+        let secret = match self.get_group(group_id) {
+            Some(g) => g.secret(),
+            None => return,
+        };
+        let me = self.peer_base58();
+        let my_e2e = self.e2e_public().to_string();
+        let mut any_err = String::new();
+        for (peer, mi) in members {
+            if peer.is_empty() || *peer == me {
+                continue;
+            }
+            let bundle = match group::seal_secret(&self.account, &mi.e2e_public, &secret) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        peer = %peer,
+                        group = %group_id,
+                        err = %e,
+                        "group key distribution: seal failed for one member; continuing"
+                    );
+                    if any_err.is_empty() {
+                        any_err = format!("member {}: seal — {e}", peer);
+                    }
+                    continue;
+                }
+            };
+            let sealed = crate::account::b64(&bundle);
+            if let Err(e) = self.dir.put_group_key_slot(group_id, peer, &my_e2e, &sealed) {
+                tracing::warn!(
+                    peer = %peer,
+                    group = %group_id,
+                    err = %e,
+                    "group key distribution: slot write failed for one member; continuing"
+                );
+                if any_err.is_empty() {
+                    any_err = format!("member {}: slot — {e}", peer);
+                }
+            }
+        }
+        if !any_err.is_empty() {
+            tracing::warn!(group = %group_id, "group key distribution completed with per-member errors: {any_err}");
+        }
     }
 
     pub fn add_member(self: &Arc<Self>, group_id: &str, info: MemberInfo) -> anyhow::Result<()> {
@@ -3888,72 +3975,21 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             g.set_member(m.clone());
         }
         self.save_group(&g)?;
-        let mode = g.mode;
-        drop(g);
-
-        if mode == group::GroupMode::Server {
-            let secret = self
-                .get_group(group_id)
-                .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?
-                .secret();
-            let me = self.peer_base58();
-            let my_e2e = self.e2e_public().to_string();
-            let mut any_err = String::new();
-            for info in &infos {
-                if info.peer_id.is_empty() || info.peer_id == me {
-                    continue;
-                }
-                // Per-member isolation: one bad member must not drop the rest.
-                let bundle = match group::seal_secret(&self.account, &info.e2e_public, &secret) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::warn!(
-                            peer = %info.peer_id,
-                            group = group_id,
-                            err = %e,
-                            "add_members: seal failed for one member; continuing"
-                        );
-                        if any_err.is_empty() {
-                            any_err = format!("member {}: seal — {e}", info.peer_id);
-                        }
-                        continue;
-                    }
-                };
-                let sealed = crate::account::b64(&bundle);
-                if let Err(e) =
-                    self.dir
-                        .put_group_key_slot(group_id, &info.peer_id, &my_e2e, &sealed)
-                {
-                    tracing::warn!(
-                        peer = %info.peer_id,
-                        group = group_id,
-                        err = %e,
-                        "add_members: key slot write failed for one member; continuing"
-                    );
-                    if any_err.is_empty() {
-                        any_err = format!("member {}: slot — {e}", info.peer_id);
-                    }
-                }
-            }
-            if !any_err.is_empty() {
-                tracing::warn!(group = group_id, "add_members completed with per-member errors: {any_err}");
-            }
-            self.announce_group(group_id)?;
-            return Ok(());
-        }
-
-        self.running
-            .cmd_tx
-            .send(Cmd::GroupSubscribe {
-                group_id: group_id.into(),
-            })
-            .map_err(|e| anyhow::anyhow!("GroupSubscribe cmd failed: {e}"))?;
-        if infos
+        // Two independent key-distribution channels:
+        //  1. `publish_group_key` — pushes the secret to members who are
+        //     ONLINE NOW (and gives a passive invitee a reason to come online).
+        //  2. `distribute_group_key_slots` — writes an E2E-sealed copy to the
+        //     server for every member, so an OFFLINE member can `join_server_group`
+        //     (claim its slot) the next time it's around.
+        let slots: Vec<(String, MemberInfo)> = infos
             .iter()
-            .any(|i| !i.peer_id.is_empty() && i.peer_id != self.peer_base58())
-        {
+            .map(|m| (m.peer_id.clone(), m.clone()))
+            .collect();
+        self.distribute_group_key_slots(group_id, &slots);
+        if infos.iter().any(|i| !i.peer_id.is_empty() && i.peer_id != self.peer_base58()) {
             self.publish_group_key(group_id)?;
         }
+        self.announce_group(group_id)?;
         Ok(())
     }
 
@@ -3964,58 +4000,16 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .get(group_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
-        let mode = g.mode;
-        let me = self.peer_base58();
-        let my_e2e = self.e2e_public().to_string();
+        let members = g.members.clone();
         g.rotate();
-        let secret = g.secret();
-
-        if mode == group::GroupMode::Server {
-            let members = g.members.clone();
-            let mut any_err = String::new();
-            for (peer, mi) in members.iter() {
-                if peer.as_str() == me.as_str() {
-                    continue;
-                }
-                // Per-member isolation: one bad member must not abort rotation
-                // for the rest.
-                let bundle = match group::seal_secret(&self.account, &mi.e2e_public, &secret) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::warn!(
-                            peer = %peer,
-                            group = group_id,
-                            err = %e,
-                            "rotate_group: re-seal failed for one member; continuing"
-                        );
-                        if any_err.is_empty() {
-                            any_err = format!("member {}: seal — {e}", peer);
-                        }
-                        continue;
-                    }
-                };
-                let sealed = crate::account::b64(&bundle);
-                if let Err(e) = self.dir.put_group_key_slot(group_id, peer, &my_e2e, &sealed) {
-                    tracing::warn!(
-                        peer = %peer,
-                        group = group_id,
-                        err = %e,
-                        "rotate_group: key slot write failed for one member; continuing"
-                    );
-                    if any_err.is_empty() {
-                        any_err = format!("member {}: slot — {e}", peer);
-                    }
-                }
-            }
-            self.save_group(&g)?;
-            self.announce_group(group_id)?;
-            if !any_err.is_empty() {
-                tracing::warn!(group = group_id, "rotate_group completed with per-member errors: {any_err}");
-            }
-            return Ok(g);
-        }
         self.save_group(&g)?;
-        self.publish_group_key(group_id)?;
+        let slots: Vec<(String, MemberInfo)> =
+            members.iter().map(|(p, m)| (p.clone(), m.clone())).collect();
+        self.distribute_group_key_slots(group_id, &slots);
+        if slots.iter().any(|(p, _)| !p.is_empty() && *p != self.peer_base58()) {
+            self.publish_group_key(group_id)?;
+        }
+        self.announce_group(group_id)?;
         Ok(g)
     }
 
@@ -4051,10 +4045,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     }
                 });
         }
-        if g.mode == group::GroupMode::Server {
-            let _ = self.dir.delete_group_key_slot(group_id, peer_id);
-            self.announce_group(group_id)?;
-        }
+        let _ = self.dir.delete_group_key_slot(group_id, peer_id);
+        self.announce_group(group_id)?;
         Ok(true)
     }
 
@@ -4628,53 +4620,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
     }
 
-    fn p2p_all_peers_offline(&self, group_id: &str) -> bool {
-        let g = match self.get_group(group_id) {
-            Some(g) if g.mode != group::GroupMode::Server => g,
-            _ => return false,
-        };
-        let me = self.peer_base58();
-        let mut others = 0usize;
-        let mut any_online = false;
-        let conns = self.running.connected.lock().unwrap();
-        for p in g.member_ids() {
-            if p == me {
-                continue;
-            }
-            others += 1;
-            if let Ok(pid) = p.parse::<PeerId>() {
-                if *conns.get(&pid).unwrap_or(&0) > 0 {
-                    any_online = true;
-                    break;
-                }
-            }
-        }
-        others > 0 && !any_online
-    }
-
-    /// Return the base58 peer ids of members that are *not* currently
-    /// connected (P2P mode). Server mode is always fully reachable via the
-    /// directory.
-    fn p2p_unreachable_members(&self, group_id: &str) -> Vec<String> {
-        let g = match self.get_group(group_id) {
-            Some(g) if g.mode != group::GroupMode::Server => g,
-            _ => return Vec::new(),
-        };
-        let me = self.peer_base58();
-        let conns = self.running.connected.lock().unwrap();
-        g.member_ids()
-            .into_iter()
-            .filter(|m| m != &me)
-            .filter(|m| {
-                if let Ok(pid) = m.parse::<PeerId>() {
-                    *conns.get(&pid).unwrap_or(&0) == 0
-                } else {
-                    true
-                }
-            })
-            .collect()
-    }
-
     pub async fn send_group_message(&self, group_id: &str, text: &str) -> anyhow::Result<()> {
         self.send_group_typed(group_id, &group::GroupMsgKind::Text, text, None)
             .await
@@ -4707,44 +4652,49 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             text.len()
         );
         let env = self.seal_group_message_typed(group_id, kind, text, data)?;
-        if self.group_mode(group_id) == group::GroupMode::Server {
-            let seq = self.dir.post_group_message(group_id, &env)?;
-            tracing::debug!(group_id, seq, "sent group msg via server");
-        } else {
-            if self.p2p_all_peers_offline(group_id) {
-                let _ = self.connect_to_group(group_id);
-                tracing::warn!("[group] all members offline for {group_id} — redial attempted");
-                anyhow::bail!(
-                    "group {group_id}: no other member online — \
-                     retry once a peer is reachable"
-                );
+
+        // Dual delivery: fire BOTH the live gossipsub path (for members who
+        // are online now) AND the server inbox (so members who are offline
+        // can catch up when they next come online). Neither channel alone is
+        // sufficient — gossipsub drops messages sent while no peer is
+        // subscribed, and the server inbox is only read when a member polls.
+        //
+        // A failure on ONE channel is tolerated: the other channel still
+        // delivers the message. Both failing means the message cannot reach
+        // anyone (offline or online), so we surface the error.
+        let mut server_ok = false;
+        match self.dir.post_group_message(group_id, &env) {
+            Ok(seq) => {
+                tracing::debug!(group_id, seq, "sent group msg via server");
+                server_ok = true;
             }
-            let missing: Vec<String> = self.p2p_unreachable_members(group_id);
-            if !missing.is_empty() {
-                tracing::warn!(
-                    "[group] async redial {group_id}: {} member(s) offline {missing:?}",
-                    missing.len()
-                );
-                let _ = self.connect_to_group(group_id);
+            Err(e) => tracing::warn!(group_id, err = %e, "server inbox post failed; live path still delivers"),
+        }
+        let mut live_ok = false;
+        match group::msg_wire(&env) {
+            Ok(wire) => {
+                let topic = sw::IdentTopic::new(sw::group_topic_name(group_id));
+                match self
+                    .running
+                    .cmd_tx
+                    .send(Cmd::GroupPublish { topic, data: wire })
+                {
+                    Ok(()) => live_ok = true,
+                    Err(e) => {
+                        tracing::warn!(group_id, err = %e, "gossipsub publish failed; server path still delivers")
+                    }
+                }
             }
-            let wire = group::msg_wire(&env)?;
-            let topic = sw::IdentTopic::new(sw::group_topic_name(group_id));
-            self.running
-                .cmd_tx
-                .send(Cmd::GroupPublish { topic, data: wire })
-                .map_err(|e| anyhow::anyhow!("publish group msg: {e}"))?;
+            Err(e) => {
+                tracing::warn!(group_id, err = %e, "group wire encode failed; server path still delivers")
+            }
+        }
+        if !server_ok && !live_ok {
+            anyhow::bail!("group {group_id}: both server and live delivery failed");
         }
         self.store_group_outbound(&env).await?;
         tracing::debug!("[group] send_group_message done group={group_id}");
         Ok(())
-    }
-
-    fn group_mode(&self, group_id: &str) -> group::GroupMode {
-        self.groups
-            .read()
-            .get(group_id)
-            .map(|g| g.mode)
-            .unwrap_or_default()
     }
 
     pub fn create_server_group(
@@ -4864,7 +4814,70 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         touched
     }
 
+    /// How often the "discover groups I'm a member of" sync may run. The
+    /// catch-up pulls fire on every `Connected`/`GroupPeerSubscribed` event AND
+    /// a 30s backstop, so an unthrottled `list_groups` would spam the directory
+    /// on a busy account. 5s keeps discovery responsive without load.
+    const GROUPS_SYNC_INTERVAL_MS: u64 = 5_000;
+
+    /// Discover groups where I am a member but have NO local record yet, and
+    /// claim my key slot for each (via the directory's `groups` directory).
+    ///
+    /// This is the missing piece for offline catch-up: a member who was added
+    /// to a group while offline has no local `Group` row, so
+    /// `poll_group_server_inbox` (which iterates the local group map) has
+    /// nothing to pull. Claiming the key materializes the group locally so the
+    /// subsequent inbox poll can deliver the messages they missed.
+    ///
+    /// Returns the ids of groups we newly claimed. Idempotent — re-claiming an
+    /// existing group is a no-op, and the whole step is rate-limited.
+    fn sync_membership(&self) -> Vec<String> {
+        let me = self.peer_base58();
+        // Cheap throttle check before touching the directory.
+        let now = crate::message::now_ms();
+        {
+            let last = *self.groups_sync_last.lock().unwrap();
+            if now.saturating_sub(last) < Self::GROUPS_SYNC_INTERVAL_MS {
+                return Vec::new();
+            }
+        }
+        let directory_groups = self.dir.list_groups();
+        let known = {
+            let g = self.groups.read();
+            let s: std::collections::HashSet<String> = g.keys().cloned().collect();
+            s
+        };
+        let mut claimed = Vec::new();
+        for pubinfo in directory_groups {
+            if known.contains(&pubinfo.group_id) {
+                continue;
+            }
+            if !pubinfo.members.contains_key(&me) && pubinfo.owner != me {
+                continue;
+            }
+            match self.join_server_group(&pubinfo.group_id) {
+                Ok(_) => {
+                    tracing::info!(group = %pubinfo.group_id, "claimed group membership for offline catch-up");
+                    claimed.push(pubinfo.group_id);
+                }
+                Err(e) => {
+                    // Not fatal: e.g. slot missing, or a P2P-mode group whose
+                    // key is only distributed live. Live delivery still works;
+                    // we just can't catch up offline.
+                    tracing::debug!(group = %pubinfo.group_id, err = %e, "skip claiming group on sync");
+                }
+            }
+        }
+        if !claimed.is_empty() {
+            *self.groups_sync_last.lock().unwrap() = crate::message::now_ms();
+        }
+        claimed
+    }
+
     pub async fn poll_group_server_inbox(&self) -> Vec<String> {
+        // Materialize any group memberships we're missing BEFORE polling, so a
+        // member added to a group while offline can actually pull it.
+        let _newly = self.sync_membership();
         let work: Vec<(String, u64)> = {
             let groups = self.groups.read();
             groups
@@ -5081,7 +5094,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         topic: &str,
         from: PeerId,
         data: &[u8],
-        seq: u64,
+        _seq: u64,
     ) -> Option<String> {
         let group_id = sw::topic_to_group_id(topic)?;
         if from.to_base58() == self.peer_base58() {
@@ -5101,19 +5114,29 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             return None;
         }
         match self.open_group_message(&group_id, &wire.env) {
-            Ok(_text) => {
-                if seq > 0 {
-                    let b64 =
-                        crate::account::b64(&serde_json::to_vec(&wire.env).unwrap_or_default());
-                    let dup = self
-                        .store
-                        .all()
-                        .iter()
-                        .any(|m| m.chat_id == group_id && m.text == b64);
-                    if dup {
-                        tracing::debug!(group_id, "drop duplicate group envelope");
+            Ok(plain) => {
+                // Receiver-side idempotency. A group message now travels BOTH
+                // the live gossipsub path and the server inbox (offline
+                // catch-up), so the same logical message arrives twice. The
+                // sender's stable `client_id` is identical on both copies —
+                // on first sight we record it and persist; on the second
+                // copy we drop it so the user never sees a duplicate. `None`
+                // (legacy v<=2 sender) is never deduplicated.
+                if let (Some(cid), Some(pool)) = (plain.client_id, self.store.pool()) {
+                    let fresh = match sqlite::group_seen::mark(&pool, cid as i64, &wire.env.from)
+                        .await
+                    {
+                        Ok(f) => f,
+                        Err(e) => {
+                            tracing::warn!("[group] dedup mark failed: {e}; persisting");
+                            true
+                        }
+                    };
+                    if !fresh {
+                        tracing::debug!(group_id, client_id = cid, "drop duplicate group delivery");
                         return Some(group_id);
                     }
+                    let _ = sqlite::group_seen::prune(&pool).await;
                 }
                 let _ = self.store_group_inbound(&wire.env).await;
                 Some(group_id)

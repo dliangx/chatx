@@ -36,7 +36,7 @@ pub mod xhost;
 use doc_viewer::{doc_page_get, open_doc_page, xl_sheet_get, xl_slint_rows};
 use doc_viewer::{doc_pages_clear, is_office_ext, xl_sheets_clear};
 
-use process::{group_conn_enter, start_group_conn_sweeper, touch_chat_activity};
+use process::{group_conn_enter, touch_chat_activity};
 use time::{fmt_profile_date, fmt_time, time_label};
 use trans::{set_lang as set_time_lang, translate_notify_body};
 
@@ -2953,7 +2953,6 @@ fn apply_result(
             client.start_dm_redeliver();
             client.start_group_key_redeliver();
             client.start_upgrade_loop();
-            start_group_conn_sweeper();
             // Background sweeper: re-derive the chat status dot every 1.5 s so
             // a peer that goes stale without a `Disconnected` event (remote
             // session expiry, failed escalation, etc.) still repaints the dot
@@ -3159,8 +3158,28 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
     let weak = weak.clone();
     let rt = runtime();
     rt.spawn(async move {
-        let mut server_poll = tokio::time::interval(std::time::Duration::from_secs(2));
-        server_poll.tick().await;
+        // Group messages now arrive LIVE via gossipsub; the server inbox is
+        // only the offline catch-up path. So we do NOT poll on a 2s tick.
+        // Instead: (1) a one-shot catch-up pull right after we come online
+        // (below, before the first `next_event`), and (2) a slow 30s backstop
+        // in case an event-triggered pull was missed (e.g. a member's online
+        // event raced with our startup). Event-triggered pulls also fire on
+        // `Connected` / `GroupPeerSubscribed` (see the event path below).
+        let mut server_backstop = tokio::time::interval(std::time::Duration::from_secs(30));
+        server_backstop.tick().await;
+        // Initial catch-up: pull anything that piled up in the server inbox
+        // while this device was offline. Idempotent — the receiver dedups by
+        // the sender's stable `client_id`, so any message that ALSO arrives
+        // live over gossipsub is dropped as a duplicate.
+        {
+            let client_opt = CLIENT.lock().unwrap().clone();
+            if let Some(client) = client_opt {
+                let touched = client.poll_group_server_inbox().await;
+                for gid in touched {
+                    refresh_inbound_chat(weak.clone(), gid).await;
+                }
+            }
+        }
         loop {
             let client: std::sync::Arc<chatx_core::Client<chatx_core::signal::HttpDirectory>> =
                 match CLIENT.lock().unwrap().clone() {
@@ -3168,14 +3187,33 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                     None => break,
                 };
             tokio::select! {
-                _ = server_poll.tick() => {
-                    let _touched = client.poll_group_server_inbox().await;
+                _ = server_backstop.tick() => {
+                    let touched = client.poll_group_server_inbox().await;
+                    for gid in touched {
+                        refresh_inbound_chat(weak.clone(), gid).await;
+                    }
                     continue;
                 }
                 maybe_evt = client.next_event() => {
                     let Some(evt) = maybe_evt else {
                         break;
                     };
+                    // Event-triggered offline catch-up: a group member just
+                    // came online (we (re)connected to them, or they joined
+                    // our gossipsub topic) — pull any server-inbox messages
+                    // they may have sent while we were the offline one.
+                    // Idempotent: the receiver dedups by the sender's stable
+                    // `client_id`, and the cursor means an empty poll is cheap.
+                    if matches!(
+                        evt,
+                        chatx_core::swarm::ChatEvent::Connected(_)
+                            | chatx_core::swarm::ChatEvent::GroupPeerSubscribed { .. }
+                    ) {
+                        let touched = client.poll_group_server_inbox().await;
+                        for gid in touched {
+                            refresh_inbound_chat(weak.clone(), gid).await;
+                        }
+                    }
                     if let chatx_core::swarm::ChatEvent::Webrtc { peer, json, .. } = &evt {
                         let client_arc = client.clone();
                         let peer = *peer;
@@ -6744,10 +6782,6 @@ fn delete_chat(weak: slint::Weak<MainWindow>, key: i32) {
     });
 }
 
-fn should_use_server_fanout(member_count: usize) -> bool {
-    return member_count >= chatx_core::GROUP_P2P_MAX;
-}
-
 /// Load the ChatSetting page state for the open group: its name, my nickname
 /// in the group, and the pin flag. `key` is the open chat's UI key; on
 /// success the values are pushed onto `GroupState` (which mirrors them into the
@@ -7615,14 +7649,6 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
             members.len()
         );
     }
-    if members.len() >= chatx_core::GROUP_P2P_MAX {
-        tracing::warn!(
-            count = members.len(),
-            max = chatx_core::GROUP_P2P_MAX,
-            "Group size hits the P2P cap (pair count O(N²); reachability risk rises sharply); enabling server fan-out plan B"
-        );
-    }
-
     let group_id = format!(
         "grp-{}",
         std::time::SystemTime::now()
@@ -7631,23 +7657,22 @@ fn create_group_flow(weak: slint::Weak<MainWindow>, picked: Vec<i32>) -> bool {
             .unwrap_or(0)
     );
     let title = format!("Group ({})", members.len());
-    let use_b = should_use_server_fanout(members.len());
     // Snapshot every member's device peer_id (owner + all selected users'
     // devices) so it can be persisted to the local `group_members` table.
     let member_peer_ids: Vec<String> = std::iter::once(my_peer.clone())
         .chain(members.iter().map(|m| m.peer_id.clone()))
         .collect();
-    let create_ok = if use_b {
-        client.create_server_group(&group_id, members).map(|_| ())
-    } else {
-        client
-            .create_group(&group_id, members.clone())
-            .and_then(|_| {
-                client.announce_group(&group_id)?;
-                client.publish_group_key(&group_id)?;
-                Ok(())
-            })
-    };
+    // All groups now use the unified delivery: keys distributed via server
+    // key-slots (offline fallback) AND pushed live to online members.
+    // `create_group` writes the key slots; we then push the key to any member
+    // that's reachable now so the group is usable immediately (the slots are
+    // the fallback for offline members).
+    let create_ok = client
+        .create_group(&group_id, members.clone())
+        .and_then(|_| {
+            client.publish_group_key(&group_id)?;
+            Ok(())
+        });
     match create_ok {
         Ok(_) => {
             let new_key = {

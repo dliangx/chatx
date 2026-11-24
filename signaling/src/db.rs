@@ -174,7 +174,6 @@ pub async fn delete_device(db: &Sdb, peer_id: &str) -> anyhow::Result<bool> {
 }
 
 // --- B-mode (server-fanout group) -----------------------------------------
-pub const GROUP_MESSAGES_KEEP_WINDOW: u64 = 10_000;
 
 pub async fn trim_group_messages(
     db: &Sdb,
@@ -225,8 +224,10 @@ pub async fn append_group_message(
     .bind(wire)
     .execute(db)
     .await?;
-    // Enforce the cap (no-op under the window).
-    let _ = trim_group_messages(db, group_id, GROUP_MESSAGES_KEEP_WINDOW).await?;
+    // No retention window: the group inbox is the offline catch-up store, so
+    // it must keep its full history — a member offline for a long time still
+    // gets every message they missed. (Use `trim_group_messages` manually to
+    // prune a group's inbox if/when an operator wants to reclaim space.)
     Ok(next as u64)
 }
 

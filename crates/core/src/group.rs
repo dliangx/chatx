@@ -237,6 +237,11 @@ pub struct GroupPlain {
     /// Decoded media payload for `Voice` (raw s16le PCM) / `Image` (photo
     /// bytes). `None` for `Text`.
     pub data: Option<Vec<u8>>,
+    /// Sender-local stable id for receiver-side dedup: a group message is
+    /// delivered BOTH live (gossipsub) and via the server inbox (offline
+    /// catch-up), so the receiver drops the second copy of the same id.
+    /// `None` for legacy (v<=2) senders — those are never deduplicated.
+    pub client_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,7 +252,8 @@ struct GroupPayload {
     /// Wire format version. `v=1` = legacy text-only message whose signature
     /// did NOT cover body/media — its canonical is exactly the old form so an
     /// unsigned old message still verifies. `v>=2` includes `kind` + `data` in
-    /// the signature so the kind and body are tamper-evident together.
+    /// the signature so the kind and body are tamper-evident together. `v>=3`
+    /// additionally signs `client_id` (stable sender-local dedup id).
     #[serde(default = "default_payload_version")]
     v: u32,
     #[serde(default)]
@@ -255,6 +261,10 @@ struct GroupPayload {
     text: String,
     #[serde(default)]
     data_b64: Option<String>,
+    /// Stable sender-local message id (wall-clock ms), identical on the live
+    /// gossipsub copy and the server-inbox copy of the same message.
+    #[serde(default)]
+    client_id: Option<u64>,
     signature: String,
 }
 
@@ -280,6 +290,11 @@ impl GroupPayload {
             v.extend_from_slice(self.text.as_bytes());
             v.push(b'|');
             v.extend_from_slice(self.data_b64.as_deref().unwrap_or("").as_bytes());
+            if self.v >= 3 {
+                v.push(b'|');
+                let cid = self.client_id.unwrap_or(0).to_le_bytes();
+                v.extend_from_slice(&cid);
+            }
         } else {
             // v1 legacy form — must byte-match the pre-media canonical so an
             // unsigned old message still verifies: `group|from|t|text`.
@@ -377,10 +392,11 @@ pub fn seal_message_typed(
         from: sender_peer.to_string(),
         from_sign_pk,
         t,
-        v: 2,
+        v: 3,
         kind: kind.clone(),
         text: text.to_string(),
         data_b64,
+        client_id: Some(t),
         signature: String::new(),
     };
     let msg = payload.canonical(&group.group_id);
@@ -435,6 +451,7 @@ pub fn open_message(my_secret: &[u8; 32], env: &SealedGroupMsg) -> GmResult<Grou
         kind: payload.kind,
         text: payload.text,
         data,
+        client_id: payload.client_id,
     })
 }
 
