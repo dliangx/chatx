@@ -90,10 +90,7 @@ impl<D: DirectoryClient + ?Sized> Client<D> {
             .media_inflight
             .lock()
             .unwrap()
-            .insert(
-                (msg_id, peer_base58.to_string()),
-                std::time::Instant::now(),
-            );
+            .insert((msg_id, peer_base58.to_string()), std::time::Instant::now());
     }
 
     /// Release the claim set by [`Self::media_claim`]. Safe to call without a
@@ -981,7 +978,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             if !self.peer_connected_str(&row.peer_base58) {
                 continue;
             }
-            if self.redeliver_group_key_once(&row.group_id, &row.peer_base58).await {
+            if self
+                .redeliver_group_key_once(&row.group_id, &row.peer_base58)
+                .await
+            {
                 let _ = sqlite::gkeyq::remove(&pool, &row.group_id, &row.peer_base58).await;
                 tracing::info!(
                     group = %row.group_id,
@@ -1118,7 +1118,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             // Local row missing (user deleted?) — drop the queue row for all
             // its devices.
             let _ = sqlite::queue::give_up(pool, row.msg_id).await;
-            tracing::debug!(msg_id = row.msg_id, "[redeliver] local row missing — dropped");
+            tracing::debug!(
+                msg_id = row.msg_id,
+                "[redeliver] local row missing — dropped"
+            );
             return;
         };
         let (msg_type, media_path, text_content) = payload;
@@ -1152,21 +1155,40 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             match (msg_type, media_path.clone()) {
                 (sqlite::MSG_TYPE_VOICE, Some(path)) => {
                     let p = resolve_media_path(&path);
-                    let buf = std::fs::read(&p).map_err(|e| anyhow::anyhow!("read voice {p:?}: {e}"))?;
-                    self.send_voice_nodial_from_buffer(&row.peer_base58, &buf, Some(row.msg_id as u64)).await
+                    let buf =
+                        std::fs::read(&p).map_err(|e| anyhow::anyhow!("read voice {p:?}: {e}"))?;
+                    self.send_voice_nodial_from_buffer(
+                        &row.peer_base58,
+                        &buf,
+                        Some(row.msg_id as u64),
+                    )
+                    .await
                 }
                 (sqlite::MSG_TYPE_IMAGE, Some(path)) => {
                     let p = resolve_media_path(&path);
-                    let buf = std::fs::read(&p).map_err(|e| anyhow::anyhow!("read image {p:?}: {e}"))?;
-                    self.send_image_nodial(&row.peer_base58, buf, Some(row.msg_id as u64)).await
+                    let buf =
+                        std::fs::read(&p).map_err(|e| anyhow::anyhow!("read image {p:?}: {e}"))?;
+                    self.send_image_nodial(&row.peer_base58, buf, Some(row.msg_id as u64))
+                        .await
                 }
                 (sqlite::MSG_TYPE_FILE, Some(path)) => {
                     let p = resolve_media_path(&path);
-                    let buf = std::fs::read(&p).map_err(|e| anyhow::anyhow!("read file {p:?}: {e}"))?;
-                    self.send_file_nodial(&row.peer_base58, text_content.unwrap_or_default(), buf, Some(row.msg_id as u64)).await
+                    let buf =
+                        std::fs::read(&p).map_err(|e| anyhow::anyhow!("read file {p:?}: {e}"))?;
+                    self.send_file_nodial(
+                        &row.peer_base58,
+                        text_content.unwrap_or_default(),
+                        buf,
+                        Some(row.msg_id as u64),
+                    )
+                    .await
                 }
                 _ => self
-                    .send_dm_fastpath(&row.peer_base58, &text_content.unwrap_or_default(), row.msg_id as u64)
+                    .send_dm_fastpath(
+                        &row.peer_base58,
+                        &text_content.unwrap_or_default(),
+                        row.msg_id as u64,
+                    )
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}")),
             }
@@ -1229,11 +1251,21 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let rate = u32::from_le_bytes(buf[4..8].try_into().unwrap());
         let ch = u32::from_le_bytes(buf[8..12].try_into().unwrap()).max(1);
         let samples = (buf.len().saturating_sub(12) / (2 * ch as usize)).max(0) as u64;
-        let duration_ms = if rate == 0 { 0 } else { (samples * 1000) / rate as u64 };
-        self.send_voice_nodial(peer_base58, buf[12..].to_vec(), rate, ch, duration_ms, client_id)
-            .await
+        let duration_ms = if rate == 0 {
+            0
+        } else {
+            (samples * 1000) / rate as u64
+        };
+        self.send_voice_nodial(
+            peer_base58,
+            buf[12..].to_vec(),
+            rate,
+            ch,
+            duration_ms,
+            client_id,
+        )
+        .await
     }
-
 
     /// Background thread that long-polls the directory for wake
     /// notices and dials the sender back on arrival. Safe to call multiple
@@ -1403,26 +1435,47 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 "[dm] warm_dial {peer_base58} pass={pass} candidates={}",
                 candidates.len()
             );
+            // Fan out per priority tier, in order LAN → Public → Relay:
+            // dial every address in a tier in parallel (all `Cmd::Connect`
+            // issued back-to-back, so libp2p's per-peer dialer races them) and
+            // wait up to `per_attempt` for ANY of them to land. A hit in a
+            // tier stops immediately; only on a full miss do we drop to the
+            // next, more expensive tier. The relay circuit is the last-resort
+            // fallback.
+            let mut tiers: Vec<(EndpointPriority, Vec<&Multiaddr>)> = Vec::new();
             for addr in &candidates {
+                let prio = endpoint_priority(addr);
+                match tiers.iter_mut().find(|(p, _)| *p == prio) {
+                    Some((_, v)) => v.push(addr),
+                    None => tiers.push((prio, vec![addr])),
+                }
+            }
+            tiers.sort_by_key(|(p, _)| *p);
+            for (prio, tier_addrs) in tiers {
                 if self.peer_connected(&pid) {
                     return Ok(());
                 }
-                if self
-                    .running
-                    .cmd_tx
-                    .send(Cmd::Connect {
-                        peer: pid.clone(),
-                        addr: addr.clone(),
-                    })
-                    .is_err()
-                {
-                    continue;
+                for addr in &tier_addrs {
+                    if self
+                        .running
+                        .cmd_tx
+                        .send(Cmd::Connect {
+                            peer: pid.clone(),
+                            addr: (*addr).clone(),
+                        })
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    tracing::debug!("[dm] warm_dial {peer_base58} -> {addr}");
                 }
-                tracing::debug!("[dm] warm_dial {peer_base58} -> {addr}");
                 let deadline = std::time::Instant::now() + per_attempt;
                 while std::time::Instant::now() < deadline {
                     if self.peer_connected(&pid) {
-                        tracing::debug!("[dm] warm_dial {peer_base58} connected via {addr}");
+                        tracing::debug!(
+                            "[dm] warm_dial {peer_base58} connected via {:?} tier",
+                            prio
+                        );
                         return Ok(());
                     }
                     std::thread::sleep(POLL);
@@ -2039,13 +2092,25 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                     }
                 }
             }
-            // Re-order: base listeners first, appended candidates after.
-            // The dialer will try them in parallel; no need to re-sort.
+            // Order: LAN first, public STUN/egress in the middle, relay last.
+            // `sort_by_key` is stable, so within each priority tier the
+            // original (lexicographic) order is preserved.
+            base.sort_by_key(|a| {
+                a.parse::<Multiaddr>()
+                    .map(|addr| endpoint_priority(&addr))
+                    .unwrap_or(EndpointPriority::Lan)
+            });
             return base;
         }
 
-        // Fallback / same-subnet: the legacy LAN egress endpoint.
+        // Fallback / same-subnet: the legacy LAN egress endpoint. Order LAN
+        // first, relay last (stable within tier).
         let mut v = base;
+        v.sort_by_key(|a| {
+            a.parse::<Multiaddr>()
+                .map(|addr| endpoint_priority(&addr))
+                .unwrap_or(EndpointPriority::Lan)
+        });
         if let Some(ip) = current_egress_ip() {
             if let Some(pos) = v.iter().position(|a| a.contains(&ip)) {
                 v.swap_remove(pos);
@@ -2602,7 +2667,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// `dm:<username>` one.
     pub async fn resolve_peer_username_local(&self, peer_base58: &str) -> String {
         if let Some(pool) = self.store.pool() {
-            if let Ok(Some(user_id)) = sqlite::devices::ensure_user_by_peer(&pool, peer_base58).await {
+            if let Ok(Some(user_id)) =
+                sqlite::devices::ensure_user_by_peer(&pool, peer_base58).await
+            {
                 if let Ok(Some(username)) = sqlite::users::username(&pool, user_id).await {
                     if !username.trim().is_empty() {
                         return username;
@@ -2675,11 +2742,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         };
         local
             .into_iter()
-            .filter(|p| {
-                !p.trim().is_empty()
-                    && *p != me
-                    && approved.contains(p.as_str())
-            })
+            .filter(|p| !p.trim().is_empty() && *p != me && approved.contains(p.as_str()))
             .collect()
     }
 
@@ -2821,11 +2884,11 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             Ok(()) => {
                 if let Some(pool) = self.store.pool() {
                     let _ = sqlite::queue::give_up_pair(&pool, msg_id, peer_base58).await; // drop this device's queue row
-                                                                                           // Only mark the local message row SENT once every device
-                                                                                           // for this message has acked (or been given up on). If any
-                                                                                           // other device is still pending, leave the row as SENDING
-                                                                                           // so the UI keeps showing a "sending" badge until the last
-                                                                                           // device lands.
+                    // Only mark the local message row SENT once every device
+                    // for this message has acked (or been given up on). If any
+                    // other device is still pending, leave the row as SENDING
+                    // so the UI keeps showing a "sending" badge until the last
+                    // device lands.
                     let still_pending = sqlite::queue::pending_peers_for_msg(&pool, msg_id)
                         .await
                         .unwrap_or_default();
@@ -3025,7 +3088,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let from = self.peer_base58();
         let e2e = self.e2e_public().to_string();
         let send_timeout = std::time::Duration::from_secs(8);
-        let dial_wait = sw::DIAL_BACKOFF_DUR; 
+        let dial_wait = sw::DIAL_BACKOFF_DUR;
 
         let mut last_err: String;
 
@@ -3227,18 +3290,20 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let e2e = self.e2e_public().to_string();
         let timeout = std::time::Duration::from_secs(8);
         let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
-        self.running.cmd_tx.send(Cmd::SendVoice {
-            peer,
-            from,
-            e2e,
-            rate,
-            ch,
-            duration_ms,
-            data,
-            ack_tx: Some(tx),
-            client_id,
-        })
-        .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
+        self.running
+            .cmd_tx
+            .send(Cmd::SendVoice {
+                peer,
+                from,
+                e2e,
+                rate,
+                ch,
+                duration_ms,
+                data,
+                ack_tx: Some(tx),
+                client_id,
+            })
+            .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(()))) => Ok(()),
             Ok(Ok(Err(e))) => Err(anyhow::anyhow!("send failed: {e}")),
@@ -3331,7 +3396,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         peer_base58: &str,
         chat_id: &str,
     ) -> anyhow::Result<()> {
-        let pool = self.store.pool().ok_or_else(|| anyhow::anyhow!("no pool"))?;
+        let pool = self
+            .store
+            .pool()
+            .ok_or_else(|| anyhow::anyhow!("no pool"))?;
         let deadline = sqlite::now_ms() + sqlite::queue::DM_DEADLINE_MS;
         sqlite::queue::enqueue(&pool, msg_id, peer_base58, chat_id, Some(deadline)).await
     }
@@ -3426,7 +3494,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         // no extra dial. On a miss it fans out all candidates in parallel
         // (one `Cmd::Dial`), waits up to `DIAL_BACKOFF_DUR`, then we issue
         // the payload once. Same shape as text's `try_send_dm_once`.
-        if !self.dial_and_wait(&peer, candidates.clone(), sw::DIAL_BACKOFF_DUR).await {
+        if !self
+            .dial_and_wait(&peer, candidates.clone(), sw::DIAL_BACKOFF_DUR)
+            .await
+        {
             anyhow::bail!(
                 "failed to deliver to {peer_base58} (no candidate dial connected within {} s, {} candidates)",
                 sw::DIAL_BACKOFF_DUR.as_secs(),
@@ -3434,18 +3505,20 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             );
         }
         let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
-        self.running.cmd_tx.send(Cmd::SendVoice {
-            peer: peer.clone(),
-            from: from.clone(),
-            e2e: e2e.clone(),
-            rate,
-            ch,
-            duration_ms,
-            data: data.clone(),
-            ack_tx: Some(tx),
-            client_id,
-        })
-        .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
+        self.running
+            .cmd_tx
+            .send(Cmd::SendVoice {
+                peer: peer.clone(),
+                from: from.clone(),
+                e2e: e2e.clone(),
+                rate,
+                ch,
+                duration_ms,
+                data: data.clone(),
+                ack_tx: Some(tx),
+                client_id,
+            })
+            .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(()))) => {
                 tracing::info!("[voice] delivered");
@@ -3453,7 +3526,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             Ok(Ok(Err(e))) => Err(anyhow::anyhow!("send to {peer_base58} failed: {e}")),
             Ok(Err(_)) => Err(anyhow::anyhow!("peer connection dropped before ack")),
-            Err(_) => Err(anyhow::anyhow!("no ack from {peer_base58} within {timeout:?}")),
+            Err(_) => Err(anyhow::anyhow!(
+                "no ack from {peer_base58} within {timeout:?}"
+            )),
         }
     }
 
@@ -3574,7 +3649,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         // `dial_and_wait` short-circuits when already connected; otherwise it
         // fans out all candidates in parallel then a single payload send
         // follows. Same shape as text's `try_send_dm_once`.
-        if !self.dial_and_wait(&peer, candidates.clone(), sw::DIAL_BACKOFF_DUR).await {
+        if !self
+            .dial_and_wait(&peer, candidates.clone(), sw::DIAL_BACKOFF_DUR)
+            .await
+        {
             anyhow::bail!(
                 "failed to deliver to {peer_base58} (no candidate dial connected within {} s, {} candidates)",
                 sw::DIAL_BACKOFF_DUR.as_secs(),
@@ -3582,14 +3660,16 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             );
         }
         let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
-        self.running.cmd_tx.send(Cmd::SendImage {
-            peer,
-            from,
-            data,
-            ack_tx: Some(tx),
-            client_id,
-        })
-        .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
+        self.running
+            .cmd_tx
+            .send(Cmd::SendImage {
+                peer,
+                from,
+                data,
+                ack_tx: Some(tx),
+                client_id,
+            })
+            .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(()))) => {
                 tracing::info!("[image] delivered");
@@ -3597,7 +3677,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             Ok(Ok(Err(e))) => Err(anyhow::anyhow!("send to {peer_base58} failed: {e}")),
             Ok(Err(_)) => Err(anyhow::anyhow!("peer connection dropped before ack")),
-            Err(_) => Err(anyhow::anyhow!("no ack from {peer_base58} within {timeout:?}")),
+            Err(_) => Err(anyhow::anyhow!(
+                "no ack from {peer_base58} within {timeout:?}"
+            )),
         }
     }
 
@@ -3674,7 +3756,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         // `dial_and_wait` short-circuits when already connected; otherwise it
         // fans out all candidates in parallel then a single payload send
         // follows. Same shape as text's `try_send_dm_once`.
-        if !self.dial_and_wait(&peer, candidates.clone(), sw::DIAL_BACKOFF_DUR).await {
+        if !self
+            .dial_and_wait(&peer, candidates.clone(), sw::DIAL_BACKOFF_DUR)
+            .await
+        {
             anyhow::bail!(
                 "failed to deliver to {peer_base58} (no candidate dial connected within {} s, {} candidates)",
                 sw::DIAL_BACKOFF_DUR.as_secs(),
@@ -3682,15 +3767,17 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             );
         }
         let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
-        self.running.cmd_tx.send(Cmd::SendFile {
-            peer,
-            from,
-            name,
-            data,
-            ack_tx: Some(tx),
-            client_id,
-        })
-        .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
+        self.running
+            .cmd_tx
+            .send(Cmd::SendFile {
+                peer,
+                from,
+                name,
+                data,
+                ack_tx: Some(tx),
+                client_id,
+            })
+            .map_err(|e| anyhow::anyhow!("cmd channel closed: {e}"))?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(()))) => {
                 tracing::info!("[file] delivered");
@@ -3698,7 +3785,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             }
             Ok(Ok(Err(e))) => Err(anyhow::anyhow!("send to {peer_base58} failed: {e}")),
             Ok(Err(_)) => Err(anyhow::anyhow!("peer connection dropped before ack")),
-            Err(_) => Err(anyhow::anyhow!("no ack from {peer_base58} within {timeout:?}")),
+            Err(_) => Err(anyhow::anyhow!(
+                "no ack from {peer_base58} within {timeout:?}"
+            )),
         }
     }
 
@@ -3712,10 +3801,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// Returns `Ok(())` on acceptance (HTTP 2xx) and `Err(anyhow)` on any
     /// other failure (server unreachable, HTTP 4xx/5xx, malformed body). The
     /// UI surfaces the error to the user.
-    pub fn send_friend_request(
-        &self,
-        recipient_username: &str,
-    ) -> anyhow::Result<()> {
+    pub fn send_friend_request(&self, recipient_username: &str) -> anyhow::Result<()> {
         let me_user = self.current_username();
         let me_peer = self.peer_base58();
         if me_user.is_empty() {
@@ -3730,17 +3816,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     /// [`ChatEvent::FriendAction`] on their next long-poll tick; the fan-out
     /// payload carries `actor_peer` (this device's base58 peer id) so the
     /// counter-party can bind `devices.peer_id` directly.
-    pub fn decide_friend_request(
-        &self,
-        other_username: &str,
-        accept: bool,
-    ) -> anyhow::Result<()> {
+    pub fn decide_friend_request(&self, other_username: &str, accept: bool) -> anyhow::Result<()> {
         let me_user = self.current_username();
         if me_user.is_empty() {
             anyhow::bail!("not logged in");
         }
         let me_peer = self.peer_base58();
-        self.dir.fr_decide(&me_user, &me_peer, other_username, accept)
+        self.dir
+            .fr_decide(&me_user, &me_peer, other_username, accept)
     }
 
     pub fn all_messages(&self) -> Vec<store::StoredMsg> {
@@ -3883,8 +3966,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             match group::seal_secret(&self.account, &m.e2e_public, &secret) {
                 Ok(bundle) => {
                     let sealed = crate::account::b64(&bundle);
-                    if let Err(e) =
-                        self.dir.put_group_key_slot(&group_id, &m.peer_id, &my_e2e, &sealed)
+                    if let Err(e) = self
+                        .dir
+                        .put_group_key_slot(&group_id, &m.peer_id, &my_e2e, &sealed)
                     {
                         tracing::warn!(
                             peer = %m.peer_id,
@@ -3952,7 +4036,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 }
             };
             let sealed = crate::account::b64(&bundle);
-            if let Err(e) = self.dir.put_group_key_slot(group_id, peer, &my_e2e, &sealed) {
+            if let Err(e) = self
+                .dir
+                .put_group_key_slot(group_id, peer, &my_e2e, &sealed)
+            {
                 tracing::warn!(
                     peer = %peer,
                     group = %group_id,
@@ -4008,7 +4095,10 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .map(|m| (m.peer_id.clone(), m.clone()))
             .collect();
         self.distribute_group_key_slots(group_id, &slots);
-        if infos.iter().any(|i| !i.peer_id.is_empty() && i.peer_id != self.peer_base58()) {
+        if infos
+            .iter()
+            .any(|i| !i.peer_id.is_empty() && i.peer_id != self.peer_base58())
+        {
             self.publish_group_key(group_id)?;
         }
         self.announce_group(group_id)?;
@@ -4025,10 +4115,15 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let members = g.members.clone();
         g.rotate();
         self.save_group(&g)?;
-        let slots: Vec<(String, MemberInfo)> =
-            members.iter().map(|(p, m)| (p.clone(), m.clone())).collect();
+        let slots: Vec<(String, MemberInfo)> = members
+            .iter()
+            .map(|(p, m)| (p.clone(), m.clone()))
+            .collect();
         self.distribute_group_key_slots(group_id, &slots);
-        if slots.iter().any(|(p, _)| !p.is_empty() && *p != self.peer_base58()) {
+        if slots
+            .iter()
+            .any(|(p, _)| !p.is_empty() && *p != self.peer_base58())
+        {
             self.publish_group_key(group_id)?;
         }
         self.announce_group(group_id)?;
@@ -4690,7 +4785,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 tracing::debug!(group_id, seq, "sent group msg via server");
                 server_ok = true;
             }
-            Err(e) => tracing::warn!(group_id, err = %e, "server inbox post failed; live path still delivers"),
+            Err(e) => {
+                tracing::warn!(group_id, err = %e, "server inbox post failed; live path still delivers")
+            }
         }
         let mut live_ok = false;
         match group::msg_wire(&env) {
@@ -4746,9 +4843,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             match group::seal_secret(&self.account, &m.e2e_public, &secret) {
                 Ok(bundle) => {
                     let sealed = crate::account::b64(&bundle);
-                    if let Err(e) =
-                        self.dir
-                            .put_group_key_slot(&group_id, &m.peer_id, &my_e2e, &sealed)
+                    if let Err(e) = self
+                        .dir
+                        .put_group_key_slot(&group_id, &m.peer_id, &my_e2e, &sealed)
                     {
                         tracing::warn!(
                             peer = %m.peer_id,
@@ -5018,7 +5115,8 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         // never sees the same message twice. `None` means the
                         // sender is legacy or it's a control frame (friend
                         // request) — those are never deduplicated here.
-                        let chat = store::dm_chat_id(&self.resolve_peer_username_local(&peer_b58).await);
+                        let chat =
+                            store::dm_chat_id(&self.resolve_peer_username_local(&peer_b58).await);
                         if let (Some(cid), Some(pool)) = (req.client_id, self.store.pool()) {
                             let fresh = match sqlite::inbound_seen::mark(
                                 &pool, cid as i64, &peer_b58,
@@ -5145,15 +5243,14 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 // copy we drop it so the user never sees a duplicate. `None`
                 // (legacy v<=2 sender) is never deduplicated.
                 if let (Some(cid), Some(pool)) = (plain.client_id, self.store.pool()) {
-                    let fresh = match sqlite::group_seen::mark(&pool, cid as i64, &wire.env.from)
-                        .await
-                    {
-                        Ok(f) => f,
-                        Err(e) => {
-                            tracing::warn!("[group] dedup mark failed: {e}; persisting");
-                            true
-                        }
-                    };
+                    let fresh =
+                        match sqlite::group_seen::mark(&pool, cid as i64, &wire.env.from).await {
+                            Ok(f) => f,
+                            Err(e) => {
+                                tracing::warn!("[group] dedup mark failed: {e}; persisting");
+                                true
+                            }
+                        };
                     if !fresh {
                         tracing::debug!(group_id, client_id = cid, "drop duplicate group delivery");
                         return Some(group_id);
@@ -5237,6 +5334,56 @@ fn is_routable_public_or_circuit(addr: &str) -> bool {
     has_public_ip
 }
 
+/// Priority class of an announced endpoint, lowest value = tried first.
+/// LAN < public STUN/egress < relay circuit, so the dialer burns its budget
+/// on the cheapest, most likely-to-succeed paths before falling through to
+/// the relay tunnel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EndpointPriority {
+    Lan = 0,
+    Public = 1,
+    Relay = 2,
+}
+
+fn endpoint_priority(addr: &Multiaddr) -> EndpointPriority {
+    // A relay-circuit route carries `/p2p-circuit`; it is the most expensive
+    // path (a full third-party hop) so it sorts last.
+    if addr
+        .iter()
+        .any(|c| matches!(c, libp2p::multiaddr::Protocol::P2pCircuit))
+    {
+        return EndpointPriority::Relay;
+    }
+    // Public (globally-routable) IP => direct public candidate; a private /
+    // link-local / unspecified IP => LAN same-subnet candidate (tried first).
+    let mut has_public = false;
+    let mut has_private = false;
+    for c in addr.iter() {
+        match c {
+            libp2p::multiaddr::Protocol::Ip4(ip) => {
+                if ip.is_loopback() || ip.is_unspecified() || ip.is_private() {
+                    has_private = true;
+                } else {
+                    has_public = true;
+                }
+            }
+            libp2p::multiaddr::Protocol::Ip6(ip) => {
+                if ip.is_loopback() || ip.is_unspecified() || ip.is_unicast_link_local() {
+                    has_private = true;
+                } else {
+                    has_public = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if has_public && !has_private {
+        EndpointPriority::Public
+    } else {
+        EndpointPriority::Lan
+    }
+}
+
 fn unroutable_reason(addr: &Multiaddr) -> Option<&'static str> {
     let mut saw_tcp0 = false;
     for comp in addr.iter() {
@@ -5265,4 +5412,49 @@ fn current_egress_ip() -> Option<String> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.connect("8.8.8.8:53").ok()?;
     sock.local_addr().ok()?.ip().to_string().into()
+}
+
+#[cfg(test)]
+mod endpoint_priority_tests {
+    use super::*;
+
+    #[test]
+    fn lan_public_relay_ordering() {
+        let lan = "/ip4/192.168.1.10/tcp/4001".parse::<Multiaddr>().unwrap();
+        let public = "/ip4/203.0.113.5/tcp/4001".parse::<Multiaddr>().unwrap();
+        let relay = "/ip4/203.0.113.9/tcp/1883/p2p/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG/p2p-circuit/p2p/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
+            .parse::<Multiaddr>()
+            .unwrap();
+        assert_eq!(endpoint_priority(&lan), EndpointPriority::Lan);
+        assert_eq!(endpoint_priority(&public), EndpointPriority::Public);
+        assert_eq!(endpoint_priority(&relay), EndpointPriority::Relay);
+        assert!(EndpointPriority::Lan < EndpointPriority::Public);
+        assert!(EndpointPriority::Public < EndpointPriority::Relay);
+    }
+
+    #[test]
+    fn stable_sort_keeps_tier_internal_order() {
+        let mut eps = vec![
+            // relay (sorted last)
+            "/ip4/1.2.3.4/tcp/1883/p2p/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG/p2p-circuit/p2p/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG".to_string(),
+            // public (middle)
+            "/ip4/203.0.113.5/tcp/4001".to_string(),
+            // lan (first)
+            "/ip4/192.168.1.10/tcp/4001".to_string(),
+            // another lan (first, after the previous lan — stable)
+            "/ip6/fe80::1/tcp/4001".to_string(),
+        ];
+        eps.sort_by_key(|a| {
+            a.parse::<Multiaddr>()
+                .map(|addr| endpoint_priority(&addr))
+                .unwrap_or(EndpointPriority::Lan)
+        });
+        assert_eq!(eps[0], "/ip4/192.168.1.10/tcp/4001");
+        assert_eq!(eps[1], "/ip6/fe80::1/tcp/4001");
+        assert_eq!(eps[2], "/ip4/203.0.113.5/tcp/4001");
+        assert_eq!(
+            eps[3],
+            "/ip4/1.2.3.4/tcp/1883/p2p/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG/p2p-circuit/p2p/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
+        );
+    }
 }
