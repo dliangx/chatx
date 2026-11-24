@@ -526,6 +526,101 @@ pub(crate) fn publish_profile_now() {
     });
 }
 
+/// Handle a server-fanned `profile_update` Notice: refetch the counterparty's
+/// profile from the directory, persist it locally (updates the local `users`
+/// row's nickname / bio / research / avatar), then refresh the in-memory
+/// contact list + DM chat titles + the currently-displayed profile view so the
+/// user sees the change without restarting the app.
+///
+/// No-op when the user is ourselves (our own `save_profile_data` already
+/// updated our AppState) or when the counterparty is unknown locally (we
+/// have no contact row to refresh).
+async fn handle_profile_update(weak: slint::Weak<MainWindow>, username: String) {
+    if username.is_empty() {
+        return;
+    }
+    let me = current_me();
+    if username == me {
+        return;
+    }
+    let (Some(client), Some(pool), Some(backend)) = (
+        CLIENT.lock().unwrap().clone(),
+        POOL.lock().unwrap().clone(),
+        BACKEND.lock().unwrap().clone(),
+    ) else {
+        return;
+    };
+    // Pull the latest profile from the directory.
+    let profile = match client.dir().fetch_profile(&username) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            tracing::debug!("[profile-update] {username}: no profile on directory; skipping");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("[profile-update] {username}: fetch failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = persist_inbound_profile(&pool, &username, &profile).await {
+        tracing::warn!("[profile-update] {username}: persist failed: {e}");
+        return;
+    }
+    // Refresh the in-memory rows that display this user: contacts + DM chats
+    // that are titled by this username. The contacts list `name` and DM chat
+    // `title` both come from the `users` table join, so rebuilding them from
+    // the fresh row picks up the new nickname / avatar.
+    let new_name = profile
+        .nickname
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| username.to_string());
+    let new_avatar_path = match sqlite::users::get_by_username(&pool, &username).await {
+        Ok(Some(u)) => u.avatar_path.clone().unwrap_or_default(),
+        _ => String::new(),
+    };
+    // Lock the backend, patch the rows, unlock, then publish.
+    {
+        let mut g = backend.blocking_write();
+        let letter = data::contact_letter(&new_name);
+        for c in g.contacts.iter_mut() {
+            if c.name == username {
+                c.name = new_name.clone();
+                c.letter = letter;
+                if !new_avatar_path.is_empty() {
+                    c.image = new_avatar_path.clone();
+                }
+            }
+        }
+        for chat in g.chats.iter_mut() {
+            // DM chat ids are `dm:<username>`; refresh title if it still
+            // shows the old username (a contact that has renamed).
+            if chat.chat_id == format!("dm:{username}") && chat.title == username {
+                chat.title = new_name.clone();
+                if !new_avatar_path.is_empty() {
+                    chat.avatar_path = new_avatar_path.clone();
+                }
+            }
+        }
+    }
+    // Push to the UI: contacts list + chat list + the currently-displayed
+    // profile page (if it is this user's).
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let state = ui.global::<AppState>();
+        publish_to_views(&state, backend);
+        let ps = ui.global::<ProfileState>();
+        if ps.get_username().to_string() == username {
+            let avatar_img = load_avatar_path_capped(&new_avatar_path, 40);
+            if !new_avatar_path.is_empty() {
+                ps.set_avatar(avatar_img);
+                ps.set_avatar_path(SharedString::from(new_avatar_path));
+            }
+            ps.set_nickname(SharedString::from(new_name));
+        }
+    });
+}
+
 /// Stable on-disk location for a received contact's 40×40 avatar.
 fn received_avatar_dir() -> std::path::PathBuf {
     if let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
@@ -3309,6 +3404,10 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                     } = &evt
                     {
                         handle_friend_action(weak.clone(), kind, payload.clone()).await;
+                        continue;
+                    }
+                    if let chatx_core::swarm::ChatEvent::ProfileUpdate { user } = &evt {
+                        handle_profile_update(weak.clone(), user.clone()).await;
                         continue;
                     }
                     // A new NAT-traversable address (UPnP-mapped public IP or a

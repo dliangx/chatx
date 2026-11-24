@@ -289,6 +289,14 @@ pub enum ChatEvent {
         kind: String,
         payload: serde_json::Value,
     },
+    /// A user's profile (nickname / bio / research / avatar) has changed.
+    /// The application should fetch the latest profile from the directory
+    /// (via `dir().fetch_profile(&user)`) and refresh any contact / group /
+    /// chat-header views that display it. `user` is the counterparty's
+    /// username (the account id, 1:1 with the user).
+    ProfileUpdate {
+        user: String,
+    },
 }
 
 pub enum Cmd {

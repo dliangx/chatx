@@ -174,7 +174,7 @@ async fn fetch_user_profile(
 }
 
 async fn upsert_user_profile(
-    State(App { db, .. }): State<App>,
+    State(app): State<App>,
     Path(user_id): Path<String>,
     body: String,
 ) -> ApiResult {
@@ -182,8 +182,32 @@ async fn upsert_user_profile(
         Ok(p) => p,
         Err(e) => return Err(bad(StatusCode::BAD_REQUEST, format!("bad UserProfile: {e}"))),
     };
-    match db::publish_profile_db(db.as_ref(), &user_id, &p).await {
-        Ok(()) => Ok(ok_json(&"ok")),
+    match db::publish_profile_db(app.db.as_ref(), &user_id, &p).await {
+        Ok(()) => {
+            // Fan out a "profile_update" Notice to every other user's devices
+            // so their contacts/profile views refresh in real time. Users that
+            // are offline miss the broadcast and pick up the fresh value on
+            // their next `fetch_profile` round.
+            let users = db::list_users(app.db.as_ref()).await.unwrap_or_default();
+            let now = now_ms();
+            for u in users {
+                if u.user_id == user_id {
+                    continue;
+                }
+                let devices =
+                    db::list_user_devices_db(app.db.as_ref(), &u.user_id).await.unwrap_or_default();
+                for d in devices {
+                    app.notifies.push(Notice {
+                        peer_id: d.peer_id,
+                        from: user_id.clone(),
+                        at: now,
+                        kind: "profile_update".into(),
+                        payload: Some(serde_json::json!({ "user": user_id })),
+                    });
+                }
+            }
+            Ok(ok_json(&"ok"))
+        }
         Err(e) => {
             tracing::warn!(%e, "publish profile failed");
             Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"))

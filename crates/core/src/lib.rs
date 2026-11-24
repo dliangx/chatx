@@ -810,10 +810,21 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             // UI (which already pumps `next_event`) can observe them in the
             // same stream as P2P text/media/voice.
             if !n.kind.is_empty() && n.kind != "wake" {
-                let evt = sw::ChatEvent::FriendAction {
-                    from_peer: n.from.clone(),
-                    kind: n.kind.clone(),
-                    payload: n.payload.clone().unwrap_or(serde_json::Value::Null),
+                let evt = if n.kind == "profile_update" {
+                    let user = n
+                        .payload
+                        .as_ref()
+                        .and_then(|v| v.get("user"))
+                        .and_then(|u| u.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_default();
+                    sw::ChatEvent::ProfileUpdate { user }
+                } else {
+                    sw::ChatEvent::FriendAction {
+                        from_peer: n.from.clone(),
+                        kind: n.kind.clone(),
+                        payload: n.payload.clone().unwrap_or(serde_json::Value::Null),
+                    }
                 };
                 let _ = injected.send(evt);
                 continue;
