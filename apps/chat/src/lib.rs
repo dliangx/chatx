@@ -3236,8 +3236,8 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                          // Only fire when the frame actually carries a text
                          // payload (control frames like group-key exchange
                          // have `text: None` and should not ping the user).
-                         if let Some(text) = req.text.as_deref() {
-                             let title = client.resolve_peer_username(&peer.to_base58());
+                          if let Some(text) = req.text.as_deref() {
+                              let title = client.resolve_peer_username_local(&peer.to_base58()).await;
                              let body = text.trim().to_string();
                              let body = if body.is_empty() {
                                  translate_notify_body("text")
@@ -3396,7 +3396,7 @@ async fn handle_inbound_voice(
         tracing::warn!("[voice] inbound: no client yet, dropping");
         return;
     };
-    let username = client.resolve_peer_username(peer_base58);
+    let username = client.resolve_peer_username_local(peer_base58).await;
     let chat_id = dm_chat_id(&username);
     // Receiver-side idempotency — same as image / file. Core acks the voice
     // clip on receipt (immediate in-core ack), so a dropped redelivery leaves
@@ -3446,7 +3446,7 @@ async fn handle_inbound_image(
         tracing::warn!("[chat-image] inbound: no client yet, dropping");
         return;
     };
-    let username = client.resolve_peer_username(peer_base58);
+    let username = client.resolve_peer_username_local(peer_base58).await;
     let chat_id = dm_chat_id(&username);
     // Receiver-side idempotency. A redelivery of a photo we already stored
     // (the sender re-sent because its ACK was lost/timed out) is a duplicate —
@@ -3506,7 +3506,7 @@ async fn handle_inbound_file(
         tracing::warn!("[chat-file] inbound: no client yet, dropping");
         return;
     };
-    let username = client.resolve_peer_username(peer_base58);
+    let username = client.resolve_peer_username_local(peer_base58).await;
     let chat_id = dm_chat_id(&username);
     // Receiver-side idempotency — same as the image path. Core already acks
     // the file on receipt (immediate in-core ack, unlike image's deferred

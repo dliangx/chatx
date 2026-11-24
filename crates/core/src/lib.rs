@@ -2591,6 +2591,28 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
     }
 
+    /// Local-first variant of [`Self::resolve_peer_username`].
+    ///
+    /// Prefers the local `devices` + `users` tables (zero network) before
+    /// falling back to the directory HTTP lookup. The local tables are
+    /// populated the moment a contact is added, so this keeps resolving a
+    /// peer's real username even when the signaling/directory server is
+    /// down — without it, an inbound DM falls back to `dm:<base58>` and
+    /// spawns a duplicate conversation instead of landing in the existing
+    /// `dm:<username>` one.
+    pub async fn resolve_peer_username_local(&self, peer_base58: &str) -> String {
+        if let Some(pool) = self.store.pool() {
+            if let Ok(Some(user_id)) = sqlite::devices::ensure_user_by_peer(&pool, peer_base58).await {
+                if let Ok(Some(username)) = sqlite::users::username(&pool, user_id).await {
+                    if !username.trim().is_empty() {
+                        return username;
+                    }
+                }
+            }
+        }
+        self.resolve_peer_username(peer_base58)
+    }
+
     /// Enumerate every **approved device** the user `username` currently has
     /// registered in the directory. This is the fan-out list for a DM from
     /// the current user to that person: each entry is the dial target for
@@ -4996,7 +5018,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         // never sees the same message twice. `None` means the
                         // sender is legacy or it's a control frame (friend
                         // request) — those are never deduplicated here.
-                        let chat = store::dm_chat_id(&self.resolve_peer_username(&peer_b58));
+                        let chat = store::dm_chat_id(&self.resolve_peer_username_local(&peer_b58).await);
                         if let (Some(cid), Some(pool)) = (req.client_id, self.store.pool()) {
                             let fresh = match sqlite::inbound_seen::mark(
                                 &pool, cid as i64, &peer_b58,
