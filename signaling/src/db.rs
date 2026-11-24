@@ -44,6 +44,24 @@ async fn apply_migrations(pool: &Sdb) -> anyhow::Result<()> {
         sqlx::raw_sql(sql).execute(pool).await?;
     }
     ensure_group_mode_column(pool).await?;
+    ensure_group_meta_columns(pool).await?;
+    Ok(())
+}
+
+async fn ensure_group_meta_columns(pool: &Sdb) -> anyhow::Result<()> {
+    for col in ["name", "nicknames"] {
+        let has: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('groups') WHERE name = ?1")
+                .bind(col)
+                .fetch_one(pool)
+                .await?;
+        if has == 0 {
+            let stmt = format!(
+                "ALTER TABLE groups ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"
+            );
+            sqlx::query(&stmt).execute(pool).await?;
+        }
+    }
     Ok(())
 }
 
@@ -140,24 +158,29 @@ pub async fn upsert_device(db: &Sdb, d: &DeviceRecord) -> anyhow::Result<()> {
 
 pub async fn upsert_group(db: &Sdb, g: &GroupPublic) -> anyhow::Result<()> {
     let members = serde_json::to_string(&g.members)?;
+    let nicknames = serde_json::to_string(&g.nicknames)?;
     let mode = match g.mode {
         chatx_core::group::GroupMode::Server => "server",
         chatx_core::group::GroupMode::P2P => "p2p",
     };
     sqlx::query(
-        "INSERT INTO groups (group_id, owner, members, created_at, mode)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO groups (group_id, owner, members, created_at, mode, name, nicknames)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(group_id) DO UPDATE SET
             owner      = ?2,
             members    = ?3,
             created_at = ?4,
-            mode       = ?5",
+            mode       = ?5,
+            name       = ?6,
+            nicknames  = ?7",
     )
     .bind(&g.group_id)
     .bind(&g.owner)
     .bind(members)
     .bind(g.created_at as i64)
     .bind(mode)
+    .bind(&g.name)
+    .bind(nicknames)
     .execute(db)
     .await?;
     Ok(())
@@ -833,6 +856,8 @@ struct GrpRow {
     members: String,
     created_at: i64,
     mode: Option<String>,
+    name: String,
+    nicknames: String,
 }
 
 impl GrpRow {
@@ -843,12 +868,16 @@ impl GrpRow {
             Some("server") => chatx_core::group::GroupMode::Server,
             _ => chatx_core::group::GroupMode::P2P,
         };
+        let nicknames: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&self.nicknames).unwrap_or_default();
         GroupPublic {
             group_id: self.group_id,
             owner: self.owner,
             members,
             created_at: self.created_at as u64,
             mode,
+            name: self.name,
+            nicknames,
         }
     }
 }
@@ -944,6 +973,8 @@ mod tests {
             members,
             created_at: 42,
             mode: chatx_core::group::GroupMode::P2P,
+            name: "Team chat".into(),
+            nicknames: std::collections::BTreeMap::new(),
         };
         upsert_group(&db, &grp).await.unwrap();
 

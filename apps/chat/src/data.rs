@@ -158,6 +158,15 @@ impl DataBackend {
         self.chat_key_to_id.get(&key).map(|s| s.as_str())
     }
 
+    /// Reverse lookup: the UI key for a chat, given its string `chat_id`
+    /// (e.g. `grp-123` / `dm:alice`). `None` if not in the in-memory list.
+    pub fn key_for_chat_id(&self, chat_id: &str) -> Option<i32> {
+        self.chat_key_to_id
+            .iter()
+            .find(|(_, c)| c.as_str() == chat_id)
+            .map(|(k, _)| *k)
+    }
+
     pub fn contact_id_for(&self, key: i32) -> Option<i64> {
         self.contact_key_to_id.get(&key).copied()
     }
@@ -957,7 +966,25 @@ pub async fn persist_group(
     Some(num)
 }
 
-pub async fn group_sender_name(pool: &SqlitePool, sender: &str) -> String {
+/// Resolve the display name for a group-message sender. Priority: the
+/// sender's **in-group nickname** (`group_members.nickname` for this group,
+/// keyed by the sender's peer_id) → the sender's global profile nickname /
+/// username → the raw peer id. `chat_id` is the `grp-…` conversation id; it
+/// is used to scope the per-group nickname lookup so the same person can have
+/// different display names in different groups.
+pub async fn group_sender_name(pool: &SqlitePool, chat_id: &str, sender: &str) -> String {
+    if let Some(num) = chat_id.strip_prefix("grp-").and_then(|n| n.parse::<i64>().ok()) {
+        if let Ok(rows) = sqlite::groups::list_members(pool, num).await {
+            for m in rows {
+                if m.peer_id == sender {
+                    if let Some(nick) = m.nickname.filter(|n| !n.trim().is_empty()) {
+                        return nick;
+                    }
+                    break;
+                }
+            }
+        }
+    }
     if let Ok(Some(user_id)) = sqlite::devices::ensure_user_by_peer(pool, sender).await {
         if let Ok(Some(u)) = sqlite::users::get(pool, user_id).await {
             let label = u

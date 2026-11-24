@@ -297,6 +297,13 @@ pub enum ChatEvent {
     ProfileUpdate {
         user: String,
     },
+    /// A group's metadata (display name and/or member in-group nicknames)
+    /// changed. The application should re-pull the group via
+    /// `dir().resolve_group(&group_id)` and refresh the chat-list title +
+    /// group member list. `group_id` is the group's id.
+    GroupMetaChanged {
+        group_id: String,
+    },
 }
 
 pub enum Cmd {

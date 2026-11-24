@@ -580,7 +580,7 @@ async fn poll_notices(
 }
 
 async fn upsert_group(
-    State(App { db, .. }): State<App>,
+    State(app): State<App>,
     Path(group_id): Path<String>,
     body: String,
 ) -> ApiResult {
@@ -594,9 +594,24 @@ async fn upsert_group(
         }
     };
     g.group_id = group_id.clone();
-    if let Err(e) = db::upsert_group(db.as_ref(), &g).await {
+    if let Err(e) = db::upsert_group(app.db.as_ref(), &g).await {
         tracing::warn!(%e, "persisting group failed");
         return Err(bad(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
+    }
+    // Fan out a `group_meta` Notice to every member's device so their group
+    // views (chat-list title + member list nicknames) refresh when the group
+    // name or any member's in-group nickname changes. The member map keys are
+    // the members' device peer ids. Offline members miss the broadcast and
+    // pick up the fresh meta on their next `resolve_group`.
+    let now = now_ms();
+    for member_peer in g.members.keys() {
+        app.notifies.push(Notice {
+            peer_id: member_peer.clone(),
+            from: String::new(),
+            at: now,
+            kind: "group_meta".into(),
+            payload: Some(serde_json::json!({ "group_id": group_id })),
+        });
     }
     Ok(ok_json(&"ok"))
 }
@@ -1161,6 +1176,8 @@ mod http_tests {
                         members,
                         created_at: 1,
                         mode: GroupMode::Server,
+                        name: String::new(),
+                        nicknames: std::collections::BTreeMap::new(),
                     };
                     db::upsert_group(app.db.as_ref(), &grp).await.unwrap();
 

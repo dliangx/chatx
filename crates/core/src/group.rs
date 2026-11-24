@@ -29,6 +29,16 @@ pub struct GroupPublic {
     pub created_at: u64,
     #[serde(default)]
     pub mode: GroupMode,
+    /// Display name of the group (the rename target). Empty until someone
+    /// sets one; UI falls back to a default. Synced to all members via the
+    /// server announce + `group_meta` notice.
+    #[serde(default)]
+    pub name: String,
+    /// Per-member in-group nicknames: `peer_id -> display nickname`. Empty
+    /// value means "not set" (UI falls back to the member's global profile
+    /// nickname). Synced like `name`.
+    #[serde(default)]
+    pub nicknames: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +55,12 @@ pub struct Group {
     pub created_at: u64,
     #[serde(default)]
     pub mode: GroupMode,
+    /// Group display name (see [`GroupPublic::name`]).
+    #[serde(default)]
+    pub name: String,
+    /// Per-member in-group nicknames (see [`GroupPublic::nicknames`]).
+    #[serde(default)]
+    pub nicknames: BTreeMap<String, String>,
 }
 
 impl Group {
@@ -61,6 +77,8 @@ impl Group {
             members: BTreeMap::new(),
             created_at: crate::message::now_ms(),
             mode: GroupMode::P2P,
+            name: String::new(),
+            nicknames: BTreeMap::new(),
         }
     }
 
@@ -78,6 +96,8 @@ impl Group {
             members: BTreeMap::new(),
             created_at: crate::message::now_ms(),
             mode: GroupMode::P2P,
+            name: String::new(),
+            nicknames: BTreeMap::new(),
         }
     }
 
@@ -118,11 +138,28 @@ impl Group {
             members: self.members.clone(),
             created_at: self.created_at,
             mode: self.mode,
+            name: self.name.clone(),
+            nicknames: self.nicknames.clone(),
         }
     }
 
     pub fn set_mode(&mut self, mode: GroupMode) {
         self.mode = mode;
+    }
+
+    /// Set the group's display name (the rename target).
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+
+    /// Set `peer_id`'s per-group display nickname (empty value clears it).
+    pub fn set_member_nickname(&mut self, peer_id: &str, nickname: impl Into<String>) {
+        let nick = nickname.into();
+        if nick.trim().is_empty() {
+            self.nicknames.remove(peer_id);
+        } else {
+            self.nicknames.insert(peer_id.to_string(), nick);
+        }
     }
 
     pub fn save(&self, acct: &Account, path: &std::path::Path) -> anyhow::Result<()> {

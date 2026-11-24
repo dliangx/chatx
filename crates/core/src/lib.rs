@@ -819,6 +819,15 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                         .map(str::to_string)
                         .unwrap_or_default();
                     sw::ChatEvent::ProfileUpdate { user }
+                } else if n.kind == "group_meta" {
+                    let group_id = n
+                        .payload
+                        .as_ref()
+                        .and_then(|v| v.get("group_id"))
+                        .and_then(|u| u.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_default();
+                    sw::ChatEvent::GroupMetaChanged { group_id }
                 } else {
                     sw::ChatEvent::FriendAction {
                         from_peer: n.from.clone(),
@@ -4389,6 +4398,67 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         let pubinfo = g.to_public();
         self.dir.upsert_group(&pubinfo);
         Ok(pubinfo)
+    }
+
+    /// Rename the group's display name. Updates the local `Group`, persists it,
+    /// and announces to the server (which fans out a `group_meta` notice to the
+    /// member's other devices + other online members). Any member may rename —
+    /// no owner check. The receiver side (see `handle_group_meta`) re-pulls the
+    /// name via `resolve_group` and refreshes its own views.
+    pub fn rename_group(&self, group_id: &str, name: &str) -> anyhow::Result<()> {
+        if name.trim().is_empty() {
+            anyhow::bail!("rename_group: empty name");
+        }
+        let mut g = self
+            .get_group(group_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        g.set_name(name);
+        self.save_group(&g)?;
+        self.announce_group(group_id)?;
+        Ok(())
+    }
+
+    /// Set a member's in-group display nickname (empty value clears it).
+    /// Same sync path as [`Self::rename_group`]. The change is local to this
+    /// group's `Group.nicknames` map, so it only affects how `peer_id` is shown
+    /// *inside* this group — other groups and the member's global profile are
+    /// untouched.
+    pub fn set_group_member_nickname(
+        &self,
+        group_id: &str,
+        peer_id: &str,
+        nickname: &str,
+    ) -> anyhow::Result<()> {
+        let mut g = self
+            .get_group(group_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown group {group_id}"))?;
+        g.set_member_nickname(peer_id, nickname);
+        self.save_group(&g)?;
+        self.announce_group(group_id)?;
+        Ok(())
+    }
+
+    /// Apply freshly-pulled group metadata (display name + member in-group
+    /// nicknames) to the local in-memory group and persist it. Used by the
+    /// receiver side after a `group_meta` notice: the sender already pushed the
+    /// new meta to the server, so we read it back via `resolve_group` and fold
+    /// it into our local `Group` here. No re-announce (we're not the change
+    /// originator). Unknown group is a no-op (we're not a member).
+    pub fn apply_group_meta(
+        &self,
+        group_id: &str,
+        name: &str,
+        nicknames: &std::collections::BTreeMap<String, String>,
+    ) {
+        if let Some(mut g) = self.get_group(group_id) {
+            if !name.trim().is_empty() {
+                g.set_name(name);
+            }
+            for (peer_id, nick) in nicknames {
+                g.set_member_nickname(peer_id, nick);
+            }
+            let _ = self.save_group(&g);
+        }
     }
 
     /// Publish the group key to every other member. Spawned onto a

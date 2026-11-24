@@ -388,6 +388,8 @@ mod tests {
             members,
             created_at: 1,
             mode: GroupMode::Server,
+            name: String::new(),
+            nicknames: std::collections::BTreeMap::new(),
         }
     }
 

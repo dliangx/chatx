@@ -624,6 +624,75 @@ async fn handle_profile_update(weak: slint::Weak<MainWindow>, username: String) 
     });
 }
 
+/// Handle a server-fanned `group_meta` Notice: refetch the group's
+/// `GroupPublic` from the directory, persist the new name + member
+/// nicknames locally, then refresh the in-memory chat title + group member
+/// list so the change is visible without restarting the app.
+async fn handle_group_meta(weak: slint::Weak<MainWindow>, group_id: String) {
+    if group_id.is_empty() {
+        return;
+    }
+    let (Some(client), Some(pool), Some(backend)) = (
+        CLIENT.lock().unwrap().clone(),
+        POOL.lock().unwrap().clone(),
+        BACKEND.lock().unwrap().clone(),
+    ) else {
+        return;
+    };
+    // Pull the latest GroupPublic (name + nicknames) from the directory.
+    let pubinfo = match client.dir().resolve_group(&group_id) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("[group-meta] {group_id}: resolve_group failed: {e}");
+            return;
+        }
+    };
+    let name = pubinfo.name.clone();
+    let nicknames = pubinfo.nicknames.clone();
+    // Fold the fresh meta into the local in-memory core group (so the member
+    // list — which reads core's group.nicknames — picks it up), and persist.
+    client.apply_group_meta(&group_id, &name, &nicknames);
+    // Persist locally.
+    if let Some(num) = group_id.strip_prefix("grp-").and_then(|n| n.parse::<i64>().ok()) {
+        if !name.is_empty() {
+            let me_id = sqlite::users::get_by_username(&pool, &current_me())
+                .await
+                .ok()
+                .flatten()
+                .map(|u| u.id)
+                .unwrap_or(0);
+            let _ = sqlite::groups::create(&pool, num, &name, me_id, None).await;
+        }
+        for (peer_id, nick) in &nicknames {
+            if !peer_id.is_empty() {
+                let _ =
+                    sqlite::groups::set_member_nickname(&pool, num, peer_id, Some(nick)).await;
+            }
+        }
+    }
+    // Refresh in-memory UI.
+    {
+        let mut g = backend.write().await;
+        if let Some(key) = g.key_for_chat_id(&group_id) {
+            if !name.is_empty() {
+                g.set_chat_title(key, &name);
+            }
+        }
+    }
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let state = ui.global::<AppState>();
+        publish_to_views(&state, backend.clone());
+        // Refresh the group member list (which displays per-member nicknames)
+        // if this chat exists in the in-memory list. `GroupState` is a global
+        // data store — refreshing it is harmless even when the group's
+        // settings page is not currently the active sub-page.
+        if let Some(key) = backend.blocking_read().key_for_chat_id(&group_id) {
+            refresh_group_members(weak.clone(), key);
+        }
+    });
+}
+
 /// Stable on-disk location for a received contact's 40×40 avatar.
 fn received_avatar_dir() -> std::path::PathBuf {
     if let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
@@ -3413,6 +3482,10 @@ fn start_inbound_pump(weak: slint::Weak<MainWindow>) {
                         handle_profile_update(weak.clone(), user.clone()).await;
                         continue;
                     }
+                    if let chatx_core::swarm::ChatEvent::GroupMetaChanged { group_id } = &evt {
+                        handle_group_meta(weak.clone(), group_id.clone()).await;
+                        continue;
+                    }
                     // A new NAT-traversable address (UPnP-mapped public IP or a
                     // relay-circuit reservation) is now dialable. Re-announce our
                     // endpoint list to the directory immediately so remote peers
@@ -5374,7 +5447,7 @@ fn load_chat_messages(ui_weak: slint::Weak<MainWindow>, chat_key: i32) {
             {
                 sender_names.insert(
                     sender.clone(),
-                    crate::data::group_sender_name(&pool, &sender).await,
+                    crate::data::group_sender_name(&pool, &chat_id, &sender).await,
                 );
             }
         }
@@ -7112,18 +7185,41 @@ fn refresh_group_members(weak: slint::Weak<MainWindow>, key: i32) {
         // as an avatar fallback.
         let member_set: std::collections::HashSet<&str> =
             member_peers.iter().map(String::as_str).collect();
+        // Per-group nicknames (the "name within this group" override). Read from
+        // the sqlite `group_members` table — the same authoritative source the
+        // sender writes and `handle_group_meta` syncs (mirroring how the group
+        // *name* is displayed from `groups.name`). Reading core's in-memory
+        // `Group.nicknames` here would miss groups the receiver never loaded
+        // into core, which is why synced nicknames didn't show before.
+        let group_nicknames: std::collections::BTreeMap<String, String> =
+            match sqlite::groups::list_members(&pool, num).await {
+                Ok(members) => members
+                    .into_iter()
+                    .filter_map(|m| {
+                        let nick = m.nickname?;
+                        if nick.trim().is_empty() {
+                            None
+                        } else {
+                            Some((m.peer_id, nick))
+                        }
+                    })
+                    .collect(),
+                Err(_) => std::collections::BTreeMap::new(),
+            };
         let mut raws: Vec<(String, Option<String>, Option<Vec<u8>>, bool, String)> = Vec::new();
         for peer in &member_peers {
             let (srv_name, bytes) = resolve_member_profile_client(&client, peer).await;
             // Local contact (if any) as a fast avatar + name fallback.
             let local = contacts.iter().find(|(p, _, _)| p == peer);
-            let name = if !srv_name.is_empty() {
-                srv_name
-            } else if let Some((_, n, _)) = local {
-                n.clone()
-            } else {
-                peer.clone()
-            };
+            // Priority: per-group nickname override > global profile > local
+            // contact > raw peer id.
+            let name = group_nicknames
+                .get(peer)
+                .filter(|n| !n.trim().is_empty())
+                .cloned()
+                .or_else(|| (!srv_name.is_empty()).then(|| srv_name))
+                .or_else(|| local.map(|(_, n, _)| n.clone()))
+                .unwrap_or_else(|| peer.clone());
             let path = local.and_then(|(_, _, img)| (!img.is_empty()).then(|| img.clone()));
             raws.push((name, path, bytes, peer == &me_peer, peer.clone()));
         }
@@ -7443,6 +7539,7 @@ fn rename_group(weak: slint::Weak<MainWindow>, key: i32, name: String) {
     // for older groups that were never persisted via `persist_group`.
     let me_username = current_me();
     let me_peer = client_peer();
+    let client = CLIENT.lock().unwrap().clone();
     let rt = runtime();
     let name_owned = name.clone();
     rt.spawn(async move {
@@ -7466,6 +7563,14 @@ fn rename_group(weak: slint::Weak<MainWindow>, key: i32, name: String) {
                 {
                     tracing::warn!("[rename_group] groups.add_member failed: {e}");
                 }
+            }
+        }
+        // Push the new name to core (local Group + server announce), which fans
+        // out a `group_meta` notice to the other members. Best-effort: a local
+        // rename is valid even if the directory is unreachable right now.
+        if let Some(client) = client {
+            if let Err(e) = client.rename_group(&chat_id, &name_owned) {
+                tracing::warn!("[rename_group] core rename_group({chat_id}) failed: {e}");
             }
         }
     });
@@ -7493,6 +7598,7 @@ fn set_group_nickname(weak: slint::Weak<MainWindow>, key: i32, nickname: String)
         return;
     };
     let my_peer = client_peer();
+    let client = CLIENT.lock().unwrap().clone();
     let rt = runtime();
     let nick = nickname.clone();
     rt.spawn(async move {
@@ -7503,6 +7609,18 @@ fn set_group_nickname(weak: slint::Weak<MainWindow>, key: i32, nickname: String)
             if !my_peer.is_empty() {
                 let _ =
                     sqlite::groups::set_member_nickname(&pool, num, &my_peer, Some(&nick)).await;
+            }
+        }
+        // Push to core (local Group.nicknames + server announce) so the other
+        // members see my new in-group nickname. Keyed by my peer_id (device id),
+        // matching how `group_members.nickname` is stored and looked up.
+        if let Some(client) = client {
+            if !my_peer.is_empty() {
+                if let Err(e) = client.set_group_member_nickname(&chat_id, &my_peer, &nick) {
+                    tracing::warn!(
+                        "[set_group_nickname] core set_group_member_nickname({chat_id}) failed: {e}"
+                    );
+                }
             }
         }
     });
