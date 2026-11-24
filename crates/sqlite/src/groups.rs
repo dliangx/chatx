@@ -63,33 +63,6 @@ pub async fn list(pool: &Pool) -> anyhow::Result<Vec<Group>> {
         .map_err(Into::into)
 }
 
-pub async fn set_name(pool: &Pool, id: i64, name: &str) -> anyhow::Result<()> {
-    sqlx::query("UPDATE groups SET name = ?2 WHERE id = ?1")
-        .bind(id)
-        .bind(name)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-pub async fn set_avatar(pool: &Pool, id: i64, path: Option<&str>) -> anyhow::Result<()> {
-    sqlx::query("UPDATE groups SET avatar_path = ?2 WHERE id = ?1")
-        .bind(id)
-        .bind(path)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-pub async fn set_last_sync_seq(pool: &Pool, id: i64, seq: i64) -> anyhow::Result<()> {
-    sqlx::query("UPDATE groups SET last_sync_seq = ?2 WHERE id = ?1")
-        .bind(id)
-        .bind(seq)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
 pub async fn delete(pool: &Pool, id: i64) -> anyhow::Result<bool> {
     let mut trans = pool.begin().await?;
     {
@@ -237,15 +210,6 @@ pub async fn groups_of(pool: &Pool, peer_id: &str) -> anyhow::Result<Vec<Group>>
     .fetch_all(pool)
     .await?;
     Ok(rows)
-}
-
-// --- message reads ---------------------------------------------------------
-
-#[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
-pub struct GroupMessageRead {
-    pub message_id: i64,
-    pub peer_id: String,
-    pub read_at: i64,
 }
 
 pub async fn mark_read(pool: &Pool, message_id: i64, peer_id: &str) -> anyhow::Result<()> {

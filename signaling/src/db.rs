@@ -175,31 +175,6 @@ pub async fn delete_device(db: &Sdb, peer_id: &str) -> anyhow::Result<bool> {
 
 // --- B-mode (server-fanout group) -----------------------------------------
 
-pub async fn trim_group_messages(
-    db: &Sdb,
-    group_id: &str,
-    keep_window: u64,
-) -> anyhow::Result<u64> {
-    if keep_window == 0 {
-        return Ok(0);
-    }
-    let max_seq: i64 =
-        sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM group_messages WHERE group_id = ?1")
-            .bind(group_id)
-            .fetch_one(db)
-            .await?;
-    let floor = max_seq - keep_window as i64 + 1;
-    if floor <= 0 {
-        return Ok(0);
-    }
-    let n = sqlx::query("DELETE FROM group_messages WHERE group_id = ?1 AND seq < ?2")
-        .bind(group_id)
-        .bind(floor)
-        .execute(db)
-        .await?;
-    Ok(n.rows_affected() as u64)
-}
-
 pub async fn append_group_message(
     db: &Sdb,
     group_id: &str,
@@ -226,8 +201,7 @@ pub async fn append_group_message(
     .await?;
     // No retention window: the group inbox is the offline catch-up store, so
     // it must keep its full history — a member offline for a long time still
-    // gets every message they missed. (Use `trim_group_messages` manually to
-    // prune a group's inbox if/when an operator wants to reclaim space.)
+    // gets every message they missed.
     Ok(next as u64)
 }
 
@@ -1130,34 +1104,5 @@ mod tests {
         // Repeat kicks return false.
         assert!(!delete_group_key_slot(&db, gid, "Alice").await.unwrap());
         assert!(!delete_group_key_slot(&db, "ghost", "Alice").await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn inbox_trim_enforces_keep_window() {
-        let (_d, db) = tmp_db().await;
-        let gid = "grp-trim";
-
-        // Append 7 messages, then request keep_window=3. The oldest 4 go.
-        for i in 0..7u64 {
-            append_group_message(&db, gid, "owner", i, &format!("WIRE-{i}"))
-                .await
-                .unwrap();
-        }
-        assert_eq!(list_group_messages(&db, gid, 0).await.unwrap().len(), 7);
-
-        let removed = trim_group_messages(&db, gid, 3).await.unwrap();
-        assert_eq!(removed, 4, "keep 3 -> delete 4 oldest");
-
-        let kept = list_group_messages(&db, gid, 0).await.unwrap();
-        assert_eq!(kept.len(), 3);
-        assert_eq!(kept[0].wire, "WIRE-4", "oldest kept is WIRE-4");
-        assert_eq!(kept[2].wire, "WIRE-6", "newest kept is WIRE-6");
-
-        // Trimming to a window >= current row count is a no-op.
-        assert_eq!(trim_group_messages(&db, gid, 10).await.unwrap(), 0);
-        assert_eq!(list_group_messages(&db, gid, 0).await.unwrap().len(), 3);
-
-        // Trimming an unknown group is a no-op.
-        assert_eq!(trim_group_messages(&db, "ghost", 3).await.unwrap(), 0);
     }
 }

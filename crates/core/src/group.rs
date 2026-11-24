@@ -97,10 +97,6 @@ impl Group {
         self.members.get(peer_id)
     }
 
-    pub fn members(&self) -> impl Iterator<Item = &MemberInfo> {
-        self.members.values()
-    }
-
     pub fn member_ids(&self) -> Vec<String> {
         self.members.keys().cloned().collect()
     }

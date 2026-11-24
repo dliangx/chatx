@@ -473,8 +473,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
     ///
     /// Scope: only fires for DM peers (we have a DM conversation with this peer)
     /// AND only when we actually have a pending (undelivered) message to them.
-    /// This avoids fighting `disconnect_from_group` for offline group members —
-    /// group recovery is owned by the group tick loop / wake pump / §A
+    /// Group recovery is owned by the group tick loop / wake pump / §A
     /// escalation, none of which care about pending DMs.
     ///
     /// Bounded by the DM dial-backoff ([`Self::dm_reconnect_suppressed`]) so a
@@ -498,8 +497,7 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
         // Only reconnect a DM partner that actually has pending messages. This
         // is the user-visible "message stuck" case; it also naturally excludes
-        // pure group members (no DM) from fighting an explicit
-        // `disconnect_from_group`.
+        // pure group members (no DM).
         let Some(pool) = self.store.pool() else {
             return;
         };
@@ -1497,46 +1495,6 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             .copied()
             .unwrap_or(0)
             > 0
-    }
-
-    pub fn disconnect_from_group(&self, group_id: &str) {
-        let g = match self.get_group(group_id) {
-            Some(g) => g,
-            None => return,
-        };
-        let me = self.peer_base58();
-        let mut n = 0usize;
-        for pid_b58 in g.member_ids() {
-            if pid_b58 == me {
-                continue;
-            }
-            let Ok(pid) = pid_b58.parse::<PeerId>() else {
-                continue;
-            };
-            let is_conn = self
-                .running
-                .connected
-                .lock()
-                .unwrap()
-                .get(&pid)
-                .copied()
-                .unwrap_or(0)
-                > 0;
-            if !is_conn {
-                continue;
-            }
-            if self
-                .running
-                .cmd_tx
-                .send(Cmd::Disconnect { peer: pid })
-                .is_ok()
-            {
-                n += 1;
-            }
-        }
-        if n > 0 {
-            tracing::debug!("[group] disconnect {group_id}: closed {n} peers");
-        }
     }
 
     fn dial_suppressed(&self, peer: &str) -> bool {

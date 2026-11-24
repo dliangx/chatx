@@ -202,35 +202,6 @@ pub async fn friends_with_profile(
     Ok(rows)
 }
 
-/// Group roster with role + optional user profile, ordered by role then name.
-#[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
-pub struct GroupRosterEntry {
-    pub peer_id: String,
-    pub role: i64,
-    pub nickname: Option<String>,
-    pub group_nickname: Option<String>,
-    pub joined_at: i64,
-    pub username: Option<String>,
-    pub avatar_path: Option<String>,
-}
-
-pub async fn group_roster(pool: &Pool, group_id: i64) -> anyhow::Result<Vec<GroupRosterEntry>> {
-    let rows = sqlx::query_as::<_, GroupRosterEntry>(
-        "SELECT
-            gm.peer_id, gm.role, gm.nickname, gm.group_nickname, gm.joined_at,
-            u.username,
-            COALESCE(u.avatar_path, gm.avatar_path) AS avatar_path
-         FROM group_members gm
-         LEFT JOIN users u ON u.id = gm.peer_id
-         WHERE gm.group_id = ?1
-         ORDER BY gm.role DESC, COALESCE(gm.nickname, u.nickname, u.username, gm.peer_id)",
-    )
-    .bind(group_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows)
-}
-
 /// Feed item joined with author profile and the viewer's like state.
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
 pub struct FeedItem {
@@ -495,14 +466,6 @@ pub async fn search_messages(
             (!text.trim().is_empty()).then_some(MessageSearchHit { chat_id, text, ts })
         })
         .collect())
-}
-
-/// Convenience: everything a UI needs to render "who is online in this group".
-pub async fn group_online_snapshot(
-    pool: &Pool,
-    group_id: i64,
-) -> anyhow::Result<Vec<GroupRosterEntry>> {
-    group_roster(pool, group_id).await
 }
 
 #[cfg(test)]
