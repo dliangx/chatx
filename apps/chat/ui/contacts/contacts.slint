@@ -297,16 +297,6 @@ export component ContactListView inherits Rectangle {
             (-fk.content-y >= root.letters[j].target * root.row-h) &&
             (j == root.letters.length - 1 || -fk.content-y < root.letters[j + 1].target * root.row-h);
 
-        Rectangle {
-            visible: AppState.is-mobile && parent.active;
-            x: 0px;
-            y: 0px;
-            width: parent.width;
-            height: parent.width;
-            background: Theme.brand;
-            border-radius: parent.width / 2;
-        }
-
         Text {
             x: 0px;
             y: 0px;
