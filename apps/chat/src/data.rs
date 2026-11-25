@@ -110,6 +110,17 @@ pub struct DiscoverRow {
     pub liked: bool,
     pub recommends: i64,
     pub recommended: bool,
+    /// Comment count (denormalised from `social_posts.comment_count`). Kept in
+    /// sync with the DB on load / comment / reconcile so the feed card and the
+    /// detail page never disagree.
+    pub comments: i64,
+    /// If this post was synced from a friend, the base58 peer id of the
+    /// canonical owner (the publisher's device). Used to route a viewer's
+    /// like/comment back to the post's author (B path). `None` when unknown.
+    pub source_peer_id: Option<String>,
+    /// The post's immutable cross-device identity (the publisher's `post_uid`).
+    /// The key a `React` op resolves on. `0` when unknown.
+    pub post_uid: i64,
     /// First media file path (cover) for the discover card. Empty when the
     /// post has no media.
     pub cover: String,
@@ -617,6 +628,9 @@ pub async fn load(pool: &SqlitePool, me: &str) -> anyhow::Result<(DataBackend, S
             liked: p.i_liked,
             recommends: p.recommend_count,
             recommended: p.i_recommended,
+            comments: p.comment_count,
+            source_peer_id: p.source_peer_id,
+            post_uid: p.post_uid,
             cover: first_preview_or_media(&p.preview_urls, &p.media_urls),
         });
     }
@@ -1065,6 +1079,9 @@ mod tests {
             liked: false,
             recommends: 0,
             recommended: false,
+            comments: 0,
+            source_peer_id: None,
+            post_uid: 0,
             cover: String::new(),
         });
         let (liked, likes) = b.toggle_like(key);

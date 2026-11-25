@@ -26,6 +26,15 @@ struct SyncedNode {
     previews: Vec<String>,
     media: Vec<String>,
     post_id: i64,
+    /// Wire-carried denormalized counters (authoritative from the sender).
+    likes: i64,
+    recommends: i64,
+    comments: i64,
+    /// The post's canonical owner peer (from the wire; the publisher's device).
+    /// Used to route a viewer's like/comment back to the owner (B path).
+    owner_peer: String,
+    /// The post's immutable cross-device identity (the wire's `post_uid`).
+    post_uid: i64,
 }
 
 static ROUND_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -59,6 +68,35 @@ pub fn start_timer(weak: Weak<MainWindow>) {
             trigger_round(weak.clone());
         }
     });
+}
+
+/// Apply the wire-carried reactions (likers, recommenders, comments) of a
+/// pulled post to the local DB. Maps the core wire entries (username-keyed)
+/// to the sqlite tuple form and upserts them. Returns `true` when any new
+/// reaction/comment landed locally — the caller uses that to decide whether
+/// to re-publish the feed views.
+async fn apply_post_reactions(
+    pool: &sqlx::SqlitePool,
+    post_id: i64,
+    meta: &PostMeta,
+) -> anyhow::Result<bool> {
+    let likers: Vec<(String, Option<String>)> =
+        meta.likers.iter().map(|l| (l.username.clone(), l.nickname.clone())).collect();
+    let recommenders: Vec<(String, Option<String>)> = meta
+        .recommenders
+        .iter()
+        .map(|r| (r.username.clone(), r.nickname.clone()))
+        .collect();
+    let comments: Vec<(String, Option<String>, String, i64)> = meta
+        .comments
+        .iter()
+        .map(|c| (c.username.clone(), c.nickname.clone(), c.content.clone(), c.created_at))
+        .collect();
+
+    let any_like = sqlite::social_feed::apply_incoming_likers(pool, post_id, &likers).await?;
+    let any_rec = sqlite::social_feed::apply_incoming_recommenders(pool, post_id, &recommenders).await?;
+    let any_cmt = sqlite::social_feed::apply_incoming_comments(pool, post_id, &comments).await?;
+    Ok(any_like || any_rec || any_cmt)
 }
 
 /// One sync round.
@@ -190,16 +228,54 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or(f.display.as_str());
 
-            if sqlite::social_feed::has_synced_post(
+            // If we already have this post, check whether its denormalized
+            // counters (like / recommend / comment) have changed on the sender
+            // side and, if so, overwrite them locally. This is the path that
+            // keeps B (like/recommend counts) and C (comment count) in sync
+            // across clients — the wire carries the sender's current counts,
+            // so a re-pull after a friend's `add_post_comment` /
+            // `toggle_detail_like` refreshes the receiver's local copy without
+            // re-fetching media or re-inserting the row.
+            let existing = sqlite::social_feed::get_post_by_identity(
                 &pool,
                 f.local_users_id,
                 user_name,
                 meta.content.as_deref(),
-                meta.timestamp,
             )
             .await
-            .unwrap_or(false)
-            {
+            .ok()
+            .flatten();
+            if let Some(existing) = existing {
+                // Apply any likers / recommenders / comments that arrived with
+                // this re-pull (idempotent upserts; safe if already present).
+                let any_new_reactions =
+                    apply_post_reactions(&pool, existing.id, meta).await.unwrap_or(false);
+                let dirty = existing.like_count != meta.like_count
+                    || existing.recommend_count != meta.recommend_count
+                    || existing.comment_count != meta.comment_count
+                    || any_new_reactions;
+                if dirty {
+                    if let Err(e) = sqlite::social_feed::set_counts(
+                        &pool,
+                        existing.id,
+                        meta.like_count,
+                        meta.recommend_count,
+                        meta.comment_count,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            "[moment] set_counts for post id={} failed: {e}",
+                            existing.id
+                        );
+                    }
+                    // Refresh the in-memory feed row so the discover card
+                    // reflects the new counts without a re-enter.
+                    if let Some(ui) = weak.upgrade() {
+                        let state = ui.global::<AppState>();
+                        crate::publish_to_views(&state, backend.clone());
+                    }
+                }
                 continue;
             }
             // Per-post media folder (timestamp-suffixed) so different posts
@@ -244,6 +320,34 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
                 }
             };
 
+            // Rebuild the local reaction tables (likers / recommenders /
+            // comments) for this freshly-created post.
+            if let Err(e) = apply_post_reactions(&pool, created.id, meta).await {
+                tracing::warn!("[moment] apply_post_reactions for post id={} failed: {e}", created.id);
+            }
+            // Preserve the post's immutable cross-device identity (the wire's
+            // `post_uid`) so a later `React` resolves to the same post on every
+            // device. Fall back to minting one if this row predates the feature.
+            if meta.post_uid != 0 {
+                if let Err(e) = sqlite::social_feed::set_post_uid(&pool, created.id, meta.post_uid).await {
+                    tracing::warn!("[moment] set_post_uid for post id={} failed: {e}", created.id);
+                }
+            } else {
+                let uid = sqlite::new_id();
+                let _ = sqlite::social_feed::set_post_uid(&pool, created.id, uid).await;
+            }
+            // Record the canonical owner peer. Prefer the wire's `owner_peer`
+            // (the publisher's device); fall back to the peer we pulled from
+            // when the sender is pre-feature.
+            let owner_peer = if meta.owner_peer.is_empty() {
+                peer_id.clone()
+            } else {
+                meta.owner_peer.clone()
+            };
+            if let Err(e) = sqlite::social_feed::set_source_peer(&pool, created.id, &owner_peer).await {
+                tracing::warn!("[moment] set_source_peer for post id={} failed: {e}", created.id);
+            }
+
             let media: Vec<String> = serde_json::from_str(&media_json).unwrap_or_default();
             let previews: Vec<String> = serde_json::from_str(&preview_json).unwrap_or_default();
             nodes.push(SyncedNode {
@@ -252,6 +356,11 @@ async fn run_round(weak: Weak<MainWindow>) -> anyhow::Result<()> {
                 media,
                 previews,
                 post_id: created.id,
+                likes: meta.like_count,
+                recommends: meta.recommend_count,
+                comments: meta.comment_count,
+                owner_peer,
+                post_uid: meta.post_uid,
             });
         }
         sqlite::moment_sync::upsert(&pool, &peer_id, friend_newest).await?;
@@ -330,10 +439,13 @@ async fn push_nodes_to_ui(
             post_id: n.post_id,
             title: n.content,
             author: n.author,
-            likes: 0,
+            likes: n.likes,
             liked: false,
-            recommends: 0,
+            recommends: n.recommends,
             recommended: false,
+            comments: n.comments,
+            source_peer_id: Some(n.owner_peer),
+            post_uid: n.post_uid,
             cover,
         });
     }

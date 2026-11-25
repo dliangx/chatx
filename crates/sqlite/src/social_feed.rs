@@ -19,6 +19,18 @@ pub struct SocialPost {
     /// `users` row.
     #[sqlx(default)]
     pub user_name: Option<String>,
+    /// The base58 peer id of the canonical source (the publisher's device).
+    /// Set at publish (own peer) and preserved on pull (the wire's value), so
+    /// a viewer who pulled the post from an intermediate still dials the
+    /// publisher directly for a `React`. NULL for pre-feature rows / local
+    /// posts created before the publisher stamped it.
+    #[sqlx(default)]
+    pub source_peer_id: Option<String>,
+    /// Stable cross-device identity (random 63-bit), minted once by the
+    /// publisher and carried on the wire. Identical on every device holding
+    /// the post — the immutable key the `React` op resolves on.
+    #[sqlx(default)]
+    pub post_uid: Option<i64>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
@@ -85,6 +97,26 @@ pub async fn has_post_by_author_ts(pool: &Pool, author_id: i64, ts: i64) -> anyh
             .fetch_optional(pool)
             .await?;
     Ok(row.is_some())
+}
+
+/// Find a local post by its wire identity (`author_id`, `user_name`,
+/// `content`). Used by the receiver to locate an existing post whose
+/// denormalized counters may have changed on the sender side.
+pub async fn get_post_by_identity(
+    pool: &Pool,
+    author_id: i64,
+    user_name: &str,
+    content: Option<&str>,
+) -> anyhow::Result<Option<SocialPost>> {
+    let row = sqlx::query_as::<_, SocialPost>(
+        "SELECT * FROM social_posts WHERE author_id = ?1 AND (user_name IS ?2) AND (content IS ?3) ORDER BY timestamp DESC LIMIT 1",
+    )
+    .bind(author_id)
+    .bind(Some(user_name))
+    .bind(content)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
 }
 
 pub async fn has_synced_post(
@@ -236,6 +268,208 @@ pub async fn likers(pool: &Pool, post_id: i64) -> anyhow::Result<Vec<i64>> {
     Ok(rows.into_iter().map(|(u,)| u).collect())
 }
 
+/// Liker identities (username + optional nickname) for a post. Used by the
+/// wire-serve path to ship the full likers list to a friend's client — the
+/// receiver resolves each username to its own local `users.id`.
+#[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
+pub struct ActorWithProfile {
+    pub username: String,
+    pub nickname: Option<String>,
+}
+
+pub async fn likers_with_profile(pool: &Pool, post_id: i64) -> anyhow::Result<Vec<ActorWithProfile>> {
+    let rows: Vec<ActorWithProfile> = sqlx::query_as(
+        "SELECT COALESCE(u.username, '') AS username, u.nickname
+           FROM social_likes l JOIN users u ON u.id = l.user_id
+          WHERE l.post_id = ?1
+          ORDER BY l.created_at",
+    )
+    .bind(post_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().filter(|r| !r.username.is_empty()).collect())
+}
+
+pub async fn recommenders_with_profile(pool: &Pool, post_id: i64) -> anyhow::Result<Vec<ActorWithProfile>> {
+    let rows: Vec<ActorWithProfile> = sqlx::query_as(
+        "SELECT COALESCE(u.username, '') AS username, u.nickname
+           FROM social_recommends r JOIN users u ON u.id = r.user_id
+          WHERE r.post_id = ?1
+          ORDER BY r.created_at",
+    )
+    .bind(post_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().filter(|r| !r.username.is_empty()).collect())
+}
+
+/// Comment rows (with commenter identity + body + timestamp) for a post.
+/// Wire transport: the receiver uses `username` to resolve (or stub-create)
+/// a local `users` row, then upserts the comment into `social_comments`.
+#[derive(Debug, Clone, FromRow, serde::Serialize, serde::Deserialize)]
+pub struct CommentRowWithAuthor {
+    pub id: i64,
+    pub post_id: i64,
+    pub username: String,
+    pub nickname: Option<String>,
+    pub content: String,
+    pub reply_to: Option<i64>,
+    pub created_at: i64,
+}
+
+pub async fn comments_with_profile(pool: &Pool, post_id: i64) -> anyhow::Result<Vec<CommentRowWithAuthor>> {
+    let rows: Vec<CommentRowWithAuthor> = sqlx::query_as(
+        "SELECT sc.id, sc.post_id,
+                COALESCE(u.username, '') AS username, u.nickname,
+                sc.content, sc.reply_to, sc.created_at
+           FROM social_comments sc
+           LEFT JOIN users u ON u.id = sc.author_id
+          WHERE sc.post_id = ?1
+          ORDER BY sc.created_at",
+    )
+    .bind(post_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().filter(|r| !r.username.is_empty()).collect())
+}
+
+/// Apply a batch of incoming likers (from the wire) to local `social_likes`
+/// rows. Returns `true` if any row was newly inserted.
+pub async fn apply_incoming_likers(
+    pool: &Pool,
+    post_id: i64,
+    actors: &[(String, Option<String>)],
+) -> anyhow::Result<bool> {
+    let mut any_new = false;
+    for (username, nickname) in actors {
+        let author_id = resolve_or_stub_user(pool, username, nickname.as_deref()).await?;
+        let n = sqlx::query(
+            "INSERT OR IGNORE INTO social_likes (post_id, user_id, created_at) VALUES (?1, ?2, ?3)",
+        )
+        .bind(post_id)
+        .bind(author_id)
+        .bind(crate::now_ms())
+        .execute(pool)
+        .await?;
+        if n.rows_affected() > 0 {
+            bump_like_count(pool, post_id, 1).await?;
+            any_new = true;
+        }
+    }
+    Ok(any_new)
+}
+
+pub async fn apply_incoming_recommenders(
+    pool: &Pool,
+    post_id: i64,
+    actors: &[(String, Option<String>)],
+) -> anyhow::Result<bool> {
+    let mut any_new = false;
+    for (username, nickname) in actors {
+        let author_id = resolve_or_stub_user(pool, username, nickname.as_deref()).await?;
+        let n = sqlx::query(
+            "INSERT OR IGNORE INTO social_recommends (post_id, user_id, created_at) VALUES (?1, ?2, ?3)",
+        )
+        .bind(post_id)
+        .bind(author_id)
+        .bind(crate::now_ms())
+        .execute(pool)
+        .await?;
+        if n.rows_affected() > 0 {
+            bump_recommend_count(pool, post_id, 1).await?;
+            any_new = true;
+        }
+    }
+    Ok(any_new)
+}
+
+/// Apply a batch of incoming comments (from the wire) to local
+/// `social_comments` rows. Returns `true` if any row was newly inserted.
+pub async fn apply_incoming_comments(
+    pool: &Pool,
+    post_id: i64,
+    comments: &[(String, Option<String>, String, i64)],
+) -> anyhow::Result<bool> {
+    let mut any_new = false;
+    for (username, nickname, content, created_at) in comments {
+        let (_, inserted) = upsert_incoming_comment(
+            pool,
+            post_id,
+            username,
+            nickname.as_deref(),
+            content,
+            *created_at,
+        )
+        .await?;
+        if inserted {
+            any_new = true;
+        }
+    }
+    Ok(any_new)
+}
+
+/// Resolve a username to a local `users.id`, creating a stub row if the user
+/// is unknown locally. This keeps `post_comments` joins working and lets us
+/// re-resolve later when the real profile syncs in.
+async fn resolve_or_stub_user(
+    pool: &Pool,
+    username: &str,
+    nickname: Option<&str>,
+) -> anyhow::Result<i64> {
+    if let Some(u) = crate::users::get_by_username(pool, username).await? {
+        return Ok(u.id);
+    }
+    let id = crate::new_id();
+    let patch = crate::users::UserPatch {
+        username: Some(username.to_string()),
+        nickname: nickname.map(|s| s.to_string()),
+        ..Default::default()
+    };
+    crate::users::upsert(pool, id, &patch).await?;
+    Ok(id)
+}
+
+/// Upsert a single incoming comment from the wire. Resolves the commenter's
+/// `username` to a local `users.id` (creating a stub row if necessary) and
+/// then upserts the comment by `(post_id, content, created_at)`.
+/// Returns `(local_id, inserted)` — `inserted` is false when an equivalent
+/// row already existed locally.
+pub async fn upsert_incoming_comment(
+    pool: &Pool,
+    post_id: i64,
+    username: &str,
+    nickname: Option<&str>,
+    content: &str,
+    created_at: i64,
+) -> anyhow::Result<(i64, bool)> {
+    let author_id = resolve_or_stub_user(pool, username, nickname).await?;
+    let existing: Option<(i64,)> = sqlx::query_as(
+        "SELECT id FROM social_comments WHERE post_id = ?1 AND content = ?2 AND created_at = ?3",
+    )
+    .bind(post_id)
+    .bind(content)
+    .bind(created_at)
+    .fetch_optional(pool)
+    .await?;
+    if let Some((id,)) = existing {
+        return Ok((id, false));
+    }
+    let id = crate::new_id();
+    sqlx::query(
+        "INSERT INTO social_comments (id, post_id, author_id, content, reply_to, created_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+    )
+    .bind(id)
+    .bind(post_id)
+    .bind(author_id)
+    .bind(content)
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+    bump_comment_count(pool, post_id, 1).await?;
+    Ok((id, true))
+}
+
 // --- recommends -----------------------------------------------------------
 
 pub async fn bump_recommend_count(pool: &Pool, post_id: i64, delta: i64) -> anyhow::Result<()> {
@@ -249,6 +483,22 @@ pub async fn bump_recommend_count(pool: &Pool, post_id: i64, delta: i64) -> anyh
     Ok(())
 }
 
+/// Overwrite the three denormalized counters with the authoritative values
+/// received over the wire (used when a re-pulled post already exists locally
+/// and its counts have changed on the sender side).
+pub async fn set_counts(pool: &Pool, post_id: i64, like: i64, recommend: i64, comment: i64) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE social_posts SET like_count = ?2, recommend_count = ?3, comment_count = ?4 WHERE id = ?1",
+    )
+    .bind(post_id)
+    .bind(like.max(0))
+    .bind(recommend.max(0))
+    .bind(comment.max(0))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn set_timestamp(pool: &Pool, post_id: i64, ts: i64) -> anyhow::Result<()> {
     sqlx::query("UPDATE social_posts SET timestamp = ?2 WHERE id = ?1")
         .bind(post_id)
@@ -256,6 +506,64 @@ pub async fn set_timestamp(pool: &Pool, post_id: i64, ts: i64) -> anyhow::Result
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Record which device this synced post came from, so a viewer's
+/// like/comment can later be routed back to the post's canonical owner.
+pub async fn set_source_peer(pool: &Pool, post_id: i64, peer: &str) -> anyhow::Result<()> {
+    sqlx::query("UPDATE social_posts SET source_peer_id = ?2 WHERE id = ?1")
+        .bind(post_id)
+        .bind(peer)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Stamp the post's immutable cross-device identity (`post_uid`). The
+/// publisher mints one at publish time; the receiver copies the wire's value
+/// onto the row it creates so it matches on every device.
+pub async fn set_post_uid(pool: &Pool, post_id: i64, uid: i64) -> anyhow::Result<()> {
+    sqlx::query("UPDATE social_posts SET post_uid = ?2 WHERE id = ?1")
+        .bind(post_id)
+        .bind(uid)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Look up a post by its immutable cross-device identity (see `set_post_uid`).
+pub async fn get_post_by_uid(pool: &Pool, uid: i64) -> anyhow::Result<Option<SocialPost>> {
+    let row = sqlx::query_as::<_, SocialPost>("SELECT * FROM social_posts WHERE post_uid = ?1")
+        .bind(uid)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row)
+}
+
+/// Trust check for the `React` path: returns `true` when the peer id
+/// (base58) of the device dialing in matches any device row of a user that
+/// has an active friendship with `owner_user_id`. This prevents a non-friend
+/// (or a stranger) from pushing fabricated reactions onto a friend's post.
+pub async fn requester_is_friend_of(
+    pool: &Pool,
+    owner_user_id: i64,
+    requester_peer_id: &str,
+) -> anyhow::Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM friendships f
+           JOIN devices d ON d.user_id = f.user_low
+          WHERE f.user_high = ?1 AND d.peer_id = ?2
+          UNION ALL
+          SELECT 1 FROM friendships f
+           JOIN devices d ON d.user_id = f.user_high
+          WHERE f.user_low = ?1 AND d.peer_id = ?2
+          LIMIT 1",
+    )
+    .bind(owner_user_id)
+    .bind(requester_peer_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
 }
 
 pub async fn recommend(pool: &Pool, post_id: i64, user_id: i64) -> anyhow::Result<bool> {

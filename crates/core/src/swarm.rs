@@ -1861,12 +1861,15 @@ async fn swarm_loop(
                     //  * Inbound response: we are the syncing client; resolve
                     //    the matching waiter in `pending_blobs`.
                     NetEvent::Blob(b) => match b {
-                        RrEvent::Message { message, .. } => match message {
+                        RrEvent::Message { peer, message, .. } => match message {
                             RrMessage::Request { request, channel, .. } => {
                                 let req_id = request.id;
                                 let pool = running.pool.clone();
+                                // Identify the dialing device for the React
+                                // trust check (List/Image ops ignore it).
+                                let requester = peer.to_base58();
                                 let payload =
-                                    match crate::moment::serve(request, pool).await {
+                                    match crate::moment::serve(request, pool, &requester).await {
                                         Ok(p) => p,
                                         Err(e) => {
                                             tracing::warn!("[swarm] SERVE FAIL id={req_id}: {e}");

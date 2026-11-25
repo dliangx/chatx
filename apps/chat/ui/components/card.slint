@@ -8,6 +8,7 @@ export component CardView inherits Rectangle {
     in property <string> user;
     in property <bool> is-liked;
     in property <bool> is-recommended;
+    in property <int> comments: 0;
     callback clicked(int);
     callback like-toggled();
     callback recommend-toggled();
@@ -32,6 +33,37 @@ export component CardView inherits Rectangle {
                 height: root.cover-h;
                 source: root.image;
                 image-fit: contain;
+            }
+
+            // Comment-count badge (bottom-left of the cover), shown only when
+            // the post has comments.
+            if root.comments > 0:
+            Rectangle {
+                x: 6px;
+                y: root.cover-h - 26px;
+                width: 16px + (root.comments >= 100 ? 28px : root.comments >= 10 ? 20px : 12px);
+                height: 20px;
+                border-radius: 10px;
+                background: #cc000000;
+
+                Icon {
+                    x: 4px;
+                    y: 2px;
+                    size: 16px;
+                    glyph: Glyph.chat;
+                    tint: white;
+                }
+
+                Text {
+                    x: 22px;
+                    y: 0px;
+                    width: parent.width - 22px;
+                    height: 100%;
+                    text: root.comments;
+                    font-size: 12px;
+                    color: white;
+                    vertical-alignment: center;
+                }
             }
 
             TouchArea {

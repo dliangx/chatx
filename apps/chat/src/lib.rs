@@ -3160,6 +3160,14 @@ fn apply_result(
             // fires a sync round; if nothing has changed it returns quickly.
             moment::start_timer(weak.clone());
 
+            // Register the React handler (B path): when a friend reacts to a
+            // post WE own, the core `serve()` calls this so we (1) re-broadcast
+            // to our own friends and (2) refresh the feed views. OnceLock-guarded
+            // — first login wins; a re-login reuses the existing handler.
+            if !chatx_core::moment::set_react_handler(react_handler(weak.clone())) {
+                tracing::debug!("[moment] react handler already registered; reusing");
+            }
+
             // One-time media repair (idempotent): rewrite any post image we
             // pulled from a friend *before* container sniffing — WebP
             // content stored under a `.jpg` name — into a decodable JPEG.
@@ -5086,6 +5094,7 @@ fn publish_discover(state: &AppState, backend: &ArcBackend) {
             liked: r.liked,
             recommends: r.recommends as i32,
             recommended: r.recommended,
+            comments: r.comments as i32,
             image: load_image_cached(&r.cover),
         })
         .collect();
@@ -6117,8 +6126,19 @@ fn toggle_discover_like(weak: slint::Weak<MainWindow>, key: i32) {
     }
     if let Some(post_id) = post_id {
         let rt = runtime();
+        let me_username = me.clone();
         rt.spawn(async move {
             let _ = data::persist_like_toggle(&pool, &me, post_id, want_liked).await;
+            if want_liked {
+                // Re-share so my friends see the updated post.
+                bump_ts_and_notify(post_id).await;
+                // B path: push my like back to the post's canonical owner.
+                push_reaction_to_owner(
+                    key,
+                    chatx_core::moment::ReactionWire::Like { username: me_username },
+                )
+                .await;
+            }
         });
     }
 }
@@ -6140,6 +6160,7 @@ fn toggle_discover_recommend(weak: slint::Weak<MainWindow>, key: i32) {
     }
     if let Some(post_id) = post_id {
         let rt = runtime();
+        let me_username = me.clone();
         rt.spawn(async move {
             let _ = data::persist_recommend_toggle(&pool, &me, post_id, want_recommended).await;
             // Propagate to my friends: bump the local copy's `timestamp` so it
@@ -6147,7 +6168,17 @@ fn toggle_discover_recommend(weak: slint::Weak<MainWindow>, key: i32) {
             // signal server under *my* peer/user. My friends' next sync round
             // will see the pointer, dial me, and pull the post over the binary
             // moment channel (existing friend-only path — no wire change).
-            propagate_recommend(&pool, post_id, want_recommended).await;
+            propagate_recommend(post_id, want_recommended).await;
+            // B path: push my recommend back to the post's canonical owner.
+            if want_recommended {
+                push_reaction_to_owner(
+                    key,
+                    chatx_core::moment::ReactionWire::Recommend {
+                        username: me_username,
+                    },
+                )
+                .await;
+            }
         });
     }
 }
@@ -6155,14 +6186,15 @@ fn toggle_discover_recommend(weak: slint::Weak<MainWindow>, key: i32) {
 /// Bump `social_posts.timestamp` for `post_id` to now (so any syncing friend
 /// whose cursor is behind us will pick the row up on its next round), then
 /// notify the signal server under the current device's (user_id, peer_id).
-/// No-op when `want_recommended` is false — we only (re-)share on the way up.
-async fn propagate_recommend(pool: &sqlx::SqlitePool, post_id: i64, want_recommended: bool) {
-    if !want_recommended {
-        return;
-    }
+/// Shared by every "re-share this post" event: recommend (way-up), new comment,
+/// like (way-up). Fire-and-forget — a server-side failure must not roll back
+/// the local action.
+async fn bump_ts_and_notify(post_id: i64) {
+    let pool = crate::POOL.lock().unwrap().clone();
+    let Some(pool) = pool else { return };
     let new_ts = sqlite::now_ms();
-    if let Err(e) = sqlite::social_feed::set_timestamp(pool, post_id, new_ts).await {
-        tracing::warn!("[moment] recommend-bump set_timestamp failed for {post_id}: {e}");
+    if let Err(e) = sqlite::social_feed::set_timestamp(&pool, post_id, new_ts).await {
+        tracing::warn!("[moment] set_timestamp failed for {post_id}: {e}");
         return;
     }
     let client = crate::CLIENT.lock().unwrap().clone();
@@ -6170,15 +6202,66 @@ async fn propagate_recommend(pool: &sqlx::SqlitePool, post_id: i64, want_recomme
         let my_peer = client.peer_base58().to_string();
         let my_user = client.user_id().to_string();
         if let Err(e) = client.dir().notify_post(&my_user, &my_peer, new_ts) {
-            tracing::warn!(
-                "[moment] recommend-bump notify_post failed: {e} (user={my_user}, peer={my_peer}, ts={new_ts})"
-            );
+            tracing::warn!("[moment] notify_post failed: {e} (user={my_user}, peer={my_peer}, ts={new_ts})");
             return;
         }
-        tracing::debug!(
-            "[moment] recommend-bump notify -> server: user={my_user} peer={my_peer} ts={new_ts}"
-        );
+        tracing::debug!("[moment] notify -> server: user={my_user} peer={my_peer} ts={new_ts}");
     }
+}
+
+/// No-op when `want_recommended` is false — we only (re-)share on the way up.
+async fn propagate_recommend(post_id: i64, want_recommended: bool) {
+    if !want_recommended {
+        return;
+    }
+    bump_ts_and_notify(post_id).await;
+}
+
+/// B path: push a viewer reaction (like / recommend / comment) back to the
+/// post's canonical owner so it's aggregated into their canonical copy.
+/// `key` is the local UI key of the post; the owner peer + immutable `post_uid`
+/// are read from the in-memory row. Early-returns (no-op) when the post is
+/// locally created (I'm the owner), the owner is unknown, or the owner is me.
+async fn push_reaction_to_owner(key: i32, reaction: chatx_core::moment::ReactionWire) {
+    let backend = BACKEND.lock().unwrap().clone();
+    let Some(backend) = backend else { return };
+    let (owner_peer, post_uid) = {
+        let g = backend.blocking_read();
+        match g.discover.iter().find(|r| r.key == key) {
+            Some(r) => (r.source_peer_id.clone(), r.post_uid),
+            None => return,
+        }
+    };
+    let Some(owner_peer) = owner_peer.filter(|p| !p.is_empty()) else { return };
+    if post_uid == 0 {
+        return;
+    }
+    let Some(client) = crate::CLIENT.lock().unwrap().clone() else { return };
+    if client.peer_base58() == owner_peer {
+        return; // I'm the canonical owner — nothing to push back.
+    }
+    let _ = client.request_post_react(&owner_peer, post_uid, reaction).await;
+}
+
+/// Build the core-layer React handler. Invoked from `chatx_core::moment` when
+/// a friend's reaction (like / recommend / comment) is applied to a post we
+/// own: re-broadcast to our friends (bump ts + notify the signal server) and
+/// refresh the feed views so the counts/badges update in place.
+fn react_handler(weak: slint::Weak<MainWindow>) -> chatx_core::moment::ReactHandler {
+    use std::future::Future;
+    use std::pin::Pin;
+    Arc::new(move |post_id: i64, _username: &str| -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let weak2 = weak.clone();
+        Box::pin(async move {
+            bump_ts_and_notify(post_id).await;
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak2.upgrade() else { return };
+                let Some(backend) = BACKEND.lock().unwrap().clone() else { return };
+                let state = ui.global::<AppState>();
+                publish_to_views(&state, backend);
+            });
+        })
+    })
 }
 
 fn layout_my_notes(notes: &[data::NoteRowData]) -> Vec<NoteRow> {
@@ -6784,6 +6867,19 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
                 return;
             }
         };
+        // Mint the post's immutable cross-device identity and record the
+        // canonical owner (our own device) so viewers can later dial us back
+        // for a `React`. Both are carried on the wire to every friend.
+        let post_uid = sqlite::new_id();
+        let my_peer = crate::CLIENT.lock().unwrap().as_ref().map(|c| c.peer_base58().to_string());
+        if let Err(e) = sqlite::social_feed::set_post_uid(&pool, created.id, post_uid).await {
+            tracing::warn!("[moment] set_post_uid on publish failed: {e}");
+        }
+        if let Some(peer) = &my_peer {
+            if let Err(e) = sqlite::social_feed::set_source_peer(&pool, created.id, peer).await {
+                tracing::warn!("[moment] set_source_peer on publish failed: {e}");
+            }
+        }
         // Fire-and-forget notification to the signal server so friends can
         // learn about this new post (and sync it from us over the binary
         // moment channel). Failure here does NOT roll back the local publish.
@@ -6823,6 +6919,9 @@ fn publish_moment(weak: slint::Weak<MainWindow>) {
                     liked: false,
                     recommends: 0,
                     recommended: false,
+                    comments: 0,
+                    source_peer_id: None, // locally created — I'm the owner
+                    post_uid,
                     cover,
                 };
                 g.discover.insert(0, row);
@@ -8223,6 +8322,7 @@ fn publish_discover_searched(state: &AppState, rows: &[data::DiscoverRow]) {
             liked: r.liked,
             recommends: r.recommends as i32,
             recommended: r.recommended,
+            comments: r.comments as i32,
             image: load_image_cached(&r.cover),
         })
         .collect();
@@ -10568,8 +10668,21 @@ fn toggle_detail_like(weak: slint::Weak<MainWindow>, key: i32) {
     if let Some(post_id) = post_id {
         let rt = runtime();
         let me = current_me();
+        let me_username = me.clone();
         rt.spawn(async move {
             let _ = data::persist_like_toggle(&pool, &me, post_id, want_liked).await;
+            if want_liked {
+                // Re-share so my friends see the updated post.
+                bump_ts_and_notify(post_id).await;
+                // B path: push my like back to the post's canonical owner so it
+                // is aggregated into their canonical copy.
+                push_reaction_to_owner(
+                    key,
+                    chatx_core::moment::ReactionWire::Like { username: me_username },
+                )
+                .await;
+            }
+            reconcile_post_counts(weak, key, post_id);
         });
     }
 }
@@ -10600,11 +10713,82 @@ fn toggle_detail_recommend(weak: slint::Weak<MainWindow>, key: i32) {
     if let Some(post_id) = post_id {
         let rt = runtime();
         let me = current_me();
+        let me_username = me.clone();
         rt.spawn(async move {
             let _ = data::persist_recommend_toggle(&pool, &me, post_id, want_recommended).await;
-            propagate_recommend(&pool, post_id, want_recommended).await;
+            propagate_recommend(post_id, want_recommended).await;
+            // B path: push my recommend back to the post's canonical owner.
+            if want_recommended {
+                push_reaction_to_owner(
+                    key,
+                    chatx_core::moment::ReactionWire::Recommend {
+                        username: me_username,
+                    },
+                )
+                .await;
+            }
+            reconcile_post_counts(weak, key, post_id);
         });
     }
+}
+
+/// Make the detail page + in-memory feed row reflect the **authoritative DB**
+/// counts after a like/recommend toggle has been persisted. Previously the
+/// display value came from the in-memory `row.likes` (a local ±1) while first
+/// load read the DB column — so the two sources could disagree (e.g. toggled in
+/// the feed, then opened the detail before the write landed). After persist we
+/// treat the DB as the single source of truth and re-publish both views from it.
+fn reconcile_post_counts(weak: slint::Weak<MainWindow>, key: i32, post_id: i64) {
+    let me = current_me();
+    let pool = POOL.lock().unwrap().clone();
+    let Some(pool) = pool else { return };
+    let backend = BACKEND.lock().unwrap().clone();
+    let Some(backend) = backend else { return };
+    let rt = runtime();
+    rt.spawn(async move {
+        let me_id = match sqlite::users::get_by_username(&pool, &me).await.ok().flatten() {
+            Some(u) => u.id,
+            None => return,
+        };
+        let (i_liked, i_recommended) =
+            match (
+                sqlite::social_feed::has_liked(&pool, post_id, me_id).await,
+                sqlite::social_feed::has_recommended(&pool, post_id, me_id).await,
+            ) {
+                (Ok(a), Ok(b)) => (a, b),
+                _ => return,
+            };
+        let (likes, recs, comments) =
+            match sqlite::social_feed::get_post(&pool, post_id).await.ok().flatten() {
+                Some(p) => (p.like_count, p.recommend_count, p.comment_count),
+                None => return,
+            };
+
+        // In-memory feed row (the discover card badge + counts).
+        {
+            let mut g = backend.blocking_write();
+            if let Some(r) = g.discover.iter_mut().find(|r| r.key == key) {
+                r.liked = i_liked;
+                r.likes = likes;
+                r.recommended = i_recommended;
+                r.recommends = recs;
+                r.comments = comments;
+            }
+        }
+
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let ps = ui.global::<PostDetailState>();
+            if ps.get_key() == key {
+                ps.set_liked(i_liked);
+                ps.set_likes(likes as i32);
+                ps.set_recommended(i_recommended);
+                ps.set_recommends(recs as i32);
+                ps.set_comments(comments as i32);
+            }
+            publish_to_views(&ui.global::<AppState>(), backend.clone());
+        });
+    });
 }
 
 fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
@@ -10636,6 +10820,8 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
             .unwrap_or_default();
         if n.is_empty() { me.clone() } else { n }
     };
+    // Capture the post's canonical owner + identity for the B path (push the
+    // comment back to the author's device so it's aggregated).
     let rt = runtime();
     rt.spawn(async move {
         let me_id = match sqlite::users::get_by_username(&pool, &me).await {
@@ -10655,6 +10841,36 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
         };
         match sqlite::social_feed::add_comment(&pool, post_id, me_id, &body, None).await {
             Ok(_) => {
+                // Re-share this post so friends who have already pulled it
+                // re-pull it and pick up the new comment (full comment text,
+                // not just the count). Bumps the local row's timestamp and
+                // notifies the signal server under our peer/user.
+                bump_ts_and_notify(post_id).await;
+                // B path: push my comment back to the post's canonical owner so
+                // it's aggregated into their canonical copy (their friends then
+                // pull it on their next round).
+                {
+                    let my_username = crate::current_me();
+                    let created_at = sqlite::now_ms();
+                    push_reaction_to_owner(
+                        key,
+                        chatx_core::moment::ReactionWire::Comment {
+                            username: my_username,
+                            content: body.clone(),
+                            created_at,
+                        },
+                    )
+                    .await;
+                }
+                // Bump the in-memory feed row so the discover card badge stays in
+                // lock-step with the detail page (DB `comment_count` is bumped by
+                // `add_comment` above; this keeps the two views consistent).
+                {
+                    let mut g = backend.blocking_write();
+                    if let Some(r) = g.discover.iter_mut().find(|r| r.key == key) {
+                        r.comments += 1;
+                    }
+                }
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
                     let ps = ui.global::<PostDetailState>();
@@ -10673,6 +10889,9 @@ fn add_post_comment(weak: slint::Weak<MainWindow>, key: i32, body: String) {
                     ps.set_comment_list(slint::ModelRc::new(slint::VecModel::from(list)));
                     ps.set_comments((ps.get_comments() as i64 + 1) as i32);
                     ps.set_status(SharedString::new());
+                    // Refresh the discover feed (and active search) so the new
+                    // comment count is reflected on the card without a re-enter.
+                    publish_to_views(&ui.global::<AppState>(), backend.clone());
                 });
             }
             Err(e) => {

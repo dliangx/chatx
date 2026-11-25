@@ -224,6 +224,14 @@ pub struct FeedItem {
     pub i_liked: bool,
     #[sqlx(default)]
     pub i_recommended: bool,
+    /// The peer this post was synced from (the canonical owner). NULL/None for
+    /// locally-created posts. Lets a viewer route a like/comment back to the
+    /// post's author.
+    #[sqlx(default)]
+    pub source_peer_id: Option<String>,
+    /// The post's immutable cross-device identity (publisher's `post_uid`).
+    #[sqlx(default)]
+    pub post_uid: i64,
 }
 
 /// Global public feed (optional friends-only), including the viewer's like state.
@@ -244,6 +252,8 @@ pub async fn feed(
             p.id, p.author_id, p.user_name, p.content, p.media_urls, p.preview_urls, p.visibility, p.timestamp,
             p.like_count, p.comment_count,
             COALESCE(p.recommend_count, 0) AS recommend_count,
+            p.source_peer_id,
+            COALESCE(p.post_uid, 0) AS post_uid,
             u.nickname    AS author_nickname,
             u.username    AS author_username,
             u.avatar_path AS author_avatar,
@@ -279,6 +289,8 @@ pub async fn author_feed(
             p.id, p.author_id, p.user_name, p.content, p.media_urls, p.preview_urls, p.visibility, p.timestamp,
             p.like_count, p.comment_count,
             COALESCE(p.recommend_count, 0) AS recommend_count,
+            p.source_peer_id,
+            COALESCE(p.post_uid, 0) AS post_uid,
             u.nickname    AS author_nickname,
             u.username    AS author_username,
             u.avatar_path AS author_avatar,

@@ -2557,6 +2557,9 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             crate::moment::PostPayload::Image { .. } => {
                 anyhow::bail!("unexpected Image response to a List request")
             }
+            crate::moment::PostPayload::ReactAck { .. } => {
+                anyhow::bail!("unexpected ReactAck response to a List request")
+            }
             crate::moment::PostPayload::Err { msg } => anyhow::bail!("remote error: {msg}"),
         }
     }
@@ -2581,7 +2584,43 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
             crate::moment::PostPayload::List { .. } => {
                 anyhow::bail!("unexpected List response to an Image request")
             }
+            crate::moment::PostPayload::ReactAck { .. } => {
+                anyhow::bail!("unexpected ReactAck response to an Image request")
+            }
             crate::moment::PostPayload::Err { msg } => anyhow::bail!("remote error: {msg}"),
+        }
+    }
+
+    /// Send a viewer reaction (like / recommend / comment) to a post's
+    /// canonical owner. `post_uid` is the post's immutable cross-device
+    /// identity. We await the owner's `ReactAck` to log success, but the ack
+    /// does not gate the local action (which already happened).
+    pub async fn request_post_react(
+        &self,
+        peer_base58: &str,
+        post_uid: i64,
+        reaction: crate::moment::ReactionWire,
+    ) -> anyhow::Result<bool> {
+        let resp = self
+            .dial_and_send_blob(
+                peer_base58,
+                crate::moment::PostReqOp::React {
+                    post_uid,
+                    reaction,
+                },
+                std::time::Duration::from_secs(10),
+            )
+            .await?;
+        match resp.payload {
+            crate::moment::PostPayload::ReactAck { applied, .. } => Ok(applied),
+            crate::moment::PostPayload::Err { msg } => {
+                tracing::warn!("[moment] react to {peer_base58} rejected: {msg}");
+                Ok(false)
+            }
+            _ => {
+                tracing::warn!("[moment] react to {peer_base58}: unexpected response");
+                Ok(false)
+            }
         }
     }
 
