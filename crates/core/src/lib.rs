@@ -3045,16 +3045,21 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         }
     }
 
-    /// Dial `peer` with every candidate address **in parallel** (libp2p's
-    /// multi-addr failover) and await up to `wait` for the connection to come
-    /// up. Returns `true` when at least one link is established. Used by
-    /// `try_send_dm_once` round 1 / 2 in place of the old serial
-    /// `Connect` + `SendText` loop, which blocked for up to N×(dial+send)
-    /// windows.
+    /// Dial `peer` in **priority tiers** (LAN → Public → Relay) and await up
+    /// to `wait` per tier for the connection to come up. Returns `true` when
+    /// at least one link is established. Used by `try_send_dm_once` round 1 / 2
+    /// in place of the old serial `Connect` + `SendText` loop.
+    ///
+    /// Addresses within a tier race in parallel (libp2p's dialer contended
+    /// over the whole peer address book); we only advance to the next, more
+    /// expensive tier once the current one has had its full `wait` window and
+    /// nothing landed. Relay circuits are the last-resort fallback — we do not
+    /// want the relay to win the race on a LAN pair just because it was in
+    /// the candidate list.
     ///
     /// The wait is a polling loop on the `connected` map (cheap: a single
-    /// mutex read per 50 ms); libp2p's actual dial fan-out is already
-    /// running independently on the swarm's own task.
+    /// mutex read per 50 ms); libp2p's actual dial fan-out runs independently
+    /// on the swarm's own task, so this never blocks the event loop.
     async fn dial_and_wait(
         &self,
         peer: &PeerId,
@@ -3067,23 +3072,45 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
         if addrs.is_empty() {
             return false;
         }
-        if let Err(e) = self.running.cmd_tx.send(Cmd::Dial { peer: *peer, addrs }) {
-            tracing::warn!(%peer, err = %e, "[dm] Cmd::Dial dropped (channel closed)");
-            return false;
+        let mut tiers: Vec<(EndpointPriority, Vec<Multiaddr>)> = Vec::new();
+        for addr in addrs {
+            let prio = endpoint_priority(&addr);
+            match tiers.iter_mut().find(|(p, _)| *p == prio) {
+                Some((_, v)) => v.push(addr),
+                None => tiers.push((prio, Vec::new())),
+            }
         }
-        let deadline = std::time::Instant::now() + wait;
-        loop {
+        tiers.sort_by_key(|(p, _)| *p);
+        for (prio, tier_addrs) in tiers {
             if self.peer_connected(peer) {
                 return true;
             }
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                return self.peer_connected(peer);
+            tracing::debug!(%peer, ?prio, n = tier_addrs.len(), "[dm] dial tier fan-out");
+            for addr in tier_addrs {
+                if let Err(e) = self
+                    .running
+                    .cmd_tx
+                    .send(Cmd::Connect { peer: *peer, addr })
+                {
+                    tracing::warn!(%peer, err = %e, "[dm] Cmd::Connect dropped (channel closed)");
+                    return self.peer_connected(peer);
+                }
             }
-            let remaining = deadline - now;
-            let poll = std::time::Duration::from_millis(50).min(remaining);
-            tokio::time::sleep(poll).await;
+            let deadline = std::time::Instant::now() + wait;
+            loop {
+                if self.peer_connected(peer) {
+                    return true;
+                }
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let remaining = deadline - now;
+                let poll = std::time::Duration::from_millis(50).min(remaining);
+                tokio::time::sleep(poll).await;
+            }
         }
+        self.peer_connected(peer)
     }
 
     /// Live dial attempt (round 1 = all endpoints, round 2 = wake + retry).
@@ -5432,13 +5459,13 @@ fn is_routable_public_or_circuit(addr: &str) -> bool {
 /// on the cheapest, most likely-to-succeed paths before falling through to
 /// the relay tunnel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum EndpointPriority {
+pub enum EndpointPriority {
     Lan = 0,
     Public = 1,
     Relay = 2,
 }
 
-fn endpoint_priority(addr: &Multiaddr) -> EndpointPriority {
+pub fn endpoint_priority(addr: &Multiaddr) -> EndpointPriority {
     // A relay-circuit route carries `/p2p-circuit`; it is the most expensive
     // path (a full third-party hop) so it sorts last.
     if addr
