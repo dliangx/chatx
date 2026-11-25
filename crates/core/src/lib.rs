@@ -5439,6 +5439,7 @@ fn is_routable_public_or_circuit(addr: &str) -> bool {
                     && !ip.is_unspecified()
                     && !ip.is_private()
                     && !ip.is_link_local()
+                    && !is_cgnat(ip)
                 {
                     has_public_ip = true;
                 }
@@ -5475,13 +5476,17 @@ pub fn endpoint_priority(addr: &Multiaddr) -> EndpointPriority {
         return EndpointPriority::Relay;
     }
     // Public (globally-routable) IP => direct public candidate; a private /
-    // link-local / unspecified IP => LAN same-subnet candidate (tried first).
+    // link-local / unspecified / **CGNAT** IP => LAN-tier candidate (tried
+    // first). CGNAT (100.64.0.0/10, RFC 6598) is carrier-grade NAT: the
+    // address looks public but is only reachable behind the operator's own
+    // carrier, so it is NOT a cross-network dial target and must not sort
+    // above the relay fallback.
     let mut has_public = false;
     let mut has_private = false;
     for c in addr.iter() {
         match c {
             libp2p::multiaddr::Protocol::Ip4(ip) => {
-                if ip.is_loopback() || ip.is_unspecified() || ip.is_private() {
+                if ip.is_loopback() || ip.is_unspecified() || ip.is_private() || is_cgnat(ip) {
                     has_private = true;
                 } else {
                     has_public = true;
@@ -5502,6 +5507,14 @@ pub fn endpoint_priority(addr: &Multiaddr) -> EndpointPriority {
     } else {
         EndpointPriority::Lan
     }
+}
+
+/// True when `ip` falls in the CGNAT range (RFC 6598, `100.64.0.0/10`).
+/// These addresses are not globally routable — they sit behind carrier-grade
+/// NAT — so they must not be mistaken for a public dial target.
+fn is_cgnat(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 100 && (o[1] & 0xC0) == 64
 }
 
 fn unroutable_reason(addr: &Multiaddr) -> Option<&'static str> {
@@ -5550,6 +5563,23 @@ mod endpoint_priority_tests {
         assert_eq!(endpoint_priority(&relay), EndpointPriority::Relay);
         assert!(EndpointPriority::Lan < EndpointPriority::Public);
         assert!(EndpointPriority::Public < EndpointPriority::Relay);
+    }
+
+    #[test]
+    fn cgnat_is_not_public() {
+        // RFC 6598 carrier-grade NAT: looks public, is not globally routable,
+        // so it must sort as the cheap LAN tier (not the cross-network Public tier).
+        let cgnat = "/ip4/100.64.0.17/tcp/4001".parse::<Multiaddr>().unwrap();
+        let cgnat2 = "/ip4/100.127.255.255/tcp/4001".parse::<Multiaddr>().unwrap();
+        let edge_outside = "/ip4/99.64.0.17/tcp/4001".parse::<Multiaddr>().unwrap();
+        let edge_outside2 = "/ip4/101.64.0.17/tcp/4001".parse::<Multiaddr>().unwrap();
+        assert_eq!(endpoint_priority(&cgnat), EndpointPriority::Lan);
+        assert_eq!(endpoint_priority(&cgnat2), EndpointPriority::Lan);
+        // Just outside the /10: genuinely public.
+        assert_eq!(endpoint_priority(&edge_outside), EndpointPriority::Public);
+        assert_eq!(endpoint_priority(&edge_outside2), EndpointPriority::Public);
+        assert!(!is_routable_public_or_circuit("/ip4/100.64.0.17/tcp/4001"));
+        assert!(is_routable_public_or_circuit("/ip4/203.0.113.5/tcp/4001"));
     }
 
     #[test]
