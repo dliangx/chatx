@@ -331,6 +331,12 @@ pub enum Cmd {
         peer: PeerId,
         addrs: Vec<Multiaddr>,
     },
+    /// Close a specific live connection (by libp2p `ConnectionId`). Used to
+    /// drop a now-redundant relay circuit once a direct transport to the same
+    /// peer is established.
+    CloseConnection {
+        connection: libp2p::swarm::ConnectionId,
+    },
     SendText {
         peer: PeerId,
         from: String,
@@ -491,6 +497,12 @@ pub struct Running {
     /// `link_direct`. A non-zero count (with zero direct) means the peer is
     /// reachable but only via the relay → the chat dot is yellow.
     pub link_relay: Arc<Mutex<HashMap<PeerId, u32>>>,
+    /// Live relay-circuit `ConnectionId`s, keyed by peer. Kept so that the
+    /// moment a direct transport is established for the same peer we can
+    /// proactively `close_connection` the now-redundant relay circuit(s)
+    /// (bandwidth/latency: traffic should ride the direct path, the relay
+    /// circuit is dropped). Cleared on the matching `ConnectionClosed`.
+    pub relay_conns: Arc<Mutex<HashMap<PeerId, Vec<libp2p::swarm::ConnectionId>>>>,
     /// Live AutoNAT reachability verdict (`true` = outside node dialed us,
     /// `false` = private/blocked/unknown). Written from `swarm_loop` on
     /// `Autonat(StatusChanged)` events, read synchronously by the directory
@@ -870,6 +882,8 @@ pub async fn boot(
     let relays = Arc::new(Mutex::new(parse_relay_env()));
     let link_direct: Arc<Mutex<HashMap<PeerId, u32>>> = Arc::new(Mutex::new(HashMap::new()));
     let link_relay: Arc<Mutex<HashMap<PeerId, u32>>> = Arc::new(Mutex::new(HashMap::new()));
+    let relay_conns: Arc<Mutex<HashMap<PeerId, Vec<libp2p::swarm::ConnectionId>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let known_addrs: Arc<Mutex<HashMap<PeerId, KnownAddr>>> = Arc::new(Mutex::new(HashMap::new()));
     let dialing: Arc<Mutex<std::collections::HashSet<PeerId>>> = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let approved: Arc<Mutex<std::collections::HashSet<PeerId>>> = Arc::new(Mutex::new(std::collections::HashSet::new()));
@@ -928,6 +942,7 @@ pub async fn boot(
         injected: injected_tx.clone(),
         link_direct: Arc::clone(&link_direct),
         link_relay: Arc::clone(&link_relay),
+        relay_conns: Arc::clone(&relay_conns),
         dialing: Arc::clone(&dialing),
         approved: Arc::clone(&approved),
         nat_public: Arc::clone(&nat_public),
@@ -1034,6 +1049,10 @@ async fn swarm_loop(
                         let _ = swarm.dial(peer);
                         let _ = ev.send(ChatEvent::Dialing(peer));
                     }
+                }
+                Some(Cmd::CloseConnection { connection }) => {
+                    let closed = swarm.close_connection(connection);
+                    tracing::debug!(?connection, closed, "[swarm] close_connection");
                 }
                 Some(Cmd::SendText {
                     peer,
@@ -1335,7 +1354,12 @@ async fn swarm_loop(
                         .retain(|a| a != &address);
                     tracing::debug!("[swarm] EXTERNAL ADDR EXPIRED {address}");
                 }
-                SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                SwarmEvent::ConnectionEstablished {
+                    peer_id,
+                    endpoint,
+                    connection_id,
+                    ..
+                } => {
                     tracing::debug!(
                         "[swarm] CONNECTED to {peer_id} endpoint={endpoint:?}"
                     );
@@ -1372,6 +1396,23 @@ async fn swarm_loop(
                         };
                         *running.connected.lock().unwrap().entry(peer_id).or_insert(0) += 1;
                         *bucket.lock().unwrap().entry(peer_id).or_insert(0) += 1;
+                        if is_relay {
+                            running
+                                .relay_conns
+                                .lock()
+                                .unwrap()
+                                .entry(peer_id)
+                                .or_default()
+                                .push(connection_id);
+                        } else if let Some(conns) = running.relay_conns.lock().unwrap().remove(&peer_id) {
+                            let n = conns.len();
+                            for c in conns {
+                                let _ = swarm.close_connection(c);
+                            }
+                            if n > 0 {
+                                tracing::info!(%peer_id, n, "[upgrade] direct established — closing redundant relay circuit(s)");
+                            }
+                        }
                     tracing::debug!(
                         "[swarm] {peer_id} link_{kind}={count}",
                         kind = if is_relay { "relay" } else { "direct" },
@@ -1441,11 +1482,19 @@ async fn swarm_loop(
                         }
                     }
                 }
-                SwarmEvent::ConnectionClosed { peer_id, endpoint, .. } => {
+                SwarmEvent::ConnectionClosed { peer_id, endpoint, connection_id, .. } => {
                     tracing::debug!(
                         "[swarm] DISCONNECTED from {peer_id} endpoint={endpoint:?}"
                     );
                     {
+                        if is_endpoint_relayed(&endpoint) {
+                            if let Some(v) = running.relay_conns.lock().unwrap().get_mut(&peer_id) {
+                                v.retain(|c| *c != connection_id);
+                                if v.is_empty() {
+                                    running.relay_conns.lock().unwrap().remove(&peer_id);
+                                }
+                            }
+                        }
                         let mut m = running.connected.lock().unwrap();
                         let dropped_all = match m.get_mut(&peer_id) {
                             Some(n) => {
