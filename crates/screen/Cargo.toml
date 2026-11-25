@@ -1,6 +1,6 @@
 [package]
 name = "screen"
-version = "0.1.0"
+version = "0.9.0"
 edition = "2024"
 description = "Desktop screen-capture streaming (xcap). Mobile shells capture natively and deliver via the bridge FFI."
 

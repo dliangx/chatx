@@ -34,46 +34,8 @@ async fn apply_migrations(pool: &Sdb) -> anyhow::Result<()> {
     sqlx::query("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY);")
         .execute(pool)
         .await?;
-    for sql in [
-        include_str!("migrations/0001_signal.sql"),
-        include_str!("migrations/0002_group_mail.sql"),
-        include_str!("migrations/0003_post_index.sql"),
-        include_str!("migrations/0004_user_profiles.sql"),
-        include_str!("migrations/0005_friend_requests.sql"),
-    ] {
+    for sql in [include_str!("migrations/0001_signal.sql")] {
         sqlx::raw_sql(sql).execute(pool).await?;
-    }
-    ensure_group_mode_column(pool).await?;
-    ensure_group_meta_columns(pool).await?;
-    Ok(())
-}
-
-async fn ensure_group_meta_columns(pool: &Sdb) -> anyhow::Result<()> {
-    for col in ["name", "nicknames"] {
-        let has: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('groups') WHERE name = ?1")
-                .bind(col)
-                .fetch_one(pool)
-                .await?;
-        if has == 0 {
-            let stmt = format!(
-                "ALTER TABLE groups ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"
-            );
-            sqlx::query(&stmt).execute(pool).await?;
-        }
-    }
-    Ok(())
-}
-
-async fn ensure_group_mode_column(pool: &Sdb) -> anyhow::Result<()> {
-    let has: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('groups') WHERE name = 'mode'")
-            .fetch_one(pool)
-            .await?;
-    if has == 0 {
-        sqlx::query("ALTER TABLE groups ADD COLUMN mode TEXT NOT NULL DEFAULT 'p2p'")
-            .execute(pool)
-            .await?;
     }
     Ok(())
 }

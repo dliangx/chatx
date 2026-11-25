@@ -1,6 +1,6 @@
 [package]
 name = "audio"
-version = "0.1.0"
+version = "0.9.0"
 edition = "2024"
 description = "Cross-platform mic/speaker I/O around cpal, normalised to s16le mono/stereo for the chatx call path."
 

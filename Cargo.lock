@@ -716,7 +716,7 @@ dependencies = [
 
 [[package]]
 name = "audio"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "cpal",
  "tracing",
@@ -1370,14 +1370,14 @@ dependencies = [
 
 [[package]]
 name = "bot"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "chatx-agent",
 ]
 
 [[package]]
 name = "bridge"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "jni 0.21.1",
  "tracing",
@@ -1542,7 +1542,7 @@ dependencies = [
 
 [[package]]
 name = "camera"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "bridge",
  "image",
@@ -1682,7 +1682,7 @@ dependencies = [
 
 [[package]]
 name = "chatx"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1719,7 +1719,7 @@ dependencies = [
 
 [[package]]
 name = "chatx-agent"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "encoding_rs",
  "llama-cpp-2",
@@ -1730,7 +1730,7 @@ dependencies = [
 
 [[package]]
 name = "chatx-core"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "chatx-nat-probe"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "chatx-core",
@@ -1772,7 +1772,7 @@ dependencies = [
 
 [[package]]
 name = "chatx-signal"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "cli"
-version = "0.1.0"
+version = "0.9.0"
 
 [[package]]
 name = "clipboard-win"
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "doc"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "betteroffice-docx",
  "betteroffice-opc",
@@ -5931,7 +5931,7 @@ dependencies = [
 
 [[package]]
 name = "media"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "async-broadcast",
  "bridge",
@@ -6354,7 +6354,7 @@ dependencies = [
 
 [[package]]
 name = "network"
-version = "0.1.0"
+version = "0.9.0"
 
 [[package]]
 name = "new_debug_unreachable"
@@ -7396,7 +7396,7 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "pdf"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "pdf-interpret",
  "pdf-render",
@@ -8902,7 +8902,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "screen"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "tracing",
  "xcap",
@@ -9516,7 +9516,7 @@ dependencies = [
 
 [[package]]
 name = "sqlite"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "rand 0.8.8",
@@ -11015,7 +11015,7 @@ dependencies = [
 
 [[package]]
 name = "wasmhost"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "thiserror 2.0.20",
  "tracing",

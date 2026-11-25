@@ -1,10 +1,11 @@
 -- ============================================================
--- 0002 Core business tables
--- Users/devices, social relations, conversations & messages, groups,
--- settings & plugins, social feed, server-side tables
--- Note: coexists with the msgs table from 0001 (store.rs still reads/writes msgs);
--- this migration only adds the tables above, no conflicts.
--- Idempotent: all DDL uses IF NOT EXISTS, safe to re-run.
+-- Chatx consolidated database schema (final state)
+--
+-- All tables created directly at their final shape. No ALTERs,
+-- no table rebuilds, no backfill UPDATEs — just the end result
+-- of applying migrations 0001..0017 in order.
+--
+-- Idempotent: every DDL uses IF NOT EXISTS, safe to re-run.
 -- ============================================================
 
 -- ============================================================
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS users (
     avatar_path     TEXT,                       -- avatar path/URL
     bio             TEXT,                       -- bio
     public_key      TEXT,                       -- account public key (Ed25519)
+    research        TEXT,                       -- user research / profile notes
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER
 );
@@ -55,7 +57,7 @@ CREATE TABLE IF NOT EXISTS friendships (
 CREATE INDEX IF NOT EXISTS idx_friendships_low ON friendships(user_low);
 CREATE INDEX IF NOT EXISTS idx_friendships_high ON friendships(user_high);
 
--- Friend requests
+-- Friend requests (legacy, integer-keyed)
 CREATE TABLE IF NOT EXISTS friend_requests (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     from_id         INTEGER NOT NULL,
@@ -68,6 +70,21 @@ CREATE TABLE IF NOT EXISTS friend_requests (
 );
 
 CREATE INDEX IF NOT EXISTS idx_friend_requests_to ON friend_requests(to_id, status);
+
+-- Friend requests (peer-based, exchanged over the P2P DM channel)
+CREATE TABLE IF NOT EXISTS fr_requests (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    requester    TEXT NOT NULL,
+    recipient    TEXT NOT NULL,
+    note         TEXT,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER,
+    UNIQUE (requester, recipient)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fr_requests_recipient ON fr_requests(recipient, status);
+CREATE INDEX IF NOT EXISTS idx_fr_requests_requester ON fr_requests(requester, status);
 
 -- Follows (one-directional, like Xiaohongshu)
 CREATE TABLE IF NOT EXISTS follows (
@@ -84,11 +101,12 @@ CREATE INDEX IF NOT EXISTS idx_follows_following ON follows(following_id);
 -- ============================================================
 
 -- Conversations table (one row per chat list item)
+-- NOTE: `peer_id` column was removed in the DM-username rebuild; the
+-- DM routing key now lives in `name` (dm:<username>).
 CREATE TABLE IF NOT EXISTS conversations (
     id                  INTEGER PRIMARY KEY,    -- conversation id (app-generated)
     type                INTEGER NOT NULL,       -- 0=DM, 1=group
-    name                TEXT,                   -- routing key (DM: peer pair string; group: group id)
-    peer_id             TEXT,                   -- DM peer's identity (libp2p PeerId / username)
+    name                TEXT,                   -- routing key (DM: dm:<username>; group: group id)
     avatar_path         TEXT,                   -- avatar
     last_message_id     INTEGER,                -- last message ID (denormalized)
     last_message_preview TEXT,                  -- last message preview (denormalized)
@@ -102,6 +120,7 @@ CREATE TABLE IF NOT EXISTS conversations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_conversations_time ON conversations(last_message_time DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_name ON conversations(name);
 
 -- Messages table (DMs and groups stored uniformly)
 CREATE TABLE IF NOT EXISTS messages (
@@ -167,8 +186,50 @@ CREATE TABLE IF NOT EXISTS group_message_reads (
 
 CREATE INDEX IF NOT EXISTS idx_group_reads_peer ON group_message_reads(peer_id);
 
+-- P2P group-key redelivery queue
+CREATE TABLE IF NOT EXISTS group_key_queue (
+    group_id      TEXT NOT NULL,     -- group id (grp-<num>)
+    peer_base58   TEXT NOT NULL,     -- member device that never acked the key
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    next_try_ms   INTEGER NOT NULL,  -- earliest retry timestamp
+    created_at    INTEGER NOT NULL,
+    PRIMARY KEY (group_id, peer_base58)
+);
+
+-- Idempotency marker for inbound group messages we have already persisted.
+CREATE TABLE IF NOT EXISTS group_inbound_seen (
+    client_id   INTEGER NOT NULL,
+    peer_base58 TEXT    NOT NULL,
+    seen_at_ms  INTEGER NOT NULL,
+    PRIMARY KEY (client_id, peer_base58)
+);
+
 -- ============================================================
--- 5. Settings & plugins
+-- 5. DM queues & dedup
+-- ============================================================
+
+-- DM send queue (client-side offline redelivery, one row per (message, device))
+CREATE TABLE IF NOT EXISTS dm_send_queue (
+    msg_id        INTEGER NOT NULL,             -- local `messages.id` of the pending text row
+    peer_base58   TEXT    NOT NULL,             -- ONE recipient device (dial target)
+    chat_id       TEXT    NOT NULL,             -- DM chat id (dm:<username>)
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    next_try_ms   INTEGER NOT NULL,             -- earliest retry timestamp (per pair)
+    created_at    INTEGER NOT NULL,
+    deadline_ms   INTEGER,                      -- hard deadline (NULL = indefinite)
+    PRIMARY KEY (msg_id, peer_base58)
+);
+
+-- Idempotent marker for inbound DM text we have already persisted.
+CREATE TABLE IF NOT EXISTS dm_inbound_seen (
+    client_id   INTEGER NOT NULL,
+    peer_base58 TEXT    NOT NULL,
+    seen_at_ms  INTEGER NOT NULL,
+    PRIMARY KEY (client_id, peer_base58)
+);
+
+-- ============================================================
+-- 6. Settings & plugins
 -- ============================================================
 
 -- Settings table (key-value pairs)
@@ -189,22 +250,28 @@ CREATE TABLE IF NOT EXISTS plugins (
 );
 
 -- ============================================================
--- 6. Social feed (like Moments / Xiaohongshu)
+-- 7. Social feed (like Moments / Xiaohongshu)
 -- ============================================================
 
--- Feed posts table
+-- Feed posts table (all optional columns added by later migrations included)
 CREATE TABLE IF NOT EXISTS social_posts (
     id              INTEGER PRIMARY KEY,
     author_id       INTEGER NOT NULL,           -- author
     content         TEXT,                       -- text content
     media_urls      TEXT,                       -- list of media URLs/paths (JSON)
+    preview_urls    TEXT,                       -- list of preview JPEGs (JSON), index-aligned with media_urls
     visibility      INTEGER DEFAULT 0,          -- 0=public, 1=friends only, 2=private
     timestamp       INTEGER NOT NULL,
     like_count      INTEGER DEFAULT 0,
-    comment_count   INTEGER DEFAULT 0
+    comment_count   INTEGER DEFAULT 0,
+    recommend_count INTEGER DEFAULT 0,          -- denormalized social_recommends counter
+    user_name       TEXT,                       -- denormalized author display name
+    source_peer_id  TEXT DEFAULT NULL,          -- peer a synced post came from (NULL = local)
+    post_uid        INTEGER DEFAULT NULL        -- stable cross-device identity for the post
 );
 
 CREATE INDEX IF NOT EXISTS idx_social_posts_author ON social_posts(author_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_social_posts_post_uid ON social_posts(post_uid);
 
 -- Likes table
 CREATE TABLE IF NOT EXISTS social_likes (
@@ -227,8 +294,38 @@ CREATE TABLE IF NOT EXISTS social_comments (
 
 CREATE INDEX IF NOT EXISTS idx_social_comments_post ON social_comments(post_id, created_at);
 
+-- Post recommendations (a separate, friend-level "recommend" on top of like)
+CREATE TABLE IF NOT EXISTS social_recommends (
+    post_id         INTEGER NOT NULL,
+    user_id         INTEGER NOT NULL,
+    created_at      INTEGER NOT NULL,
+    PRIMARY KEY (post_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_social_recommends_post ON social_recommends(post_id);
+
+-- Per-friend high-water mark of the `social_posts.timestamp` we have imported.
+CREATE TABLE IF NOT EXISTS moment_sync (
+    peer_id       TEXT    PRIMARY KEY,
+    last_sync_ts  INTEGER NOT NULL DEFAULT 0
+);
+
 -- ============================================================
--- 7. Server-side tables
+-- 8. Notes (personal notes)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS notes (
+    id          INTEGER PRIMARY KEY,            -- note id (app-generated)
+    user_id     INTEGER NOT NULL,               -- owning user
+    content     TEXT NOT NULL,                  -- note text
+    created_at  INTEGER NOT NULL,               -- creation time (milliseconds)
+    updated_at  INTEGER                          -- last edit time (milliseconds)
+);
+
+CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id, created_at DESC);
+
+-- ============================================================
+-- 9. Server-side tables
 -- ============================================================
 
 -- Offline message queue (server-side staging)
