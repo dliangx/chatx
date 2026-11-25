@@ -583,6 +583,40 @@ fn is_relayed(addr: &Multiaddr) -> bool {
         .any(|c| matches!(c, libp2p::multiaddr::Protocol::P2pCircuit))
 }
 
+/// Insert a learned peer address into the `known_addrs` cache **without
+/// downgrading** an existing direct (non-relay) entry to a relay-circuit one.
+///
+/// The cache is a single slot per peer. A relay-circuit address is a
+/// fallback path; if we already know a direct address for this peer we keep
+/// it, because preferring the direct path is exactly the whole point of the
+/// LAN→Public→Relay priority model. A fresh direct address always wins,
+/// including over a stale relay one.
+fn store_known_addr(
+    running: &Running,
+    peer_id: PeerId,
+    addr: &Multiaddr,
+    source: AddrSource,
+) {
+    let now = crate::message::now_ms();
+    let mut m = running.known_addrs.lock().unwrap();
+    if let Some(existing) = m.get(&peer_id) {
+        let existing_direct = !is_relayed(&existing.addr);
+        let incoming_direct = !is_relayed(addr);
+        if existing_direct && !incoming_direct {
+            // Never let a relay circuit displace a known direct path.
+            return;
+        }
+    }
+    m.insert(
+        peer_id,
+        KnownAddr {
+            addr: addr.clone(),
+            at_ms: now,
+            source,
+        },
+    );
+}
+
 /// Classify a [`libp2p::core::connection::ConnectedPoint`] from a swarm event:
 /// `true` means the live transport is a relay circuit, `false` means a direct
 /// transport.
@@ -1374,14 +1408,7 @@ async fn swarm_loop(
                         &endpoint
                     {
                         let (base, _) = strip_p2p_suffix(address);
-                        running.known_addrs.lock().unwrap().insert(
-                            peer_id,
-                            KnownAddr {
-                                addr: base,
-                                at_ms: crate::message::now_ms(),
-                                source: AddrSource::Dialed,
-                            },
-                        );
+                        store_known_addr(&running, peer_id, &base, AddrSource::Dialed);
                     }
                     // Decrement counters on a best-effort basis; classify via
                     // the live `endpoint` (the only unambiguous source — the
@@ -1436,14 +1463,7 @@ async fn swarm_loop(
                     // will use it to skip a directory round-trip.
                     if peer_id != running.my_peer_id {
                         let (base, _) = strip_p2p_suffix(&address);
-                        running.known_addrs.lock().unwrap().insert(
-                            peer_id,
-                            KnownAddr {
-                                addr: base,
-                                at_ms: crate::message::now_ms(),
-                                source: AddrSource::Advertised,
-                            },
-                        );
+                        store_known_addr(&running, peer_id, &base, AddrSource::Advertised);
                     }
                     // §A escalation: the peer just advertised a *new* address.
                     // If that's a direct (non-relay) address and we're currently
