@@ -239,27 +239,6 @@ export component DiscoverDetailView inherits Rectangle {
                 }
             }
 
-            // 5) Liked-by / Recommended-by (optional).
-            if PostDetailState.liked-by != "":
-            Text {
-                height: 18px;
-                text: PostDetailState.liked-by;
-                font-size: 12px;
-                vertical-alignment: center;
-                overflow: elide;
-                color: Theme.like;
-            }
-
-            if PostDetailState.recommended-by != "":
-            Text {
-                height: 18px;
-                text: PostDetailState.recommended-by;
-                font-size: 12px;
-                vertical-alignment: center;
-                overflow: elide;
-                color: Theme.brand;
-            }
-
             // 6) Divider + section header.
             Rectangle {
                 width: 100%;
@@ -304,7 +283,7 @@ export component DiscoverDetailView inherits Rectangle {
 
                 for c[i] in PostDetailState.comment-list: card := Rectangle {
                     width: 100%;
-                    background: c.is-mine ? Theme.surface : Colors.transparent;
+                    background:  Theme.surface ;
                     border-radius: 8px;
                     clip: true;
 
