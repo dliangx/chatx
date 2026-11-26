@@ -14,26 +14,27 @@ signal_url = "http://139.159.201.87:8080"
 # Shape: `[models.<platform>]` is a nested table mapping
 #   <model-name> = "<download-url>"
 # The key is the model's display id AND its local file name (`<name>.gguf`).
-# Keys are quoted because names contain dots (e.g. `Qwen2.5-3B-Instruct`).
+# Keys are quoted because names contain dots (e.g. `Qwen3-1.7B`).
 #
 # A model is only loadable if it meets the `chatx_agent::llama` requirements:
 #   * GGUF format
-#   * an embedded chat template (i.e. an "instruct" checkpoint — base models
-#     fail to load with "no chat template")
+#   * an embedded chat template (these Qwen3 instruct checkpoints have one —
+#     base models fail to load with "no chat template")
 #   * an architecture llama.cpp supports (Qwen, Llama, Mistral, Gemma, …)
-# Keep the mobile (ios/android) entries small (0.5B–3B); desktop can use 3B–7B.
-# `Q4_K_M` quantization is a sensible default on size/quality tradeoff.
+# Keep the mobile (ios/android) entries small (0.6B–4B); desktop uses 4B–8B.
+# Quantization: `Q8_0` for the smallest (few GB) and `Q4_K_M` for the larger
+# ones — a sensible size/quality tradeoff for on-device inference.
 
 [models.desktop]
-"Qwen2.5-3B-Instruct" = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
-"Qwen2.5-7B-Instruct" = "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf"
+"Qwen3-4B" = "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf"
+"Qwen3-8B" = "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"
 
 [models.ios]
-"Qwen2.5-0.5B-Instruct" = "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
-"Qwen2.5-1.5B-Instruct" = "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
-"Qwen2.5-3B-Instruct" = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
+"Qwen3-0.6B" = "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
+"Qwen3-1.7B" = "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q8_0.gguf"
+"Qwen3-4B" = "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf"
 
 [models.android]
-"Qwen2.5-0.5B-Instruct" = "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
-"Qwen2.5-1.5B-Instruct" = "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
-"Qwen2.5-3B-Instruct" = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
+"Qwen3-0.6B" = "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
+"Qwen3-1.7B" = "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q8_0.gguf"
+"Qwen3-4B" = "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf"
