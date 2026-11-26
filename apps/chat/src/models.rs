@@ -329,14 +329,26 @@ pub fn cancel(name: &str) {
 }
 
 pub fn pause_toggle(name: &str) {
-    {
-        let mut s = STATE.lock().unwrap();
-        let Some(flag) = s.pause.get(name).cloned() else { return };
-        let was_paused = flag.load(Ordering::Relaxed);
-        flag.store(!was_paused, Ordering::Relaxed);
-        s.status.insert(name.to_string(), if was_paused { "downloading".into() } else { "paused".into() });
+    // Resume. If a live download session is registered for this model, clear
+    // its pause flag so the running worker wakes from its pause sleep. If there
+    // is NO live session — the common case, since "paused" here is produced by
+    // a cancelled download whose worker has already exited (and `set_result`
+    // removed the flag) — there is no thread to wake, so start a fresh worker
+    // that resumes from the existing `.part` file (the worker sends a `Range`
+    // header from the partial size and appends).
+    let has_session = STATE.lock().unwrap().pause.contains_key(name);
+    if has_session {
+        {
+            let mut s = STATE.lock().unwrap();
+            if let Some(flag) = s.pause.get(name).cloned() {
+                flag.store(false, Ordering::Relaxed);
+            }
+            s.status.insert(name.to_string(), "downloading".into());
+        }
+        publish_rows();
+    } else {
+        download(name);
     }
-    publish_rows();
 }
 
 fn set_result(name: &str, status: &str, error: &str) {
