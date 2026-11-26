@@ -84,6 +84,12 @@ fn selected_model_path() -> Option<std::path::PathBuf> {
     })
 }
 
+/// The currently-resolved model path (if any), so a caller can remember which
+/// GGUF is actually in use (for reverting back to it after a failed switch).
+pub fn resolved_selected_model() -> Option<std::path::PathBuf> {
+    selected_model_path()
+}
+
 /// Build the default backend from the environment:
 ///
 /// - `llama` feature enabled **and** a model path is resolvable (the runtime
@@ -92,17 +98,46 @@ fn selected_model_path() -> Option<std::path::PathBuf> {
 /// - otherwise → the [`MockBackend`] (echo), so the conversation loop, REPL,
 ///   and UI plumbing all run end-to-end without a model or the feature.
 ///
-/// Used by both `apps/bot` and the chat UI so there is one entry point.
+/// The chosen GGUF is also **self-tested** (see [`try_load_selected`]): a
+/// corrupt-but-loadable file falls through to the mock rather than producing
+/// garbage or "empty response" output. Used by both `apps/bot` and the chat UI
+/// so there is one entry point.
 pub fn default_backend() -> Box<dyn Llm> {
     #[cfg(feature = "llama")]
     {
         if let Some(path) = selected_model_path() {
-            if let Ok(be) = llama::LlamaBackend::load_default(path) {
-                return Box::new(be);
+            if let Ok(be) = try_load_selected(path) {
+                return be;
             }
+            // Unloadable or self-test failed (corrupt file) → fall through.
         }
     }
     Box::new(MockBackend::new())
+}
+
+/// Load the GGUF at `path` and verify it actually produces a valid logit
+/// distribution before trusting it.
+///
+/// A corrupt-but-loadable GGUF (truncated weights, a bad quant) passes
+/// `LlamaBackend::load` but yields all-NaN / all-zero logits on inference. This
+/// runs one tiny decode and rejects the model unless the first-position logits
+/// form a real distribution, so the caller can mark a broken file as unusable
+/// instead of surfacing "empty response" mid-conversation.
+///
+/// Returns `Ok(backend)` when the model loads and self-tests clean; `Err` when
+/// the file is unloadable or fails the self-test.
+pub fn try_load_selected(path: std::path::PathBuf) -> Result<Box<dyn Llm>> {
+    #[cfg(feature = "llama")]
+    {
+        let be = llama::LlamaBackend::load_default(path)?;
+        be.self_test()?;
+        Ok(Box::new(be))
+    }
+    #[cfg(not(feature = "llama"))]
+    {
+        let _ = path;
+        Err(Error::Model("llama feature disabled".into()))
+    }
 }
 
 /// A no-op stand-in backend that echoes the last user message.

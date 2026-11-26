@@ -83,6 +83,57 @@ impl LlamaBackend {
         Self::load(path, 4096, 2048)
     }
 
+    /// Self-test a loaded backend: render a minimal prompt, decode it, and
+    /// confirm the first-position logits form a *valid* distribution.
+    ///
+    /// A GGUF that is corrupt but still has a valid header (truncated weights,
+    /// flipped bytes, a bad quant) **loads fine** yet produces all-NaN or
+    /// all-zero logits on inference. `load` success therefore cannot tell a
+    /// good model from a broken one — only an actual decode can. A healthy
+    /// model yields logits with real spread; a corrupt one does not.
+    pub(crate) fn self_test(&self) -> Result<()> {
+        use std::num::NonZeroU32;
+        let n_ctx = NonZeroU32::new(512).unwrap();
+        let mut ctx = self
+            .model
+            .new_context(
+                &self._runtime,
+                LlamaContextParams::default().with_n_ctx(Some(n_ctx)),
+            )
+            .map_err(|e| Error::Model(format!("self-test: new context: {e}")))?;
+
+        // Render a short prompt through the model's own chat template. We use
+        // `render_messages` directly (not `fit_prompt`) because fit_prompt
+        // reserves output headroom (`max_tokens`) and would reject even a
+        // one-line prompt at a small context; the self-test only needs a valid
+        // decode, not budgeting.
+        let (prompt, _n) =
+            self.render_messages("You are a helpful assistant.", &[crate::Message::user("hi")])?;
+
+        let tokens = self.model.vocab().tokenize(prompt.as_bytes(), true, true);
+        let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
+        let last = (tokens.len() - 1) as i32;
+        for (i, t) in (0_i32..).zip(tokens) {
+            batch
+                .add(t, i, &[0], i == last)
+                .map_err(|e| Error::Model(format!("self-test: batch: {e}")))?;
+        }
+        ctx.decode(&mut batch)
+            .map_err(|e| Error::Model(format!("self-test: decode: {e}")))?;
+
+        let logits = ctx.get_logits();
+        let finite: Vec<f32> = logits.iter().copied().filter(|v| v.is_finite()).collect();
+        if finite.is_empty() {
+            return Err(Error::Model("corrupt model: logits are not finite".into()));
+        }
+        let max = finite.iter().cloned().fold(f32::MIN, f32::max);
+        let min = finite.iter().cloned().fold(f32::MAX, f32::min);
+        if (max - min) < 1e-4 {
+            return Err(Error::Model("corrupt model: degenerate (constant) logits".into()));
+        }
+        Ok(())
+    }
+
     /// Tokenize a rendered prompt (system + the given history messages) using
     /// the model's own chat template. Returns the prompt text and its real
     /// token count.
@@ -201,7 +252,7 @@ impl LlamaBackend {
         ctx.decode(&mut batch)
             .map_err(|e| Error::Model(format!("decode prompt: {e}")))?;
 
-        let mut sampler = LlamaSampler::chain_simple([LlamaSampler::dist(1234), LlamaSampler::greedy()]);
+        let mut sampler = LlamaSampler::chain_simple([LlamaSampler::temp(0.8f32), LlamaSampler::dist(1234)]);
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut out = String::new();
 

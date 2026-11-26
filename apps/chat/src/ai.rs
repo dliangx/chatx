@@ -134,16 +134,53 @@ pub fn shutdown() {
     let _ = handle.join();
 }
 
+/// Build a validated backend for the currently-selected model, running on the
+/// actor thread.
+///
+/// A corrupt-but-loadable GGUF passes `load` but produces garbage (NaN / all-0
+///) logits on inference — which is exactly what surfaced as "empty response".
+/// So we self-test on a tiny decode. If the pick fails we fall back to the
+/// last known-good model (or the built-in mock) and mark the corrupt file as an
+/// error so the picker shows it as a re-download target, NOT a selectable model.
+fn build_backend() -> Box<dyn chatx_agent::Llm> {
+    let (name, path) = crate::models::selected_name_and_path();
+    if let Some(ref p) = path {
+        match chatx_agent::try_load_selected(p.clone()) {
+            Ok(be) => {
+                crate::models::report_model_ok(&name);
+                return be;
+            }
+            Err(e) => {
+                let detail = e.to_string();
+                if let Some(fallback) = crate::models::report_model_corrupt(&name, &detail) {
+                    return match chatx_agent::try_load_selected(fallback) {
+                        Ok(be) => be,
+                        Err(_) => Box::new(chatx_agent::MockBackend::new()),
+                    };
+                }
+                return Box::new(chatx_agent::MockBackend::new());
+            }
+        }
+    }
+    Box::new(chatx_agent::MockBackend::new())
+}
+
 fn actor_loop(cmd_rx: Receiver<Cmd>) {
-    let mut backend = chatx_agent::default_backend();
+    let mut backend = build_backend();
     let mut conv = chatx_agent::Conversation::new(SYSTEM_PROMPT);
 
     for cmd in cmd_rx {
         match cmd {
             Cmd::Reload => {
-                // Re-read the (possibly newly-downloaded) model and continue
-                // the same conversation with the new backend.
-                backend = chatx_agent::default_backend();
+                // Drop the previous backend FIRST. The llama runtime is a
+                // process-wide singleton (llama-cpp-2's `LLAMA_BACKEND_INITIALIZED`
+                // static), so a second `LlamaBackend` cannot be built while the
+                // first is still alive — `LlamaRuntime::init` would fail with
+                // `BackendAlreadyInitialized` (which is why a model switch only
+                // took effect after a restart). Dropping the old backend resets
+                // that flag so the new GGUF actually loads.
+                drop(backend);
+                backend = build_backend();
             }
             Cmd::Reset => {
                 conv = chatx_agent::Conversation::new(SYSTEM_PROMPT);

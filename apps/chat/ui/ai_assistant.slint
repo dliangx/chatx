@@ -372,6 +372,17 @@ export component AiAssistantView inherits Rectangle {
                     text-cursor-width: 3px;
                     selection-background-color: Theme.brand;
                     selection-foreground-color: white;
+                    key-pressed(event) => {
+                        // Enter sends the draft (no modifier required). `send()`
+                        // already guards `!busy && draft != ""`, so a bare Enter
+                        // on an empty/blocked box is a no-op. Returning `accept`
+                        // keeps Slint from also inserting a newline.
+                        if (event.text == "\n") {
+                            root.send();
+                            return accept;
+                        }
+                        return reject;
+                    }
                 }
 
                 placeholder := Text {
@@ -459,7 +470,7 @@ export component AiAssistantView inherits Rectangle {
                         Text {
                             width: 100%;
                             height: 100%;
-                            text: @tr("HF");
+                            text: "HF";
                             font-size: 12px;
                             font-weight: 600;
                             color: !AiAssistantState.model-mirror ? Theme.fg-on-accent : Theme.fg;
@@ -486,7 +497,7 @@ export component AiAssistantView inherits Rectangle {
                         Text {
                             width: 100%;
                             height: 100%;
-                            text: @tr("Mirror");
+                            text: "Mirror";
                             font-size: 12px;
                             font-weight: 600;
                             color: AiAssistantState.model-mirror ? Theme.fg-on-accent : Theme.fg;

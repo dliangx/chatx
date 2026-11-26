@@ -116,6 +116,10 @@ struct State {
     cancel: HashMap<String, Flag>,
     pause: HashMap<String, Flag>,
     selected: String,
+    /// The most recently-verified-good model (it passed the inference self-test).
+    /// Used to revert the selection when a later pick turns out to be a corrupt
+    /// file, so the assistant keeps a working backend instead of the echo mock.
+    last_good: String,
     /// True when downloads go through the hf-mirror.com mirror instead of
     /// huggingface.co directly. Chosen by the user in the model picker.
     mirror: bool,
@@ -129,6 +133,7 @@ static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| Mutex::new(State {
     cancel: HashMap::new(),
     pause: HashMap::new(),
     selected: String::new(),
+    last_good: String::new(),
     mirror: false,
 }));
 
@@ -199,6 +204,81 @@ pub fn select(name: &str) {
     chatx_agent::set_selected_model(Some(path));
     crate::ai::reload();
     publish_rows();
+}
+
+/// The currently-active model: its catalog `name` and the `.gguf` `path` to
+/// load (None when no model is selected → the actor uses the built-in mock).
+/// Read by the actor thread when (re)building its backend.
+pub fn selected_name_and_path() -> (String, Option<PathBuf>) {
+    let mut s = STATE.lock().unwrap();
+    init(&mut *s);
+    let name = s.selected.clone();
+    let path = if name.is_empty() {
+        None
+    } else {
+        let p = file_for(&name);
+        if p.exists() { Some(p) } else { None }
+    };
+    (name, path)
+}
+
+/// Report (from the actor thread, after a real inference self-test) that the
+/// model `name` loaded and validated. Remember it as the last known-good model
+/// (so a later corrupt pick can revert to it) and clear any stale "corrupt"
+/// error so the row is selectable again.
+pub fn report_model_ok(name: &str) {
+    if name.is_empty() { return; }
+    let mut s = STATE.lock().unwrap();
+    s.last_good = name.to_string();
+    s.error.insert(name.to_string(), String::new());
+    drop(s);
+    publish_rows();
+}
+
+/// Report (from the actor thread) that model `name` failed its inference
+/// self-test — i.e. the file is corrupt/unloadable. Mark the row as an error
+/// (the picker then offers a re-download and the row is NOT selectable) and
+/// revert the active selection off the corrupt file.
+///
+/// Returns the fallback `.gguf` the actor should load next: the last
+/// known-good model, if there is one; otherwise `None` (run the built-in mock).
+/// Persistence + the runtime override are updated here so the next launch also
+/// avoids the corrupt file. The caller (actor) performs the actual (re)load.
+pub fn report_model_corrupt(name: &str, detail: &str) -> Option<PathBuf> {
+    let (fallback_name, was_selected) = {
+        let mut s = STATE.lock().unwrap();
+        s.status.insert(name.to_string(), "error".into());
+        s.error.insert(name.to_string(), detail.to_string());
+        let was_selected = s.selected == name;
+        let fallback = s.last_good.clone();
+        if was_selected {
+            s.selected = fallback.clone();
+        }
+        (fallback, was_selected)
+    };
+
+    let fallback_path = if !fallback_name.is_empty() {
+        let p = file_for(&fallback_name);
+        if p.exists() {
+            save_selected(&fallback_name);
+            chatx_agent::set_selected_model(Some(p.clone()));
+            Some(p)
+        } else {
+            save_selected("");
+            chatx_agent::set_selected_model(None);
+            None
+        }
+    } else if was_selected {
+        save_selected("");
+        chatx_agent::set_selected_model(None);
+        None
+    } else {
+        None
+    };
+
+    tracing::warn!("[model] '{name}' failed inference self-test — marked corrupt ({detail})");
+    publish_rows();
+    fallback_path
 }
 
 /// On launch, restore the persisted model selection: point the runtime override
@@ -351,7 +431,23 @@ fn download_pass(
             continue;
         }
         match reader.read(&mut buf) {
-            Ok(0) => return Outcome::Finished,
+            Ok(0) => {
+                // EOF — the stream ended. But EOF also happens when the
+                // connection is dropped mid-body (a truncated download): ureq's
+                // reader reports that as a clean `Ok(0)`, indistinguishable
+                // from a complete download without checking the byte count.
+                // Finalizing here would mark a corrupt/truncated file as
+                // "ready" (the bug that produced an unloadable Qwen3-8B). When
+                // the server told us the full size and we have fewer bytes,
+                // fail (keeping the `.part` for resume) instead of finalizing.
+                if total > 0 && *done < total {
+                    return Outcome::Failed(format!(
+                        "incomplete: {}/{} bytes — connection dropped early",
+                        *done, total
+                    ));
+                }
+                return Outcome::Finished;
+            }
             Ok(n) => {
                 if file.write_all(&buf[..n]).is_err() {
                     return Outcome::Failed("write failed".into());
