@@ -1,4 +1,5 @@
 pub mod account;
+pub mod config;
 pub mod friendq;
 pub mod group;
 pub mod identity;

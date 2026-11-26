@@ -30,19 +30,14 @@ fn platform() -> &'static str {
     }
 }
 
-fn catalog() -> Vec<(&'static str, &'static str)> {
-    match platform() {
-        "desktop" => vec![
-            ("Qwen2.5-3B-Instruct", "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"),
-            ("Qwen2.5-7B-Instruct", "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf"),
-        ],
-        "ios" | "android" => vec![
-            ("Qwen2.5-0.5B-Instruct", "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"),
-            ("Qwen2.5-1.5B-Instruct", "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"),
-            ("Qwen2.5-3B-Instruct", "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"),
-        ],
-        _ => Vec::new(),
-    }
+/// The built-in model catalog for the current platform, read from the
+/// user-writable `config.toml` (see `chatx_core::config`). Returns an empty
+/// list when the platform section is absent or malformed.
+fn catalog() -> Vec<(String, String)> {
+    chatx_core::config::model_catalog(platform())
+        .into_iter()
+        .map(|e| (e.name, e.url))
+        .collect()
 }
 
 /// Resolve the download URL for `name` using the currently-selected source:
@@ -149,7 +144,7 @@ fn init(s: &mut State) {
     // override; both fall back to the built-in default ("").
     s.selected = persisted_selected().unwrap_or_else(|| crate::selected_model_name());
     for (name, _) in catalog() {
-        if file_for(name).exists() {
+        if file_for(&name).exists() {
             s.status.insert(name.to_string(), "ready".into());
             s.done.insert(name.to_string(), u64::MAX);
             s.total.insert(name.to_string(), u64::MAX);
