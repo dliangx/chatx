@@ -420,3 +420,42 @@ msgstr "Вы"
 
 msgid "starting…"
 msgstr "запуск…"
+
+msgid "AI assistant"
+msgstr "ИИ-помощник"
+
+msgid "Ask me anything"
+msgstr "Спросите меня о чём угодно"
+
+msgid "Ask me anything…"
+msgstr "Спросите меня о чём угодно…"
+
+msgid "Choose a model"
+msgstr "Выбрать модель"
+
+msgid "Not downloaded"
+msgstr "Не загружено"
+
+msgid "Downloading…"
+msgstr "Загрузка…"
+
+msgid "Paused"
+msgstr "Пауза"
+
+msgid "Ready"
+msgstr "Готово"
+
+msgid "Selected"
+msgstr "Выбрано"
+
+msgid "Download"
+msgstr "Загрузить"
+
+msgid "Resume"
+msgstr "Продолжить"
+
+msgid "Select"
+msgstr "Выбрать"
+
+msgid "Retry"
+msgstr "Повторить"

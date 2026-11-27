@@ -420,3 +420,42 @@ msgstr "あなた"
 
 msgid "starting…"
 msgstr "起動中…"
+
+msgid "AI assistant"
+msgstr "AI アシスタント"
+
+msgid "Ask me anything"
+msgstr "何でも聞いてください"
+
+msgid "Ask me anything…"
+msgstr "何でも聞いてください…"
+
+msgid "Choose a model"
+msgstr "モデルを選択"
+
+msgid "Not downloaded"
+msgstr "未ダウンロード"
+
+msgid "Downloading…"
+msgstr "ダウンロード中…"
+
+msgid "Paused"
+msgstr "一時停止中"
+
+msgid "Ready"
+msgstr "準備完了"
+
+msgid "Selected"
+msgstr "選択中"
+
+msgid "Download"
+msgstr "ダウンロード"
+
+msgid "Resume"
+msgstr "再開"
+
+msgid "Select"
+msgstr "選択"
+
+msgid "Retry"
+msgstr "再試行"

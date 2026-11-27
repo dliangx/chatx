@@ -420,3 +420,42 @@ msgstr "أنت"
 
 msgid "starting…"
 msgstr "جارٍ التشغيل…"
+
+msgid "AI assistant"
+msgstr "المساعد الذكي"
+
+msgid "Ask me anything"
+msgstr "اسألني أي شيء"
+
+msgid "Ask me anything…"
+msgstr "اسألني أي شيء…"
+
+msgid "Choose a model"
+msgstr "اختر نموذجًا"
+
+msgid "Not downloaded"
+msgstr "لم يتم التنزيل"
+
+msgid "Downloading…"
+msgstr "جارٍ التنزيل…"
+
+msgid "Paused"
+msgstr "متوقف مؤقتًا"
+
+msgid "Ready"
+msgstr "جاهز"
+
+msgid "Selected"
+msgstr "تم التحديد"
+
+msgid "Download"
+msgstr "تنزيل"
+
+msgid "Resume"
+msgstr "استئناف"
+
+msgid "Select"
+msgstr "تحديد"
+
+msgid "Retry"
+msgstr "إعادة المحاولة"

@@ -420,3 +420,42 @@ msgstr "我"
 
 msgid "starting…"
 msgstr "启动中…"
+
+msgid "AI assistant"
+msgstr "AI 助手"
+
+msgid "Ask me anything"
+msgstr "随便问我"
+
+msgid "Ask me anything…"
+msgstr "随便问我…"
+
+msgid "Choose a model"
+msgstr "选择模型"
+
+msgid "Not downloaded"
+msgstr "未下载"
+
+msgid "Downloading…"
+msgstr "下载中…"
+
+msgid "Paused"
+msgstr "已暂停"
+
+msgid "Ready"
+msgstr "就绪"
+
+msgid "Selected"
+msgstr "已选择"
+
+msgid "Download"
+msgstr "下载"
+
+msgid "Resume"
+msgstr "继续"
+
+msgid "Select"
+msgstr "选择"
+
+msgid "Retry"
+msgstr "重试"

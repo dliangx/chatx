@@ -420,3 +420,42 @@ msgstr "Vous"
 
 msgid "starting…"
 msgstr "démarrage…"
+
+msgid "AI assistant"
+msgstr "Assistant IA"
+
+msgid "Ask me anything"
+msgstr "Posez-moi une question"
+
+msgid "Ask me anything…"
+msgstr "Posez-moi une question…"
+
+msgid "Choose a model"
+msgstr "Choisir un modèle"
+
+msgid "Not downloaded"
+msgstr "Non téléchargé"
+
+msgid "Downloading…"
+msgstr "Téléchargement…"
+
+msgid "Paused"
+msgstr "En pause"
+
+msgid "Ready"
+msgstr "Prêt"
+
+msgid "Selected"
+msgstr "Sélectionné"
+
+msgid "Download"
+msgstr "Télécharger"
+
+msgid "Resume"
+msgstr "Reprendre"
+
+msgid "Select"
+msgstr "Sélectionner"
+
+msgid "Retry"
+msgstr "Réessayer"
