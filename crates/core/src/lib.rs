@@ -3111,7 +3111,16 @@ impl<D: DirectoryClient + ?Sized + 'static> Client<D> {
                 tokio::time::sleep(poll).await;
             }
         }
-        self.peer_connected(peer)
+        let connected = self.peer_connected(peer);
+        if !connected {
+            // Every tier failed: the cached address (typically a stale relay
+            // circuit) is dead. Invalidate it so the next send re-resolves the
+            // peer's endpoints from the directory instead of redialing the same
+            // stale slot — without this the stale entry would keep masking the
+            // directory (up to `ADDR_CACHE_TTL_MS`) and the DM would stay red.
+            self.running.known_addrs.lock().unwrap().remove(peer);
+        }
+        connected
     }
 
     /// Live dial attempt (round 1 = all endpoints, round 2 = wake + retry).
