@@ -92,7 +92,8 @@ fi
 CXX=""
 case "${CC}" in
   *-gcc) CXX="${CC%-gcc}-g++" ;;
-  gcc|cc) CXX="${CC}++" ;;
+  gcc)    CXX="g++" ;;
+  cc)     CXX="g++" ;;
 esac
 AR=""
 case "${CC}" in
