@@ -55,7 +55,7 @@ winres = "0.1"
 # renderer-less and failing to compile.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies.slint]
 workspace = true
-features = ["unstable-winit-030"]
+features = ["unstable-winit-030","renderer-skia"]
 
 # iOS renders via the Skia backend (winit backend forces Skia on Apple
 # non-macOS targets; declared explicitly to be unambiguous).
