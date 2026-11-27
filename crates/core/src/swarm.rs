@@ -45,9 +45,10 @@ pub const FILE_PROTOCOL: StreamProtocol = StreamProtocol::new("/chatx/file/1");
 /// margin while still bounding the receiver's read buffer.
 const VOICE_REQ_MAX: u64 = 32 * 1024 * 1024;
 
-/// Ceiling for a single inbound photo request (photos are capped server-side
-/// before sending, but keep a generous margin for large originals).
-const IMAGE_REQ_MAX: u64 = 10 * 1024 * 1024;
+/// Ceiling for a single inbound photo request. The app caps outbound images
+/// at 50 MiB (`CHAT_IMAGE_MAX_BYTES`), so this must be larger to leave room
+/// for CBOR framing — mirrors `FILE_REQ_MAX` (64 MiB) > `CHAT_FILE_MAX_BYTES` (50 MiB).
+const IMAGE_REQ_MAX: u64 = 64 * 1024 * 1024;
 
 /// Ceiling for one inbound document-file request (app-side caps picked files well below this; mirrors the wasm sandbox's `MAX_FILE_BYTES`).
 const FILE_REQ_MAX: u64 = 64 * 1024 * 1024;
