@@ -29,6 +29,7 @@
 #   CX_ARCH=aarch64 ./scripts/build_linux.sh # Cross arch on a Linux that has the toolchain
 #
 # Set CC / CXX / AR in the environment to force a specific compiler.
+# python -c "with open('scripts/build_linux.sh', 'rb') as f: content = f.read(); open('scripts/build_linux.sh', 'wb').write(content.replace(b'\r\n', b'\n'))"
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
