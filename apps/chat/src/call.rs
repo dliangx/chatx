@@ -212,11 +212,14 @@ pub struct CallOptions {
 /// The offer SDP is sent through the transport immediately; the peer responds
 /// via [`handle_signal_offer`](Self::handle_signal_offer) (inbound
 /// `ChatEvent::Webrtc`).
+///
+/// Returns `(mic_available, speaker_available, cam_available)` so the caller
+/// can grey out the corresponding UI buttons when a device failed to start.
 pub fn start_call(
     client: Arc<ChatxClient>,
     peer_base58: &str,
     opts: CallOptions,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(bool, bool, bool)> {
     if is_active() {
         stop_call();
     }
@@ -225,7 +228,17 @@ pub fn start_call(
         .dial_peer(peer_base58)
         .map_err(|e| anyhow::anyhow!("dial peer '{peer_base58}': {e}"))?;
 
-    let (audio, queue, aud_src, cam_src, scr_src) = bootstrap_media(opts)?;
+    let mb = bootstrap_media(opts)?;
+    let audio = mb.audio;
+    let queue = mb.queue;
+    let aud_src = mb.aud_src;
+    let cam_src = mb.cam_src;
+    let scr_src = mb.scr_src;
+    let (mic_available, speaker_available, cam_available) = (
+        mb.mic_available,
+        mb.speaker_available,
+        mb.cam_available,
+    );
 
     let transport = Arc::new(Lp2pSignal {
         client: Arc::clone(&client),
@@ -309,23 +322,36 @@ pub fn start_call(
         "[call] offerer started: peer={peer} cam={} scr={}",
         opts.include_cam, opts.include_scr
     );
-    Ok(())
+    Ok((mic_available, speaker_available, cam_available))
 }
 
 // ── public: answer (inbound offer) ────────────────────────────────────────
 
 /// Answer an inbound `Offer`. Called from
 /// [`handle_signal_offer`](Self::handle_signal_offer).
+///
+/// Returns `(mic_available, speaker_available, cam_available)` so the caller
+/// can grey out the corresponding UI buttons when a device failed to start.
 pub fn answer_offer(
     client: Arc<ChatxClient>,
     peer: libp2p::PeerId,
     offer: &SignalFrame,
     opts: CallOptions,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(bool, bool, bool)> {
     if is_active() {
         stop_call();
     }
-    let (audio, queue, aud_src, cam_src, scr_src) = bootstrap_media(opts)?;
+    let mb = bootstrap_media(opts)?;
+    let audio = mb.audio;
+    let queue = mb.queue;
+    let aud_src = mb.aud_src;
+    let cam_src = mb.cam_src;
+    let scr_src = mb.scr_src;
+    let (mic_available, speaker_available, cam_available) = (
+        mb.mic_available,
+        mb.speaker_available,
+        mb.cam_available,
+    );
 
     let transport = Arc::new(Lp2pSignal {
         client: Arc::clone(&client),
@@ -397,18 +423,24 @@ pub fn answer_offer(
             Some(CallMode::Audio) | None => crate::GlobalOverlayType::AudioCall,
         };
         crate::publish_call_state(weak.clone(), Some(peer_b58), peer_name, true);
-        if opts.include_cam {
-            let wk = weak.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = wk.upgrade() {
-                    ui.global::<CallState>().set_cam_on(true);
+        let wk2 = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = wk2.upgrade() {
+                let st = ui.global::<CallState>();
+                st.set_mic_available(mic_available);
+                st.set_speaker_available(speaker_available);
+                st.set_cam_available(cam_available);
+                // Only mark the camera "on" if it actually started — a failed
+                // camera stays off + disabled rather than on-but-greyed.
+                if opts.include_cam && cam_available {
+                    st.set_cam_on(true);
                 }
-            });
-        }
+            }
+        });
         crate::show_call_overlay(weak, overlay);
     }
     tracing::debug!("[call] answerer started (ui=on)");
-    Ok(())
+    Ok((mic_available, speaker_available, cam_available))
 }
 
 // ── public: inbound signaling ─────────────────────────────────────────────
@@ -495,17 +527,20 @@ pub fn handle_signal_offer(client: Arc<ChatxClient>, peer: libp2p::PeerId, json:
     }
 }
 
-/// Clear a pending inbound offer + its ringing UI WITHOUT notifying the peer.
-/// Used when the offer's originating side ends the call first (e.g. the
-/// caller hung up while we were still at the Accept/Decline screen).
+/// Clear the inbound-call UI (ringing panel OR the "Call failed" error panel)
+/// WITHOUT notifying the peer. Used when the offer's originating side ends the
+/// call first (e.g. the caller hung up) or when OUR accept failed.
+///
+/// The UI teardown must run unconditionally: after `accept_inbound` takes the
+/// pending offer, the `RINGING` slot is empty, so the old `was_pending` guard
+/// would early-return and leave the answerer's error overlay stuck on screen
+/// even though the offerer already ended the call (the "one side ENDs, the
+/// other doesn't sync" case). Resetting an already-clean state is idempotent.
 fn dismiss_inbound() {
-    let was_pending = {
+    {
         let mut slot = RINGING.lock().unwrap();
         slot.generation += 1;
-        slot.pending.take().is_some()
-    };
-    if !was_pending {
-        return;
+        slot.pending.take();
     }
     if let Some(weak) = weak_window() {
         let _ = slint::invoke_from_event_loop(move || {
@@ -515,6 +550,7 @@ fn dismiss_inbound() {
             let st = ui.global::<CallState>();
             st.set_ringing(false);
             st.set_active(false);
+            st.set_error_message(SharedString::new());
             let state = ui.global::<AppState>();
             let mut nav = state.get_nav_state();
             nav.global_overlay = GlobalOverlayType::None;
@@ -596,20 +632,42 @@ pub fn accept_inbound() {
         return;
     };
 
+    // Captured before `answer_offer` consumes `p.client` / `p.peer` so the
+    // failure branch can still send a `Bye` back to the offerer.
+    let fail_client = p.client.clone();
+    let fail_peer = p.peer.clone();
+    let fail_call_id = p.offer.call_id.clone();
+    let fail_from = p.client.peer_base58();
+
     match answer_offer(p.client, p.peer, &p.offer, p.opts) {
-        Ok(()) => {
+        Ok((mic_available, speaker_available, cam_available)) => {
             if let Some(weak) = weak_window() {
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         let st = ui.global::<CallState>();
                         st.set_ringing(false);
                         st.set_active(true);
+                        st.set_mic_available(mic_available);
+                        st.set_speaker_available(speaker_available);
+                        st.set_cam_available(cam_available);
                     }
                 });
             }
         }
         Err(e) => {
             tracing::debug!("[call] answer_offer: {e}");
+            // Tell the offerer the call failed so it tears down too. Without
+            // this the offerer's `start_call` already stored its active call
+            // (waiting on the answer) and would ring forever — no answer and no
+            // `Bye` — leaving the caller stuck in a live "Calling…" overlay.
+            // `Lp2pSignal::send` re-dials on a `Bye` to refresh the route so it
+            // reliably reaches the peer.
+            let transport =
+                as_dyn(Arc::new(Lp2pSignal { client: fail_client, peer: fail_peer }));
+            let bye = SignalFrame::new(fail_call_id, SignalKind::Bye).with_from(fail_from);
+            if let Err(se) = transport.send(&bye) {
+                tracing::debug!("[call] accept-fail Bye: {se}");
+            }
             if let Some(weak) = weak_window() {
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
@@ -849,18 +907,31 @@ pub fn apply_incoming_upgrade(frame: &SignalFrame) {
 // `VidSource` is registered into the dispatcher slot. That way there's a
 // single source that both receives camera frames AND is attached to the
 // webrtc track.
-fn bootstrap_media(
-    opts: CallOptions,
-) -> anyhow::Result<(
-    audio::Audio,
-    Arc<Mutex<std::collections::VecDeque<u8>>>,
-    Arc<AudSource>,
-    Option<Arc<VidSource>>,
-    Option<Arc<VidSource>>,
-)> {
+/// The result of [`bootstrap_media`]. A hardware failure no longer aborts the
+/// whole call: `mic` / `speaker` / `cam` failures are surfaced as their
+/// `*-available` flag being `false` (the matching UI button is greyed out +
+/// non-interactive) and the call proceeds without that device. Only a screen
+/// capture failure — which has no "unavailable" concept — is a hard error.
+pub struct MediaBootstrap {
+    pub audio: audio::Audio,
+    pub queue: Arc<Mutex<std::collections::VecDeque<u8>>>,
+    pub aud_src: Arc<AudSource>,
+    pub cam_src: Option<Arc<VidSource>>,
+    pub scr_src: Option<Arc<VidSource>>,
+    pub mic_available: bool,
+    pub speaker_available: bool,
+    pub cam_available: bool,
+}
+
+fn bootstrap_media(opts: CallOptions) -> anyhow::Result<MediaBootstrap> {
     let audio = audio::Audio::new();
 
     let aud_src = Arc::new(AudSource::new());
+    // Default: available. Flipped to `false` only when the corresponding
+    // hardware start fails below.
+    let mut mic_available = true;
+    let mut speaker_available = true;
+    let mut cam_available = true;
 
     // ── local mic → this call's `AudSource` ─────────────────────────────
     // iOS + desktop: cpal (`crates/audio`) is the mic — cpal 0.16 uses Core
@@ -888,10 +959,19 @@ fn bootstrap_media(
                 mic.push(&pcm8, 8_000);
             }
         });
-        let (rate, ch) = audio
-            .start_input()
-            .map_err(|e| anyhow::anyhow!("start mic: {e}"))?;
-        tracing::info!("[call] mic cpal @ {rate} Hz / {ch} ch (→ 8 kHz PCMU)");
+        match audio.start_input() {
+            Ok((rate, ch)) => {
+                tracing::info!("[call] mic cpal @ {rate} Hz / {ch} ch (→ 8 kHz PCMU)");
+            }
+            // Mic hardware unavailable (e.g. "no default input device"): do NOT
+            // fail the call. Drop the sink, mark the mic button as disabled,
+            // and let the call proceed (peer hears silence on our side).
+            Err(e) => {
+                audio::clear_input_sink();
+                mic_available = false;
+                tracing::warn!("[call] mic unavailable, continuing without it: {e}");
+            }
+        }
     }
     #[cfg(target_os = "android")]
     {
@@ -912,9 +992,15 @@ fn bootstrap_media(
     }
 
     // ── speaker (remote → local) ────────────────────────────────────────
-    let _ = audio
-        .start_output()
-        .map_err(|e| anyhow::anyhow!("start speaker: {e}"))?;
+    // Speaker hardware unavailable → mark disabled and continue (we just can't
+    // play the remote audio; the remote is unaffected).
+    match audio.start_output() {
+        Ok(_) => {}
+        Err(e) => {
+            speaker_available = false;
+            tracing::warn!("[call] speaker unavailable, continuing without it: {e}");
+        }
+    }
     let queue = audio.output_queue().clone();
 
     // Camera / screen local sources. `start_local_capture` guarantees a
@@ -926,8 +1012,17 @@ fn bootstrap_media(
     // tuple eagerly — `expr` runs even when `flag` is `false` — which would
     // boot the Retina screen recorder (xcap/ScreenCaptureKit + TCC prompt,
     // on the UI thread) for EVERY call and freeze the UI on accept.
+    // Camera hardware unavailable → mark disabled, continue as an audio-only
+    // call (the CAMERA button is greyed out).
     let cam_src: Option<Arc<VidSource>> = if opts.include_cam {
-        Some(crate::start_local_capture(media::VKind::Cam)?)
+        match crate::start_local_capture(media::VKind::Cam) {
+            Ok(src) => Some(src),
+            Err(e) => {
+                cam_available = false;
+                tracing::warn!("[call] camera unavailable, continuing without video: {e}");
+                None
+            }
+        }
     } else {
         None
     };
@@ -954,7 +1049,16 @@ fn bootstrap_media(
         call_dispatcher::set_scr_source(Some(Arc::clone(src)));
     }
 
-    Ok((audio, queue, aud_src, cam_src, scr_src))
+    Ok(MediaBootstrap {
+        audio,
+        queue,
+        aud_src,
+        cam_src,
+        scr_src,
+        mic_available,
+        speaker_available,
+        cam_available,
+    })
 }
 
 /// Tear everything [`bootstrap_media`] started, for the setup-failure paths

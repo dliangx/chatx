@@ -9275,6 +9275,11 @@ pub(crate) fn publish_call_state_with(
             // successful `start_call` + `toggle_my_video` (for video).
             cs.set_cam_on(false);
             cs.set_scr_on(false);
+            // Availability defaults to true; the call bootstrap paths override
+            // a specific one to false when that device failed to start.
+            cs.set_mic_available(true);
+            cs.set_speaker_available(true);
+            cs.set_cam_available(true);
             // Reset local image sources + "has-*" flags so the surfaces and
             // device buttons start gray; they come back on when each local
             // camera / screen frame is pushed + `has_my_*` is set. Release
@@ -9385,11 +9390,18 @@ fn begin_voice_call(weak: slint::Weak<MainWindow>, key: i32) {
             include_scr: false,
         },
     ) {
-        Ok(()) => {
+        Ok((mic_available, speaker_available, _)) => {
             tracing::debug!(
                 "[audio.call] begin_voice_call: start_call OK — showing AudioCall overlay"
             );
             publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
+            let wk = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = wk.upgrade() {
+                    ui.global::<CallState>().set_mic_available(mic_available);
+                    ui.global::<CallState>().set_speaker_available(speaker_available);
+                }
+            });
             show_call_overlay(weak, GlobalOverlayType::AudioCall);
         }
         Err(e) => {
@@ -9425,7 +9437,7 @@ fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
         (pid, name)
     };
 
-    if let Err(e) = call::start_call(
+    let (mic_available, speaker_available, cam_available) = match call::start_call(
         Arc::clone(&client),
         &peer_base58,
         call::CallOptions {
@@ -9433,10 +9445,21 @@ fn begin_video_call(weak: slint::Weak<MainWindow>, key: i32) {
             include_scr: false,
         },
     ) {
-        publish_call_error(weak, format!("Failed to start video call: {e}"));
-        return;
-    }
+        Ok(v) => v,
+        Err(e) => {
+            publish_call_error(weak, format!("Failed to start video call: {e}"));
+            return;
+        }
+    };
     publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
+    let wk = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = wk.upgrade() {
+            ui.global::<CallState>().set_mic_available(mic_available);
+            ui.global::<CallState>().set_speaker_available(speaker_available);
+            ui.global::<CallState>().set_cam_available(cam_available);
+        }
+    });
     // Cam is on for this call (it was attached in the initial offer).
     let wk = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
@@ -9457,12 +9480,15 @@ fn publish_call_error(weak: slint::Weak<MainWindow>, msg: String) {
 }
 
 fn end_voice_call(weak: slint::Weak<MainWindow>) {
-    let had_active = call::is_active();
+    // Always tear down + dismiss, even when no live call exists. An inbound
+    // call that fails during accept (e.g. "no default input device") shows the
+    // call overlay with an error but leaves `is_active()` false; the old
+    // `had_active` gate then skipped the `show_call_overlay(None)` call and the
+    // overlay stayed stuck on screen (END had no effect and the app looked
+    // frozen). `stop_call` is a safe no-op when there is nothing active.
     call::stop_call();
-    if had_active {
-        publish_call_state(weak.clone(), None, None, false);
-        show_call_overlay(weak, GlobalOverlayType::None);
-    }
+    publish_call_state(weak.clone(), None, None, false);
+    show_call_overlay(weak, GlobalOverlayType::None);
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -9497,7 +9523,7 @@ fn begin_screen_share(weak: slint::Weak<MainWindow>, key: i32) {
     // `start_call` → `bootstrap_media` → `start_local_capture(Scr)` starts
     // the capture device (xcap / MediaProjection / ReplayKit) and wires the
     // dispatcher. We don't start it here.
-    if let Err(e) = call::start_call(
+    let (mic_available, speaker_available, _) = match call::start_call(
         Arc::clone(&client),
         &peer_base58,
         call::CallOptions {
@@ -9505,10 +9531,20 @@ fn begin_screen_share(weak: slint::Weak<MainWindow>, key: i32) {
             include_scr: true,
         },
     ) {
-        publish_call_error(weak, format!("Failed to start screen share: {e}"));
-        return;
-    }
+        Ok(v) => v,
+        Err(e) => {
+            publish_call_error(weak, format!("Failed to start screen share: {e}"));
+            return;
+        }
+    };
     publish_call_state(weak.clone(), Some(peer_base58), Some(peer_name), true);
+    let wk = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = wk.upgrade() {
+            ui.global::<CallState>().set_mic_available(mic_available);
+            ui.global::<CallState>().set_speaker_available(speaker_available);
+        }
+    });
     let wk = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = wk.upgrade() {
