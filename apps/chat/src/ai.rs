@@ -13,7 +13,7 @@
 //! - otherwise → the echo `MockBackend` (page works end-to-end with no model).
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 use slint::ComponentHandle;
 use slint::SharedString;
@@ -23,8 +23,7 @@ use crate::{AiAssistantState, AiMessageRow, MainWindow};
 const SYSTEM_PROMPT: &str = "You are ChatX's built-in assistant. Be concise and helpful. \
      You are running fully locally; you have no network access.";
 
-const TRANSLATE_SYSTEM_PROMPT: &str =
-    "You are a precise translator. You translate the user's text into the requested \
+const TRANSLATE_SYSTEM_PROMPT: &str = "You are a precise translator. You translate the user's text into the requested \
      target language and reply with the translation only — no preamble, no quotation, \
      no notes. Preserve line breaks, links and emoji.";
 
@@ -142,26 +141,14 @@ pub fn shutdown() {
     // Drop the only sender so the actor's `for cmd in rx` iterator ends (the
     // receiver becomes broken) and the loop returns, dropping the backend.
     *CMD.lock().unwrap() = None;
-    let Some(handle) = ACTOR_THREAD.lock().unwrap().take() else { return };
+    let Some(handle) = ACTOR_THREAD.lock().unwrap().take() else {
+        return;
+    };
     let _ = handle.join();
 }
 
 /// Install an `atexit` handler that tears down the LLM actor **before**
 /// llama.cpp's C++ static destructors run.
-///
-/// Why this is needed: the normal teardown (`run_app` returning from
-/// `ui.run()`) already calls [`shutdown`]. But macOS's ⌘Q / red-X path is
-/// different — AppKit's `NSApplication terminate:` calls `exit(0)`, which runs
-/// C++ static destructors (`__cxa_finalize`) *directly*, never unwinding the
-/// Rust stack, so `ai::shutdown()` is never reached. The Metal residency sets
-/// still hold the `LlamaContext` buffers, and `ggml_metal_device_free` then
-/// trips `GGML_ASSERT([rsets->data count] == 0)` and aborts.
-///
-/// `atexit` handlers run *before* C++ static destructors (the C standard
-/// guarantees `exit()` calls `atexit` handlers first, then runs the
-/// static-destruction phase). This handler drops the actor — and with it the
-/// `LlamaModel` and the Metal residency-set buffers it owns — on the actor
-/// thread, so the static destructors find empty residency sets.
 ///
 /// Safe to call more than once: only the first call registers (the rest are
 /// no-ops), and the handler itself is idempotent via [`SHUTDOWN_CALLED`].
@@ -183,12 +170,6 @@ pub fn install_exit_guard() {
 
 /// Build a validated backend for the currently-selected model, running on the
 /// actor thread.
-///
-/// A corrupt-but-loadable GGUF passes `load` but produces garbage (NaN / all-0
-///) logits on inference — which is exactly what surfaced as "empty response".
-/// So we self-test on a tiny decode. If the pick fails we fall back to the
-/// last known-good model (or the built-in mock) and mark the corrupt file as an
-/// error so the picker shows it as a re-download target, NOT a selectable model.
 fn build_backend() -> Box<dyn chatx_agent::Llm> {
     let (name, path) = crate::models::selected_name_and_path();
     if let Some(ref p) = path {
@@ -214,18 +195,13 @@ fn build_backend() -> Box<dyn chatx_agent::Llm> {
 
 fn actor_loop(cmd_rx: Receiver<Cmd>) {
     let mut backend = build_backend();
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    install_exit_guard();
     let mut conv = chatx_agent::Conversation::new(SYSTEM_PROMPT);
 
     for cmd in cmd_rx {
         match cmd {
             Cmd::Reload => {
-                // Drop the previous backend FIRST. The llama runtime is a
-                // process-wide singleton (llama-cpp-2's `LLAMA_BACKEND_INITIALIZED`
-                // static), so a second `LlamaBackend` cannot be built while the
-                // first is still alive — `LlamaRuntime::init` would fail with
-                // `BackendAlreadyInitialized` (which is why a model switch only
-                // took effect after a restart). Dropping the old backend resets
-                // that flag so the new GGUF actually loads.
                 drop(backend);
                 backend = build_backend();
             }
@@ -243,10 +219,11 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
                 }
                 conv = c;
             }
-            Cmd::Ask { context, question, reply } => {
-                // One-shot: build a fresh conversation from the supplied context
-                // so the running AI-assistant conversation (`conv`) is left
-                // untouched. The answer goes to the oneshot `reply` channel.
+            Cmd::Ask {
+                context,
+                question,
+                reply,
+            } => {
                 let mut c = chatx_agent::Conversation::new(SYSTEM_PROMPT);
                 for (is_assistant, text) in context {
                     if is_assistant {
@@ -267,12 +244,15 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
                 }
                 let _ = reply.send(collected);
             }
-            Cmd::Translate { text, target, reply } => {
+            Cmd::Translate {
+                text,
+                target,
+                reply,
+            } => {
                 // One-shot translation. The conversation is seeded with a
                 // translation-dedicated system prompt so the model answers
                 // with the translation (and nothing else).
-                let mut c =
-                    chatx_agent::Conversation::new(TRANSLATE_SYSTEM_PROMPT);
+                let mut c = chatx_agent::Conversation::new(TRANSLATE_SYSTEM_PROMPT);
                 c.user(format!(
                     "Translate the following text into {target}. Reply with the translation only.\n\n{text}"
                 ));
@@ -295,10 +275,14 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
                 conv.user(text);
 
                 let _ = tx.send(UiEvent::Row(AiMessageRow {
-                    side: 0, pending: false, text: SharedString::from(ui_text),
+                    side: 0,
+                    pending: false,
+                    text: SharedString::from(ui_text),
                 }));
                 let _ = tx.send(UiEvent::Row(AiMessageRow {
-                    side: 1, pending: true, text: SharedString::new(),
+                    side: 1,
+                    pending: true,
+                    text: SharedString::new(),
                 }));
 
                 let mut collected = String::new();
@@ -329,7 +313,9 @@ fn actor_loop(cmd_rx: Receiver<Cmd>) {
 
 pub fn send(text: &str) {
     ensure_actor();
-    let Some(cmd_tx) = CMD.lock().unwrap().clone() else { return };
+    let Some(cmd_tx) = CMD.lock().unwrap().clone() else {
+        return;
+    };
     let _ = cmd_tx.send(Cmd::Send(text.to_string()));
 }
 
@@ -338,7 +324,9 @@ pub fn send(text: &str) {
 /// turn uses the real LLM instead of the echo backend.
 pub fn reload() {
     ensure_actor();
-    let Some(cmd_tx) = CMD.lock().unwrap().clone() else { return };
+    let Some(cmd_tx) = CMD.lock().unwrap().clone() else {
+        return;
+    };
     let _ = cmd_tx.send(Cmd::Reload);
 }
 
@@ -347,7 +335,9 @@ pub fn reload() {
 /// type-2 conversation from the chat list.
 pub fn load(turns: Vec<(bool, String)>) {
     ensure_actor();
-    let Some(cmd_tx) = CMD.lock().unwrap().clone() else { return };
+    let Some(cmd_tx) = CMD.lock().unwrap().clone() else {
+        return;
+    };
     let _ = cmd_tx.send(Cmd::Load(turns));
 }
 
@@ -355,17 +345,18 @@ pub fn load(turns: Vec<(bool, String)>) {
 /// `question` given `context` (chronological `(is_assistant, text)` turns)
 /// and blocks until the full answer is ready (or a 120s timeout). The actor's
 /// running AI-assistant conversation is left untouched.
-pub fn ask_on(
-    context: Vec<(bool, String)>,
-    question: String,
-) -> Result<String, String> {
+pub fn ask_on(context: Vec<(bool, String)>, question: String) -> Result<String, String> {
     ensure_actor();
     let Some(cmd_tx) = CMD.lock().unwrap().clone() else {
         return Err("AI actor unavailable".to_string());
     };
     let (tx, rx) = channel::<String>();
     cmd_tx
-        .send(Cmd::Ask { context, question, reply: tx })
+        .send(Cmd::Ask {
+            context,
+            question,
+            reply: tx,
+        })
         .map_err(|e| e.to_string())?;
     rx.recv_timeout(std::time::Duration::from_secs(120))
         .map_err(|e| format!("AI reply timed out: {e}"))
@@ -394,12 +385,16 @@ pub fn translate(text: &str, target: &str) -> Result<String, String> {
 
 pub fn reset(weak: slint::Weak<MainWindow>) {
     ensure_actor();
-    let Some(cmd_tx) = CMD.lock().unwrap().clone() else { return };
+    let Some(cmd_tx) = CMD.lock().unwrap().clone() else {
+        return;
+    };
     let _ = cmd_tx.send(Cmd::Reset);
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = weak.upgrade() else { return };
         let a = ui.global::<AiAssistantState>();
-        a.set_messages(slint::ModelRc::new(slint::VecModel::from(Vec::<AiMessageRow>::new())));
+        a.set_messages(slint::ModelRc::new(slint::VecModel::from(Vec::<
+            AiMessageRow,
+        >::new())));
         a.set_error(SharedString::new());
         a.set_busy(false);
     });
@@ -449,7 +444,9 @@ fn push_row(a: &AiAssistantState, row: AiMessageRow) {
 fn append_token(a: &AiAssistantState, tok: String) {
     use slint::Model as _;
     let n = a.get_messages().row_count();
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
     let mut rows: Vec<AiMessageRow> = (0..n)
         .map(|i| a.get_messages().row_data(i).unwrap_or_default())
         .collect();

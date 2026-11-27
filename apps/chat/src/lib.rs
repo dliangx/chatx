@@ -888,12 +888,6 @@ pub fn run_app() {
     // ~/.chatx/chatx.log). Idempotent; cheap no-op if already initialised.
     let _ = chatx_core::logging::init_default();
 
-    // Tear down the LLM actor before llama.cpp's C++ static destructors run,
-    // even on the macOS ⌘Q / red-X path that calls `exit()` directly (which
-    // would otherwise leave the Metal residency sets non-empty and abort).
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    ai::install_exit_guard();
-
     drag_drop::install();
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
