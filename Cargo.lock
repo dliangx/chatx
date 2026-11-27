@@ -1696,6 +1696,7 @@ dependencies = [
  "cpal",
  "doc",
  "image",
+ "libc",
  "libp2p",
  "media",
  "notify-rust",

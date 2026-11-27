@@ -12,6 +12,7 @@
 //! - `llama` feature + `CHATX_MODEL` set → the on-device GGUF model.
 //! - otherwise → the echo `MockBackend` (page works end-to-end with no model).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use slint::ComponentHandle;
@@ -87,6 +88,14 @@ static ACTOR_THREAD: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> =
 static OUT_TX: std::sync::Mutex<Option<Sender<UiEvent>>> = std::sync::Mutex::new(None);
 static OUT_RX: std::sync::Mutex<Option<Receiver<UiEvent>>> = std::sync::Mutex::new(None);
 
+/// Guards against [`shutdown`] running twice. AppKit's `⌘Q` / red-X path calls
+/// `exit()`, which runs C++ static destructors *after* `atexit` handlers — so
+/// the Metal residency sets must be emptied on the actor thread **before**
+/// `ggml_metal_device_free` runs, or `GGML_ASSERT([rsets->data count] == 0)`
+/// aborts the process. The `atexit` handler (see [`install_exit_guard`]) and the
+/// normal `run_app` teardown both funnel through here.
+static SHUTDOWN_CALLED: AtomicBool = AtomicBool::new(false);
+
 /// Called on the UI thread once a generation finishes, with the full assistant
 /// text. Registered by `lib.rs` to persist the assistant turn to the AI
 /// conversation (type-2) in SQLite.
@@ -127,11 +136,49 @@ fn ensure_actor() {
 /// (and its Metal buffers) are freed before `main` returns, so the static
 /// destructors find empty residency sets.
 pub fn shutdown() {
+    if SHUTDOWN_CALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
     // Drop the only sender so the actor's `for cmd in rx` iterator ends (the
     // receiver becomes broken) and the loop returns, dropping the backend.
     *CMD.lock().unwrap() = None;
     let Some(handle) = ACTOR_THREAD.lock().unwrap().take() else { return };
     let _ = handle.join();
+}
+
+/// Install an `atexit` handler that tears down the LLM actor **before**
+/// llama.cpp's C++ static destructors run.
+///
+/// Why this is needed: the normal teardown (`run_app` returning from
+/// `ui.run()`) already calls [`shutdown`]. But macOS's ⌘Q / red-X path is
+/// different — AppKit's `NSApplication terminate:` calls `exit(0)`, which runs
+/// C++ static destructors (`__cxa_finalize`) *directly*, never unwinding the
+/// Rust stack, so `ai::shutdown()` is never reached. The Metal residency sets
+/// still hold the `LlamaContext` buffers, and `ggml_metal_device_free` then
+/// trips `GGML_ASSERT([rsets->data count] == 0)` and aborts.
+///
+/// `atexit` handlers run *before* C++ static destructors (the C standard
+/// guarantees `exit()` calls `atexit` handlers first, then runs the
+/// static-destruction phase). This handler drops the actor — and with it the
+/// `LlamaModel` and the Metal residency-set buffers it owns — on the actor
+/// thread, so the static destructors find empty residency sets.
+///
+/// Safe to call more than once: only the first call registers (the rest are
+/// no-ops), and the handler itself is idempotent via [`SHUTDOWN_CALLED`].
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn install_exit_guard() {
+    static REGISTERED: AtomicBool = AtomicBool::new(false);
+    if REGISTERED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // `atexit` requires `extern "C" fn()`, so wrap the idempotent [`shutdown`]
+    // (guarded by `SHUTDOWN_CALLED`) in an extern-C trampoline.
+    extern "C" fn atexit_shutdown() {
+        shutdown();
+    }
+    unsafe {
+        let _ = libc::atexit(atexit_shutdown);
+    }
 }
 
 /// Build a validated backend for the currently-selected model, running on the
