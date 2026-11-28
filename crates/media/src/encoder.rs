@@ -11,9 +11,9 @@
 //!
 //!   * **Apple** (macOS / iOS) — **VideoToolbox** hardware (GPU) encode, a
 //!     C-ABI surface compiled from `shim/encoder.swift` (see `build.rs`),
-//!     wrapped in [`crate::apple::AppleH264Encoder`].
+//!     wrapped in [`crate::gpu::apple::AppleH264Encoder`].
 //!   * **Android** — **MediaCodec** via the JNI bridge, wrapped in
-//!     [`crate::android::AndroidH264Encoder`].
+//!     [`crate::gpu::android::AndroidH264Encoder`].
 //!   * **Everywhere / on failure** — pure-Rust [openh264] software encode.
 //!
 //! The native/GPU path is *opportunistic*: a backend that reports an encode
@@ -135,7 +135,7 @@ impl H264Encoder for OpenH264Encoder {
 pub fn create_encoder(bitrate_bps: u32, max_w: u32) -> Box<dyn H264Encoder> {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
-        return match crate::apple::AppleH264Encoder::new(bitrate_bps, max_w) {
+        return match crate::gpu::apple::AppleH264Encoder::new(bitrate_bps, max_w) {
             Ok(d) => {
                 tracing::debug!("[media] H.264 encoder: VideoToolbox (GPU)");
                 Box::new(d)
@@ -154,9 +154,39 @@ pub fn create_encoder(bitrate_bps: u32, max_w: u32) -> Box<dyn H264Encoder> {
         // `AndroidH264Encoder::new` never hard-fails: if MediaCodec can't be
         // opened it already wires in its openh264 software fallback.
         return Box::new(
-            crate::android::AndroidH264Encoder::new(bitrate_bps, max_w)
+            crate::gpu::android::AndroidH264Encoder::new(bitrate_bps, max_w)
                 .expect("android encoder alloc"),
         );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Software encode (openh264) for now — see the module note in
+        // `crate::gpu::linux` for why VAAPI hardware encode is deferred.
+        return match crate::gpu::linux::LinuxH264Encoder::new(bitrate_bps, max_w) {
+            Ok(d) => Box::new(d),
+            Err(e) => {
+                tracing::warn!("[media] Linux encoder init failed ({e}) — falling back to openh264 (software)");
+                Box::new(
+                    OpenH264Encoder::with_cfg(bitrate_bps, max_w)
+                        .expect("openh264 encoder alloc"),
+                )
+            }
+        };
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Software encode (openh264) for now — see the module note in
+        // `crate::gpu::windows` for why Media Foundation hardware encode is deferred.
+        return match crate::gpu::windows::WinH264Encoder::new(bitrate_bps, max_w) {
+            Ok(d) => Box::new(d),
+            Err(e) => {
+                tracing::warn!("[media] Windows encoder init failed ({e}) — falling back to openh264 (software)");
+                Box::new(
+                    OpenH264Encoder::with_cfg(bitrate_bps, max_w)
+                        .expect("openh264 encoder alloc"),
+                )
+            }
+        };
     }
     // No native backend on this target (or the build disabled one).
     #[allow(unreachable_code)]
@@ -234,7 +264,7 @@ mod apple_enc_tests {
     /// stream, followed by the IDR slice (type 5) — each start-code prefixed.
     #[test]
     fn gpu_encode_emits_sps_pps_idr() {
-        let mut enc = crate::apple::AppleH264Encoder::new(2_000_000, 0).expect("gpu enc");
+        let mut enc = crate::gpu::apple::AppleH264Encoder::new(2_000_000, 0).expect("gpu enc");
         let (w, h): (u32, u32) = (320, 240);
         let rgba: Vec<u8> = (0..(w * h * 4)).map(|i| i as u8).collect();
         let out = enc.encode_rgba(&rgba, w, h, 2_000_000, 0).expect("gpu encode");
@@ -284,7 +314,7 @@ mod apple_enc_tests {
         let (w, h): (u32, u32) = (320, 240);
         let rgba: Vec<u8> = (0..(w * h * 4)).map(|i| i as u8).collect();
         for _ in 0..8 {
-            let mut enc = crate::apple::AppleH264Encoder::new(2_000_000, 0).expect("gpu enc");
+            let mut enc = crate::gpu::apple::AppleH264Encoder::new(2_000_000, 0).expect("gpu enc");
             // Fire off an encode; do NOT drain. The output may still be
             // in flight on a VideoToolbox worker when we drop the encoder
             // below.

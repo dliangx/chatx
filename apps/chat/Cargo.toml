@@ -54,15 +54,10 @@ winres = "0.1"
 # desktop targets — on Android the selector cannot attach a renderer to the
 # winit backend (its winit dep is `cfg(not(target_os="android"))`), leaving it
 # renderer-less and failing to compile.
-# Windows explicitly uses the Skia renderer; macOS/Linux rely on Slint's
-# default backend selection.
-[target.'cfg(windows)'.dependencies.slint]
+# Windows macOS/Linux  explicitly uses the Skia renderer;
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies.slint]
 workspace = true
 features = ["unstable-winit-030", "renderer-skia"]
-
-[target.'cfg(not(any(windows, target_os = "android", target_os = "ios")))'.dependencies.slint]
-workspace = true
-features = ["unstable-winit-030"]
 
 # iOS renders via the Skia backend (winit backend forces Skia on Apple
 # non-macOS targets; declared explicitly to be unambiguous).

@@ -7,8 +7,8 @@
 //! Callers push raw frames (s16le PCM / RGBA8) from the `audio` / `camera` /
 //! `screen` sink callbacks.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
 /// Connection gate. Set to `true` once the `PeerConnection` reaches the
@@ -41,12 +41,12 @@ pub(crate) fn should_send() -> bool {
 }
 
 use bytes::Bytes;
-use webrtc_rs::api::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_PCMU};
+use webrtc_rs::api::media_engine::{MIME_TYPE_H264, MIME_TYPE_PCMU, MediaEngine};
 use webrtc_rs::rtp_transceiver::rtp_codec::{
-    RTPCodecType, RTCRtpCodecCapability, RTCRtpCodecParameters,
+    RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
 };
-use webrtc_rs::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc_rs::track::track_local::TrackLocal;
+use webrtc_rs::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
 use crate::error::Result;
 use crate::signal::VKind;
@@ -247,23 +247,17 @@ impl VidSource {
         ));
         let latest = Arc::new(std::sync::Mutex::new(None));
         let stopped = Arc::new(AtomicBool::new(false));
-        // Screen capture runs at *full desktop resolution* (e.g. 2560x1440).
-        // The default `Encoder::new()` target bitrate is only **120 kbps**,
-        // far too low for full-res screen content — the rate controller drops
-        // most frames and the ones kept are grainy, which is why the shared
-        // screen was "unreadable". Clarity at full resolution is therefore
-        // governed by the *target bitrate*, and by how much the network can
-        // actually carry. So for the screen source:
-        //   * keep the captured resolution UNCAPPED by default (no downscale),
-        //     so the picture stays sharp — the user explicitly does not want
-        //     the screen shrunk;
-        //   * raise the target bitrate to a readable level (6 Mbps);
-        //   * run at a modest frame rate (~10 fps) so the per-second volume
-        //     stays within what a real 1:1 relay can deliver without heavy loss.
-        // All three are overridable via env vars for tuning per network:
-        //   CHATX_SCR_BITRATE  bits/s   (default 6_000_000)
-        //   CHATX_SCR_MAX_W    px, 0=no cap (default 0 = full res)
-        //   CHATX_SCR_FPS      fps    (default 10)
+        // Resolution + rate policy per source (width cap via `max_w`, then the
+        // 4K ceiling in `prepare_rgba` still applies on top):
+        //   * **Camera** — hard cap at **2K (2560 wide)** @ **60 fps**. Keeps a
+        //     4K/8MP camera inside a live 1:1 relay while staying smooth.
+        //   * **Screen** — hard cap at **2K (2560 wide)** @ **15 fps**. Screen
+        //     content needs the *bitrate* (sharp text) more than the frame rate;
+        //     a modest fps keeps the per-second volume within a real 1:1 relay.
+        // Both are overridable via env vars for tuning per network:
+        //   Camera: CHATX_CAM_MAX_W (px, default 2560)  / CHATX_CAM_FPS (default 60)
+        //   Screen: CHATX_SCR_MAX_W (px, default 2560)  / CHATX_SCR_FPS (default 15)
+        //           CHATX_SCR_BITRATE (bits/s, default 6_000_000)
         let is_scr = matches!(kind, VKind::Scr);
         let bitrate_bps = if is_scr {
             std::env::var("CHATX_SCR_BITRATE")
@@ -277,18 +271,25 @@ impl VidSource {
             std::env::var("CHATX_SCR_MAX_W")
                 .ok()
                 .and_then(|s| s.trim().parse::<u32>().ok())
-                .unwrap_or(0)
+                .unwrap_or(2560)
         } else {
-            0
+            std::env::var("CHATX_CAM_MAX_W")
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(1920)
         };
         let fps = if is_scr {
             std::env::var("CHATX_SCR_FPS")
                 .ok()
                 .and_then(|s| s.trim().parse::<f32>().ok())
                 .filter(|f| *f > 0.0)
-                .unwrap_or(10.0)
+                .unwrap_or(15.0)
         } else {
-            60.0
+            std::env::var("CHATX_CAM_FPS")
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .filter(|f| *f > 0.0)
+                .unwrap_or(60.0)
         };
         // Pick the best H.264 encoder for this target — VideoToolbox (GPU) on
         // Apple, MediaCodec (GPU) on Android, pure-Rust openh264 elsewhere —
@@ -303,7 +304,18 @@ impl VidSource {
         let stopped2 = stopped.clone();
         std::thread::Builder::new()
             .name("chatx-venc".into())
-            .spawn(move || encode_loop(enc, track2, latest2, stopped2, tick, max_w, bitrate_bps, tag))
+            .spawn(move || {
+                encode_loop(
+                    enc,
+                    track2,
+                    latest2,
+                    stopped2,
+                    tick,
+                    max_w,
+                    bitrate_bps,
+                    tag,
+                )
+            })
             .map_err(|e| crate::error::Error::other(format!("spawn venc: {e}")))?;
         Ok(Self {
             track,
@@ -319,7 +331,8 @@ impl VidSource {
     /// so callers can tear down deterministically (e.g. on hangup / mid-call
     /// video-off) without waiting for the source to be dropped.
     pub fn stop(&self) {
-        self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         *self.latest.lock().unwrap() = None;
     }
 
@@ -345,7 +358,10 @@ impl VidSource {
         // this source, and whether the connection gate let it through to
         // `latest`. Throttled (first + every 50th) so it never floods.
         if !self.muted.load(std::sync::atomic::Ordering::Relaxed) {
-            let n = self.push_n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let n = self
+                .push_n
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
             if n == 1 || n % 50 == 0 {
                 tracing::debug!(
                     "[media] {} push #{} WxH={w}x{h} gate={}",
@@ -364,7 +380,11 @@ impl VidSource {
         if !should_send() {
             return;
         }
-        *self.latest.lock().unwrap() = Some(Frame { rgba: rgba.to_vec(), w, h });
+        *self.latest.lock().unwrap() = Some(Frame {
+            rgba: rgba.to_vec(),
+            w,
+            h,
+        });
     }
 
     pub fn mute(&self, on: bool) {
@@ -398,7 +418,8 @@ impl Drop for VidSource {
         // here could self-deadlock. The stop flag alone is enough to reclaim
         // the openh264 encoder / frame / runtime (the thread exits on its
         // next ~16ms tick and drops everything it owned).
-        self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -412,7 +433,10 @@ fn encode_loop(
     bitrate_bps: u32,
     tag: &'static str,
 ) {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("venc rt");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("venc rt");
     // Throttled send diagnostic (first sample + every 50th) written to
     // stderr/chatx.log: proves the sender actually produced + handed the
     // encoded frame to the webrtc track, isolating "no frames produced"
@@ -476,7 +500,12 @@ fn encode_loop(
         if data.is_empty() {
             let n = enc_tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if n == 1 || n % 10 == 0 {
-                tracing::debug!("[media] {tag} venc #{}: encode EMPTY ({}x{})", n, frame.w, frame.h);
+                tracing::debug!(
+                    "[media] {tag} venc #{}: encode EMPTY ({}x{})",
+                    n,
+                    frame.w,
+                    frame.h
+                );
             }
             continue;
         }
@@ -493,14 +522,23 @@ fn encode_loop(
         if n_w == 1 || n_w % 50 == 0 {
             tracing::debug!(
                 "[media] {tag} before write_sample #{} enc={}B ({}x{})",
-                n_w, data_len, frame.w, frame.h
+                n_w,
+                data_len,
+                frame.w,
+                frame.h
             );
         }
         if let Err(e) = rt.block_on(track.write_sample(&sample)) {
             tracing::warn!(err = %e, "{tag} write_sample video failed");
         }
         if n_w == 1 || n_w % 50 == 0 {
-            tracing::debug!("[media] {tag} video sent #{} enc={}B ({}x{})", n_w, data_len, frame.w, frame.h);
+            tracing::debug!(
+                "[media] {tag} video sent #{} enc={}B ({}x{})",
+                n_w,
+                data_len,
+                frame.w,
+                frame.h
+            );
         }
     }
 }
@@ -564,7 +602,9 @@ mod mulaw_tests {
     #[test]
     fn byte_count_and_bits_preserved() {
         // 16 samples @ 16-bit = 32 bytes, preserved both directions.
-        let pcm: Vec<u8> = (0..16).flat_map(|i| (i as i16 * 2000).to_le_bytes()).collect();
+        let pcm: Vec<u8> = (0..16)
+            .flat_map(|i| (i as i16 * 2000).to_le_bytes())
+            .collect();
         assert_eq!(pcm.len(), 32);
         assert_eq!(mulaw_encode(&pcm).len(), 32);
         assert_eq!(mulaw_decode(&mulaw_encode(&pcm)).len(), 32);

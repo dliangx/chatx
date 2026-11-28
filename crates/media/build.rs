@@ -17,6 +17,16 @@
 //! For cross-compilation (macOS → iOS), the shims are compiled with the target
 //! triple + SDK the cargo build is using (via `xcrun`, preserving Xcode's
 //! toolchain env).
+//!
+//! # Non-Apple targets
+//!
+//! - **Linux** — the VAAPI backend (`src/linux.rs`) `dlopen`s `libva.so.1`
+//!   at runtime (no link-time dependency, no extra system lib required at
+//!   build time). If `libva` is not present at runtime, the backend silently
+//!   falls back to the [openh264] software decoder.
+//! - **Windows** — the backend (`src/windows.rs`) uses the [openh264]
+//!   software path today (Media Foundation GPU decode is future work).
+//!   No native build steps required.
 fn main() {
     let target = std::env::var("TARGET").unwrap_or_default();
     if !target.contains("apple") {
@@ -38,9 +48,6 @@ fn main() {
     }
 
     let (swift_target, sdk_name) = match target.as_str() {
-        // macOS 14+: the VideoToolbox decode surface we use
-        // (`VTDecompressionSessionCreate` 5-param + block `DecodeFrame`) is the
-        // modern, stable API.
         t if t.ends_with("aarch64-apple-darwin") => ("arm64-apple-macos14.0", "macosx"),
         t if t.ends_with("x86_64-apple-darwin") => ("x86_64-apple-macos14.0", "macosx"),
         // iOS 17+: the modern `VTDecompressionSessionCreate` /

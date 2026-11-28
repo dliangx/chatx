@@ -22,5 +22,10 @@ tracing = { workspace = true }
 [target.'cfg(target_os = "android")'.dependencies]
 bridge = { path = "../bridge" }
 
+# Linux H.264 decode (VAAPI) dlopens libva.so.1 at runtime; `libc` supplies
+# the dlopen/dlsym entry points. No link-time dependency on libva is needed.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

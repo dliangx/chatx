@@ -5937,6 +5937,7 @@ dependencies = [
  "async-broadcast",
  "bridge",
  "bytes",
+ "libc",
  "openh264",
  "serde",
  "serde_json",
