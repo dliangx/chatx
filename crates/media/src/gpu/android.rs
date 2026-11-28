@@ -103,16 +103,21 @@ impl H264Decoder for AndroidH264Decoder {
 pub struct AndroidH264Encoder {
     /// Opaque handle into the Java `MediaCodecEncoder` registry. `0` = dead.
     handle: i32,
-    /// Once a native `feed` fails, encode everything through this software
+    /// Once a native `feed` hard-fails, encode everything through this software
     /// encoder instead (and stop calling into the Java side).
     fallback: Option<OpenH264Encoder>,
-    /// Scratch buffer for `out()` — allocated once and reused.
+    /// Native path is dead — route `submit`/`poll` through `fallback`.
+    native_dead: bool,
+    /// Scratch buffer for `poll` — allocated once and reused.
     scratch: Vec<u8>,
+    /// Width cap applied in `submit` before the native encoder.
     max_w: u32,
+    /// Target bitrate, used to build the software fallback.
+    bitrate_bps: u32,
 }
 
 impl AndroidH264Encoder {
-    pub fn new(_bitrate_bps: u32, max_w: u32) -> Result<Self, Error> {
+    pub fn new(bitrate_bps: u32, max_w: u32) -> Result<Self, Error> {
         let handle = bridge::h264enc_new();
         if handle == 0 {
             return Err(Error::other("MediaCodec encoder unavailable (handle 0)"));
@@ -120,21 +125,29 @@ impl AndroidH264Encoder {
         Ok(Self {
             handle,
             fallback: None,
+            native_dead: false,
             scratch: Vec::new(),
             max_w,
+            bitrate_bps,
         })
     }
 
-    fn encode_fallback(&mut self, rgba: &[u8], w: u32, h: u32, bitrate_bps: u32) -> crate::error::Result<Vec<u8>> {
-        if self.fallback.is_none() {
-            self.fallback = Some(
-                OpenH264Encoder::with_cfg(bitrate_bps, self.max_w)
-                    .map_err(|e| Error::other(e.to_string()))?,
-            );
+    /// Switch to the software fallback permanently (lazy allocation).
+    fn enable_fallback(&mut self) {
+        if self.native_dead {
+            return;
         }
-        self.fallback.as_mut().unwrap().encode_rgba(rgba, w, h, bitrate_bps, self.max_w)
+        self.native_dead = true;
+        if self.handle != 0 {
+            bridge::h264enc_close(self.handle);
+            self.handle = 0;
+        }
+        if self.fallback.is_none() {
+            self.fallback = OpenH264Encoder::with_cfg(self.bitrate_bps, self.max_w).ok();
+        }
     }
 
+    /// Pull one completed Annex-B NAL stream out of the Java shim.
     fn drain_annexb(&mut self) -> Option<Vec<u8>> {
         // Pre-allocate a generous scratch buffer (like the decode side does
         // with MAX_RGBA) so the Java `out()` — which copies `min(n, dst.len)`
@@ -148,21 +161,38 @@ impl AndroidH264Encoder {
 }
 
 impl H264Encoder for AndroidH264Encoder {
-    fn encode_rgba(&mut self, rgba: &[u8], w: u32, h: u32, bitrate_bps: u32, max_w: u32) -> crate::error::Result<Vec<u8>> {
+    /// Non-blocking submit: hand the frame to MediaCodec and return. The
+    /// encoded output is produced asynchronously by the Java side and collected
+    /// later via [`Self::poll`]. A hard `feed` rejection retires the native
+    /// path (software from here on); the dropped frame is reported.
+    fn submit(&mut self, rgba: &[u8], w: u32, h: u32) -> bool {
         if rgba.is_empty() || w == 0 || h == 0 {
-            return Err(Error::other("empty frame"));
+            return false;
         }
-        if let Some(fb) = self.fallback.as_mut() {
-            return fb.encode_rgba(rgba, w, h, bitrate_bps, max_w);
+        if self.native_dead {
+            if let Some(fb) = self.fallback.as_mut() {
+                return fb.submit(rgba, w, h);
+            }
+            return false;
         }
-        let (rgba, w, h) = prepare_rgba(rgba, w, h, max_w);
+        let (rgba, w, h) = prepare_rgba(rgba, w, h, self.max_w);
         if !bridge::h264enc_feed(self.handle, &rgba, w, h) {
             tracing::warn!("[media] MediaCodec feed failed — switching to openh264 software encode");
-            bridge::h264enc_close(self.handle);
-            self.handle = 0;
-            return self.encode_fallback(&rgba, w, h, bitrate_bps);
+            self.enable_fallback();
+            if let Some(fb) = self.fallback.as_mut() {
+                return fb.submit(&rgba, w, h);
+            }
+            return false;
         }
-        self.drain_annexb().ok_or_else(|| Error::other("no encoded output from MediaCodec"))
+        true
+    }
+
+    /// Collect one completed Annex-B NAL stream, if any (non-blocking).
+    fn poll(&mut self) -> Option<Vec<u8>> {
+        if self.native_dead {
+            return self.fallback.as_mut()?.poll();
+        }
+        self.drain_annexb()
     }
 
     fn close(&mut self) {

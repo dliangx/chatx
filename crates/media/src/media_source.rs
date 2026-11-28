@@ -311,8 +311,6 @@ impl VidSource {
                     latest2,
                     stopped2,
                     tick,
-                    max_w,
-                    bitrate_bps,
                     tag,
                 )
             })
@@ -429,8 +427,6 @@ fn encode_loop(
     latest: Arc<std::sync::Mutex<Option<Frame>>>,
     stopped: Arc<AtomicBool>,
     tick: Duration,
-    max_w: u32,
-    bitrate_bps: u32,
     tag: &'static str,
 ) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -442,103 +438,72 @@ fn encode_loop(
     // encoded frame to the webrtc track, isolating "no frames produced"
     // from "frames dropped on the wire" in the field.
     let sent = std::sync::atomic::AtomicU64::new(0);
-    // Diagnostic: count each encode_loop outcome so a live log can disambiguate
-    // "no frame arrived" (latest empty) from "encode errored" / "encode empty"
-    // from "encoded + written out". Throttled (first + every 50th).
-    let enc_tick = std::sync::atomic::AtomicU64::new(0);
+    // Diagnostic counters so a live log can disambiguate the async pipeline:
+    // `sent` = frames written to the track; `dropped` = input frames we
+    // discarded because the backend was saturated (submit failed).
+    let dropped = std::sync::atomic::AtomicU64::new(0);
     loop {
         if stopped.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
         std::thread::sleep(tick); // frame-rate cap (see `VidSource::new`)
-        // Take the frame out (ownership transfer) rather than cloning the full
-        // RGBA `Vec` — a screen frame can be ~14 MB, and this runs every tick.
-        // Single-consumer ("latest wins"), so removing it from `latest` is safe;
-        // `stop`/`clear` already handle the `None` case.
-        let frame = latest.lock().unwrap().take();
-        if frame.is_none() {
-            let n = enc_tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if n == 1 || n % 50 == 0 {
-                tracing::debug!("[media] {tag} venc #{}: no frame pending (latest empty)", n);
-            }
-            continue;
-        }
-        let Some(frame) = frame else { continue };
 
         // Connection gate: before the peer answers (and after it hangs up /
         // disconnects) we must NOT feed the webrtc track — encoded frames only
-        // pile up in the send pipeline. Skip the encode entirely (cheapest CPU
-        // win: no openh264 work, no `write_sample`) and drop the retained
-        // full-res frame so it isn't pinned while we're not sending.
+        // pile up in the send pipeline. Drop the retained full-res frame so it
+        // isn't pinned while we're not sending.
         if !should_send() {
             *latest.lock().unwrap() = None;
             continue;
         }
 
-        // Encode this frame through whichever backend we picked
-        // (VideoToolbox / MediaCodec / openh264). The backend owns the
-        // width-cap downscale (to `max_w`, preserving aspect) and the H.264
-        // 3840×2160 ceiling clamp, and returns the full Annex-B NAL stream
-        // (SPS/PPS + the slice) — exactly the wire format the webrtc
-        // `H264Payloader` expects. `max_w == 0` = no limit (camera path).
-        let data = match enc.encode_rgba(&frame.rgba, frame.w, frame.h, bitrate_bps, max_w) {
-            Ok(b) => b,
-            Err(e) => {
-                let n = enc_tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                if n == 1 || n % 10 == 0 {
-                    tracing::warn!(
-                        "[media] {tag} venc #{}: encode ERROR {e} ({}x{})",
-                        n,
-                        frame.w,
-                        frame.h
-                    );
-                }
-                tracing::warn!(err = %e, "{tag} h264 encode failed");
-                continue;
+        // 1) Drain every completed picture from the encoder and write it to the
+        //    track, in order. A hardware backend's output lags its input by ≥1
+        //    frame (VideoToolbox / MediaCodec run async on their own worker), so
+        //    on each tick we may collect 0..N completed Annex-B streams. Always
+        //    send these before submitting the next input frame — that keeps wire
+        //    order == input order (encoders emit in submission order).
+        while let Some(data) = enc.poll() {
+            if data.is_empty() {
+                continue; // encoder warmed up / produced nothing this frame
             }
-        };
-        if data.is_empty() {
-            let n = enc_tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if n == 1 || n % 10 == 0 {
-                tracing::debug!(
-                    "[media] {tag} venc #{}: encode EMPTY ({}x{})",
-                    n,
-                    frame.w,
-                    frame.h
-                );
+            let data_len = data.len();
+            let sample = webrtc_rs::media::Sample {
+                data: Bytes::from(data),
+                timestamp: SystemTime::now(),
+                duration: tick,
+                packet_timestamp: 0,
+                prev_dropped_packets: 0,
+                prev_padding_packets: 0,
+            };
+            let n_w = sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if n_w == 1 || n_w % 50 == 0 {
+                tracing::debug!("[media] {tag} before write_sample #{} enc={}B", n_w, data_len);
             }
+            if let Err(e) = rt.block_on(track.write_sample(&sample)) {
+                tracing::warn!(err = %e, "{tag} write_sample video failed");
+            }
+            if n_w == 1 || n_w % 50 == 0 {
+                tracing::debug!("[media] {tag} video sent #{} enc={}B", n_w, data_len);
+            }
+        }
+
+        // 2) Take the latest input frame (ownership transfer, "latest wins") and
+        //    submit it for encoding. Non-blocking by contract: if the backend is
+        //    saturated (its output queue already has an unpolled frame, or a
+        //    native submit was rejected) we drop this frame and keep going —
+        //    live video tolerates a dropped frame far better than a wedged
+        //    encode thread, and this is exactly the blocking bug we removed.
+        let frame = latest.lock().unwrap().take();
+        let Some(frame) = frame else {
+            // Nothing new to submit; any completed output was drained above.
             continue;
-        }
-        let data_len = data.len();
-        let sample = webrtc_rs::media::Sample {
-            data: Bytes::from(data),
-            timestamp: SystemTime::now(),
-            duration: tick,
-            packet_timestamp: 0,
-            prev_dropped_packets: 0,
-            prev_padding_packets: 0,
         };
-        let n_w = sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        if n_w == 1 || n_w % 50 == 0 {
-            tracing::debug!(
-                "[media] {tag} before write_sample #{} enc={}B ({}x{})",
-                n_w,
-                data_len,
-                frame.w,
-                frame.h
-            );
-        }
-        if let Err(e) = rt.block_on(track.write_sample(&sample)) {
-            tracing::warn!(err = %e, "{tag} write_sample video failed");
-        }
-        if n_w == 1 || n_w % 50 == 0 {
-            tracing::debug!(
-                "[media] {tag} video sent #{} enc={}B ({}x{})",
-                n_w,
-                data_len,
-                frame.w,
-                frame.h
-            );
+        if !enc.submit(&frame.rgba, frame.w, frame.h) {
+            let n = dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if n == 1 || n % 50 == 0 {
+                tracing::debug!("[media] {tag} venc: dropped frame (encoder busy) #{}", n);
+            }
         }
     }
 }

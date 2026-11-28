@@ -603,15 +603,12 @@ impl LinuxH264Encoder {
 }
 
 impl H264Encoder for LinuxH264Encoder {
-    fn encode_rgba(
-        &mut self,
-        rgba: &[u8],
-        w: u32,
-        h: u32,
-        bitrate_bps: u32,
-        max_w: u32,
-    ) -> crate::error::Result<Vec<u8>> {
-        self.inner.encode_rgba(rgba, w, h, bitrate_bps, max_w)
+    fn submit(&mut self, rgba: &[u8], w: u32, h: u32) -> bool {
+        self.inner.submit(rgba, w, h)
+    }
+
+    fn poll(&mut self) -> Option<Vec<u8>> {
+        self.inner.poll()
     }
 
     fn close(&mut self) {

@@ -79,11 +79,15 @@ final class EncInst {
     var session: VTCompressionSession?
     var sessW: Int = 0
     var sessH: Int = 0
-    var pendingOut: [UInt8] = []
+    /// Completed Annex-B NAL streams, ready to be pulled by Rust (`out`). The
+    /// output callback appends a frame here (under `lock`); `out` pops the
+    /// front. A queue (not a single slot) because VideoToolbox emits
+    /// asynchronously and can have more than one frame in flight — Rust drains
+    /// it via repeated `out`.
+    var outQueue: [[UInt8]] = []
     var spsPps: [UInt8] = []
     var nextPts: Int64 = 0
     var lastErr: Int32 = 0
-    let sem = DispatchSemaphore(value: 0)
 
     /// Count of frames we have handed to `VTCompressionSessionEncodeFrame`
     /// but for which the output callback has not yet fired. Bumped on
@@ -140,7 +144,7 @@ final class EncInst {
                 lock.lock()
             }
         }
-        pendingOut = []
+        outQueue = []
         spsPps = []
         guard w > 0, h > 0 else { return false }
         var s: VTCompressionSession?
@@ -219,7 +223,7 @@ final class EncInst {
             // Safe: no worker is in flight. Clear the session ref; `deinit`
             // invalidates it once the last strong ref is gone.
             session = nil
-            pendingOut = []
+            outQueue = []
             spsPps = []
         } else {
             FileHandle.standardError.write(Data("[venc] close: worker in flight — leaking session to avoid UAF\n".utf8))
@@ -251,9 +255,17 @@ final class EncInst {
         self.encodeImage(pb, w, h)
     }
 
-    /// Shared core: ensure a session for (w,h), encode `image`, wait for the
-    /// output, report status. `pb` must outlive the call (it does — the caller
-    /// holds a `Retain` or it is freshly allocated).
+    /// Shared core: ensure a session for (w,h), then hand `image` to
+    /// `VTCompressionSessionEncodeFrame` and **return immediately**.
+    ///
+    /// The encoded output is produced **asynchronously** on a VideoToolbox
+    /// worker thread: the output callback fires later and appends the Annex-B
+    /// stream to `outQueue`, which Rust pulls via `out`. We deliberately do NOT
+    /// wait for the callback here — blocking on a single frame's async callback
+    /// is exactly what wedged the old synchronous design (the "GPU feed failed
+    /// → switch to software" field bug). `pb` must outlive the call (it does —
+    /// the caller holds a `Retain` or it is freshly allocated); the encoder
+    /// reads it synchronously before `EncodeFrame` returns.
     private func encodeImage(_ pb: CVPixelBuffer, _ w: Int, _ h: Int) -> Int32 {
         var s: VTCompressionSession?
         lock.lock()
@@ -262,12 +274,12 @@ final class EncInst {
         guard ensureSessionLocked(w: w, h: h) else { lock.unlock(); return -1 }
         s = self.session
         guard s != nil else { lock.unlock(); return -1 }
-        lastErr = 0
         let pts = CMTimeMake(value: nextPts, timescale: 30)
         let dur = CMTimeMake(value: 1, timescale: 30)
         nextPts += 1
         // Reserve one slot of `pending` for the callback we are about to ask
-        // for. The callback will decrement it when it fires.
+        // for. The callback will decrement it when it fires. (Still needed for
+        // the safe-close / leak decision in `close()`.)
         pending += 1
         lock.unlock()
         guard let s = s else {
@@ -285,8 +297,10 @@ final class EncInst {
             infoFlagsOut: nil
         )
         if st != 0 {
-            // The callback will NOT fire for this frame — undo our pending
-            // reservation.
+            // `EncodeFrame` itself rejected the frame (session torn down, bad
+            // buffer, …). The callback will NOT fire for this frame — undo the
+            // `pending` reservation and report a hard failure so Rust can drop
+            // the frame / fall back.
             lock.lock()
             pending -= 1
             lastErr = Int32(st)
@@ -294,37 +308,25 @@ final class EncInst {
             FileHandle.standardError.write(Data("[venc] EncodeFrame=\(st)\n".utf8))
             return Int32(st)
         }
-        // 5s budget for one frame's worth of VideoToolbox work. A healthy GPU
-        // encoder emits a P-frame in well under 100 ms; a hung encoder (seen
-        // in the field: the *first P-frame after an IDR* never fires the output
-        // callback on some macOS/GPU combos) is caught here and the caller
-        // falls back to software. Kept short on purpose: this runs per-frame,
-        // so a longer value only delays the (correct) software fallback.
-        if sem.wait(timeout: .now() + 5.0) == .timedOut {
-            // Timeout: the callback did not fire within 5s. The VideoToolbox
-            // worker is stuck / the service is gone. Do NOT un-reserve
-            // `pending` here: leaving it ≥1 forces `close()` to take the leak
-            // path (keeping the session alive), which is the safe choice when
-            // a worker may still be touching it.
-            FileHandle.standardError.write(Data("[venc] EncodeFrame timeout\n".utf8))
-            return -2
-        }
-        lock.lock()
-        let err = lastErr
-        lock.unlock()
-        return err
+        // Accepted. The output callback will fire later on a VideoToolbox
+        // worker and queue the Annex-B stream for `out`. Return success now.
+        return 0
     }
 
     // ── output (Rust-owned destination) ───────────────────────────────────
+    /// Pop the front completed Annex-B stream into `dst` (grow-on-demand via
+    /// the caller's repeated `out`). Returns the frame's byte length, or `0`
+    /// when nothing is queued yet. Non-blocking: if no frame is ready the
+    /// caller simply polls again on the next tick.
     func out(dst: UnsafeMutablePointer<UInt8>, cap: Int) -> Int32 {
         lock.lock(); defer { lock.unlock() }
-        guard !pendingOut.isEmpty else { return 0 }
-        let total = pendingOut.count
+        guard !outQueue.isEmpty else { return 0 }
+        let total = outQueue[0].count
         if cap < total {
-            return Int32(total) // need a bigger buffer; frame kept
+            return Int32(total) // need a bigger buffer; frame kept for retry
         }
-        dst.update(from: pendingOut, count: total)
-        pendingOut = []
+        let frame = outQueue.removeFirst()
+        dst.update(from: frame, count: total)
         return Int32(total)
     }
 }
@@ -357,16 +359,18 @@ private func encOutputCallback(
     defer { Unmanaged<EncInst>.passUnretained(inst).release() }
 
     inst.lock.lock(); defer { inst.lock.unlock() }
+    // No `sem.signal()` here: the consumer (Rust `out`) no longer blocks on a
+    // per-frame semaphore. It simply polls `outQueue`, so the callback only has
+    // to enqueue the result (or nothing, on a hard failure) and release the
+    // `pending` reservation that `encodeImage` made.
     if status != 0 {
         inst.lastErr = Int32(status)
         inst.pending -= 1
-        inst.sem.signal()
         return
     }
     guard let sb = sampleBuffer else {
         inst.lastErr = -4
         inst.pending -= 1
-        inst.sem.signal()
         return
     }
     // First output frame carries the format description (SPS/PPS).
@@ -377,7 +381,6 @@ private func encOutputCallback(
     guard let bb = CMSampleBufferGetDataBuffer(sb) else {
         inst.lastErr = -5
         inst.pending -= 1
-        inst.sem.signal()
         return
     }
     let total = Int(CMBlockBufferGetDataLength(bb))
@@ -389,7 +392,6 @@ private func encOutputCallback(
     guard copied else {
         inst.lastErr = -6
         inst.pending -= 1
-        inst.sem.signal()
         return
     }
     // Convert avcC → Annex-B (4-byte length prefix → 00 00 00 01 start code).
@@ -409,9 +411,15 @@ private func encOutputCallback(
         annexb = inst.spsPps + annexb
         inst.spsPps = []
     }
-    inst.pendingOut = annexb
+    // Enqueue for Rust to pull. If the encode loop is behind and the queue
+    // already holds unpolled frames, a hardware encoder can in principle drop
+    // the *oldest* (or a new) frame; we keep the queue small by bounding it
+    // here so memory stays flat if the consumer stalls.
+    if annexb.count > 0 {
+        if inst.outQueue.count >= 8 { inst.outQueue.removeFirst() }
+        inst.outQueue.append(annexb)
+    }
     inst.pending -= 1
-    inst.sem.signal()
 }
 
 extension EncInst {

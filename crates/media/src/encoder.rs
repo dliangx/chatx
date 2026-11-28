@@ -1,11 +1,34 @@
 //! Pluggable H.264 video **encode** backends — the outbound (local → peer) side.
 //!
-//! [`media_source::VidSource`] pushes RGBA8888 frames into [`H264Encoder::encode_rgba`];
-//! the returned **Annex-B** NAL stream (SPS / PPS / IDR / P, in order) is written
-//! straight into the webrtc track. webrtc-rs's `H264Payloader` splits that
-//! buffer on `00 00 01` start codes into RFC 6184 packets, and the peer's
-//! [`crate::decoder::H264DePacketizer`] reassembles Annex-B NALs for decode —
-//! so the *wire format is Annex-B* and every encoder MUST emit it.
+//! **Asynchronous submit / poll contract.** Every backend exposes two
+//! non-blocking operations driven by the single `chatx-venc` thread per
+//! [`crate::media_source::VidSource`]:
+//!
+//!   * [`H264Encoder::submit`] — hand in one RGBA8888 picture. For a hardware
+//!     backend this just *enqueues* the frame into the native encoder and
+//!     returns immediately; the encoded output is produced **asynchronously**
+//!     (VideoToolbox / MediaCodec run on their own worker thread) and is later
+//!     collected via [`H264Encoder::poll`]. For the software backend it encodes
+//!     the frame inline and buffers the result for `poll`.
+//!   * [`H264Encoder::poll`] — drain one completed **Annex-B** NAL stream (SPS /
+//!     PPS / IDR / P in order), if one is ready. Returns `None` when nothing has
+//!     been produced yet.
+//!
+//! This split is the whole point: the old `encode_rgba` *blocked on the
+//! encoder's per-frame output callback*, which deadlocked against the
+//! asynchronous VideoToolbox worker (the "GPU feed failed → switch to software
+//! every time" field bug). Never blocking on a single frame's output is what
+//! lets the hardware path actually be used.
+//!
+//! **Frame dropping.** `submit` returns `false` (or `poll` keeps returning
+//! `None`) when the backend is saturated or still warming up. The encode loop
+//! treats that as *drop this frame and keep going* — acceptable for live video,
+//! and it is what keeps the pipeline from ever wedging a thread.
+//!
+//! The wire format is **Annex-B** (start-code prefixed): webrtc-rs's
+//! `H264Payloader` splits it on `00 00 01` into RFC 6184 packets, and the
+//! peer's [`crate::decoder::H264DePacketizer`] reassembles the NALs — so every
+//! backend MUST emit Annex-B.
 //!
 //! [`create_encoder`] picks the best backend:
 //!
@@ -16,8 +39,8 @@
 //!     [`crate::gpu::android::AndroidH264Encoder`].
 //!   * **Everywhere / on failure** — pure-Rust [openh264] software encode.
 //!
-//! The native/GPU path is *opportunistic*: a backend that reports an encode
-//! failure permanently switches to [openh264], so a call always encodes — GPU
+//! The native/GPU path is *opportunistic*: a backend that hard-fails on a
+//! frame permanently switches to [openh264], so a call always encodes — GPU
 //! when available, CPU otherwise. [`OpenH264Encoder`] is that universal
 //! fallback and is used directly on targets with no native backend.
 //!
@@ -25,48 +48,32 @@
 
 use crate::error::Error;
 
-/// A stateful H.264 encoder: feed RGBA8888 frames, read back the Annex-B NAL
-/// stream for one picture each call.
+/// A stateful, **asynchronous** H.264 encoder: submit RGBA8888 frames, poll for
+/// the Annex-B NAL stream of each completed picture.
 ///
-/// Implementations are driven by a single (detached) encode thread per
-/// [`crate::media_source::VidSource`] and only need to be `Send` so that
-/// object can be handed to the spawned thread.
+/// Both operations are non-blocking. Implementations are driven by a single
+/// (detached) encode thread per [`crate::media_source::VidSource`] and only
+/// need to be `Send` so that object can be handed to the spawned thread.
 pub trait H264Encoder: Send {
-    /// Encode one RGBA8888 picture (`rgba.len() == w * h * 4`) and return the
-    /// full Annex-B NAL stream for that frame — SPS / PPS first when a new
-    /// sequence starts, then the IDR / P slice.
+    /// Submit one RGBA8888 picture (`rgba.len() == w * h * 4`) for encoding.
     ///
-    /// `bitrate_bps == 0` means "pick a sensible default" (screen-share calls
-    /// pass a high value for full-resolution clarity; camera passes `0`).
-    /// `max_w == 0` means "no width cap"; a non-zero value downscales the
-    /// input (preserving aspect) so the encoded frame fits within `max_w`
-    /// pixels wide — used to keep a 4K desktop screen inside a live 1:1 relay.
-    fn encode_rgba(&mut self, rgba: &[u8], w: u32, h: u32, bitrate_bps: u32, max_w: u32)
-        -> crate::error::Result<Vec<u8>>;
+    /// Returns `true` if the frame was accepted (its output will be collected
+    /// later via [`Self::poll`]), or `false` if the backend could not accept
+    /// it right now (queue full / not ready) — the caller then drops the frame.
+    /// **This must not block** waiting for the frame to be encoded.
+    ///
+    /// Resolution policy (`max_w` cap, H.264 4K ceiling) is fixed at
+    /// construction time and applied here by the backend; `bitrate` was likewise
+    /// baked in when the encoder was created.
+    fn submit(&mut self, rgba: &[u8], w: u32, h: u32) -> bool;
 
-    /// Optional zero-conversion fast path: encode a native pixel buffer
-    /// directly, skipping the CPU RGBA round-trip entirely.
+    /// Collect one completed **Annex-B** NAL stream (SPS / PPS / IDR / P, in
+    /// order), if one is ready; `None` when nothing has been produced yet.
     ///
-    /// `pb` is a raw pointer to the platform's video pixel buffer
-    /// (`CVPixelBuffer` on Apple). The backend *borrows* it only for the
-    /// duration of the encode call; the caller keeps ownership (a `Retain`).
-    /// Backends that cannot take a native buffer (Android `MediaCodec` image
-    /// input, openh264) return `None`, and the caller falls back to
-    /// [`Self::encode_rgba`]. This is the entry a capture source that already
-    /// produces a pixel buffer (camera / screen) uses to avoid a per-frame
-    /// CPU pixel conversion.
-    ///
-    /// Returns `Some(Ok(annexb))` on success, `Some(Err(_))` on a hard
-    /// failure (caller may fall back to software), or `None` when this backend
-    /// has no native fast path.
-    fn encode_cvpb(
-        &mut self,
-        _pb: *const std::ffi::c_void,
-        _w: u32,
-        _h: u32,
-    ) -> Option<crate::error::Result<Vec<u8>>> {
-        None
-    }
+    /// Non-blocking. A backend emits at most one picture per call; the encode
+    /// loop calls this in a `while let` to drain any backlog before submitting
+    /// the next frame.
+    fn poll(&mut self) -> Option<Vec<u8>>;
 
     /// Release backend resources (native encoder / session). Default is a
     /// no-op; called once when a track is torn down and on [`Drop`].
@@ -77,6 +84,12 @@ pub trait H264Encoder: Send {
 /// so a call always encodes even when the native/GPU backend is unavailable.
 pub struct OpenH264Encoder {
     inner: openh264::encoder::Encoder,
+    /// Bounded (<=1) output queue of completed Annex-B NAL streams, filled by
+    /// `submit` and drained by `poll`.
+    pending: std::collections::VecDeque<Vec<u8>>,
+    /// Width cap for the `max_w` downscale, fixed at construction (0 = none
+    /// beyond the 4K ceiling).
+    max_w: u32,
 }
 
 impl OpenH264Encoder {
@@ -94,27 +107,22 @@ impl OpenH264Encoder {
             openh264::encoder::Encoder::new()
                 .map_err(|e| Error::other(format!("openh264 encoder: {e}")))?
         };
-        Ok(Self { inner })
+        Ok(Self { inner, pending: Default::default(), max_w: 0 })
     }
 
     /// Reusable from the native backends' software fallback: build an
     /// [`OpenH264Encoder`] with the same `bitrate_bps` / `max_w` a caller had
     /// asked the native path to use.
-    pub fn with_cfg(bitrate_bps: u32, _max_w: u32) -> crate::error::Result<Self> {
-        Self::new(bitrate_bps)
+    pub fn with_cfg(bitrate_bps: u32, max_w: u32) -> crate::error::Result<Self> {
+        let mut e = Self::new(bitrate_bps)?;
+        e.max_w = max_w;
+        Ok(e)
     }
-}
 
-impl H264Encoder for OpenH264Encoder {
-    fn encode_rgba(
-        &mut self,
-        rgba: &[u8],
-        w: u32,
-        h: u32,
-        bitrate_bps: u32,
-        max_w: u32,
-    ) -> crate::error::Result<Vec<u8>> {
-        let _ = bitrate_bps; // baked into the encoder config at construction
+    /// Encode `rgba` (applying the width cap `max_w` + the 4K ceiling) through
+    /// openh264 and return the Annex-B NAL stream. Synchronous inherent helper
+    /// shared by the trait impl and by the native backends' software fallback.
+    pub fn encode_rgba(&mut self, rgba: &[u8], w: u32, h: u32, max_w: u32) -> crate::error::Result<Vec<u8>> {
         // Cap + downscale before the (fixed-resolution) backend (shared helper).
         // When no downscale is needed the input is borrowed (zero-copy);
         // `rgba` is a `Cow` that keeps the (possibly owned) downscaled buffer
@@ -127,6 +135,34 @@ impl H264Encoder for OpenH264Encoder {
             .encode(&yuv)
             .map_err(|e| Error::other(format!("openh264 encode: {e}")))?;
         Ok(bs.to_vec())
+    }
+}
+
+impl H264Encoder for OpenH264Encoder {
+    fn submit(&mut self, rgba: &[u8], w: u32, h: u32) -> bool {
+        if rgba.is_empty() || w == 0 || h == 0 {
+            return false;
+        }
+        // Bounded: if the previous output hasn't been polled yet we are behind —
+        // drop this frame rather than grow an unbounded queue (the "drop, don't
+        // block" contract).
+        if !self.pending.is_empty() {
+            return false;
+        }
+        match self.encode_rgba(rgba, w, h, self.max_w) {
+            Ok(bs) => {
+                self.pending.push_back(bs);
+                true
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "openh264 encode failed");
+                false
+            }
+        }
+    }
+
+    fn poll(&mut self) -> Option<Vec<u8>> {
+        self.pending.pop_front()
     }
 }
 
@@ -267,7 +303,16 @@ mod apple_enc_tests {
         let mut enc = crate::gpu::apple::AppleH264Encoder::new(2_000_000, 0).expect("gpu enc");
         let (w, h): (u32, u32) = (320, 240);
         let rgba: Vec<u8> = (0..(w * h * 4)).map(|i| i as u8).collect();
-        let out = enc.encode_rgba(&rgba, w, h, 2_000_000, 0).expect("gpu encode");
+        // Async contract: submit the frame, then poll for its Annex-B output.
+        // (The first picture may be empty while the encoder warms up — retry.)
+        let out = loop {
+            enc.submit(&rgba, w, h);
+            if let Some(o) = enc.poll() {
+                if !o.is_empty() {
+                    break o;
+                }
+            }
+        };
         let mut types: Vec<u8> = Vec::new();
         let mut i = 0usize;
         while i + 4 <= out.len() {
@@ -318,7 +363,7 @@ mod apple_enc_tests {
             // Fire off an encode; do NOT drain. The output may still be
             // in flight on a VideoToolbox worker when we drop the encoder
             // below.
-            let _ = enc.encode_rgba(&rgba, w, h, 2_000_000, 0);
+            let _ = enc.submit(&rgba, w, h);
             // Drop the encoder while a VideoToolbox worker may still be
             // emitting. Must not crash the process.
         }
@@ -338,11 +383,14 @@ mod tests {
         let rgba: Vec<u8> = vec![0u8; 16 * 16 * 4];
         let mut out = Vec::new();
         // First frame is typically empty (the openh264 rate controller warms
-        // up); loop until a non-empty Annex-B NAL stream is produced.
+        // up); loop submit→poll until a non-empty Annex-B NAL stream is produced.
         for _ in 0..8 {
-            out = enc.encode_rgba(&rgba, 16, 16, 0, 0).unwrap();
-            if !out.is_empty() {
-                break;
+            enc.submit(&rgba, 16, 16);
+            if let Some(o) = enc.poll() {
+                if !o.is_empty() {
+                    out = o;
+                    break;
+                }
             }
         }
         assert!(!out.is_empty(), "openh264 produced no NALs over 8 frames");

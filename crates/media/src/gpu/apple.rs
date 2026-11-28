@@ -33,7 +33,6 @@ unsafe extern "C" {
     fn chatx_h264_dec_close(handle: i32);
     fn chatx_h264_enc_new() -> i32;
     fn chatx_h264_enc_feed(handle: i32, rgba: *const u8, len: i32, w: i32, h: i32) -> i32;
-    fn chatx_h264_enc_feed_cvpb(handle: i32, pb: *const std::ffi::c_void, w: i32, h: i32) -> i32;
     fn chatx_h264_enc_out(handle: i32, dst: *mut u8, cap: i32) -> i32;
     fn chatx_h264_enc_close(handle: i32);
 }
@@ -251,13 +250,20 @@ pub struct AppleH264Encoder {
     /// Once a native `feed` hard-fails, encode everything through this
     /// software encoder instead (and stop calling into the shim).
     fallback: Option<OpenH264Encoder>,
-    /// Scratch buffer for `out()` — allocated once and reused.
+    /// Native path is dead — route `submit`/`poll` through `fallback`.
+    native_dead: bool,
+    /// Scratch buffer for `poll` — allocated once and reused.
     scratch: Vec<u8>,
+    /// Width cap applied in `submit` before the (fixed-resolution) native
+    /// encoder (and used to build the software fallback).
     max_w: u32,
+    /// Target bitrate, used to build the software fallback (native
+    /// VideoToolbox ignores it).
+    bitrate_bps: u32,
 }
 
 impl AppleH264Encoder {
-    pub fn new(_bitrate_bps: u32, max_w: u32) -> Result<Self, Error> {
+    pub fn new(bitrate_bps: u32, max_w: u32) -> Result<Self, Error> {
         let handle = unsafe { chatx_h264_enc_new() };
         if handle == 0 {
             return Err(Error::other("chatx_h264_enc_new = 0"));
@@ -265,21 +271,29 @@ impl AppleH264Encoder {
         Ok(Self {
             handle,
             fallback: None,
+            native_dead: false,
             scratch: Vec::new(),
             max_w,
+            bitrate_bps,
         })
     }
 
-    /// Encode `rgba` through the software fallback.
-    fn encode_fallback(&mut self, rgba: &[u8], w: u32, h: u32, bitrate_bps: u32) -> Result<Vec<u8>, Error> {
-        if self.fallback.is_none() {
-            self.fallback =
-                Some(OpenH264Encoder::with_cfg(bitrate_bps, self.max_w).map_err(|e| Error::other(e.to_string()))?);
+    /// Switch to the software fallback permanently (lazy allocation).
+    fn enable_fallback(&mut self) {
+        if self.native_dead {
+            return;
         }
-        self.fallback.as_mut().unwrap().encode_rgba(rgba, w, h, bitrate_bps, self.max_w)
+        self.native_dead = true;
+        if self.handle != 0 {
+            unsafe { chatx_h264_enc_close(self.handle) };
+            self.handle = 0;
+        }
+        if self.fallback.is_none() {
+            self.fallback = OpenH264Encoder::with_cfg(self.bitrate_bps, self.max_w).ok();
+        }
     }
 
-    /// Pull the encoded Annex-B NAL stream out of the shim (grow-on-demand).
+    /// Pull one completed Annex-B NAL stream out of the shim (grow-on-demand).
     fn drain_annexb(&mut self) -> Option<Vec<u8>> {
         if self.scratch.is_empty() {
             self.scratch.resize(1024 * 1024, 0);
@@ -305,47 +319,46 @@ impl AppleH264Encoder {
 }
 
 impl H264Encoder for AppleH264Encoder {
-    fn encode_rgba(&mut self, rgba: &[u8], w: u32, h: u32, bitrate_bps: u32, max_w: u32) -> Result<Vec<u8>, Error> {
+    /// Non-blocking submit: hand the frame to VideoToolbox and return. The
+    /// encoded output is produced asynchronously on a VT worker and collected
+    /// later via [`Self::poll`]. A hard `EncodeFrame` rejection retires the
+    /// native path (software from here on); the dropped frame is reported.
+    fn submit(&mut self, rgba: &[u8], w: u32, h: u32) -> bool {
         if rgba.is_empty() || w == 0 || h == 0 {
-            return Err(Error::other("empty frame"));
+            return false;
         }
         // Already on the software path.
-        if let Some(fb) = self.fallback.as_mut() {
-            return fb.encode_rgba(rgba, w, h, bitrate_bps, max_w);
+        if self.native_dead {
+            if let Some(fb) = self.fallback.as_mut() {
+                return fb.submit(rgba, w, h);
+            }
+            return false;
         }
         // Cap + downscale before the (fixed-resolution) native encoder. `rgba`
         // is a `Cow` that keeps the (possibly owned) downscaled buffer alive
         // for the whole encode; no downscale = zero-copy borrow.
-        let (rgba, w, h) = prepare_rgba(rgba, w, h, max_w);
+        let (rgba, w, h) = prepare_rgba(rgba, w, h, self.max_w);
         let r = unsafe {
             chatx_h264_enc_feed(self.handle, rgba.as_ptr(), rgba.len() as i32, w as i32, h as i32)
         };
         if r != 0 {
             tracing::warn!("[media] VideoToolbox feed failed (code {r}) — switching to openh264 software encode");
-            unsafe { chatx_h264_enc_close(self.handle) }
-            self.handle = 0;
-            return self.encode_fallback(&rgba, w, h, bitrate_bps);
+            self.enable_fallback();
+            // Re-route this frame through the (now ready) software path.
+            if let Some(fb) = self.fallback.as_mut() {
+                return fb.submit(&rgba, w, h);
+            }
+            return false;
         }
-        self.drain_annexb().ok_or_else(|| Error::other("no encoded output from VideoToolbox"))
+        true
     }
 
-    /// Zero-conversion fast path: hand the capture `CVPixelBuffer` straight to
-    /// VideoToolbox, skipping the CPU RGBA→BGRA conversion. The buffer is
-    /// encoded at its own native resolution (no downscale — the hardware
-    /// encoder already handles the size).
-    fn encode_cvpb(&mut self, pb: *const std::ffi::c_void, w: u32, h: u32) -> Option<Result<Vec<u8>, Error>> {
-        if w == 0 || h == 0 || self.handle == 0 {
-            return None;
+    /// Collect one completed Annex-B NAL stream, if any (non-blocking).
+    fn poll(&mut self) -> Option<Vec<u8>> {
+        if self.native_dead {
+            return self.fallback.as_mut()?.poll();
         }
-        let r = unsafe { chatx_h264_enc_feed_cvpb(self.handle, pb, w as i32, h as i32) };
-        if r != 0 {
-            // Native encode failed for this frame. We can't synthesize an
-            // RGBA fallback from a pixel buffer here, so report the error and
-            // let the caller fall back to the software path via `encode_rgba`
-            // (which will have its own fallback wiring).
-            return Some(Err(Error::other(format!("cvpb encode failed (code {r})"))));
-        }
-        Some(self.drain_annexb().ok_or_else(|| Error::other("no encoded output from VideoToolbox (cvpb)")))
+        self.drain_annexb()
     }
 
     fn close(&mut self) {
@@ -357,107 +370,8 @@ impl H264Encoder for AppleH264Encoder {
 }
 
 #[cfg(test)]
-mod cvpb_tests {
+mod apple_enc_tests {
     use super::*;
-
-    /// CoreVideo FFI — enough to synthesize a BGRA `CVPixelBuffer` for the
-    /// fast-path test (the `media` build already links `CoreVideo` +
-    /// `CoreFoundation`).
-    type OsStatus = i32;
-    const K_CV_RETURN_SUCCESS: OsStatus = 0;
-    const K_CV_PIXEL_FORMAT_32BGRA: u32 = 0x42475241; // 'BGRA'
-    type CVPixelBufferRef = *mut std::ffi::c_void;
-
-    unsafe extern "C" {
-        fn CVPixelBufferCreate(
-            allocator: *const std::ffi::c_void,
-            width: usize,
-            height: usize,
-            format: u32,
-            attachments: *const std::ffi::c_void,
-            pixel_buffer_out: *mut CVPixelBufferRef,
-        ) -> OsStatus;
-        fn CVPixelBufferRelease(pb: CVPixelBufferRef) -> OsStatus;
-        fn CVPixelBufferLockBaseAddress(pb: CVPixelBufferRef, flags: u32) -> OsStatus;
-        fn CVPixelBufferUnlockBaseAddress(pb: CVPixelBufferRef, flags: u32) -> OsStatus;
-        fn CVPixelBufferGetBaseAddress(pb: CVPixelBufferRef) -> *mut std::ffi::c_void;
-        fn CVPixelBufferGetBytesPerRow(pb: CVPixelBufferRef) -> usize;
-    }
-
-    /// Build a tightly-sized BGRA pixel buffer with a simple per-pixel pattern.
-    /// Returns a retained buffer (refcount 1) the caller must `Release`.
-    fn make_bgra_pb(w: u32, h: u32) -> Option<CVPixelBufferRef> {
-        unsafe {
-            let mut pb: CVPixelBufferRef = std::ptr::null_mut();
-            let st = CVPixelBufferCreate(
-                std::ptr::null(),
-                w as usize,
-                h as usize,
-                K_CV_PIXEL_FORMAT_32BGRA,
-                std::ptr::null(),
-                &mut pb,
-            );
-            if st != K_CV_RETURN_SUCCESS || pb.is_null() {
-                eprintln!("[cvpb-test] CVPixelBufferCreate status={st} null_pb={}", pb.is_null());
-                return None;
-            }
-            if CVPixelBufferLockBaseAddress(pb, 0) == K_CV_RETURN_SUCCESS {
-                let base = CVPixelBufferGetBaseAddress(pb).cast::<u8>();
-                if !base.is_null() {
-                    let bpr = CVPixelBufferGetBytesPerRow(pb);
-                    for y in 0..h as usize {
-                        let row = base.add(y * bpr);
-                        for x in 0..w as usize {
-                            let i = x * 4;
-                            *row.add(i) = (x as u8).wrapping_mul(3);
-                            *row.add(i + 1) = (y as u8).wrapping_mul(5);
-                            *row.add(i + 2) = x.wrapping_add(y) as u8;
-                            *row.add(i + 3) = 255;
-                        }
-                    }
-                }
-                let _ = CVPixelBufferUnlockBaseAddress(pb, 0);
-            }
-            Some(pb)
-        }
-    }
-
-    /// The zero-conversion fast path (`feed_cvpb`) must emit the same Annex-B
-    /// wire format as the RGBA path: SPS (7) then PPS (8) leading the stream,
-    /// with an IDR (5) slice — proving a capture `CVPixelBuffer` can be fed
-    /// straight to VideoToolbox with no CPU pixel conversion.
-    #[test]
-    fn cvpb_fast_path_emits_sps_pps_idr() {
-        let (w, h) = (160u32, 120u32);
-        let mut enc = AppleH264Encoder::new(2_000_000, 0).expect("gpu enc");
-        let pb = make_bgra_pb(w, h).expect("build CVPixelBuffer");
-        let first = enc
-            .encode_cvpb(pb as *const std::ffi::c_void, w, h)
-            .expect("cvpb fast path supported")
-            .expect("cvpb encode");
-        let mut types: Vec<u8> = Vec::new();
-        let mut i = 0usize;
-        while i + 4 <= first.len() {
-            if first[i] == 0 && first[i + 1] == 0 && first[i + 2] == 0 && first[i + 3] == 1 {
-                let start = i + 4;
-                let mut j = start;
-                while j + 4 <= first.len()
-                    && !(first[j] == 0 && first[j + 1] == 0 && first[j + 2] == 0 && first[j + 3] == 1)
-                {
-                    j += 1;
-                }
-                types.push(first[start] & 0x1F);
-                i = j;
-            } else {
-                i += 1;
-            }
-        }
-        assert!(!types.is_empty(), "cvpb fast path produced no NALs");
-        assert_eq!(types[0], 7, "first NAL must be SPS, got {types:?}");
-        assert_eq!(types[1], 8, "second NAL must be PPS, got {types:?}");
-        assert!(types.iter().any(|t| *t == 5), "stream must contain IDR, got {types:?}");
-        unsafe { let _ = CVPixelBufferRelease(pb); }
-    }
 
     /// Full GPU round trip: encode several frames on VideoToolbox, then decode
     /// them back on VideoToolbox. This exercises the *real* encode→decode path
@@ -482,9 +396,11 @@ mod cvpb_tests {
         let mut enc = AppleH264Encoder::new(2_000_000, 0).expect("gpu enc");
         let mut encoded: Vec<Vec<u8>> = Vec::new();
         for _ in 0..2 {
-            let out = enc.encode_rgba(&rgba, w, h, 2_000_000, 0).expect("gpu encode");
-            if !out.is_empty() {
-                encoded.push(out);
+            enc.submit(&rgba, w, h);
+            if let Some(out) = enc.poll() {
+                if !out.is_empty() {
+                    encoded.push(out);
+                }
             }
         }
         assert!(!encoded.is_empty(), "GPU encoder produced no Annex-B stream");
