@@ -254,7 +254,9 @@ export component CallView inherits Rectangle {
         border-radius: 10px;
         background: #141821;
         clip: true;
-        visible: !CallState.minimized && (root.a-is-me ? _me_present() : _peer_present());
+        visible: !CallState.minimized;
+        // A's person has video → fully opaque; no video → 70% transparent.
+        opacity: (root.a-is-me ? _me_present() : _peer_present()) ? 1.0 : 0.3;
         Image {
             x: 0px;
             y: 0px;
